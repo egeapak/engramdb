@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain stats
+exit: 0
+--- stdout ---
+Total: 0
+
+Embeddings: Not available (run 'engramdb init' to download model)
+--- stderr ---

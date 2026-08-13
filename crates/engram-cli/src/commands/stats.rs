@@ -1,6 +1,6 @@
 //! Display statistics about the memory store.
 
-use crate::output::{OutputFormatter, Stats};
+use crate::output::{outln, OutputFormatter, Stats};
 use anyhow::Result;
 #[cfg(feature = "ollama")]
 use engramdb::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
@@ -94,16 +94,16 @@ pub async fn run_stats(
     // corrupt it for scripted consumers, so suppress them entirely (finding #7).
     if !formatter.is_json() {
         // Print embeddings status
-        println!();
+        outln!(formatter);
         let config_path = store.project_dir.join(".engramdb/config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         let model = config.embeddings.provider.as_str();
         let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
-        print_embeddings_status(model, backend).await;
+        print_embeddings_status(model, backend, formatter).await;
 
         if challenged_count > 0 || needs_review_count > 0 {
-            println!();
-            println!("Health Warnings:");
+            outln!(formatter);
+            outln!(formatter, "Health Warnings:");
             if challenged_count > 0 {
                 formatter.print_error(&format!(
                     "  {} memories are challenged (run 'engramdb review --challenged-only')",
@@ -147,23 +147,27 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
         if formatter.is_json() {
             // Emit a single JSON object so scripted consumers can parse it
             // (finding #7) — raw println! lines would corrupt the stream.
-            println!("{}", crate::output::daemon_status_json(&s, &socket));
+            outln!(
+                formatter,
+                "{}",
+                crate::output::daemon_status_json(&s, &socket)
+            );
             return Ok(());
         }
         formatter.print_success(&format!("Embedding daemon: running (pid {})", s.pid));
-        println!("  socket:        {}", socket.display());
-        println!("  protocol:      v{}", s.version);
-        println!("  uptime:        {}s", s.uptime_secs);
-        println!("  idle:          {}s", s.idle_secs);
-        println!("  model bundles: {}", s.bundles_loaded);
-        println!("  requests (cumulative across restarts):");
-        println!("    embed:       {}", s.requests.embed);
-        println!("    classify:    {}", s.requests.classify);
-        println!("    rerank:      {}", s.requests.rerank);
-        println!("    meta:        {}", s.requests.meta);
-        println!("    status:      {}", s.requests.status);
-        println!("    title:       {}", s.requests.title);
-        println!("    total:       {}", s.requests.total);
+        outln!(formatter, "  socket:        {}", socket.display());
+        outln!(formatter, "  protocol:      v{}", s.version);
+        outln!(formatter, "  uptime:        {}s", s.uptime_secs);
+        outln!(formatter, "  idle:          {}s", s.idle_secs);
+        outln!(formatter, "  model bundles: {}", s.bundles_loaded);
+        outln!(formatter, "  requests (cumulative across restarts):");
+        outln!(formatter, "    embed:       {}", s.requests.embed);
+        outln!(formatter, "    classify:    {}", s.requests.classify);
+        outln!(formatter, "    rerank:      {}", s.requests.rerank);
+        outln!(formatter, "    meta:        {}", s.requests.meta);
+        outln!(formatter, "    status:      {}", s.requests.status);
+        outln!(formatter, "    title:       {}", s.requests.title);
+        outln!(formatter, "    total:       {}", s.requests.total);
         return Ok(());
     }
 
@@ -176,7 +180,8 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
                 "meta": s.meta, "status": s.status, "title": s.title, "total": s.total(),
             })
         });
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({ "running": false, "requests": requests })
         );
@@ -186,9 +191,9 @@ async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()>
     match persisted {
         Some(p) => {
             formatter.print_message("Embedding daemon: not running (last persisted snapshot)");
-            println!("  requests (cumulative across restarts):");
+            outln!(formatter, "  requests (cumulative across restarts):");
             for row in persisted_snapshot_rows(&p.snapshot) {
-                println!("{row}");
+                outln!(formatter, "{row}");
             }
         }
         None => {
@@ -219,12 +224,20 @@ fn persisted_snapshot_rows(s: &engramdb::daemon::metrics::MetricsSnapshot) -> Ve
 }
 
 /// Print the embeddings availability status for the given model name and backend.
-async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
+async fn print_embeddings_status(
+    model: &str,
+    backend: EmbeddingBackend,
+    formatter: &OutputFormatter,
+) {
     if !matches!(
         model,
         "onnx" | "all-minilm" | "nomic-embed-text" | "mxbai-embed-large"
     ) {
-        println!("Embeddings: Not available (unknown provider '{}')", model);
+        outln!(
+            formatter,
+            "Embeddings: Not available (unknown provider '{}')",
+            model
+        );
         return;
     }
 
@@ -243,11 +256,18 @@ async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
             _ => OnnxProvider::try_new().is_some(),
         };
         if available {
-            println!("Embeddings: Available ({} via ONNX)", display_name);
+            outln!(
+                formatter,
+                "Embeddings: Available ({} via ONNX)",
+                display_name
+            );
             return;
         }
         if backend == EmbeddingBackend::Onnx {
-            println!("Embeddings: Not available (run 'engramdb init' to download model)");
+            outln!(
+                formatter,
+                "Embeddings: Not available (run 'engramdb init' to download model)"
+            );
             return;
         }
     }
@@ -263,11 +283,18 @@ async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
         if let Some(provider) = OllamaProvider::try_new(ollama_spec) {
             match provider.check_model_available().await {
                 Ok(true) => {
-                    println!("Embeddings: Available ({} via Ollama)", display_name);
+                    outln!(
+                        formatter,
+                        "Embeddings: Available ({} via Ollama)",
+                        display_name
+                    );
                     return;
                 }
                 Ok(false) => {
-                    println!("Embeddings: Not available (run 'engramdb init' to download model)");
+                    outln!(
+                        formatter,
+                        "Embeddings: Not available (run 'engramdb init' to download model)"
+                    );
                     return;
                 }
                 Err(_) => {}
@@ -275,7 +302,10 @@ async fn print_embeddings_status(model: &str, backend: EmbeddingBackend) {
         }
     }
 
-    println!("Embeddings: Not available (run 'engramdb init' to download model)");
+    outln!(
+        formatter,
+        "Embeddings: Not available (run 'engramdb init' to download model)"
+    );
 }
 
 #[cfg(test)]

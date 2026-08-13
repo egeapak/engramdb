@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"filter\", \"--min-criticality\", \"0.5\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode filter --min-criticality 0.5
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Validation error: mode=filter requires at least one of: query, logical, path, tags

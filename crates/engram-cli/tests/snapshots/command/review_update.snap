@@ -1,0 +1,22 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Action: [Keep (reset to Active), Update, Invalidate (close validity window, keep history), Delete, Skip, Quit] → Update
+? New summary (enter to keep): → All CLI output goes through the outln!/errln! formatter macros
+? New content (enter to keep): → Bare print macros fail the formatter-output CI job; write through OutputFormatter so the renderer snapshots can see the bytes.
+--- stdout ---
+1 memories need review:
+
+ID: [ID8]
+Type: Convention
+Summary: CLI output goes through println! in command handlers
+Status: Challenged
+Criticality: 0.60
+Challenges:
+  - The formatter-output CI job now rejects bare print macros (2025-03-14)
+
+Updated memory [ID8].
+
+--- stderr ---

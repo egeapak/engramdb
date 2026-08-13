@@ -1,0 +1,25 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format pretty stats --all-projects
+exit: 0
+--- stdout ---
+Total Memories: 3
+
+By Type:
+  Convention: 1
+  Decision: 1
+  Hazard: 1
+
+By Status:
+  Active: 3
+
+Expired: 0
+Oldest: [DATE]
+Newest: [DATE]
+
+Average Criticality: 0.60
+
+Embeddings: Not available (run 'engramdb init' to download model)
+--- stderr ---

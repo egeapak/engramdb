@@ -1,0 +1,15 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"definitely-not-a-command\"])"
+---
+$ engramdb definitely-not-a-command
+exit: 2
+--- stdout ---
+--- stderr ---
+error: unrecognized subcommand 'definitely-not-a-command'
+
+  tip: a similar subcommand exists: 'init'
+
+Usage: engramdb [OPTIONS] <COMMAND>
+
+For more information, try '--help'.

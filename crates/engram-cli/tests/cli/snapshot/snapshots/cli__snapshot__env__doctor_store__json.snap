@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json doctor store
+exit: 0
+--- stdout ---
+{
+  "message": "Store is healthy. 3 memories indexed, 3 on disk.",
+  "success": true
+}
+--- stderr ---

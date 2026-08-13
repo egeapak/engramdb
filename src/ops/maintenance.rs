@@ -212,6 +212,13 @@ pub async fn auto_maintain_with_engine(
     };
 
     // 1) Clean up orphan/stale projects and repair broken hierarchy links.
+    //
+    // This runs on the command path of every ordinary invocation, before the
+    // store is even opened, so it is the widest reach the sweep has: an
+    // unregistered project is one `engramdb query` away from being swept. What
+    // makes that safe is `reclaim_data_dir`, which retains any directory still
+    // holding personal memories, transcript copies or a conversations table —
+    // not anything this caller passes.
     match prune_stale_projects(registry, |_| {}).await {
         Ok(result) => {
             if result.stale_removed > 0
@@ -445,6 +452,50 @@ mod tests {
         assert!(report.prune.is_some(), "cleanup must have run");
         let doctor = report.doctor.expect("doctor must have run");
         assert!(doctor.healthy, "freshly-created store must be healthy");
+    }
+
+    /// The widest reach the prune sweep has, and the reason its retention rule
+    /// has to hold without any help from the caller.
+    ///
+    /// This pass runs on the command path of every ordinary CLI/MCP invocation
+    /// on the main worktree, *before* the store is opened, so a project missing
+    /// from the registry — a lost or corrupted `registry.json`, a moved
+    /// checkout — is one `engramdb query` away from being swept. It once was:
+    /// the sweep deleted the data directory, taking the only copy of its
+    /// personal memories. `reclaim_data_dir` now retains any directory still
+    /// holding irreplaceable data, and this pins that the automatic pass gets
+    /// that protection too — nothing here passes the sweep a project to spare.
+    #[tokio::test]
+    async fn auto_maintain_keeps_the_personal_memories_of_an_unregistered_project() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir.path(), &registry).await.unwrap();
+        let mut mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        mem.visibility = crate::types::Visibility::Personal;
+        store.create(&mem).await.unwrap();
+        let memory_id = mem.id.to_string();
+
+        // Lose the registry entry, leaving the data dir unreferenced.
+        let mut reg = registry.load().await.unwrap();
+        reg.projects.clear();
+        registry.save(&reg).await.unwrap();
+
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
+
+        let prune = report.prune.expect("cleanup must have run");
+        assert_eq!(
+            prune.orphans_removed, 0,
+            "maintenance swept the very project it was maintaining"
+        );
+        assert!(
+            MemoryStore::open(dir.path())
+                .await
+                .unwrap()
+                .get(&memory_id)
+                .await
+                .is_ok(),
+            "personal memory destroyed by a routine maintenance pass"
+        );
     }
 
     #[tokio::test]

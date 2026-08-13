@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format pretty daemon status
+exit: 0
+--- stdout ---
+Daemon: not running (socket [RUNTIME]/d.sock)
+It is auto-spawned on demand by the next MCP run when [daemon] is enabled.
+--- stderr ---

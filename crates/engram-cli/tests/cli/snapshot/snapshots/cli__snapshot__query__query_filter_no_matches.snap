@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"query\", \"--mode\", \"filter\", \"--query\", \"zzzznotpresent\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] query --mode filter --query zzzznotpresent
+exit: 0
+--- stdout ---
+{
+  "memories": [],
+  "total": 0
+}
+--- stderr ---

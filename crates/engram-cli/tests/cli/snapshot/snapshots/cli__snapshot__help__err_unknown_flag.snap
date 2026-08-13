@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"list\", \"--not-a-flag\"])"
+---
+$ engramdb list --not-a-flag
+exit: 2
+--- stdout ---
+--- stderr ---
+error: unexpected argument '--not-a-flag' found
+
+Usage: engramdb list [OPTIONS]
+
+For more information, try '--help'.

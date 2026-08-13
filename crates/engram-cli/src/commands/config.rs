@@ -6,7 +6,7 @@
 //! store's most-used tags. Same JSON shape as the MCP tool so scripts can
 //! consume either interchangeably.
 
-use crate::output::OutputFormatter;
+use crate::output::{outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::{top_tags, AgentConfigView, DEFAULT_TOP_TAGS};
 use engramdb::storage::MemoryStore;
@@ -44,50 +44,59 @@ pub async fn run_config(
         if let serde_json::Value::Object(ref mut obj) = payload {
             obj.insert("top_tags".to_string(), serde_json::to_value(&tags)?);
         }
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        outln!(formatter, "{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
-    println!("Limits");
-    println!(
+    outln!(formatter, "Limits");
+    outln!(
+        formatter,
         "  summary max chars:      {}",
         view.limits.summary_max_chars
     );
-    println!(
+    outln!(
+        formatter,
         "  content soft target:    {} tokens",
         view.limits.content_soft_token_target
     );
-    println!(
+    outln!(
+        formatter,
         "  embedding chunk window: {} tokens (content is chunked; nothing is truncated)",
         view.limits.embedding_chunk_tokens
     );
 
-    println!();
-    println!("Retrieval / search");
-    println!(
+    outln!(formatter);
+    outln!(formatter, "Retrieval / search");
+    outln!(
+        formatter,
         "  default max results:    {}",
         view.retrieval.default_max_results
     );
-    println!(
+    outln!(
+        formatter,
         "  relevance threshold:    {}",
         view.retrieval.relevance_threshold
     );
-    println!(
+    outln!(
+        formatter,
         "  search threshold:       {}",
         view.retrieval.search_threshold
     );
-    println!(
+    outln!(
+        formatter,
         "  search semantic weight: {}",
         view.retrieval.search_semantic_weight
     );
-    println!(
+    outln!(
+        formatter,
         "  include expired:        {}",
         view.retrieval.include_expired
     );
 
-    println!();
-    println!("Features");
-    println!(
+    outln!(formatter);
+    outln!(formatter, "Features");
+    outln!(
+        formatter,
         "  rerank:                 {}{}",
         if view.features.rerank_enabled {
             "on"
@@ -100,7 +109,8 @@ pub async fn run_config(
             String::new()
         }
     );
-    println!(
+    outln!(
+        formatter,
         "  contradiction check:    {}",
         if view.features.contradiction_detection_enabled {
             "on"
@@ -108,7 +118,8 @@ pub async fn run_config(
             "off"
         }
     );
-    println!(
+    outln!(
+        formatter,
         "  title strategy:         {}",
         serde_json::to_value(view.features.title_strategy)
             .ok()
@@ -116,18 +127,26 @@ pub async fn run_config(
             .unwrap_or_default()
     );
 
-    println!();
-    println!("Embedding");
-    println!("  provider:               {}", view.embedding.provider);
-    println!("  dimensions:             {}", view.embedding.dimensions);
+    outln!(formatter);
+    outln!(formatter, "Embedding");
+    outln!(
+        formatter,
+        "  provider:               {}",
+        view.embedding.provider
+    );
+    outln!(
+        formatter,
+        "  dimensions:             {}",
+        view.embedding.dimensions
+    );
 
-    println!();
+    outln!(formatter);
     if tags.is_empty() {
-        println!("Top tags: (none yet)");
+        outln!(formatter, "Top tags: (none yet)");
     } else {
-        println!("Top tags (most used first)");
+        outln!(formatter, "Top tags (most used first)");
         for t in &tags {
-            println!("  {:<24} {}", t.tag, t.count);
+            outln!(formatter, "  {:<24} {}", t.tag, t.count);
         }
     }
 

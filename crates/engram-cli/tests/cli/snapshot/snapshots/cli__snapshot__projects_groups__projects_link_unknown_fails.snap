@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"projects\", \"link\", \"0000000000000000\", \"--parent\",\n\"1111111111111111\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] projects link [PROJECT_ID] --parent [PROJECT_ID]
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Child project '[PROJECT_ID]' not found in registry

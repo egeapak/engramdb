@@ -1,0 +1,3756 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run_bare(&[\"completions\", shell])"
+---
+$ engramdb completions zsh
+exit: 0
+--- stdout ---
+#compdef engramdb
+
+autoload -U is-at-least
+
+_engramdb() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_engramdb_commands" \
+"*::: :->engramdb" \
+&& ret=0
+    case $state in
+    (engramdb)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-command-$line[1]:"
+        case $line[1] in
+            (init)
+_arguments "${_arguments_options[@]}" : \
+'--template=[Path to a config template file]:TEMPLATE:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--no-embeddings[Skip embedding model initialization]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'-t+[Type of memory]:TYPE:_default' \
+'--type=[Type of memory]:TYPE:_default' \
+'-c+[Memory content]:CONTENT:_default' \
+'--content=[Memory content]:CONTENT:_default' \
+'-s+[Brief summary (required; prompted for in an interactive terminal)]:SUMMARY:_default' \
+'--summary=[Brief summary (required; prompted for in an interactive terminal)]:SUMMARY:_default' \
+'-T+[Short title (a few words) for human-readable filenames]:TITLE:_default' \
+'--title=[Short title (a few words) for human-readable filenames]:TITLE:_default' \
+'*-p+[Physical scope (file paths or globs, can be repeated)]:PHYSICAL:_default' \
+'*--physical=[Physical scope (file paths or globs, can be repeated)]:PHYSICAL:_default' \
+'*-l+[Logical scope (dot-notation domains, can be repeated)]:LOGICAL:_default' \
+'*--logical=[Logical scope (dot-notation domains, can be repeated)]:LOGICAL:_default' \
+'*--tags=[Tags (comma-separated or repeated)]:TAGS:_default' \
+'--criticality=[Criticality score (0.0 to 1.0)]:CRITICALITY:_default' \
+'--confidence=[Confidence score (0.0 to 1.0)]:CONFIDENCE:_default' \
+'--details=[Extended details]:DETAILS:_default' \
+'--visibility=[Visibility (shared or personal)]:VISIBILITY:_default' \
+'*--audience=[Audience for a group/global share\: project and/or group ids that may see this memory (comma-separated). Omit for whole-group visibility. Only meaningful with --group or --global]:AUDIENCE:_default' \
+'--supersedes=[IDs of memories this one supersedes (comma-separated)]:SUPERSEDES:_default' \
+'--epistemic=[Epistemic class\: fact, observation, or decision (defaults from type)]:EPISTEMIC:_default' \
+'--premise=[Premise this memory depends on (e.g. "while we pin ort rc.12")]:PREMISE:_default' \
+'*--invalidated-by=[Paths/globs whose change invalidates this memory (repeatable)]:INVALIDATED_BY:_default' \
+'--origin-task=[Task/feature this memory was created for]:ORIGIN_TASK:_default' \
+'--generality=[Generality\: project (default) or task]:GENERALITY:_default' \
+'--valid-from=[Valid-time start (RFC3339) — backdate when the claim became true]:VALID_FROM:_default' \
+'--decay-strategy=[Decay strategy\: none, linear, exponential, or step]:DECAY_STRATEGY:_default' \
+'--decay-half-life=[Half-life in seconds for decay]:DECAY_HALF_LIFE:_default' \
+'--decay-ttl=[TTL in seconds for decay]:DECAY_TTL:_default' \
+'--decay-floor=[Minimum decay factor (0.0-1.0)]:DECAY_FLOOR:_default' \
+'--details-file=[Read details from file]:DETAILS_FILE:_files' \
+'(--global)--group=[Write the memory into the named group store instead of the current project. Repo-relative physical scope is stripped on group writes (see the multi-project-memories design). Mutually exclusive with \`--global\`]:GROUP:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-i[Launch interactive TUI prompts]' \
+'--interactive[Launch interactive TUI prompts]' \
+'-e[Open \$EDITOR for content entry]' \
+'--editor[Open \$EDITOR for content entry]' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::content_pos -- Memory content as a trailing positional (alternative to --content). This is the form the Quick Start uses\: `engramdb add -t decision -s "..." "content"`:_default' \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-f[Show complete details without truncation]' \
+'--full[Show complete details without truncation]' \
+'--raw[Output the raw markdown file contents]' \
+'--path[Print the memory'\''s file path instead of content]' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':id -- Memory ID (supports prefix matching):_default' \
+&& ret=0
+;;
+(query)
+_arguments "${_arguments_options[@]}" : \
+'--mode=[Retrieval mode. Required]:MODE:(rank filter)' \
+'--query=[Search query text (explicit flag; overrides positional when both set)]:QUERY:_default' \
+'-p+[Physical path context (scoring signal)]:PATH:_default' \
+'--path=[Physical path context (scoring signal)]:PATH:_default' \
+'*-l+[Logical scope context — dot-notation; scoring signal, not a filter. Repeatable]:LOGICAL:_default' \
+'*--logical=[Logical scope context — dot-notation; scoring signal, not a filter. Repeatable]:LOGICAL:_default' \
+'*-t+[Filter by type (repeatable)]:TYPE:_default' \
+'*--type=[Filter by type (repeatable)]:TYPE:_default' \
+'*--tags=[Filter by tags (comma-separated or repeated)]:TAGS:_default' \
+'--min-criticality=[Minimum criticality threshold]:MIN_CRITICALITY:_default' \
+'-n+[Maximum number of results]:MAX_RESULTS:_default' \
+'--max-results=[Maximum number of results]:MAX_RESULTS:_default' \
+'--detail-level=[Detail level\: summary, content, full]:DETAIL_LEVEL:_default' \
+'*--epistemic=[Filter by epistemic class\: fact, observation, decision (repeatable)]:EPISTEMIC:_default' \
+'--situation=[Your situation, to reweight classes\: session_start, file_edit, debugging, design_choice]:SITUATION:_default' \
+'(--global)--group=[Query a named group store directly (instead of the current project). Subscribed groups already fan into a normal project query; use this to inspect one group'\''s memories in isolation]:GROUP:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--include-expired[Include expired memories]' \
+'--include-invalidated[Include invalidated memories (closed validity windows)]' \
+'--show-scores[Show relevance scores alongside results]' \
+'--include-global[Also merge global (cross-project) memories into the results]' \
+'--global[Query the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::query_pos -- Search query text (positional). Alternatively pass `--query`:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'*-t+[Filter by type (can be repeated)]:TYPE:_default' \
+'*--type=[Filter by type (can be repeated)]:TYPE:_default' \
+'*--epistemic=[Filter by epistemic class\: fact, observation, decision (repeatable)]:EPISTEMIC:_default' \
+'*--tags=[Filter by tags (comma-separated or repeated)]:TAGS:_default' \
+'-s+[Filter by status]:STATUS:_default' \
+'--status=[Filter by status]:STATUS:_default' \
+'--scope=[Filter by scope (matches physical or logical scopes)]:SCOPE:_default' \
+'--sort=[Sort field\: criticality (default), created, updated, type]:SORT:_default' \
+'-n+[Maximum number of results to display]:LIMIT:_default' \
+'--limit=[Maximum number of results to display]:LIMIT:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-r[Reverse sort order]' \
+'--reverse[Reverse sort order]' \
+'--include-invalidated[Include invalidated memories (closed validity windows)]' \
+'--global[List the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(update)
+_arguments "${_arguments_options[@]}" : \
+'-t+[New type]:TYPE:_default' \
+'--type=[New type]:TYPE:_default' \
+'-c+[New content]:CONTENT:_default' \
+'--content=[New content]:CONTENT:_default' \
+'-s+[New summary]:SUMMARY:_default' \
+'--summary=[New summary]:SUMMARY:_default' \
+'-T+[New title (short, a few words, for human-readable filenames)]:TITLE:_default' \
+'--title=[New title (short, a few words, for human-readable filenames)]:TITLE:_default' \
+'*-p+[New physical scope (replaces existing)]:PHYSICAL:_default' \
+'*--physical=[New physical scope (replaces existing)]:PHYSICAL:_default' \
+'*-l+[New logical scope (replaces existing)]:LOGICAL:_default' \
+'*--logical=[New logical scope (replaces existing)]:LOGICAL:_default' \
+'(--tags-add --tags-remove)*--tags=[New tags (comma-separated or repeated, replaces existing)]:TAGS:_default' \
+'--tags-add=[Tags to add (comma-separated)]:TAGS_ADD:_default' \
+'--tags-remove=[Tags to remove (comma-separated)]:TAGS_REMOVE:_default' \
+'--criticality=[New criticality]:CRITICALITY:_default' \
+'--confidence=[New confidence]:CONFIDENCE:_default' \
+'--details=[New details]:DETAILS:_default' \
+'--details-file=[Read details from file]:DETAILS_FILE:_files' \
+'--visibility=[New visibility]:VISIBILITY:_default' \
+'--status=[New status]:STATUS:_default' \
+'--supersedes=[IDs of memories this one supersedes (comma-separated)]:SUPERSEDES:_default' \
+'*--audience=[Set the per-memory audience (project/group ids) for a group/global share (comma-separated). Only meaningful on a group/global memory]:AUDIENCE:_default' \
+'--epistemic=[Epistemic class\: fact, observation, or decision (defaults from type)]:EPISTEMIC:_default' \
+'--premise=[Premise this memory depends on (e.g. "while we pin ort rc.12")]:PREMISE:_default' \
+'*--invalidated-by=[Paths/globs whose change invalidates this memory (repeatable)]:INVALIDATED_BY:_default' \
+'--origin-task=[Task/feature this memory was created for]:ORIGIN_TASK:_default' \
+'--generality=[Generality\: project (default) or task]:GENERALITY:_default' \
+'--valid-from=[Valid-time start (RFC3339) — backdate when the claim became true]:VALID_FROM:_default' \
+'--superseded-by=[Id of the memory that supersedes this one (only with --invalidate)]:SUPERSEDED_BY:_default' \
+'--decay-strategy=[Decay strategy\: none, linear, exponential, or step]:DECAY_STRATEGY:_default' \
+'--decay-half-life=[Half-life in seconds for decay]:DECAY_HALF_LIFE:_default' \
+'--decay-ttl=[TTL in seconds for decay]:DECAY_TTL:_default' \
+'--decay-floor=[Minimum decay factor (0.0-1.0)]:DECAY_FLOOR:_default' \
+'(--global)--group=[Update a memory in a named group store (instead of the current project)]:GROUP:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--clear-audience[Clear the audience (whole-group visibility). Wins over --audience]' \
+'--clear-validity[Clear the whole validity condition (premise/invalidated-by/origin-task/generality)]' \
+'--clear-invalidated[Reopen a closed validity window (clears invalidated_at + superseded_by)]' \
+'(--clear-invalidated)--invalidate[Close the validity window now\: the memory WAS true but no longer is. Preferred over delete — history stays queryable via --include-invalidated]' \
+'-e[Open memory file in \$EDITOR]' \
+'--editor[Open memory file in \$EDITOR]' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':id -- Memory ID (supports prefix matching):_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-f[Skip confirmation prompt]' \
+'--force[Skip confirmation prompt]' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':id -- Memory ID (supports prefix matching):_default' \
+&& ret=0
+;;
+(task)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__task_commands" \
+"*::: :->task" \
+&& ret=0
+
+    case $state in
+    (task)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-task-command-$line[1]:"
+        case $line[1] in
+            (current)
+_arguments "${_arguments_options[@]}" : \
+'--session-id=[Session id (defaults to \$CLAUDE_SESSION_ID / \$MCP_SESSION_ID)]:SESSION_ID:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::name -- Task/feature name (short, human-readable):_default' \
+&& ret=0
+;;
+(complete)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Task/feature name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__task__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-task-help-command-$line[1]:"
+        case $line[1] in
+            (current)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(complete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':id -- Memory ID (supports prefix matching):_default' \
+&& ret=0
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+'--top-tags=[Number of top tags to show (most-used first)]:TOP_TAGS:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Show config for the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--all-projects[Include the cross-project telemetry breakdown]' \
+'--global[Show statistics for the global (cross-project) memory store instead of the current project]' \
+'--daemon[Show the shared embedding daemon'\''s metrics instead of memory-store stats]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Check the global (cross-project) memory store instead of the current project]' \
+'--fix[Offer to fix detected issues (reindex, download model, prune registry, repair a drifted project ID, init). Prompts on a terminal; in non-interactive contexts pair with --yes]' \
+'--yes[Apply fixes without prompting (use with --fix; required to fix in non-TTY contexts)]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__doctor_commands" \
+"*::: :->doctor" \
+&& ret=0
+
+    case $state in
+    (doctor)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-doctor-command-$line[1]:"
+        case $line[1] in
+            (store)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(validate)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__doctor__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-doctor-help-command-$line[1]:"
+        case $line[1] in
+            (store)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(validate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(projects)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__projects_commands" \
+"*::: :->projects" \
+&& ret=0
+
+    case $state in
+    (projects)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-projects-command-$line[1]:"
+        case $line[1] in
+            (info)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'--group=[Directory-header grouping for this listing, overriding the \`\[cli\].project_list_grouping\` config\: \`auto\` (header only for folders with 2+ projects), \`always\` (header per folder), or \`none\` (flat, full-path rows). Worktrees nest in every mode]:MODE:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(discover)
+_arguments "${_arguments_options[@]}" : \
+'--max-depth=[Maximum directory depth to descend below the scan root]:MAX_DEPTH:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--hidden[Also descend into hidden (dot-prefixed) directories]' \
+'--follow-symlinks[Follow directory symlinks while scanning]' \
+'-y[Register every discovered project without prompting (in JSON mode, required unless --dry-run)]' \
+'--yes[Register every discovered project without prompting (in JSON mode, required unless --dry-run)]' \
+'--dry-run[Report what would be registered and exit without changing anything]' \
+'--no-index[Register only — skip the index rebuild and re-embedding]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::path -- Directory to scan (defaults to the current project directory):_files' \
+&& ret=0
+;;
+(repair)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-f[Skip confirmation prompt]' \
+'--force[Skip confirmation prompt]' \
+'--no-index[Re-key only — skip the index rebuild and re-embedding]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-f[Skip confirmation prompt (required in JSON mode)]' \
+'--force[Skip confirmation prompt (required in JSON mode)]' \
+'--cascade[Also delete all descendants (children and their children)]' \
+'--purge[Also delete personal memories, archived transcripts and curated conversation summaries — none of which have another copy. Without this they are kept\: a remote-derived project ID is shared by every clone of that remote, and the registry cannot see the others]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':project_id -- Project ID to delete:_default' \
+&& ret=0
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-f[Skip confirmation prompt]' \
+'--force[Skip confirmation prompt]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+'--parent=[Project ID of the parent]:PARENT:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':child -- Project ID of the child:_default' \
+&& ret=0
+;;
+(unlink)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':project_id -- Project ID of the child:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__projects__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-projects-help-command-$line[1]:"
+        case $line[1] in
+            (info)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(discover)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(repair)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unlink)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(harvest)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__harvest_commands" \
+"*::: :->harvest" \
+&& ret=0
+
+    case $state in
+    (harvest)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--since=[Only sessions active since this point\: an RFC 3339 timestamp or a relative shorthand like \`7d\`, \`12h\`, \`30m\`, \`2w\`]:WHEN:_default' \
+'-n+[Maximum number of sessions to list]:LIMIT:_default' \
+'--limit=[Maximum number of sessions to list]:LIMIT:_default' \
+'--exclude-session=[Session id to omit (typically the caller'\''s own, still being written)]:ID:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--include-harvested[Also list sessions already recorded as harvested]' \
+'--include-empty[Include sessions with no human turns]' \
+'--all-projects[Ignore project scoping and list every session on this machine]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'--max-chars=[Character budget for the digest. Defaults to \`\[harvest\] digest_budget\` (200000); \`0\` means unlimited]:MAX_CHARS:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--include-thinking[Include the assistant'\''s reasoning blocks (verbose)]' \
+'--include-sidechains[Include subagent turns (verbose; subagents report back into the main thread, so their raw turns are largely duplicate volume)]' \
+'--no-tools[Omit the tool-call trace, leaving prompts and prose only]' \
+'--all-projects[Search every session on this machine, not just this project'\''s]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(mark)
+_arguments "${_arguments_options[@]}" : \
+'*--memory=[Id of a memory created from this session (repeatable). Omit when the session yielded nothing — recording a zero-yield review is what stops it being re-read on the next harvest]:ID:_default' \
+'--note=[Why the session was skipped or deferred]:NOTE:_default' \
+'--summary=[Curated one-or-two-sentence summary of what this session was about, written into the search index alongside the decision]:SUMMARY:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--all-projects[Search every session on this machine, not just this project'\''s. Mirrors \`show\`, so a session you were able to digest is always a session you can mark as reviewed]' \
+'(--memory)--defer[Record the session as deliberately postponed rather than settled. Deferred sessions keep appearing in \`harvest list\`]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'()--all[Index every session in scope that still has bytes behind it]' \
+'--force[Re-embed even when the digest text is unchanged]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::session_id -- Session id, or a unique prefix of one. Omit with `--all`:_default' \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+'-n+[Maximum number of conversations to return]:LIMIT:_default' \
+'--limit=[Maximum number of conversations to return]:LIMIT:_default' \
+'--since=[Only conversations that ended since this point\: an RFC 3339 timestamp or a relative shorthand like \`30d\`, \`12h\`, \`2w\`]:WHEN:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--all-projects[Search every project'\''s conversations on this machine]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':query -- What to look for:_default' \
+&& ret=0
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[Read the summary from a file (\`-\` for stdin)]:PATH:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'(--from-file)--editor[Compose the summary in \$EDITOR]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+'::text -- The summary text. Pass an empty string to clear it:_default' \
+&& ret=0
+;;
+(reset)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(ledger)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__harvest__subcmd__ledger_commands" \
+"*::: :->ledger" \
+&& ret=0
+
+    case $state in
+    (ledger)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-ledger-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--decision=[Only entries with this decision (harvested, skipped, deferred, unreviewed)]:DECISION:_default' \
+'--stage=[Only entries at this stage (collected, indexed, compressed)]:STAGE:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--with-archive[Only entries that still have an archived transcript]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+'-o+[Destination path (default\: \`<session-id>.jsonl\` in the cwd)]:OUTPUT:_files' \
+'--output=[Destination path (default\: \`<session-id>.jsonl\` in the cwd)]:OUTPUT:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--archive-only[Delete only the archived transcript, keeping the decision record]' \
+'--unpin[Release the pin held by memories that cite this conversation, and delete the copy anyway]' \
+'-f[Skip confirmation prompt]' \
+'--force[Skip confirmation prompt]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':session_id -- Session id, or a unique prefix of one:_default' \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+'--older-than=[Override \`\[harvest\] archive_retention_days\` for this run (days, e.g. \`90d\`)]:WHEN:_default' \
+'--max-bytes=[Override \`\[harvest\] archive_max_bytes\` for this run]:BYTES:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--apply[Actually delete (default is a dry run, like \`gc\` and \`compress\`)]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-ledger-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__harvest__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mark)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ledger)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger_commands" \
+"*::: :->ledger" \
+&& ret=0
+
+    case $state in
+    (ledger)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-harvest-help-ledger-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(groups)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__groups_commands" \
+"*::: :->groups" \
+&& ret=0
+
+    case $state in
+    (groups)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-groups-command-$line[1]:"
+        case $line[1] in
+            (create)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Human-readable group name (case/whitespace-normalized into a stable id):_default' \
+&& ret=0
+;;
+(subscribe)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-y[Skip the blast-radius confirmation prompt (required in JSON mode)]' \
+'--yes[Skip the blast-radius confirmation prompt (required in JSON mode)]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Group name to subscribe to:_default' \
+&& ret=0
+;;
+(unsubscribe)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'-y[Skip the blast-radius confirmation prompt (required in JSON mode)]' \
+'--yes[Skip the blast-radius confirmation prompt (required in JSON mode)]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Group name to unsubscribe from:_default' \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(members)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Group name to inspect:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__groups__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-groups-help-command-$line[1]:"
+        case $line[1] in
+            (create)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(subscribe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unsubscribe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(members)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(challenge)
+_arguments "${_arguments_options[@]}" : \
+'-e+[Evidence or reason for the challenge]:EVIDENCE:_default' \
+'--evidence=[Evidence or reason for the challenge]:EVIDENCE:_default' \
+'--source-file=[Source file that contradicts this memory]:SOURCE_FILE:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':id -- Memory ID (supports prefix matching):_default' \
+&& ret=0
+;;
+(gc)
+_arguments "${_arguments_options[@]}" : \
+'--threshold=[Score threshold for GC (default from config)]:THRESHOLD:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--confirm[Actually delete (default is dry-run)]' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(compress)
+_arguments "${_arguments_options[@]}" : \
+'--scope=[Filter by logical scope]:SCOPE:_default' \
+'--threshold=[Criticality threshold for candidates (default 0.4)]:THRESHOLD:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--global[Operate on the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+'--transport=[Transport type (stdio or sse)]:TRANSPORT:_default' \
+'--port=[Port for SSE transport]:PORT:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(daemon)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__daemon_commands" \
+"*::: :->daemon" \
+&& ret=0
+
+    case $state in
+    (daemon)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-daemon-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+'--socket=[Unix socket to bind. Defaults to the shared per-user path (also overridable via ENGRAMDB_DAEMON_SOCKET)]:SOCKET:_files' \
+'--idle-timeout=[Seconds to stay alive with no active connections before exiting]:IDLE_TIMEOUT:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+'--socket=[Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config]:SOCKET:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(stop)
+_arguments "${_arguments_options[@]}" : \
+'--socket=[Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config]:SOCKET:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(restart)
+_arguments "${_arguments_options[@]}" : \
+'--socket=[Socket to target. Overrides ENGRAMDB_DAEMON_SOCKET and config]:SOCKET:_files' \
+'--idle-timeout=[Idle timeout for the newly started daemon]:IDLE_TIMEOUT:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__daemon__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-daemon-help-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(stop)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(restart)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':shell -- Shell type:(bash elvish fish powershell zsh)' \
+&& ret=0
+;;
+(migrate)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--dry-run[Only report what would be migrated, don'\''t change files]' \
+'--global[Migrate the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(rollback)
+_arguments "${_arguments_options[@]}" : \
+'--target-version=[Target format version (e.g., 1 for legacy YAML format). Defaults to 1]:TARGET_VERSION:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--dry-run[Only report what would be rolled back, don'\''t change files]' \
+'--global[Roll back the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(reindex)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'(--index-only)--embeddings-only[Only re-embed, don'\''t rebuild index]' \
+'--index-only[Only rebuild index, don'\''t re-embed]' \
+'(--embeddings-only --index-only --global)--archive-only[Rebuild the conversation search rows from the stored transcript copies instead of touching memories. Mirrors \`--embeddings-only\`\: a rebuild of one index, from bytes that were kept verbatim so a better reduction is always a re-derivation away]' \
+'--global[Reindex the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(hook)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_engramdb__subcmd__hook_commands" \
+"*::: :->hook" \
+&& ret=0
+
+    case $state in
+    (hook)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-hook-command-$line[1]:"
+        case $line[1] in
+            (pre-tool-use)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(session-start)
+_arguments "${_arguments_options[@]}" : \
+'--min-criticality=[Minimum criticality threshold for surfaced memories (0.0-1.0)]:MIN_CRITICALITY:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(user-prompt-submit)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(post-tool-use)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(session-end)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(pre-compact)
+_arguments "${_arguments_options[@]}" : \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__hook__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-hook-help-command-$line[1]:"
+        case $line[1] in
+            (pre-tool-use)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(session-start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(user-prompt-submit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(post-tool-use)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(session-end)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(pre-compact)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(setup)
+_arguments "${_arguments_options[@]}" : \
+'--claude-dir=[Override .claude directory path (for testing)]:CLAUDE_DIR:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--no-plugin[Skip plugin install in global mode, write hooks and MCP directly to settings.json]' \
+'--global[Install to ~/.claude/ instead of project-local .claude/]' \
+'--dry-run[Show what would be changed without writing]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(review)
+_arguments "${_arguments_options[@]}" : \
+'--scope=[Filter by logical scope]:SCOPE:_default' \
+'-t+[Filter by memory type]:TYPE:_default' \
+'--type=[Filter by memory type]:TYPE:_default' \
+'--stale-after-days=[Recency trigger\: also surface active memories not updated in more than N days. Bare \`--stale-after-days\` uses the 90-day default; omit the flag entirely to review only flagged memories]::STALE_AFTER_DAYS:_default' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--challenged-only[Only show Status\:\:Challenged memories]' \
+'--stale-only[Only show Status\:\:NeedsReview memories]' \
+'--global[Review the global (cross-project) memory store instead of the current project]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-command-$line[1]:"
+        case $line[1] in
+            (init)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(query)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(update)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(task)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__task_commands" \
+"*::: :->task" \
+&& ret=0
+
+    case $state in
+    (task)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-task-command-$line[1]:"
+        case $line[1] in
+            (current)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(complete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(verify)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(config)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(doctor)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__doctor_commands" \
+"*::: :->doctor" \
+&& ret=0
+
+    case $state in
+    (doctor)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-doctor-command-$line[1]:"
+        case $line[1] in
+            (store)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(validate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(projects)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__projects_commands" \
+"*::: :->projects" \
+&& ret=0
+
+    case $state in
+    (projects)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-projects-command-$line[1]:"
+        case $line[1] in
+            (info)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(discover)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(repair)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(stats)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(link)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unlink)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(harvest)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__harvest_commands" \
+"*::: :->harvest" \
+&& ret=0
+
+    case $state in
+    (harvest)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-harvest-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mark)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(index)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(search)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(summary)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(ledger)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger_commands" \
+"*::: :->ledger" \
+&& ret=0
+
+    case $state in
+    (ledger)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-harvest-ledger-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rm)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(prune)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(groups)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__groups_commands" \
+"*::: :->groups" \
+&& ret=0
+
+    case $state in
+    (groups)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-groups-command-$line[1]:"
+        case $line[1] in
+            (create)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(subscribe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(unsubscribe)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(members)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(challenge)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(gc)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(compress)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(serve)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(daemon)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__daemon_commands" \
+"*::: :->daemon" \
+&& ret=0
+
+    case $state in
+    (daemon)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-daemon-command-$line[1]:"
+        case $line[1] in
+            (run)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(status)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(stop)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(restart)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(migrate)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(rollback)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(reindex)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(hook)
+_arguments "${_arguments_options[@]}" : \
+":: :_engramdb__subcmd__help__subcmd__hook_commands" \
+"*::: :->hook" \
+&& ret=0
+
+    case $state in
+    (hook)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:engramdb-help-hook-command-$line[1]:"
+        case $line[1] in
+            (pre-tool-use)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(session-start)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(user-prompt-submit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(post-tool-use)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(session-end)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(pre-compact)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(setup)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(review)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_engramdb_commands] )) ||
+_engramdb_commands() {
+    local commands; commands=(
+'init:Initialize a new EngramDB store' \
+'add:Add a new memory' \
+'get:Get a memory by ID' \
+'query:Query memories (unified ranked / filtered retrieval)' \
+'list:List all memories' \
+'update:Update an existing memory' \
+'delete:Delete a memory' \
+'task:Task lifecycle\: declare or complete the task this session works on' \
+'verify:Confirm a memory is still accurate (stamps verified_at; clears doctor-flagged needs_review)' \
+'config:Show effective config values, thresholds, and the store'\''s top tags' \
+'stats:Show statistics' \
+'doctor:Check environment and store health' \
+'projects:Manage registered EngramDB projects' \
+'harvest:Inspect past Claude Code sessions for knowledge worth remembering' \
+'groups:Manage multi-project memory groups and this project'\''s subscriptions' \
+'challenge:Challenge a memory'\''s validity' \
+'gc:Run garbage collection on low-relevance memories' \
+'compress:List compression candidates (actual compression requires MCP mode)' \
+'serve:Start the MCP server' \
+'daemon:Run the shared embedding daemon (normally auto-spawned by MCP)' \
+'completions:Generate shell completions' \
+'migrate:Migrate memory files to the latest format version' \
+'rollback:Roll back memory files to a previous format version' \
+'reindex:Rebuild index and re-embed memories' \
+'hook:Claude Code plugin hook handler' \
+'setup:Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)' \
+'review:Interactive review of challenged/stale memories' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__add_commands] )) ||
+_engramdb__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb add commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__challenge_commands] )) ||
+_engramdb__subcmd__challenge_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb challenge commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__completions_commands] )) ||
+_engramdb__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb completions commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__compress_commands] )) ||
+_engramdb__subcmd__compress_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb compress commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__config_commands] )) ||
+_engramdb__subcmd__config_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb config commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon_commands] )) ||
+_engramdb__subcmd__daemon_commands() {
+    local commands; commands=(
+'run:Run the daemon event loop (this is what MCP auto-spawns)' \
+'status:Show whether a daemon is running and its request metrics' \
+'stop:Ask a running daemon to exit gracefully' \
+'restart:Stop a running daemon (if any) and start a fresh one' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb daemon commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__help_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__help_commands() {
+    local commands; commands=(
+'run:Run the daemon event loop (this is what MCP auto-spawns)' \
+'status:Show whether a daemon is running and its request metrics' \
+'stop:Ask a running daemon to exit gracefully' \
+'restart:Stop a running daemon (if any) and start a fresh one' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb daemon help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__help__subcmd__restart_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__help__subcmd__restart_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon help restart commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__help__subcmd__run_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__help__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon help run commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__help__subcmd__status_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__help__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon help status commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__help__subcmd__stop_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__help__subcmd__stop_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon help stop commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__restart_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__restart_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon restart commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__run_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon run commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__status_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon status commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__daemon__subcmd__stop_commands] )) ||
+_engramdb__subcmd__daemon__subcmd__stop_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb daemon stop commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__delete_commands] )) ||
+_engramdb__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb delete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor_commands] )) ||
+_engramdb__subcmd__doctor_commands() {
+    local commands; commands=(
+'store:Fast store health check (index consistency only)' \
+'validate:Load each downloaded model and run a test inference to confirm it works' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb doctor commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor__subcmd__help_commands] )) ||
+_engramdb__subcmd__doctor__subcmd__help_commands() {
+    local commands; commands=(
+'store:Fast store health check (index consistency only)' \
+'validate:Load each downloaded model and run a test inference to confirm it works' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb doctor help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__doctor__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb doctor help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor__subcmd__help__subcmd__store_commands] )) ||
+_engramdb__subcmd__doctor__subcmd__help__subcmd__store_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb doctor help store commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor__subcmd__help__subcmd__validate_commands] )) ||
+_engramdb__subcmd__doctor__subcmd__help__subcmd__validate_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb doctor help validate commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor__subcmd__store_commands] )) ||
+_engramdb__subcmd__doctor__subcmd__store_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb doctor store commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__doctor__subcmd__validate_commands] )) ||
+_engramdb__subcmd__doctor__subcmd__validate_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb doctor validate commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__gc_commands] )) ||
+_engramdb__subcmd__gc_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb gc commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__get_commands] )) ||
+_engramdb__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb get commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups_commands] )) ||
+_engramdb__subcmd__groups_commands() {
+    local commands; commands=(
+'create:Create a named group store (idempotent; prints its group id)' \
+'subscribe:Subscribe the current project to a group (creating the group if needed)' \
+'unsubscribe:Unsubscribe the current project from a group (forgiving if not subscribed)' \
+'list:List all known groups and the current project'\''s subscriptions' \
+'members:List the projects subscribed to a group (its blast radius) and how many memories the group holds' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb groups commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__create_commands] )) ||
+_engramdb__subcmd__groups__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups create commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help_commands() {
+    local commands; commands=(
+'create:Create a named group store (idempotent; prints its group id)' \
+'subscribe:Subscribe the current project to a group (creating the group if needed)' \
+'unsubscribe:Unsubscribe the current project from a group (forgiving if not subscribed)' \
+'list:List all known groups and the current project'\''s subscriptions' \
+'members:List the projects subscribed to a group (its blast radius) and how many memories the group holds' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb groups help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help__subcmd__create_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups help create commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help__subcmd__members_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help__subcmd__members_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups help members commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help__subcmd__subscribe_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help__subcmd__subscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups help subscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__help__subcmd__unsubscribe_commands] )) ||
+_engramdb__subcmd__groups__subcmd__help__subcmd__unsubscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups help unsubscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__list_commands] )) ||
+_engramdb__subcmd__groups__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__members_commands] )) ||
+_engramdb__subcmd__groups__subcmd__members_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups members commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__subscribe_commands] )) ||
+_engramdb__subcmd__groups__subcmd__subscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups subscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__groups__subcmd__unsubscribe_commands] )) ||
+_engramdb__subcmd__groups__subcmd__unsubscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb groups unsubscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest_commands] )) ||
+_engramdb__subcmd__harvest_commands() {
+    local commands; commands=(
+'list:List past sessions in scope, newest activity first' \
+'show:Print a budgeted digest of one session' \
+'mark:Record that a session has been reviewed, so it is not offered again' \
+'index:Index one or more sessions for \`harvest search\`' \
+'search:Search indexed past conversations' \
+'summary:Set or replace a session'\''s curated summary, re-embedding only it' \
+'reset:Forget a session'\''s harvest record so it is offered again' \
+'ledger:Inspect and manage the harvest ledger and its transcript archives' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help_commands() {
+    local commands; commands=(
+'list:List past sessions in scope, newest activity first' \
+'show:Print a budgeted digest of one session' \
+'mark:Record that a session has been reviewed, so it is not offered again' \
+'index:Index one or more sessions for \`harvest search\`' \
+'search:Search indexed past conversations' \
+'summary:Set or replace a session'\''s curated summary, re-embedding only it' \
+'reset:Forget a session'\''s harvest record so it is offered again' \
+'ledger:Inspect and manage the harvest ledger and its transcript archives' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__index_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help index commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+    )
+    _describe -t commands 'engramdb harvest help ledger commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__export_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__prune_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__rm_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__ledger__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help ledger show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__mark_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__mark_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help mark commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__reset_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__reset_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help reset commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__search_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help search commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__help__subcmd__summary_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__help__subcmd__summary_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest help summary commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__index_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest index commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest ledger commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__export_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb harvest ledger help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__export_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__prune_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__rm_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger help show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__prune_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__rm_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__ledger__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__ledger__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest ledger show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__list_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__mark_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__mark_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest mark commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__reset_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__reset_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest reset commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__search_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest search commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__show_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__harvest__subcmd__summary_commands] )) ||
+_engramdb__subcmd__harvest__subcmd__summary_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb harvest summary commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help_commands] )) ||
+_engramdb__subcmd__help_commands() {
+    local commands; commands=(
+'init:Initialize a new EngramDB store' \
+'add:Add a new memory' \
+'get:Get a memory by ID' \
+'query:Query memories (unified ranked / filtered retrieval)' \
+'list:List all memories' \
+'update:Update an existing memory' \
+'delete:Delete a memory' \
+'task:Task lifecycle\: declare or complete the task this session works on' \
+'verify:Confirm a memory is still accurate (stamps verified_at; clears doctor-flagged needs_review)' \
+'config:Show effective config values, thresholds, and the store'\''s top tags' \
+'stats:Show statistics' \
+'doctor:Check environment and store health' \
+'projects:Manage registered EngramDB projects' \
+'harvest:Inspect past Claude Code sessions for knowledge worth remembering' \
+'groups:Manage multi-project memory groups and this project'\''s subscriptions' \
+'challenge:Challenge a memory'\''s validity' \
+'gc:Run garbage collection on low-relevance memories' \
+'compress:List compression candidates (actual compression requires MCP mode)' \
+'serve:Start the MCP server' \
+'daemon:Run the shared embedding daemon (normally auto-spawned by MCP)' \
+'completions:Generate shell completions' \
+'migrate:Migrate memory files to the latest format version' \
+'rollback:Roll back memory files to a previous format version' \
+'reindex:Rebuild index and re-embed memories' \
+'hook:Claude Code plugin hook handler' \
+'setup:Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)' \
+'review:Interactive review of challenged/stale memories' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__add_commands] )) ||
+_engramdb__subcmd__help__subcmd__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help add commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__challenge_commands] )) ||
+_engramdb__subcmd__help__subcmd__challenge_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help challenge commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__completions_commands] )) ||
+_engramdb__subcmd__help__subcmd__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help completions commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__compress_commands] )) ||
+_engramdb__subcmd__help__subcmd__compress_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help compress commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__config_commands] )) ||
+_engramdb__subcmd__help__subcmd__config_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help config commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__daemon_commands] )) ||
+_engramdb__subcmd__help__subcmd__daemon_commands() {
+    local commands; commands=(
+'run:Run the daemon event loop (this is what MCP auto-spawns)' \
+'status:Show whether a daemon is running and its request metrics' \
+'stop:Ask a running daemon to exit gracefully' \
+'restart:Stop a running daemon (if any) and start a fresh one' \
+    )
+    _describe -t commands 'engramdb help daemon commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__daemon__subcmd__restart_commands] )) ||
+_engramdb__subcmd__help__subcmd__daemon__subcmd__restart_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help daemon restart commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__daemon__subcmd__run_commands] )) ||
+_engramdb__subcmd__help__subcmd__daemon__subcmd__run_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help daemon run commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__daemon__subcmd__status_commands] )) ||
+_engramdb__subcmd__help__subcmd__daemon__subcmd__status_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help daemon status commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__daemon__subcmd__stop_commands] )) ||
+_engramdb__subcmd__help__subcmd__daemon__subcmd__stop_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help daemon stop commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__delete_commands] )) ||
+_engramdb__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help delete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__doctor_commands] )) ||
+_engramdb__subcmd__help__subcmd__doctor_commands() {
+    local commands; commands=(
+'store:Fast store health check (index consistency only)' \
+'validate:Load each downloaded model and run a test inference to confirm it works' \
+    )
+    _describe -t commands 'engramdb help doctor commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__doctor__subcmd__store_commands] )) ||
+_engramdb__subcmd__help__subcmd__doctor__subcmd__store_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help doctor store commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__doctor__subcmd__validate_commands] )) ||
+_engramdb__subcmd__help__subcmd__doctor__subcmd__validate_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help doctor validate commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__gc_commands] )) ||
+_engramdb__subcmd__help__subcmd__gc_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help gc commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__get_commands] )) ||
+_engramdb__subcmd__help__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help get commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__groups_commands] )) ||
+_engramdb__subcmd__help__subcmd__groups_commands() {
+    local commands; commands=(
+'create:Create a named group store (idempotent; prints its group id)' \
+'subscribe:Subscribe the current project to a group (creating the group if needed)' \
+'unsubscribe:Unsubscribe the current project from a group (forgiving if not subscribed)' \
+'list:List all known groups and the current project'\''s subscriptions' \
+'members:List the projects subscribed to a group (its blast radius) and how many memories the group holds' \
+    )
+    _describe -t commands 'engramdb help groups commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__groups__subcmd__create_commands] )) ||
+_engramdb__subcmd__help__subcmd__groups__subcmd__create_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help groups create commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__groups__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__groups__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help groups list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__groups__subcmd__members_commands] )) ||
+_engramdb__subcmd__help__subcmd__groups__subcmd__members_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help groups members commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__groups__subcmd__subscribe_commands] )) ||
+_engramdb__subcmd__help__subcmd__groups__subcmd__subscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help groups subscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__groups__subcmd__unsubscribe_commands] )) ||
+_engramdb__subcmd__help__subcmd__groups__subcmd__unsubscribe_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help groups unsubscribe commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest_commands() {
+    local commands; commands=(
+'list:List past sessions in scope, newest activity first' \
+'show:Print a budgeted digest of one session' \
+'mark:Record that a session has been reviewed, so it is not offered again' \
+'index:Index one or more sessions for \`harvest search\`' \
+'search:Search indexed past conversations' \
+'summary:Set or replace a session'\''s curated summary, re-embedding only it' \
+'reset:Forget a session'\''s harvest record so it is offered again' \
+'ledger:Inspect and manage the harvest ledger and its transcript archives' \
+    )
+    _describe -t commands 'engramdb help harvest commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__index_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__index_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest index commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger_commands() {
+    local commands; commands=(
+'list:List recorded sessions and their decisions' \
+'show:Show one entry in full, including archive metadata' \
+'export:Decompress an archived transcript back to a file' \
+'rm:Delete a ledger entry and/or its archive' \
+'prune:Evict archives past the retention limits (dry run by default)' \
+    )
+    _describe -t commands 'engramdb help harvest ledger commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__export_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__export_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger export commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__prune_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__rm_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__rm_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger rm commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__show_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__ledger__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest ledger show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__mark_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__mark_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest mark commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__reset_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__reset_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest reset commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__search_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__search_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest search commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__show_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest show commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__harvest__subcmd__summary_commands] )) ||
+_engramdb__subcmd__help__subcmd__harvest__subcmd__summary_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help harvest summary commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook_commands() {
+    local commands; commands=(
+'pre-tool-use:Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)' \
+'session-start:Handle SessionStart hook events (outputs high-criticality memories)' \
+'user-prompt-submit:Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)' \
+'post-tool-use:Handle PostToolUse hook events (warn when an edit touches a memory'\''s watch paths)' \
+'session-end:Handle SessionEnd hook events (housekeeping; no context output)' \
+'pre-compact:Handle PreCompact hook events (store-your-memories reminder before compaction)' \
+    )
+    _describe -t commands 'engramdb help hook commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook__subcmd__post-tool-use_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook__subcmd__post-tool-use_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help hook post-tool-use commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook__subcmd__pre-compact_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook__subcmd__pre-compact_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help hook pre-compact commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook__subcmd__pre-tool-use_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook__subcmd__pre-tool-use_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help hook pre-tool-use commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook__subcmd__session-end_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook__subcmd__session-end_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help hook session-end commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook__subcmd__session-start_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook__subcmd__session-start_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help hook session-start commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__hook__subcmd__user-prompt-submit_commands] )) ||
+_engramdb__subcmd__help__subcmd__hook__subcmd__user-prompt-submit_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help hook user-prompt-submit commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__init_commands] )) ||
+_engramdb__subcmd__help__subcmd__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help init commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__migrate_commands] )) ||
+_engramdb__subcmd__help__subcmd__migrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help migrate commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects_commands() {
+    local commands; commands=(
+'info:Show info about the current project (default)' \
+'list:List all registered projects' \
+'discover:Walk a directory tree for \`.engramdb/\` projects the registry doesn'\''t know about, then offer to register and index each one' \
+'repair:Re-key this project'\''s registration to the ID it hashes to today' \
+'delete:Remove a project from the registry and reclaim its data directory' \
+'stats:Show aggregate statistics across all projects' \
+'prune:Remove stale registry entries and orphan data directories' \
+'link:Link a project as a sub-project of another project' \
+'unlink:Remove the parent link on a project, promoting it back to a root project' \
+    )
+    _describe -t commands 'engramdb help projects commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__delete_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects delete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__discover_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__discover_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects discover commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__info_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects info commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__link_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects link commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__list_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__prune_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__repair_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__repair_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects repair commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__stats_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects stats commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__projects__subcmd__unlink_commands] )) ||
+_engramdb__subcmd__help__subcmd__projects__subcmd__unlink_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help projects unlink commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__query_commands] )) ||
+_engramdb__subcmd__help__subcmd__query_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help query commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__reindex_commands] )) ||
+_engramdb__subcmd__help__subcmd__reindex_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help reindex commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__review_commands] )) ||
+_engramdb__subcmd__help__subcmd__review_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help review commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__rollback_commands] )) ||
+_engramdb__subcmd__help__subcmd__rollback_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help rollback commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__serve_commands] )) ||
+_engramdb__subcmd__help__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help serve commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__setup_commands] )) ||
+_engramdb__subcmd__help__subcmd__setup_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help setup commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__stats_commands] )) ||
+_engramdb__subcmd__help__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help stats commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__task_commands] )) ||
+_engramdb__subcmd__help__subcmd__task_commands() {
+    local commands; commands=(
+'current:Declare (or read, with no NAME) the task this session is working on' \
+'complete:Mark a task finished\: demote its task-scoped memories' \
+    )
+    _describe -t commands 'engramdb help task commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__task__subcmd__complete_commands] )) ||
+_engramdb__subcmd__help__subcmd__task__subcmd__complete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help task complete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__task__subcmd__current_commands] )) ||
+_engramdb__subcmd__help__subcmd__task__subcmd__current_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help task current commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__update_commands] )) ||
+_engramdb__subcmd__help__subcmd__update_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help update commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__verify_commands] )) ||
+_engramdb__subcmd__help__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help verify commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook_commands] )) ||
+_engramdb__subcmd__hook_commands() {
+    local commands; commands=(
+'pre-tool-use:Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)' \
+'session-start:Handle SessionStart hook events (outputs high-criticality memories)' \
+'user-prompt-submit:Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)' \
+'post-tool-use:Handle PostToolUse hook events (warn when an edit touches a memory'\''s watch paths)' \
+'session-end:Handle SessionEnd hook events (housekeeping; no context output)' \
+'pre-compact:Handle PreCompact hook events (store-your-memories reminder before compaction)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb hook commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help_commands() {
+    local commands; commands=(
+'pre-tool-use:Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)' \
+'session-start:Handle SessionStart hook events (outputs high-criticality memories)' \
+'user-prompt-submit:Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)' \
+'post-tool-use:Handle PostToolUse hook events (warn when an edit touches a memory'\''s watch paths)' \
+'session-end:Handle SessionEnd hook events (housekeeping; no context output)' \
+'pre-compact:Handle PreCompact hook events (store-your-memories reminder before compaction)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb hook help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__post-tool-use_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__post-tool-use_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help post-tool-use commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__pre-compact_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__pre-compact_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help pre-compact commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__pre-tool-use_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__pre-tool-use_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help pre-tool-use commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__session-end_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__session-end_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help session-end commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__session-start_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__session-start_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help session-start commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__help__subcmd__user-prompt-submit_commands] )) ||
+_engramdb__subcmd__hook__subcmd__help__subcmd__user-prompt-submit_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook help user-prompt-submit commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__post-tool-use_commands] )) ||
+_engramdb__subcmd__hook__subcmd__post-tool-use_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook post-tool-use commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__pre-compact_commands] )) ||
+_engramdb__subcmd__hook__subcmd__pre-compact_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook pre-compact commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__pre-tool-use_commands] )) ||
+_engramdb__subcmd__hook__subcmd__pre-tool-use_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook pre-tool-use commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__session-end_commands] )) ||
+_engramdb__subcmd__hook__subcmd__session-end_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook session-end commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__session-start_commands] )) ||
+_engramdb__subcmd__hook__subcmd__session-start_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook session-start commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__hook__subcmd__user-prompt-submit_commands] )) ||
+_engramdb__subcmd__hook__subcmd__user-prompt-submit_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb hook user-prompt-submit commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__init_commands] )) ||
+_engramdb__subcmd__init_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb init commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__list_commands] )) ||
+_engramdb__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__migrate_commands] )) ||
+_engramdb__subcmd__migrate_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb migrate commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects_commands] )) ||
+_engramdb__subcmd__projects_commands() {
+    local commands; commands=(
+'info:Show info about the current project (default)' \
+'list:List all registered projects' \
+'discover:Walk a directory tree for \`.engramdb/\` projects the registry doesn'\''t know about, then offer to register and index each one' \
+'repair:Re-key this project'\''s registration to the ID it hashes to today' \
+'delete:Remove a project from the registry and reclaim its data directory' \
+'stats:Show aggregate statistics across all projects' \
+'prune:Remove stale registry entries and orphan data directories' \
+'link:Link a project as a sub-project of another project' \
+'unlink:Remove the parent link on a project, promoting it back to a root project' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb projects commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__delete_commands] )) ||
+_engramdb__subcmd__projects__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects delete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__discover_commands] )) ||
+_engramdb__subcmd__projects__subcmd__discover_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects discover commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help_commands() {
+    local commands; commands=(
+'info:Show info about the current project (default)' \
+'list:List all registered projects' \
+'discover:Walk a directory tree for \`.engramdb/\` projects the registry doesn'\''t know about, then offer to register and index each one' \
+'repair:Re-key this project'\''s registration to the ID it hashes to today' \
+'delete:Remove a project from the registry and reclaim its data directory' \
+'stats:Show aggregate statistics across all projects' \
+'prune:Remove stale registry entries and orphan data directories' \
+'link:Link a project as a sub-project of another project' \
+'unlink:Remove the parent link on a project, promoting it back to a root project' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb projects help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__delete_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help delete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__discover_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__discover_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help discover commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__info_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help info commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__link_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help link commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__list_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__prune_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__repair_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__repair_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help repair commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__stats_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help stats commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__help__subcmd__unlink_commands] )) ||
+_engramdb__subcmd__projects__subcmd__help__subcmd__unlink_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects help unlink commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__info_commands] )) ||
+_engramdb__subcmd__projects__subcmd__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects info commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__link_commands] )) ||
+_engramdb__subcmd__projects__subcmd__link_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects link commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__list_commands] )) ||
+_engramdb__subcmd__projects__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects list commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__prune_commands] )) ||
+_engramdb__subcmd__projects__subcmd__prune_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects prune commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__repair_commands] )) ||
+_engramdb__subcmd__projects__subcmd__repair_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects repair commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__stats_commands] )) ||
+_engramdb__subcmd__projects__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects stats commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__projects__subcmd__unlink_commands] )) ||
+_engramdb__subcmd__projects__subcmd__unlink_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb projects unlink commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__query_commands] )) ||
+_engramdb__subcmd__query_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb query commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__reindex_commands] )) ||
+_engramdb__subcmd__reindex_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb reindex commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__review_commands] )) ||
+_engramdb__subcmd__review_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb review commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__rollback_commands] )) ||
+_engramdb__subcmd__rollback_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb rollback commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__serve_commands] )) ||
+_engramdb__subcmd__serve_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb serve commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__setup_commands] )) ||
+_engramdb__subcmd__setup_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb setup commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__stats_commands] )) ||
+_engramdb__subcmd__stats_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb stats commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task_commands] )) ||
+_engramdb__subcmd__task_commands() {
+    local commands; commands=(
+'current:Declare (or read, with no NAME) the task this session is working on' \
+'complete:Mark a task finished\: demote its task-scoped memories' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb task commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task__subcmd__complete_commands] )) ||
+_engramdb__subcmd__task__subcmd__complete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb task complete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task__subcmd__current_commands] )) ||
+_engramdb__subcmd__task__subcmd__current_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb task current commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task__subcmd__help_commands] )) ||
+_engramdb__subcmd__task__subcmd__help_commands() {
+    local commands; commands=(
+'current:Declare (or read, with no NAME) the task this session is working on' \
+'complete:Mark a task finished\: demote its task-scoped memories' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'engramdb task help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task__subcmd__help__subcmd__complete_commands] )) ||
+_engramdb__subcmd__task__subcmd__help__subcmd__complete_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb task help complete commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task__subcmd__help__subcmd__current_commands] )) ||
+_engramdb__subcmd__task__subcmd__help__subcmd__current_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb task help current commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__task__subcmd__help__subcmd__help_commands] )) ||
+_engramdb__subcmd__task__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb task help help commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__update_commands] )) ||
+_engramdb__subcmd__update_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb update commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__verify_commands] )) ||
+_engramdb__subcmd__verify_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb verify commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_engramdb" ]; then
+    _engramdb "$@"
+else
+    compdef _engramdb engramdb
+fi
+--- stderr ---

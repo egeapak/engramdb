@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"export\", \"session-alpha\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger export session-alpha
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Session session-alpha has no archived transcript. Archiving is controlled by `[harvest] archive` and only captures sessions that ended after it was enabled.

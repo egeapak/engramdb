@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"init\", \"--no-embeddings\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] init --no-embeddings
+exit: 0
+--- stdout ---
+{"message":"EngramDB store already initialized at [PROJECT]/.engramdb (existing config and manifest preserved)","success":true}
+{"message":"Project ID: [PROJECT_ID]"}
+--- stderr ---

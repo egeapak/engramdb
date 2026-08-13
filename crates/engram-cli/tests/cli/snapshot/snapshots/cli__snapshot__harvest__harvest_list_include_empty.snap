@@ -1,0 +1,49 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"list\", \"--include-empty\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest list --include-empty
+exit: 0
+--- stdout ---
+{
+  "scope": [
+    "[PROJECT]"
+  ],
+  "sessions": [
+    {
+      "already_harvested": false,
+      "assistant_turns": 1,
+      "bytes": 191,
+      "cwd": "[PROJECT]",
+      "ended_at": "[TIMESTAMP]",
+      "session_id": "session-gamma",
+      "started_at": "[TIMESTAMP]",
+      "user_turns": 0
+    },
+    {
+      "already_harvested": false,
+      "assistant_turns": 0,
+      "bytes": 177,
+      "cwd": "[PROJECT]",
+      "ended_at": "[TIMESTAMP]",
+      "first_prompt": "What is the default digest budget?",
+      "git_branch": "main",
+      "session_id": "session-beta",
+      "started_at": "[TIMESTAMP]",
+      "user_turns": 1
+    },
+    {
+      "already_harvested": false,
+      "assistant_turns": 2,
+      "bytes": 892,
+      "cwd": "[PROJECT]",
+      "ended_at": "[TIMESTAMP]",
+      "first_prompt": "Why does the daemon reap while a session is still open?",
+      "git_branch": "feat/harvest",
+      "session_id": "session-alpha",
+      "started_at": "[TIMESTAMP]",
+      "user_turns": 2
+    }
+  ]
+}
+--- stderr ---

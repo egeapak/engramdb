@@ -1,21 +1,17 @@
 //! Handler for the `engramdb projects` subcommand.
 
 use crate::app::ProjectsCommand;
-use crate::output::{AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput};
+use crate::output::{
+    outln, AggregateStatsOutput, OutputFormatter, ProjectInfoOutput, ProjectListOutput,
+};
+use crate::progress;
 use crate::prompter::Prompter;
 use anyhow::{bail, Result};
 use engramdb::ops::projects;
 use engramdb::storage::RegistryBackend;
 use engramdb::types::ProjectListGrouping;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
 
-/// Run the `projects` command with the given subcommand (defaults to `Info`).
-///
-/// `ProjectsCommand::{Discover, Repair}` are NOT handled here: both rebuild an
-/// index and so need model providers, and `lib.rs` dispatches them directly
-/// alongside the other daemon-aware commands. Reaching them here means that
-/// dispatch was removed.
 /// Render `(project_id, error)` pairs as objects.
 ///
 /// A bare id would tell the user a directory could not be removed without
@@ -51,6 +47,12 @@ fn report_failed_reclaims(formatter: &OutputFormatter, failed: &[(String, String
     }
 }
 
+/// Run the `projects` command with the given subcommand (defaults to `Info`).
+///
+/// `ProjectsCommand::{Discover, Repair}` are NOT handled here: both rebuild an
+/// index and so need model providers, and `lib.rs` dispatches them directly
+/// alongside the other daemon-aware commands. Reaching them here means that
+/// dispatch was removed.
 pub async fn run_projects(
     dir: &Path,
     registry: &dyn RegistryBackend,
@@ -173,7 +175,8 @@ pub async fn run_projects(
             if json_mode {
                 // ONE document. Each `print_success` below is its own JSON
                 // object, so the human path emitted two to four of them.
-                println!(
+                outln!(
+                    formatter,
                     "{}",
                     serde_json::json!({
                         "deleted": true,
@@ -267,7 +270,8 @@ pub async fn run_projects(
                     // Same object shape as a real prune so scripts parse one
                     // form — every key the success path emits, at its zero
                     // value.
-                    println!(
+                    outln!(
+                        formatter,
                         "{}",
                         serde_json::json!({
                             "stale_removed": 0,
@@ -285,9 +289,9 @@ pub async fn run_projects(
                 return Ok(());
             }
 
-            // Preview goes through the formatter so --no-color and plain mode
-            // are honored (raw owo-colors println! ignored both), and is
-            // suppressed entirely in JSON mode where stdout must carry
+            // Preview uses print_message so --no-color and plain mode are
+            // honored (the owo-colors styling this replaced ignored both), and
+            // is suppressed entirely in JSON mode where stdout must carry
             // exactly one JSON object.
             if !json_mode {
                 if stale.is_empty() {
@@ -342,25 +346,14 @@ pub async fn run_projects(
             }
 
             // Progress bars are human-only chatter; hidden in JSON mode.
-            let style = ProgressStyle::default_bar()
-                .template("{prefix} [{bar:40.green/dim}] {pos}/{len} ({eta})")
-                .unwrap()
-                .progress_chars("=>-");
-            let make_bar = |len: u64, prefix: &'static str| {
-                if json_mode {
-                    return ProgressBar::hidden();
-                }
-                let pb = ProgressBar::new(len);
-                pb.set_style(style.clone());
-                pb.set_prefix(prefix);
-                if len == 0 {
-                    pb.finish_and_clear();
-                }
-                pb
-            };
-            let stale_pb = make_bar(stale.len() as u64, "stale");
-            let orphan_pb = make_bar(orphan_count as u64, "orphan");
-            let hierarchy_pb = make_bar(hierarchy_issues.total() as u64, "links");
+            // Construction lives in `crate::progress` so the draw target is a
+            // parameter — that seam is the only way a test can see a rendered
+            // bar (the default target is hidden under a pipe).
+            let target = || progress::prune_draw_target(json_mode);
+            let stale_pb = progress::make_bar(stale.len() as u64, "stale", target());
+            let orphan_pb = progress::make_bar(orphan_count as u64, "orphan", target());
+            let hierarchy_pb =
+                progress::make_bar(hierarchy_issues.total() as u64, "links", target());
 
             let result = projects::prune_stale_projects(registry, |phase| match phase {
                 projects::PrunePhase::Stale => stale_pb.inc(1),
@@ -373,7 +366,8 @@ pub async fn run_projects(
             hierarchy_pb.finish_and_clear();
 
             if json_mode {
-                println!(
+                outln!(
+                    formatter,
                     "{}",
                     serde_json::json!({
                         "stale_removed": result.stale_removed,
@@ -439,6 +433,62 @@ mod tests {
     /// then assert against the wrong refusal.
     fn human_formatter() -> OutputFormatter {
         OutputFormatter::new(Some(crate::app::OutputFormat::Plain), false, true)
+    }
+
+    /// `projects prune` must not destroy an unregistered project's personal
+    /// memories — end to end, through the handler.
+    ///
+    /// This is the CLI half of a real data-loss bug: `doctor` warns "Registry:
+    /// not registered", `--fix` answers it by running this very command, and
+    /// the sweep used to delete the data directory because nothing in the
+    /// registry pointed at it. `projects/<id>/personal/` is the only copy, so
+    /// it went with it.
+    ///
+    /// What stops it now is `paths::holds_irreplaceable_data`, which retains
+    /// any candidate still holding personal memories, transcript copies or a
+    /// conversations table — broader than the earlier guard, which spared only
+    /// the project the command happened to be invoked from. The invariant lives
+    /// in `ops::projects`; what this pins is that the handler cannot lose it.
+    #[tokio::test]
+    async fn prune_keeps_an_unregistered_projects_personal_memories() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = engramdb::storage::MemoryStore::init(temp_dir.path(), &registry)
+            .await
+            .unwrap();
+        let mut mem = engramdb::types::Memory::new(
+            engramdb::types::MemoryType::Decision,
+            "Personal note",
+            "Only copy lives under projects/<id>/personal/",
+            engramdb::types::Provenance::human(),
+        );
+        mem.visibility = engramdb::types::Visibility::Personal;
+        store.create(&mem).await.unwrap();
+
+        // On disk but absent from the registry — a lost registry.json, which
+        // is exactly the state `doctor` offers this command as the fix for.
+        registry.save(&Registry::default()).await.unwrap();
+
+        run_projects(
+            temp_dir.path(),
+            &registry,
+            Some(ProjectsCommand::Prune { force: true }),
+            &human_formatter(),
+            &MockPrompter::new(vec![]),
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            engramdb::storage::MemoryStore::open(temp_dir.path())
+                .await
+                .unwrap()
+                .get(&mem.id.to_string())
+                .await
+                .is_ok(),
+            "prune destroyed an unregistered project's only copy of its personal memories"
+        );
     }
 
     #[tokio::test]
@@ -766,5 +816,202 @@ mod tests {
             .find(|e| e.project_id == child_store.project_id)
             .unwrap();
         assert_eq!(child_entry.parent_project_id, None);
+    }
+
+    // =================================================================
+    // Command-tier snapshots
+    //
+    // The tests above assert registry *state* — that declining leaves the
+    // entry alone. These assert what the user was actually shown before they
+    // answered: the warning naming what is about to be destroyed, the
+    // confirmation and its default, and the outcome lines. Both flows here
+    // are destructive and both default to "no", so the warning is the whole
+    // safety story. See `crate::testutil` for why this tier exists.
+    //
+    // `projects prune` builds `indicatif` bars, but their default draw target
+    // is stderr and `is_term()` is false under the runner, so they are hidden
+    // and never reach the capture (which is the formatter's sink anyway).
+    // What the bars *render* is covered separately in `crate::progress`,
+    // which takes the draw target as a parameter and points it at an
+    // `InMemoryTerm`.
+    // =================================================================
+
+    use crate::testutil::{
+        capturing_json, capturing_plain, interaction, snap_command, TempProject,
+    };
+
+    /// The registry stores the *canonicalized* project path (`update` calls
+    /// `Path::canonicalize`), and `delete` echoes it back. `TempProject::path`
+    /// is the uncanonicalized handle — identical on Linux, but `/tmp` is a
+    /// symlink on macOS — so normalization has to be given the resolved form
+    /// or the temp path would leak into the snapshot.
+    fn canonical_dir(p: &TempProject) -> std::path::PathBuf {
+        p.path().canonicalize().unwrap_or_else(|_| p.path().into())
+    }
+
+    /// Register a stale entry: a path that does not exist, so
+    /// `registry_entry_alive` classifies it as stale and prune has something
+    /// to preview. Nothing is created under the global data dir, so the
+    /// orphan and broken-parent-link counts stay at zero.
+    async fn with_stale_entry(p: &TempProject) {
+        p.registry
+            .update(&p.path().join("moved-away"), "stale-project")
+            .await
+            .unwrap();
+    }
+
+    /// Accepting the confirmation. The project was really initialised, so the
+    /// global-data line is part of the outcome too.
+    #[tokio::test]
+    async fn snap_projects_delete_confirmed() {
+        let p = TempProject::new();
+        let project_id = p.init_store().await.project_id.clone();
+
+        let prompter = MockPrompter::new(vec!["yes"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Delete {
+                project_id,
+                force: false,
+                cascade: false,
+                purge: false,
+            }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_delete_confirmed",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Declining. The prompt defaults to `no`, so this is what a bare Enter
+    /// does too — worth pinning for a command that deletes a project's index.
+    ///
+    /// A decline is an **error**, not a quiet success: it used to return `Ok`,
+    /// so `set -e` scripts read "Aborted." as a completed delete and moved on.
+    /// The returned message is part of that contract, so it goes in the
+    /// snapshot rather than being asserted away with `is_err()`.
+    #[tokio::test]
+    async fn snap_projects_delete_declined() {
+        let p = TempProject::new();
+        let project_id = p.init_store().await.project_id.clone();
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        let (formatter, cap) = capturing_plain();
+        let err = run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Delete {
+                project_id,
+                force: false,
+                cascade: false,
+                purge: false,
+            }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .expect_err("declining must not report success");
+
+        // Still registered — the decline has to have been total.
+        assert_eq!(p.registry.load().await.unwrap().projects.len(), 1);
+
+        snap_command(
+            "projects_delete_declined",
+            &canonical_dir(&p),
+            format!("{}--- error ---\n{err}\n", interaction(&prompter, &cap)),
+        );
+    }
+
+    /// Accepting the confirmation. The three preview lines are the point:
+    /// they are the only place the user learns *what* "Remove all?" covers,
+    /// and each category reports even when it found nothing.
+    #[tokio::test]
+    async fn snap_projects_prune_confirmed() {
+        let p = TempProject::new();
+        with_stale_entry(&p).await;
+
+        let prompter = MockPrompter::new(vec!["yes"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_prune_confirmed",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Declining after the same preview.
+    #[tokio::test]
+    async fn snap_projects_prune_declined() {
+        let p = TempProject::new();
+        with_stale_entry(&p).await;
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        let (formatter, cap) = capturing_plain();
+        run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "projects_prune_declined",
+            &canonical_dir(&p),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// JSON is machine-consumed, so prune refuses to prompt and bails. The
+    /// preview is suppressed as well — stdout must carry exactly one JSON
+    /// document or nothing — which leaves the error message as the only thing
+    /// the caller gets. Empty prompts *and* empty streams are the assertion.
+    #[tokio::test]
+    async fn snap_projects_prune_json_refuses() {
+        let p = TempProject::new();
+        with_stale_entry(&p).await;
+
+        let prompter = MockPrompter::new(vec![]);
+        let (formatter, cap) = capturing_json();
+        let err = run_projects(
+            p.path(),
+            &p.registry,
+            Some(ProjectsCommand::Prune { force: false }),
+            &formatter,
+            &prompter,
+            ProjectListGrouping::default(),
+        )
+        .await
+        .expect_err("JSON mode must refuse to prompt");
+
+        snap_command(
+            "projects_prune_json_refuses",
+            &canonical_dir(&p),
+            format!("{}--- error ---\n{err}\n", interaction(&prompter, &cap)),
+        );
     }
 }

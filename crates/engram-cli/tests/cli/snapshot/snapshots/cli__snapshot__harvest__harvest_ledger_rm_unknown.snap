@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"rm\", \"session-omega\", \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger rm session-omega --force
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: No harvest record matching 'session-omega'. List the ledger (`engramdb harvest ledger list`, or the harvest_ledger tool) to see which sessions have one — it holds every session that has been reviewed or archived, including ones whose live transcript is gone.

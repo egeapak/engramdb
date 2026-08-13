@@ -1,0 +1,28 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+ID: 018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b
+Type: Hazard [observation] [invalidated 2020-06-15]
+Summary: Blocking calls deadlock the daemon
+Content: A blocking call on the async runtime stalls every session.
+Details: Reproduced twice under load.
+Physical: src/daemon/server.rs, src/daemon/*.rs
+Logical: daemon.runtime, perf
+Tags: async, deadlock
+Criticality: 0.95
+Confidence: 0.65
+Status: Active
+Visibility: Personal
+Premise: while ort is pinned to rc.12
+Invalidated by: Cargo.lock, build.rs
+Origin task: daemon-perf (generality: task)
+Derived from: 550e8400-e29b
+Valid from: 2025-12-01 00:00:00
+Invalidated at: 2020-06-15 12:00:00
+Superseded by: 018f2a1b-3c4d-7e5f-8a9b-000000000099
+Verified: 2026-02-03 04:05:06
+Created: 2026-01-02 03:04:05
+Updated: 2026-01-03 04:05:06
+--- stderr ---

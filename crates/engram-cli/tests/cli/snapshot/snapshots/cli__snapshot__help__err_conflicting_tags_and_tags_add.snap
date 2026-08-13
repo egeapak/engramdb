@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"update\", \"some-id\", \"--tags\", \"a\", \"--tags-add\", \"b\"])"
+---
+$ engramdb update some-id --tags a --tags-add b
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the argument '--tags <TAGS>' cannot be used with '--tags-add <TAGS_ADD>'
+
+Usage: engramdb update --tags <TAGS> <ID>
+
+For more information, try '--help'.

@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Projects: 3
+Reachable: 2
+Memories: 128
+Decision: 80
+Hazard: 48
+--- stderr ---

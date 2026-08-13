@@ -1,0 +1,15 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"update\", &id, \"-s\", \"A new summary\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] update [UUID] -s A new summary
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Failed to send embed request to Ollama
+
+Caused by:
+    0: error sending request for url (http://localhost:11434/api/embed)
+    1: client error (Connect)
+    2: tcp connect error
+    3: Connection refused (os error 111)

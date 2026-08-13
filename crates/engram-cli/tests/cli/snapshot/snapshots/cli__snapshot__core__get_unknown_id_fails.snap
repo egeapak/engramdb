@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"get\", \"no-such-memory\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] get no-such-memory
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Memory not found: no-such-memory

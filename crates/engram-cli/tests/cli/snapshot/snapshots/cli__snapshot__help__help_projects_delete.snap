@@ -1,0 +1,67 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"projects\", \"delete\", \"--help\"])"
+---
+$ engramdb projects delete --help
+exit: 0
+--- stdout ---
+Remove a project from the registry and reclaim its data directory.
+
+The data directory is kept WHOLE — index included — whenever it still holds personal memories, archived transcripts or conversation summaries, unless `--purge` is passed: a project ID derived from a git remote is shared by every clone of that remote on this machine, and the registry records only one of them, so deleting one registration can destroy another checkout's only copy.
+
+Refuses by default when the project has sub-projects (children). Re-run with `--cascade` to also delete descendants, or unlink the children first with `engramdb projects unlink <id>`.
+
+Usage: engramdb projects delete [OPTIONS] <PROJECT_ID>
+
+Arguments:
+  <PROJECT_ID>
+          Project ID to delete
+
+Options:
+  -f, --force
+          Skip confirmation prompt (required in JSON mode)
+
+      --cascade
+          Also delete all descendants (children and their children)
+
+      --purge
+          Also delete personal memories, archived transcripts and curated conversation summaries — none of which have another copy. Without this they are kept: a remote-derived project ID is shared by every clone of that remote, and the registry cannot see the others
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

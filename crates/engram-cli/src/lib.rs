@@ -21,8 +21,12 @@ pub mod app;
 pub mod commands;
 pub mod engine;
 pub mod output;
+/// Progress-bar construction, split out so the draw target is injectable.
+pub(crate) mod progress;
 pub mod project_tree;
 pub mod prompter;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod validation;
 
 /// Determine the `DaemonPolicy` for a CLI invocation based on the flag ladder.
@@ -118,34 +122,6 @@ pub fn supported_hook_subcommands() -> Vec<String> {
         .get_subcommands()
         .map(|sub| sub.get_name().to_string())
         .collect()
-}
-
-/// Report a `hook` invocation this binary cannot serve, then let the caller
-/// exit 0.
-///
-/// A hook that exits non-zero is a *blocking* error in Claude Code: a broken
-/// `UserPromptSubmit` rejects every prompt, a broken `PreToolUse` every
-/// Read/Write/Edit. Because the hook wiring is installed independently of the
-/// binary, a plugin update alone can name an event this build never shipped —
-/// so the only safe response is to degrade to "no context" the way every other
-/// hook failure already does.
-///
-/// The message goes to **stderr on purpose**: on `UserPromptSubmit` (and
-/// `SessionStart`) Claude Code injects a hook's stdout into the model's
-/// context on exit 0, so writing there would quietly poison every prompt with
-/// a diagnostic.
-fn warn_unknown_hook(name: Option<&str>) {
-    let supported = supported_hook_subcommands().join(", ");
-    match name {
-        Some(name) => eprintln!(
-            "engramdb {} does not support `hook {name}`. Your Claude Code hook \
-             configuration is newer than this binary — reinstall with \
-             `cargo install --git https://github.com/egeapak/engramdb --force`. \
-             Supported here: {supported}. (Continuing without context; this hook is a no-op.)",
-            env!("CARGO_PKG_VERSION"),
-        ),
-        None => eprintln!("engramdb hook: no hook event given. Expected one of: {supported}."),
-    }
 }
 
 /// Run the CLI application with parsed arguments.
@@ -738,11 +714,11 @@ pub async fn run(cli: Cli) -> Result<()> {
                 // binary predates (or is a bare `engramdb hook`). Report on
                 // stderr and exit 0 — see `warn_unknown_hook`.
                 Some(HookCommand::Unknown(args)) => {
-                    warn_unknown_hook(args.first().map(String::as_str));
+                    commands::hook::warn_unknown_hook(args.first().map(String::as_str));
                     Ok(())
                 }
                 None => {
-                    warn_unknown_hook(None);
+                    commands::hook::warn_unknown_hook(None);
                     Ok(())
                 }
             };

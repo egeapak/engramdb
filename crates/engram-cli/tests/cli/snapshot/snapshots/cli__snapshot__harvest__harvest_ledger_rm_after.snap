@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger list
+exit: 0
+--- stdout ---
+[]
+--- stderr ---

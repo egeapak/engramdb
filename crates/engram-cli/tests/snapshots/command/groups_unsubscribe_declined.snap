@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Continue? [y/N] → no
+--- stdout ---
+Aborted.
+--- stderr ---
+Warning: Unsubscribing will stop project '[PID]' from seeing group 'shared-conventions's 0 memories (store not yet created) in its queries. The group and its memories are not deleted.

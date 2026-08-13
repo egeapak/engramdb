@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "scope": [
+    "/w/engramdb",
+    "/w/engramdb-worktree"
+  ],
+  "sessions": []
+}
+--- stderr ---

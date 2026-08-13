@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total: 3
+Decision: 2
+Convention: 1
+--- stderr ---

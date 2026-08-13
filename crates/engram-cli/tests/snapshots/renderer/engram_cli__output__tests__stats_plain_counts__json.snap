@@ -1,0 +1,35 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "total": 3,
+  "by_type": [
+    [
+      "decision",
+      2
+    ],
+    [
+      "convention",
+      1
+    ]
+  ],
+  "by_status": [
+    [
+      "Active",
+      3
+    ]
+  ],
+  "by_scope": [
+    [
+      "services/api",
+      2
+    ]
+  ],
+  "expired": 1,
+  "oldest": "2025-01-01T00:00:00Z",
+  "newest": "2026-01-01T00:00:00Z",
+  "avg_criticality": 0.75
+}
+--- stderr ---

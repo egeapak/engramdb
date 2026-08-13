@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] list
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: IO error: No such file or directory (os error 2)
+
+Caused by:
+    No such file or directory (os error 2)

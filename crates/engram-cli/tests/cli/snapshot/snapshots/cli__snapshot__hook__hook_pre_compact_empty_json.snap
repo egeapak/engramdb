@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/hook.rs
+expression: "f.run_with_stdin(& [\"hook\", \"pre-compact\"], & stdin)"
+---
+$ engramdb --no-maintenance --dir [PROJECT] hook pre-compact
+exit: 0
+--- stdout ---
+{
+  "hookSpecificOutput": {
+    "additionalContext": "[EngramDB] Context is about to be compacted. Store durable discoveries first: decisions (with their premise), hazards, and verified observations via the memory create tool.",
+    "hookEventName": "PreCompact"
+  }
+}
+--- stderr ---

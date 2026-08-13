@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Content (required): → Regenerate with `cargo insta test --accept`; never hand-edit a .snap file.
+? Physical scope (optional, e.g., src/**/*.rs): → crates/engram-cli/tests/snapshots/**
+? Logical scopes (optional, comma-separated): → testing.snapshots
+? Tags (optional, comma-separated): → insta, testing
+? Visibility: [shared, personal] → shared
+--- stdout ---
+Created memory [ID]
+--- stderr ---

@@ -1,7 +1,7 @@
 //! `engramdb daemon` subcommands: run / status / stop / restart.
 
 use crate::app::DaemonCommand;
-use crate::output::{format_ping_line, OutputFormatter};
+use crate::output::{format_ping_line, outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::daemon;
 use engramdb::types::DaemonConfig;
@@ -101,7 +101,8 @@ pub async fn run_daemon_cmd(
                 None if formatter.is_json() => {
                     // One JSON object (mirrors stats --daemon), not two
                     // {"message": ...} lines a script can't dispatch on.
-                    println!(
+                    outln!(
+                        formatter,
                         "{}",
                         serde_json::json!({
                             "running": false,
@@ -122,24 +123,32 @@ pub async fn run_daemon_cmd(
                     // One JSON object so scripted consumers get parseable output
                     // instead of print_success's JSON followed by raw text lines
                     // (finding #7).
-                    println!("{}", crate::output::daemon_status_json(&s, &socket));
+                    outln!(
+                        formatter,
+                        "{}",
+                        crate::output::daemon_status_json(&s, &socket)
+                    );
                 }
                 Some(s) => {
                     formatter.print_success(&format!("Daemon: running (pid {})", s.pid));
-                    println!("  socket:          {}", socket.display());
-                    println!("  protocol:        v{}", s.version);
-                    println!("  uptime:          {}", fmt_dur(s.uptime_secs));
-                    println!("  idle:            {}", fmt_dur(s.idle_secs));
-                    println!("  model bundles:   {}", s.bundles_loaded);
-                    println!("  {}", format_ping_line(s.ping_count, s.last_ping_secs_ago));
-                    println!("  requests (cumulative across restarts):");
-                    println!("    embed:         {}", s.requests.embed);
-                    println!("    classify:      {}", s.requests.classify);
-                    println!("    rerank:        {}", s.requests.rerank);
-                    println!("    meta:          {}", s.requests.meta);
-                    println!("    status:        {}", s.requests.status);
-                    println!("    title:         {}", s.requests.title);
-                    println!("    total:         {}", s.requests.total);
+                    outln!(formatter, "  socket:          {}", socket.display());
+                    outln!(formatter, "  protocol:        v{}", s.version);
+                    outln!(formatter, "  uptime:          {}", fmt_dur(s.uptime_secs));
+                    outln!(formatter, "  idle:            {}", fmt_dur(s.idle_secs));
+                    outln!(formatter, "  model bundles:   {}", s.bundles_loaded);
+                    outln!(
+                        formatter,
+                        "  {}",
+                        format_ping_line(s.ping_count, s.last_ping_secs_ago)
+                    );
+                    outln!(formatter, "  requests (cumulative across restarts):");
+                    outln!(formatter, "    embed:         {}", s.requests.embed);
+                    outln!(formatter, "    classify:      {}", s.requests.classify);
+                    outln!(formatter, "    rerank:        {}", s.requests.rerank);
+                    outln!(formatter, "    meta:          {}", s.requests.meta);
+                    outln!(formatter, "    status:        {}", s.requests.status);
+                    outln!(formatter, "    title:         {}", s.requests.title);
+                    outln!(formatter, "    total:         {}", s.requests.total);
                 }
             }
             Ok(())

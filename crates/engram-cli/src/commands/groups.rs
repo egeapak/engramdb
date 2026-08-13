@@ -243,6 +243,7 @@ mod tests {
     use crate::app::OutputFormat;
     use crate::output::OutputFormatter;
     use crate::prompter::MockPrompter;
+    use crate::testutil::{capturing_plain, interaction, snap_command, TempProject};
     use engramdb::storage::InMemoryRegistry;
     use tempfile::TempDir;
 
@@ -511,5 +512,200 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // =================================================================
+    // Command-tier snapshots
+    //
+    // The tests above assert registry *state* — that declining does not
+    // subscribe. These assert what the user was actually shown: the warning
+    // that explains what subscribing does, the confirmation and its default,
+    // and the outcome line. See `crate::testutil` for why this tier exists.
+    // =================================================================
+
+    /// Accepting the confirmation: warning, prompt, subscribe.
+    #[tokio::test]
+    async fn snap_subscribe_confirmed() {
+        let p = TempProject::new();
+        p.register().await;
+
+        let prompter = MockPrompter::new(vec!["yes"]);
+        let (formatter, cap) = capturing_plain();
+        run_groups(
+            p.path(),
+            &p.registry,
+            GroupsCommand::Subscribe {
+                name: "shared-conventions".into(),
+                yes: false,
+            },
+            &prompter,
+            &formatter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "groups_subscribe_confirmed",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Declining. The prompt defaults to `no`, so this is what a bare Enter
+    /// does too — worth pinning, since the warning is the only thing standing
+    /// between a user and folding another project's memories into theirs.
+    #[tokio::test]
+    async fn snap_subscribe_declined() {
+        let p = TempProject::new();
+        p.register().await;
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        let (formatter, cap) = capturing_plain();
+        run_groups(
+            p.path(),
+            &p.registry,
+            GroupsCommand::Subscribe {
+                name: "shared-conventions".into(),
+                yes: false,
+            },
+            &prompter,
+            &formatter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "groups_subscribe_declined",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// `--yes` must skip the prompt entirely, not answer it. An empty prompts
+    /// section is the assertion.
+    #[tokio::test]
+    async fn snap_subscribe_yes_skips_prompt() {
+        let p = TempProject::new();
+        p.register().await;
+
+        let prompter = MockPrompter::new(vec![]);
+        let (formatter, cap) = capturing_plain();
+        run_groups(
+            p.path(),
+            &p.registry,
+            GroupsCommand::Subscribe {
+                name: "shared-conventions".into(),
+                yes: true,
+            },
+            &prompter,
+            &formatter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "groups_subscribe_yes",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Subscribe this project to `shared-conventions`, so the unsubscribe
+    /// snapshots below start from the only state that reaches the prompt.
+    async fn subscribed_project() -> TempProject {
+        let p = TempProject::new();
+        let pid = p.register().await;
+        let gid = compute_group_id("shared-conventions");
+        p.registry.create_group("shared-conventions").await.unwrap();
+        p.registry.subscribe(&pid, &gid).await.unwrap();
+        p
+    }
+
+    /// Accepting the confirmation: warning, prompt, unsubscribe. The mirror of
+    /// `snap_subscribe_confirmed` — note the warning is careful to say the
+    /// group's memories survive, which is the reassurance a user needs before
+    /// answering.
+    #[tokio::test]
+    async fn snap_unsubscribe_confirmed() {
+        let p = subscribed_project().await;
+
+        let prompter = MockPrompter::new(vec!["yes"]);
+        let (formatter, cap) = capturing_plain();
+        run_groups(
+            p.path(),
+            &p.registry,
+            GroupsCommand::Unsubscribe {
+                name: "shared-conventions".into(),
+                yes: false,
+            },
+            &prompter,
+            &formatter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "groups_unsubscribe_confirmed",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Declining. The prompt defaults to `no`, so this is also what a bare
+    /// Enter does.
+    #[tokio::test]
+    async fn snap_unsubscribe_declined() {
+        let p = subscribed_project().await;
+
+        let prompter = MockPrompter::new(vec!["no"]);
+        let (formatter, cap) = capturing_plain();
+        run_groups(
+            p.path(),
+            &p.registry,
+            GroupsCommand::Unsubscribe {
+                name: "shared-conventions".into(),
+                yes: false,
+            },
+            &prompter,
+            &formatter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "groups_unsubscribe_declined",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// The forgiving no-op: the desired end state already holds, so the
+    /// handler reports it and returns without confirming anything. An empty
+    /// prompts section is the assertion.
+    #[tokio::test]
+    async fn snap_unsubscribe_not_subscribed() {
+        let p = TempProject::new();
+        p.register().await;
+
+        let prompter = MockPrompter::new(vec![]);
+        let (formatter, cap) = capturing_plain();
+        run_groups(
+            p.path(),
+            &p.registry,
+            GroupsCommand::Unsubscribe {
+                name: "shared-conventions".into(),
+                yes: false,
+            },
+            &prompter,
+            &formatter,
+        )
+        .await
+        .unwrap();
+
+        snap_command(
+            "groups_unsubscribe_not_subscribed",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
     }
 }

@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Remove all? [y/N] → yes
+--- stdout ---
+  Found 1 stale registry entry(ies).
+  No orphan data directories found.
+  No broken parent links found.
+Removed 1 stale project(s) from registry.
+--- stderr ---

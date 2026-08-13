@@ -5,7 +5,7 @@
 //! accept — registers it and rebuilds its index with an indicatif progress bar.
 
 use crate::engine::engine_for_project;
-use crate::output::OutputFormatter;
+use crate::output::{outln, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::{bail, Result};
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
@@ -112,7 +112,11 @@ pub async fn run_discover(
 
     if params.dry_run {
         if json_mode {
-            println!("{}", scan_json(&params.root, &report, &candidates));
+            outln!(
+                formatter,
+                "{}",
+                scan_json(&params.root, &report, &candidates)
+            );
         } else {
             formatter.print_message("Dry run: nothing was registered.");
         }
@@ -123,7 +127,11 @@ pub async fn run_discover(
         if json_mode {
             // The action shape with everything empty — a run that registers
             // nothing must still parse like a run that registers something.
-            println!("{}", action_json(&params, &report, &[], &[], &[]));
+            outln!(
+                formatter,
+                "{}",
+                action_json(&params, &report, &[], &[], &[])
+            );
         }
         return Ok(());
     }
@@ -165,7 +173,11 @@ pub async fn run_discover(
 
     if accepted.is_empty() {
         if json_mode {
-            println!("{}", action_json(&params, &report, &[], &declined, &[]));
+            outln!(
+                formatter,
+                "{}",
+                action_json(&params, &report, &[], &declined, &[])
+            );
         } else {
             formatter.print_message("Nothing registered.");
         }
@@ -223,7 +235,8 @@ pub async fn run_discover(
     pb.finish_and_clear();
 
     if json_mode {
-        println!(
+        outln!(
+            formatter,
             "{}",
             action_json(&params, &report, &adopted, &declined, &errors)
         );

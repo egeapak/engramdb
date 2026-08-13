@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+--- stdout ---
+Subscribed project '[PID]' to group 'shared-conventions' (id: __g_436885406724).
+--- stderr ---

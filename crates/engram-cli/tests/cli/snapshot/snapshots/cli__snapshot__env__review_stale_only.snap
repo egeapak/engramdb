@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"review\", \"--stale-only\", \"--stale-after-days\", \"3650\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] review --stale-only --stale-after-days 3650
+exit: 0
+--- stdout ---
+{
+  "message": "No memories need review."
+}
+--- stderr ---

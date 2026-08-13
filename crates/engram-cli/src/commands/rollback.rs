@@ -1,12 +1,12 @@
 //! Rollback memory files to a previous format version.
 
-use crate::output::OutputFormatter;
+use crate::output::{errln, OutputFormatter};
 use anyhow::Result;
 use engramdb::storage::memory_file::{
     detect_format_version, parser_for_version, writer_for_version, CURRENT_FORMAT_VERSION,
 };
 use engramdb::storage::paths;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolve a user-supplied `--target-version` to the internal representation
 /// (`1` ⇒ `None`, the legacy no-version format), rejecting versions outside the
@@ -106,6 +106,7 @@ pub async fn run_rollback(
         &mut rolled_back,
         &mut already_target,
         &mut errors,
+        formatter,
     )
     .await;
 
@@ -117,6 +118,7 @@ pub async fn run_rollback(
             &mut rolled_back,
             &mut already_target,
             &mut errors,
+            formatter,
         )
         .await;
     }
@@ -141,7 +143,7 @@ pub async fn run_rollback(
     if !errors.is_empty() {
         formatter.print_error(&format!("{} errors during rollback:", errors.len()));
         for err in &errors {
-            eprintln!("  {err}");
+            errln!(formatter, "  {err}");
         }
         // Findings already printed; the error sets the exit code (main maps
         // Err → exit 1) so scripts cannot proceed past a partial rollback.
@@ -158,6 +160,7 @@ async fn rollback_dir(
     rolled_back: &mut u32,
     already_target: &mut u32,
     errors: &mut Vec<String>,
+    formatter: &OutputFormatter,
 ) {
     if !dir.exists() {
         return;
@@ -171,16 +174,20 @@ async fn rollback_dir(
         }
     };
 
+    // `read_dir` yields entries in filesystem order, which is unspecified and
+    // varies between runs on the same directory. That leaked into `--dry-run`,
+    // whose whole job is to be read and compared before committing to the
+    // real thing.
+    let mut paths: Vec<PathBuf> = Vec::new();
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read entry in {}: {e}", dir.display()));
-                continue;
-            }
-        };
+        match entry {
+            Ok(e) => paths.push(e.path()),
+            Err(e) => errors.push(format!("Failed to read entry in {}: {e}", dir.display())),
+        }
+    }
+    paths.sort();
 
-        let path = entry.path();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) != Some("md") {
             continue;
         }
@@ -202,7 +209,11 @@ async fn rollback_dir(
         if dry_run {
             let from = current_version.map_or("legacy".to_string(), |v| format!("v{v}"));
             let to = target_version.map_or("legacy".to_string(), |v| format!("v{v}"));
-            eprintln!("  Would roll back: {} ({from} -> {to})", path.display());
+            errln!(
+                formatter,
+                "  Would roll back: {} ({from} -> {to})",
+                path.display()
+            );
             *rolled_back += 1;
             continue;
         }

@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"migrate\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] migrate
+exit: 0
+--- stdout ---
+{
+  "message": "All 3 memories are already at v2. Nothing to migrate."
+}
+--- stderr ---

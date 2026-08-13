@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+ID: 550e8400-e29b-41d4-a716-446655440000
+Type: Decision
+Summary: Test summary
+Content: Test content
+Criticality: 0.80
+Confidence: 0.90
+Status: Active
+Visibility: Shared
+Created: 2026-01-02 03:04:05
+Updated: 2026-01-02 03:04:05
+--- stderr ---

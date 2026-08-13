@@ -1,6 +1,6 @@
 //! Compress command — lists candidates, directs users to MCP mode for actual compression.
 
-use crate::output::{short_id, OutputFormatter};
+use crate::output::{outln, short_id, OutputFormatter};
 use crate::validation::validate_score;
 use anyhow::Result;
 use engramdb::ops;
@@ -27,7 +27,7 @@ pub async fn run_compress(
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
     // JSON mode: one parseable object (the human flow below prints the candidate
-    // list via raw println!, which would corrupt the JSON stream — finding #7).
+    // list as loose lines, which would corrupt the JSON stream — finding #7).
     if formatter.is_json() {
         let candidates: Vec<_> = result
             .candidates
@@ -41,7 +41,8 @@ pub async fn run_compress(
                 })
             })
             .collect();
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({
                 "total": result.total,
@@ -64,9 +65,13 @@ pub async fn run_compress(
 
     for candidate in &result.candidates {
         let id_short = short_id(&candidate.id);
-        println!(
+        outln!(
+            formatter,
             "  {} {:8}  {} (criticality: {:.2})",
-            id_short, candidate.type_, candidate.summary, candidate.criticality
+            id_short,
+            candidate.type_,
+            candidate.summary,
+            candidate.criticality
         );
     }
 

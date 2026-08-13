@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"list\", \"--since\", \"yesterday-ish\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest list --since yesterday-ish
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: invalid --since value: yesterday-ish

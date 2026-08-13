@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+--- stdout ---
+Project '[PID]' is not subscribed to 'shared-conventions'; nothing to do.
+--- stderr ---

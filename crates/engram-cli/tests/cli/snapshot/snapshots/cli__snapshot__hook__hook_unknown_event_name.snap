@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/hook.rs
+expression: "f.run_with_stdin(&[\"hook\", \"some-future-event\"], \"{}\")"
+---
+$ engramdb --no-maintenance --dir [PROJECT] hook some-future-event
+exit: 0
+--- stdout ---
+--- stderr ---
+engramdb [VERSION] does not support `hook some-future-event`. Your Claude Code hook configuration is newer than this binary — reinstall with `cargo install --git https://github.com/egeapak/engramdb --force`. Supported here: pre-tool-use, session-start, user-prompt-submit, post-tool-use, session-end, pre-compact. (Continuing without context; this hook is a no-op.)

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"summary\", \"session-alpha\",\n\"A daemon idle-timeout investigation.\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest summary session-alpha A daemon idle-timeout investigation.
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: session session-alpha cannot be indexed: [EMBEDDING_UNAVAILABLE]

@@ -5,7 +5,7 @@
 //! went missing come back.
 
 use crate::engine::engine_for_project;
-use crate::output::OutputFormatter;
+use crate::output::{outln, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::{bail, Result};
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
@@ -40,7 +40,8 @@ pub async fn run_repair(
 
     let Some(plan) = ops::repair::plan_repair(registry, dir).await? else {
         if json_mode {
-            println!(
+            outln!(
+                formatter,
                 "{}",
                 serde_json::json!({ "repaired": false, "reason": "nothing_to_repair" })
             );
@@ -63,7 +64,8 @@ pub async fn run_repair(
         // The drift was resolved between the plan and the repair (a concurrent
         // run). Nothing to do, and nothing went wrong.
         if json_mode {
-            println!(
+            outln!(
+                formatter,
                 "{}",
                 serde_json::json!({ "repaired": false, "reason": "nothing_to_repair" })
             );
@@ -102,7 +104,8 @@ pub async fn run_repair(
     }
 
     if json_mode {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::json!({
                 "repaired": true,

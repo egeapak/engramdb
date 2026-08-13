@@ -1076,4 +1076,179 @@ Line 3"#;
         let result = shell_words::split("vim 'unterminated");
         assert!(result.is_err());
     }
+
+    // =================================================================
+    // Command-tier snapshots
+    //
+    // The `test_interactive_add_*` tests above assert store *state* — that the
+    // answers ended up on the memory. These assert the other half: the
+    // dialogue the user was actually shown. Prompt wording, the memory-type
+    // option list, and the type-derived criticality default all reach the
+    // terminal through `inquire`, never through the formatter, so no renderer
+    // snapshot can see them. See `crate::testutil` for why this tier exists.
+    // =================================================================
+
+    use crate::testutil::{capturing_plain, interaction, snap_command, TempProject};
+
+    /// Every field left unset, so `AddParams` is all-empty and each prompt
+    /// fires. Tests override only the fields they pre-supply.
+    fn snap_params() -> AddParams {
+        AddParams {
+            type_str: None,
+            content: None,
+            summary: None,
+            title: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: None,
+            confidence: 0.8,
+            details: None,
+            visibility_str: None,
+            supersedes: None,
+            audience: vec![],
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+            interactive: true,
+            editor: false,
+            details_file: None,
+        }
+    }
+
+    /// Nothing pre-supplied: all eight prompts, in the order the flow asks
+    /// them. The criticality answer is deliberately blank so the transcript
+    /// records the default `hazard` derives (0.95) rather than a typed number.
+    #[tokio::test]
+    async fn snap_add_interactive_full() {
+        let p = TempProject::new();
+        let (store, engine) = test_store_and_engine(p.path(), &p.registry).await;
+
+        let prompter = MockPrompter::new(vec![
+            "hazard",
+            "Blocking inside the daemon socket loop deadlocks every session",
+            "Never call block_on from serve_connection; spawn the work onto the runtime instead.",
+            "src/daemon/**/*.rs",
+            "daemon.concurrency, runtime",
+            "daemon, tokio",
+            "", // criticality: accept the hazard default
+            "shared",
+        ]);
+        let (formatter, cap) = capturing_plain();
+
+        run_interactive_mode(&store, snap_params(), None, &formatter, &engine, &prompter)
+            .await
+            .unwrap();
+
+        snap_command(
+            "add_interactive_full",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// Type, summary and criticality arrive as flags. The assertion is the
+    /// *absence* of their prompts: the transcript opens at "Content".
+    #[tokio::test]
+    async fn snap_add_interactive_partial() {
+        let p = TempProject::new();
+        let (store, engine) = test_store_and_engine(p.path(), &p.registry).await;
+
+        let prompter = MockPrompter::new(vec![
+            "Regenerate with `cargo insta test --accept`; never hand-edit a .snap file.",
+            "crates/engram-cli/tests/snapshots/**",
+            "testing.snapshots",
+            "insta, testing",
+            "shared",
+        ]);
+        let (formatter, cap) = capturing_plain();
+
+        let params = AddParams {
+            type_str: Some("convention".to_string()),
+            summary: Some("Snapshot files are generated, not edited by hand".to_string()),
+            criticality: Some(0.7),
+            ..snap_params()
+        };
+
+        run_interactive_mode(&store, params, None, &formatter, &engine, &prompter)
+            .await
+            .unwrap();
+
+        snap_command(
+            "add_interactive_partial",
+            p.path(),
+            interaction(&prompter, &cap),
+        );
+    }
+
+    /// An answer that is not one of the offered memory types. `select` records
+    /// the exchange before `parse_memory_type` rejects it, so the transcript
+    /// shows both the option list the user was given and what they picked —
+    /// which is what makes the error message readable.
+    #[tokio::test]
+    async fn snap_add_interactive_invalid_type() {
+        let p = TempProject::new();
+        let (store, engine) = test_store_and_engine(p.path(), &p.registry).await;
+
+        let prompter = MockPrompter::new(vec!["blueprint"]);
+        let (formatter, cap) = capturing_plain();
+
+        let err = run_interactive_mode(&store, snap_params(), None, &formatter, &engine, &prompter)
+            .await
+            .unwrap_err();
+
+        snap_command(
+            "add_interactive_invalid_type",
+            p.path(),
+            format!("{}--- error ---\n{err}\n", interaction(&prompter, &cap)),
+        );
+    }
+
+    /// A prompter that errors mid-flow must abort without half-creating.
+    ///
+    /// **This does not document what a real user sees for a bad criticality.**
+    /// `InquirePrompter` installs a validator, so `1.5` makes the terminal
+    /// re-ask; only `MockPrompter::float_validated` turns it into an `Err`.
+    /// What the case really pins is the propagation path — any prompter
+    /// failure (a validator giving up, EOF, an interrupt) aborts
+    /// `run_interactive_mode` after the answers already given, and the store
+    /// is left untouched. The out-of-range value is just the cheapest way to
+    /// make a prompter fail partway through.
+    #[tokio::test]
+    async fn snap_add_interactive_prompter_error_aborts() {
+        let p = TempProject::new();
+        let (store, engine) = test_store_and_engine(p.path(), &p.registry).await;
+
+        let prompter = MockPrompter::new(vec![
+            "context",
+            "The web sandbox needs an ONNX runtime staged before any build",
+            "Export ORT_STRATEGY=system and ORT_LIB_LOCATION before cargo build.",
+            "", // physical
+            "", // logical
+            "", // tags
+            "1.5",
+        ]);
+        let (formatter, cap) = capturing_plain();
+
+        let err = run_interactive_mode(&store, snap_params(), None, &formatter, &engine, &prompter)
+            .await
+            .unwrap_err();
+
+        snap_command(
+            "add_interactive_prompter_error_aborts",
+            p.path(),
+            format!("{}--- error ---\n{err}\n", interaction(&prompter, &cap)),
+        );
+        assert!(
+            store.list_ids().await.unwrap().is_empty(),
+            "an aborted interactive add must not leave a partial memory behind"
+        );
+    }
 }

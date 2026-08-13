@@ -1,0 +1,36 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total Memories: 3
+
+By Type:
+  Decision: 2
+  Convention: 1
+
+By Status:
+  Active: 3
+
+By Scope:
+  services/api: 2
+
+Expired: 0
+
+Average Criticality: 0.75
+
+Runtime telemetry (since 2026-01-01 00:00:00 UTC, project project-a):
+  Total calls: 16
+  By tool:
+    create: 4
+    query: 12 (2 errors)
+  Queries: 6 (hits: 5, zero-result: 1, hit rate: 0.833)
+    Quality: full=5 keyword_only=1
+  Tool timings (ms):
+    query: avg 42.5, p50 38.0, p95 80.0 (n=12)
+  Stage timings (ms):
+    embed: avg 8.1, p50 7.0, p95 14.0 (n=16)
+  By project (2 project(s)):
+    project-a: 16 calls, 6 queries (hit rate 0.833)
+    project-b: 0 calls, 0 queries (hit rate 0.000)
+--- stderr ---

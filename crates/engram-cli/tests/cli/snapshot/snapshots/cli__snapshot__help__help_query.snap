@@ -1,0 +1,113 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"query\", \"--help\"])"
+---
+$ engramdb query --help
+exit: 0
+--- stdout ---
+Query memories (unified ranked / filtered retrieval).
+
+`--mode rank` returns every memory passing the type/tag/criticality filters, sorted by composite score (use for context-aware browsing). `--mode filter` requires a positive relevance signal — at least one of `--query`, `--logical`, `--path`, or `--tags` must be set.
+
+Usage: engramdb query [OPTIONS] --mode <MODE> [QUERY]
+
+Arguments:
+  [QUERY]
+          Search query text (positional). Alternatively pass `--query`
+
+Options:
+      --mode <MODE>
+          Retrieval mode. Required
+          
+          [possible values: rank, filter]
+
+      --query <QUERY>
+          Search query text (explicit flag; overrides positional when both set)
+
+  -p, --path <PATH>
+          Physical path context (scoring signal)
+
+  -l, --logical <LOGICAL>
+          Logical scope context — dot-notation; scoring signal, not a filter. Repeatable
+
+  -t, --type <TYPE>
+          Filter by type (repeatable)
+
+      --tags <TAGS>
+          Filter by tags (comma-separated or repeated)
+
+      --min-criticality <MIN_CRITICALITY>
+          Minimum criticality threshold
+
+  -n, --max-results <MAX_RESULTS>
+          Maximum number of results
+          
+          [default: 10]
+
+      --detail-level <DETAIL_LEVEL>
+          Detail level: summary, content, full
+
+      --include-expired
+          Include expired memories
+
+      --epistemic <EPISTEMIC>
+          Filter by epistemic class: fact, observation, decision (repeatable)
+
+      --situation <SITUATION>
+          Your situation, to reweight classes: session_start, file_edit, debugging, design_choice
+
+      --include-invalidated
+          Include invalidated memories (closed validity windows)
+
+      --show-scores
+          Show relevance scores alongside results
+
+      --include-global
+          Also merge global (cross-project) memories into the results.
+          
+          Runs the same query against the global store and folds its hits into the project results (deduplicated, re-sorted, truncated). Ignored when `--global` is set (already querying the global store). Note: groups this project is subscribed to already fan in automatically; this flag only adds the everyone/global store.
+
+      --global
+          Query the global (cross-project) memory store instead of the current project
+
+      --group <GROUP>
+          Query a named group store directly (instead of the current project). Subscribed groups already fan into a normal project query; use this to inspect one group's memories in isolation
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

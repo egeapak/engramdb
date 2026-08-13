@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/editor.rs
+expression: "f.run_with_editor(&[\"add\", \"-e\"], \"'\")"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -e
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Invalid EDITOR value ''': missing closing quote

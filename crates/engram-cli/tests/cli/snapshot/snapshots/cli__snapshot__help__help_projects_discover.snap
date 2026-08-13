@@ -1,0 +1,76 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"projects\", \"discover\", \"--help\"])"
+---
+$ engramdb projects discover --help
+exit: 0
+--- stdout ---
+Walk a directory tree for `.engramdb/` projects the registry doesn't know about, then offer to register and index each one.
+
+Useful after cloning a repo that carries its memories, restoring from a backup, or losing `registry.json`: those projects exist on disk but are invisible to `projects list` and every cross-project surface until they are registered.
+
+Usage: engramdb projects discover [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          Directory to scan (defaults to the current project directory)
+
+Options:
+      --max-depth <MAX_DEPTH>
+          Maximum directory depth to descend below the scan root
+          
+          [default: 6]
+
+      --hidden
+          Also descend into hidden (dot-prefixed) directories
+
+      --follow-symlinks
+          Follow directory symlinks while scanning
+
+  -y, --yes
+          Register every discovered project without prompting (in JSON mode, required unless --dry-run)
+
+      --dry-run
+          Report what would be registered and exit without changing anything
+
+      --no-index
+          Register only — skip the index rebuild and re-embedding
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

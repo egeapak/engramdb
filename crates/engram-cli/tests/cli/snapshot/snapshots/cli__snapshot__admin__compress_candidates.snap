@@ -1,0 +1,20 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"compress\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] compress
+exit: 0
+--- stdout ---
+{
+  "candidates": [
+    {
+      "criticality": 0.3,
+      "id": "[UUID]",
+      "summary": "Never unwrap in production paths",
+      "type": "hazard"
+    }
+  ],
+  "threshold": 0.4,
+  "total": 1
+}
+--- stderr ---

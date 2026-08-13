@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/hook.rs
+expression: "f.run_with_stdin(&[\"hook\", \"session-start\"], \"{}\")"
+---
+$ engramdb --no-maintenance --dir [PROJECT] hook session-start
+exit: 0
+--- stdout ---
+--- stderr ---

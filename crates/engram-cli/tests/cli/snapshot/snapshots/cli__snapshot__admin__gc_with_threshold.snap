@@ -1,0 +1,35 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"gc\", \"--threshold\", \"0.95\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] gc --threshold 0.95
+exit: 0
+--- stdout ---
+{
+  "count": 3,
+  "dry_run": true,
+  "maintenance": null,
+  "removed": [
+    {
+      "criticality": 0.9,
+      "id": "[UUID]",
+      "summary": "Use Rust for the backend",
+      "type": "Decision"
+    },
+    {
+      "criticality": 0.6,
+      "id": "[UUID]",
+      "summary": "Name variables in snake_case",
+      "type": "Convention"
+    },
+    {
+      "criticality": 0.3,
+      "id": "[UUID]",
+      "summary": "Never unwrap in production paths",
+      "type": "Hazard"
+    }
+  ],
+  "skipped": [],
+  "stale_entries": 0
+}
+--- stderr ---

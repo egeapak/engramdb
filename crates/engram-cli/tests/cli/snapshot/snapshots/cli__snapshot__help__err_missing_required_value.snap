@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"challenge\", \"some-id\"])"
+---
+$ engramdb challenge some-id
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the following required arguments were not provided:
+  --evidence <EVIDENCE>
+
+Usage: engramdb challenge --evidence <EVIDENCE> <ID>
+
+For more information, try '--help'.

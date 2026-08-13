@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"delete\", \"no-such-memory\", \"--force\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] delete no-such-memory --force
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Memory not found: no-such-memory

@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"groups\", \"members\", \"backend\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] groups members backend
+exit: 0
+--- stdout ---
+{"message":"Group 'backend' (id: __g_10e08a419e85) holds 0 memories (store not yet created)."}
+{"message":"Subscribed projects (1):"}
+{"message":"  [PROJECT_ID]"}
+--- stderr ---

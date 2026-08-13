@@ -1,0 +1,16 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Memory type: [decision, convention, hazard, context, intent, relationship, debug, preference] → context
+? Summary (required): → The web sandbox needs an ONNX runtime staged before any build
+? Content (required): → Export ORT_STRATEGY=system and ORT_LIB_LOCATION before cargo build.
+? Physical scope (optional, e.g., src/**/*.rs): → (empty)
+? Logical scopes (optional, comma-separated): → (empty)
+? Tags (optional, comma-separated): → (empty)
+? Criticality (0.0-1.0): [default: 0.5] → 1.5
+--- stdout ---
+--- stderr ---
+--- error ---
+Value must be between 0.0 and 1.0, got 1.5

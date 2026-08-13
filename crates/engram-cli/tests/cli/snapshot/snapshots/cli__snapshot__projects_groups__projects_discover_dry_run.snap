@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/projects_groups.rs
+expression: "f.run(&[\"--format\", \"plain\", \"projects\", \"discover\", \"--dry-run\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain projects discover --dry-run
+exit: 0
+--- stdout ---
+Scanned 2 directory(ies) under [PROJECT].
+Found 2 unregistered project(s):
+  [PROJECT]  (3 memories, id [PROJECT_ID])
+  [PROJECT]/nested  (0 memories, id [PROJECT_ID])
+Dry run: nothing was registered.
+--- stderr ---

@@ -5,7 +5,7 @@
 //! agent's, and saving is the user's. Nothing here writes a memory.
 
 use crate::app::{HarvestCommand, LedgerCommand};
-use crate::output::{HarvestSessionOutput, OutputFormatter};
+use crate::output::{outln, outraw, HarvestSessionOutput, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::{bail, Context, Result};
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
@@ -117,14 +117,15 @@ pub async fn run_harvest(
             let (markdown, fence) = harvest::render_digest_markdown_traced(&digest);
 
             if formatter.is_json() {
-                println!(
+                outln!(
+                    formatter,
                     "{}",
                     serde_json::to_string_pretty(&harvest::DigestJson::new(
                         &digest, &fence, markdown
                     ))?
                 );
             } else {
-                println!("{markdown}");
+                outln!(formatter, "{markdown}");
             }
         }
 
@@ -218,7 +219,7 @@ pub async fn run_harvest(
                     serde_json::json!(summary.is_some() && summary_error.is_none());
                 json["summary_error"] = serde_json::json!(summary_error);
                 json["superseded"] = serde_json::json!(marked.superseded);
-                println!("{}", serde_json::to_string_pretty(&json)?);
+                outln!(formatter, "{}", serde_json::to_string_pretty(&json)?);
             } else if summary_error.is_none() && summary.is_some() {
                 formatter.print_success(&format!("Summary recorded for session {resolved}."));
                 formatter.print_success(&describe_mark(&resolved, entry));
@@ -513,7 +514,8 @@ fn print_index_report(
     formatter: &OutputFormatter,
 ) -> Result<()> {
     if formatter.is_json() {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "indexed": report.indexed,
@@ -613,10 +615,10 @@ fn print_search_hits(hits: &[ConversationHit], formatter: &OutputFormatter) -> R
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        outln!(formatter, "{}", serde_json::to_string_pretty(&out)?);
         return Ok(());
     }
-    print!("{}", render_search_hits(hits));
+    outraw!(formatter, "{}", render_search_hits(hits));
     Ok(())
 }
 
@@ -907,15 +909,15 @@ async fn run_ledger(
 
             if formatter.is_json() {
                 let out: Vec<_> = rows.iter().map(|(id, e)| entry_json(id, e)).collect();
-                println!("{}", serde_json::to_string_pretty(&out)?);
+                outln!(formatter, "{}", serde_json::to_string_pretty(&out)?);
             } else if rows.is_empty() {
-                println!("Ledger is empty.");
+                outln!(formatter, "Ledger is empty.");
             } else {
-                println!("{}", LEDGER_LIST_HEADER);
+                outln!(formatter, "{}", LEDGER_LIST_HEADER);
                 for (id, e) in &rows {
-                    println!("{}", render_ledger_row(id, e));
+                    outln!(formatter, "{}", render_ledger_row(id, e));
                     if let Some(note) = &e.note {
-                        println!("    {}", harvest::defang_prose(note));
+                        outln!(formatter, "    {}", harvest::defang_prose(note));
                     }
                 }
             }
@@ -931,12 +933,13 @@ async fn run_ledger(
                 .get(&key)
                 .ok_or_else(|| anyhow::anyhow!("No harvest record for session {key}"))?;
             if formatter.is_json() {
-                println!(
+                outln!(
+                    formatter,
                     "{}",
                     serde_json::to_string_pretty(&entry_json(&key, entry))?
                 );
             } else {
-                print!("{}", render_ledger_entry(&key, entry));
+                outraw!(formatter, "{}", render_ledger_entry(&key, entry));
             }
         }
 
@@ -1160,7 +1163,8 @@ citation{}.",
             }
 
             if formatter.is_json() {
-                println!(
+                outln!(
+                    formatter,
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
                         "dry_run": !apply,
@@ -1172,13 +1176,15 @@ citation{}.",
                     }))?
                 );
             } else if outcome.removed.is_empty() {
-                println!(
+                outln!(
+                    formatter,
                     "Nothing to prune ({} held).",
                     human_bytes(outcome.bytes_remaining)
                 );
-                print_pinned_note(&outcome, cap);
+                print_pinned_note(&outcome, cap, formatter);
             } else {
-                println!(
+                outln!(
+                    formatter,
                     "{} {} archive(s), freeing {} ({} {} remain).",
                     if apply { "Removed" } else { "Would remove" },
                     outcome.removed.len(),
@@ -1186,9 +1192,9 @@ citation{}.",
                     human_bytes(outcome.bytes_remaining),
                     if apply { "now" } else { "would" }
                 );
-                print_pinned_note(&outcome, cap);
+                print_pinned_note(&outcome, cap, formatter);
                 if !apply {
-                    println!("Re-run with --apply to delete.");
+                    outln!(formatter, "Re-run with --apply to delete.");
                 }
             }
         }
@@ -1201,17 +1207,23 @@ citation{}.",
 /// Shown rather than enforced: these are the conversations behind memories, and
 /// the point of the pin is that the budget yields to the evidence. Naming the
 /// overrun is what keeps that from being a silent surprise about disk usage.
-fn print_pinned_note(outcome: &transcript_archive::PruneOutcome, cap: u64) {
+fn print_pinned_note(
+    outcome: &transcript_archive::PruneOutcome,
+    cap: u64,
+    formatter: &OutputFormatter,
+) {
     if outcome.pinned_count == 0 {
         return;
     }
-    println!(
+    outln!(
+        formatter,
         "{} held by {} copy(ies) backing memories — exempt from the budget.",
         human_bytes(outcome.pinned_bytes),
         outcome.pinned_count
     );
     if cap > 0 && outcome.pinned_bytes > cap {
-        println!(
+        outln!(
+            formatter,
             "That is over the {} budget on its own. `engramdb harvest ledger rm <id> --unpin` \
 releases a pin.",
             human_bytes(cap)

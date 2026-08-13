@@ -1,7 +1,7 @@
 //! Rebuild index and re-embed memories.
 
 use crate::engine::engine_for;
-use crate::output::OutputFormatter;
+use crate::output::{errln, outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
 use engramdb::ops::reindex;
@@ -61,10 +61,10 @@ pub async fn run_reindex(
     // selected these lines and printed them onto doctor's JSON stdout.
     if formatter.wants_human_stdout() {
         if !embeddings_only {
-            println!("Reindexing...");
+            outln!(formatter, "Reindexing...");
         }
         if !index_only && engine.is_some() {
-            println!("Regenerating embeddings...");
+            outln!(formatter, "Regenerating embeddings...");
         }
     }
 
@@ -86,7 +86,7 @@ pub async fn run_reindex(
     if !result.errors.is_empty() {
         formatter.print_error(&format!("{} errors during reindex:", result.errors.len()));
         for err in &result.errors {
-            eprintln!("  {}", err);
+            errln!(formatter, "  {}", err);
         }
     }
     if result.indexed == 0
@@ -152,7 +152,10 @@ async fn run_archive_reindex(
     }
 
     if !formatter.is_json() {
-        println!("Rebuilding conversation rows from stored transcript copies...");
+        outln!(
+            formatter,
+            "Rebuilding conversation rows from stored transcript copies..."
+        );
     }
     let report = engramdb::ops::harvest_index::reindex_from_copies(&scope, &index, &engine).await?;
     // After the rows exist, because a summary has nowhere to go without one.
@@ -166,7 +169,8 @@ async fn run_archive_reindex(
     }
 
     if formatter.is_json() {
-        println!(
+        outln!(
+            formatter,
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "rebuilt": report.indexed,

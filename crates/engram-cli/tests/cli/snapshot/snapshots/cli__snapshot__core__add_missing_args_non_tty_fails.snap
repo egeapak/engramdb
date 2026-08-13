@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"add\", \"-t\", \"decision\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -t decision
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Missing required arguments: --content, --summary. Provide all required flags or run from an interactive terminal.

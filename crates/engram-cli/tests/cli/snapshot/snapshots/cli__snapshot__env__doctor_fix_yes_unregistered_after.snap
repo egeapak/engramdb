@@ -1,0 +1,24 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"list\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] list
+exit: 0
+--- stdout ---
+[
+  {
+    "created_at": "[TIMESTAMP]",
+    "criticality": 0.5,
+    "epistemic": "fact",
+    "id": "[UUID]",
+    "physical": [
+      "/"
+    ],
+    "status": "Active",
+    "summary": "Personal note",
+    "type": "context",
+    "updated_at": "[TIMESTAMP]",
+    "visibility": "Personal"
+  }
+]
+--- stderr ---

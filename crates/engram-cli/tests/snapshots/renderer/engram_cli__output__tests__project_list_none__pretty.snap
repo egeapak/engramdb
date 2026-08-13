@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+aaaabbbbccccd /w/deleted (missing)
+0123456789abc /w/engramdb (ok)
+  ↳ fedcba9876543 /w/engramdb-wt (ok)
+--- stderr ---

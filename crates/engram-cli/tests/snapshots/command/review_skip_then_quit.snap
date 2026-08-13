@@ -1,0 +1,28 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- prompts ---
+? Action: [Keep (reset to Active), Update, Invalidate (close validity window, keep history), Delete, Skip, Quit] → Skip
+? Action: [Keep (reset to Active), Update, Invalidate (close validity window, keep history), Delete, Skip, Quit] → Quit
+--- stdout ---
+2 memories need review:
+
+ID: [ID8]
+Type: Hazard
+Summary: Blocking calls inside the daemon request handler stall every session
+Status: Challenged
+Criticality: 0.90
+Challenges:
+  - A blocking fs read was added to the Status handler (2025-03-14)
+    Source: src/daemon/server.rs
+
+ID: [ID8]
+Type: Convention
+Summary: Snapshot ids must be redacted without word boundaries
+Status: Challenged
+Criticality: 0.40
+Challenges:
+  - A new filter used \b and silently skipped embedded ids (2025-03-14)
+
+--- stderr ---

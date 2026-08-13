@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"add\", \"-t\", \"decision\", \"-s\", \"S\", \"-c\", \"C\", \"--criticality\",\n\"2.0\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] add -t decision -s S -c C --criticality 2.0
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: criticality must be between 0.0 and 1.0, got 2

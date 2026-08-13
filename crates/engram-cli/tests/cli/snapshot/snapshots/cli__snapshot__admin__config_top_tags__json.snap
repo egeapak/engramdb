@@ -1,0 +1,42 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: f.run(& all)
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json config --top-tags 5
+exit: 0
+--- stdout ---
+{
+  "embedding": {
+    "dimensions": 384,
+    "provider": "onnx"
+  },
+  "features": {
+    "contradiction_detection_enabled": false,
+    "rerank_enabled": false,
+    "rerank_top_n": 10,
+    "title_strategy": "keyword"
+  },
+  "limits": {
+    "content_soft_token_target": 500,
+    "embedding_chunk_tokens": 256,
+    "summary_max_chars": 200
+  },
+  "retrieval": {
+    "default_max_results": 10,
+    "include_expired": false,
+    "relevance_threshold": 0.45,
+    "search_semantic_weight": 3.0,
+    "search_threshold": 0.2
+  },
+  "top_tags": [
+    {
+      "count": 2,
+      "tag": "alpha"
+    },
+    {
+      "count": 1,
+      "tag": "beta"
+    }
+  ]
+}
+--- stderr ---

@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/env.rs
+expression: "f.run(&[\"setup\", \"--dry-run\", \"--global\", \"--claude-dir\",\nclaude.to_str().unwrap()])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] setup --dry-run --global --claude-dir [PROJECT]/claude-home
+exit: 0
+--- stdout ---
+{"message":"Claude CLI not found, falling back to settings.json."}
+{"message":"Would add hooks to settings.json."}
+{"message":"Would register the engramdb MCP server in [PROJECT]/claude-home/.claude.json."}
+{"message":"Would add MCP tool permissions to settings.json."}
+{"message":"Would create ENGRAM.md."}
+{"message":"Would create CLAUDE.md with @ENGRAM.md reference."}
+--- stderr ---

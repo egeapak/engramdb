@@ -1,0 +1,23 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total Memories: 3
+
+By Type:
+  Decision: 2
+  Convention: 1
+
+By Status:
+  Active: 3
+
+By Scope:
+  services/api: 2
+
+Expired: 1
+Oldest: 2025-01-01
+Newest: 2026-01-01
+
+Average Criticality: 0.75
+--- stderr ---

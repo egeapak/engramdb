@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"rollback\", \"--target-version\", \"99\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] rollback --target-version 99
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Unsupported rollback target version 99; valid versions are 1..=2

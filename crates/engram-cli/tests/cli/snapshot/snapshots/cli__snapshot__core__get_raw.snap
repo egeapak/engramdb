@@ -1,0 +1,44 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/core.rs
+expression: "f.run(&[\"get\", &id, \"--raw\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] get [UUID] --raw
+exit: 0
+--- stdout ---
+---
+version: 2
+id: [UUID]
+type: decision
+status: Active
+title: One Memory
+---
+
+# One Memory
+
+**Summary:** The one memory
+
+## Content
+
+Its content.
+
+## Scope
+
+- **Files:** `/`
+- **Tags:** `alpha`, `beta`
+- **Criticality:** 0.5
+- **Confidence:** 0.8
+
+## Provenance
+
+- **Source:** human
+- **Created:** [TIMESTAMP]
+- **Updated:** [TIMESTAMP]
+
+<!-- engramdb
+visibility: Shared
+accessed_at: [TIMESTAMP]
+decay:
+  strategy: none
+  floor: 0.0
+-->
+--- stderr ---

@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/editor.rs
+expression: "f.run_with_editor(&[\"update\", &id, \"-e\"], &editor_arg(&editor))"
+---
+$ engramdb --no-maintenance --dir [PROJECT] update [UUID] -e
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Editor exited with non-zero status
