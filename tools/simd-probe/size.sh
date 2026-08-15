@@ -21,11 +21,11 @@ text() { size -A "$1" | awk '$1==".text" {print $2}'; }
 
 printf '%-14s %10s %10s %10s   %12s %12s\n' \
   profile scalar intrinsics fearless 'intrinsics' 'fearless'
-for prof in syms oz o3; do
+for prof in syms oz o2; do
   case $prof in
-    syms) label='2 (ships)' ;;
+    syms) label='3 (ships)' ;;
     oz)   label='"z" (old)' ;;
-    o3)   label='opt-level 3' ;;
+    o2)   label='opt-level 2' ;;
   esac
   cargo build --profile "$prof" --bins >/dev/null 2>&1
   s=$(text "target/$prof/size_scalar")

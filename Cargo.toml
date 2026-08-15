@@ -213,93 +213,57 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# `opt-level = 2`, not `"z"`. This was `"z"` for most of the project's life and
-# the reasoning below (in the per-package block) is why it changed.
+# `opt-level = 3`. This was `"z"` for most of the project's life.
 #
 # `-Oz` runs neither the loop vectorizer nor the inliner, which made two things
 # true at once: EngramDB's own hot arithmetic had to be hand-written
 # intrinsics to vectorize at all, and every portable SIMD crate measured
 # 1.3-7x slower than those intrinsics because their abstractions never got
-# inlined. At `2` both facts reverse. `ops::compress::dot_unit` is now
+# inlined. Raising it reverses both. `ops::compress::dot_unit` is now
 # `fearless_simd` and beats the intrinsics it replaced, with no `unsafe` left
 # in EngramDB's own logic.
 #
-# `2` rather than `3`: measured on the dot product, `3` is not faster (33.7 vs
-# 34.3 ns/pair) and costs ~6 MiB more binary. See
-# `docs/contributors/parallelization-simd.md`.
+# `3` rather than `2`, measured — three binaries, one commit, one machine,
+# `reindex --index-only` over 1,200 memories interleaved and scored on the
+# minimum of 15:
+#
+#                          binary          min       vs "z"
+#   "z" + intrinsics   61,442,928       153 ms            -
+#   2                 112,087,952       143 ms   +82% / -7%
+#   3                 117,397,488       136 ms  +91% / -11%
+#
+# `3` over `2` is ~5% faster for ~4.7% more binary — near 1:1, and worth it
+# once the +82% step has already been taken. Note this contradicts an earlier
+# claim in the SIMD doc that `3` bought ~3% for 5.7 MiB: the dot-product
+# microbenchmark says `2` and `3` are identical (33.7 vs 34.3 ns/pair), and it
+# is wrong about the binary, because `reindex` is dominated by TOML parsing and
+# Snowball stemming rather than by arithmetic. Measure the workload, not the
+# kernel.
 [profile.release]
 lto = true
-opt-level = 2
+opt-level = 3
 strip = true
 panic = "abort"
 codegen-units = 1
 
-# Lift the crates that do the per-memory bulk work one level above the
-# profile's `2`. This block predates the `"z"` -> `2` baseline change above,
-# when it was the only thing standing between the hot paths and a build with
-# no optimizer at all; it is retained because `3` still measures slightly
-# faster on this list, but the margin is now small. Chosen from what `reindex`
-# actually spends its time in: TOML frontmatter deserialization, YAML for the
-# legacy V1 format, Snowball stemming for the keyword index, glob matching for
-# scope scores, and EngramDB's own three data crates.
+# There is deliberately no `[profile.release.package.*]` block. There used to be
+# one: fourteen crates pinned to `opt-level = 3` while the profile itself was
+# `"z"`, which was the only thing standing between the hot paths (TOML
+# frontmatter, YAML for the legacy V1 format, Snowball stemming, glob matching)
+# and a build with no optimizer at all. The profile is now `3`, so every one of
+# those entries named the value it already had, and they were removed as dead
+# config rather than measured again.
 #
-# Measured on a 1,200-memory `reindex --index-only`, 9 reps, interleaved
-# against the other candidates:
-#
-#                            binary            reindex median
-#   "z" everywhere      57,717,584  (+0.00%)   179 ms  (+0.0%)
-#   these 14 at 3       60,573,968  (+4.95%)   161 ms (-10.1%)
-#   whole tree at 2    110,273,616 (+91.06%)   147 ms (-17.9%)
-#   whole tree at 3    116,212,976 (+101.4%)   144 ms (-19.6%)
-#
-# That table is why this block existed: half the available speedup for a
-# twentieth of the size, back when the alternative was paying +91% binary.
-# **The +91% row is what ships now.** The binary is a prebuilt artifact spawned
-# per Claude Code hook invocation, so its size is download and cold-start cost,
-# and for a long time that ruled the trade out. It was reconsidered
-# deliberately: `-Oz` was also blocking `ops::compress` from using a safe SIMD
-# crate at all, so the size now buys both the whole-tree speedup and the
-# deletion of the hand-written SIMD `unsafe`.
-#
-# lance / datafusion / arrow / ort are deliberately absent: they dominate
-# binary size and their hot loops are already inside compiled C++ or their own
-# tuned Rust.
-#
-# Caveat worth knowing before extending this: per-package `opt-level` is only
-# *mostly* effective under `lto = true`. A minimal two-crate reproduction
-# produced a byte-identical binary, and overriding only EngramDB's core crate
-# left no trace in the hot function — the fat-LTO link step re-runs the
-# pipeline at the top-level opt-level and can discard the per-crate decisions.
-# It evidently survives for large dependency crates, as the table shows. Do
-# not assume an addition here helps; measure it.
-[profile.release.package.toml]
-opt-level = 3
-[profile.release.package.toml_parser]
-opt-level = 3
-[profile.release.package.toml_datetime]
-opt-level = 3
-[profile.release.package.serde]
-opt-level = 3
-[profile.release.package.serde_yaml_ng]
-opt-level = 3
-[profile.release.package.serde_json]
-opt-level = 3
-[profile.release.package.rust-stemmers]
-opt-level = 3
-[profile.release.package.globset]
-opt-level = 3
-[profile.release.package.regex-automata]
-opt-level = 3
-[profile.release.package.aho-corasick]
-opt-level = 3
-[profile.release.package.memchr]
-opt-level = 3
-[profile.release.package.engramdb]
-opt-level = 3
-[profile.release.package.engram-storage]
-opt-level = 3
-[profile.release.package.engram-types]
-opt-level = 3
+# Two things from that block are still worth knowing before adding one back.
+# Per-package `opt-level` is only *mostly* effective under `lto = true`: a
+# minimal two-crate reproduction produced a byte-identical binary, and
+# overriding only EngramDB's core crate left no trace in the hot function,
+# because the fat-LTO link step re-runs the pipeline at the top-level
+# `opt-level` and can discard per-crate decisions. It evidently survives for
+# large dependency crates. And lance / datafusion / arrow / ort were
+# deliberately absent: they dominate binary size and their hot loops are
+# already inside compiled C++ or their own tuned Rust. Do not assume an
+# addition here helps; measure it.
 
 # `opt-level` MUST match `[profile.release]`. It used to be 2 while release
 # shipped "z", which does not merely make benchmarks optimistic — for
@@ -316,5 +280,5 @@ opt-level = 3
 # confirmed by disassembling a real release build before it is believed.
 [profile.bench]
 lto = false
-opt-level = 2
+opt-level = 3
 codegen-units = 16

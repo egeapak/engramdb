@@ -11,9 +11,9 @@
 //!
 //! ```text
 //! cd tools/simd-probe
-//! cargo run --release     # mirrors [profile.release]: opt-level 2, fat LTO
+//! cargo run --release     # mirrors [profile.release]: opt-level 3, fat LTO
 //! cargo run --profile oz    # what the old -Oz profile did
-//! cargo run --profile o3    # is a result opt-level-specific?
+//! cargo run --profile o2    # is a result opt-level-specific?
 //! ./size.sh               # the size axis
 //! ```
 //!

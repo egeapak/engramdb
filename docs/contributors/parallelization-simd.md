@@ -23,7 +23,7 @@ result, not the absolute times.
 
 > ## ⚠️ Read this first: the profile changed
 >
-> **`[profile.release]` is `opt-level = 2`. It was `"z"` for most of this
+> **`[profile.release]` is `opt-level = 3`. It was `"z"` for most of this
 > document's life, and large parts of it are written against `"z"`.**
 >
 > Everything below that reasons about `-Oz` — that auto-vectorization is off,
@@ -41,9 +41,8 @@ result, not the absolute times.
 >   irreducible.
 > - It is *faster* than the four hand-written backends it replaced (1.02×), not
 >   merely competitive.
-> - The binary is **+82.4% larger** (58.60 -> 106.90 MiB) and takes ~92% longer
->   to build. That was the price, measured on one commit pair, and it was paid
->   knowingly.
+> - The binary is **+91% larger** (58.60 -> 111.96 MiB) and takes about twice
+>   as long to build. That was the price, measured, and it was paid knowingly.
 >
 > Start at [Adopting fearless_simd](#adopting-fearless_simd-and-raising-opt-level).
 
@@ -257,10 +256,10 @@ went the last `unsafe` in EngramDB's own logic. (The workspace is not
 `unsafe`-free: `engram-onnx` still `dlopen`s the ONNX Runtime, which no crate
 can do safely, and two tests call `libc::mkfifo`.)
 
-That was only possible because `[profile.release]` moved from `opt-level = "z"`
-to `2`. The two decisions are one decision: at `-Oz` the crate was 1.3–2.5×
-*slower* than the intrinsics (measured in detail below, and kept, because it is
-the reason this took two attempts). At `2` it is 1.02× *faster*.
+That was only possible because `[profile.release]` moved off `opt-level = "z"`.
+The two decisions are one decision: at `-Oz` the crate was 1.3–2.5× *slower*
+than the intrinsics (measured in detail below, and kept, because it is the
+reason this took two attempts). At `2` or `3` it is ~1.02× *faster*.
 
 The probe is committed at `tools/simd-probe/` — a standalone crate (its own
 `[workspace]`, like `fuzz/`) that mirrors `[profile.release]` key-for-key, with
@@ -298,9 +297,10 @@ Confirmed in the shipped profile rather than inferred from the benchmark:
 the AVX-512 monomorphisation emits `vfmadd231ps` on `zmm` and the AVX2 one
 on `ymm`, two accumulators per issue, with `vaddps` folding them at the end.
 
-**`2`, not `3`.** `3` is not faster here (34.3 vs 33.7) and the doc's earlier
-whole-tree measurement put it ~6 MiB larger. Nothing in this workload wants
-`3`.
+**The kernel cannot tell `2` from `3`** (33.7 vs 34.3 ns, inside the noise).
+That is a fact about the kernel, not about the profile — see
+[`2` vs `3`](#2-vs-3-the-kernel-is-the-wrong-place-to-ask) below, where the
+*workload* turns out to disagree.
 
 ### The scalar loop never vectorizes, at any `opt-level`
 
@@ -369,6 +369,39 @@ tests under each `--cfg disable_dispatch_*` combination. **This is not
 optional bookkeeping** — it is the only thing standing between a green suite
 and an untested kernel on the CPUs least likely to be in front of a developer.
 
+### `2` vs `3`: the kernel is the wrong place to ask
+
+The dot product cannot distinguish them — 33.7 ns at `2` against 34.3 at `3`,
+inside the run-to-run spread. On that evidence `2` was chosen, and an earlier
+revision of this document justified it with a borrowed figure: that `3` bought
+"~3% more speed for another 5.7 MiB".
+
+**Both halves of that were wrong**, and the whole-program measurement is what
+showed it. Three binaries, one commit, one machine, `reindex --index-only` over
+a 1,200-memory store, interleaved round-robin and scored on the minimum of 15:
+
+| build | binary | min | vs `"z"` |
+|---|---|---|---|
+| `"z"` + intrinsics | 61,442,928 (58.60 MiB) | 153 ms | — |
+| `opt-level = 2` | 112,087,952 (106.90 MiB) | 143 ms | +82% size, −7% time |
+| **`opt-level = 3` (ships)** | **117,397,488 (111.96 MiB)** | **136 ms** | +91% size, −11% time |
+
+`3` over `2` is **~5% faster for ~4.7% more binary** — close to 1:1, and an
+easy call once the +82% step has been taken. The old claim had it as 3% for
+5.7 MiB, i.e. a clearly bad trade.
+
+The reason the microbenchmark misleads is worth internalising, because it is
+the same shape as the `-Oz` mistake earlier in this document: **`reindex` is
+not arithmetic-bound.** Its time goes to TOML frontmatter deserialization and
+Snowball stemming, and those are exactly the code `3` helps and the dot product
+is not. Tuning the profile on the kernel measures the one part of the workload
+that had already been hand-optimised into insensitivity.
+
+This also retired the `[profile.release.package.*]` block. Fourteen crates were
+pinned to `opt-level = 3` back when the profile was `"z"`; with the profile at
+`3` every entry named the value it already had, so they were deleted as dead
+config.
+
 ### Size — what this actually cost
 
 Two scales. The kernel itself is noise; the profile change is the bill.
@@ -380,8 +413,8 @@ cancel; the fearless case carries the same four-accumulator body that ships):
 | | intrinsics | fearless_simd |
 |---|---|---|
 | `"z"` (old profile) | +2,088 | +4,520 |
-| **`2` (ships)** | +2,179 | **+6,291** |
-| `3` | +2,163 | +6,227 |
+| `2` | +2,163 | +6,259 |
+| **`3` (ships)** | +2,163 | **+6,211** |
 
 fearless_simd is never the smaller option — `dispatch!` emits a copy of the
 kernel per SIMD level where the hand-written code emitted two — and four
@@ -389,25 +422,24 @@ accumulators cost ~900 bytes over two. At ~4 KB more than the intrinsics on a
 100 MB binary this does not register.
 
 **The profile.** This is the real number, and it is large. Same commit range,
-same machine, same toolchain — `HEAD~1` (intrinsics at `-Oz`) against `HEAD`
-(fearless_simd at `2`), both `cargo build --release`:
+same machine, same toolchain, both `cargo build --release`:
 
 | | binary | build |
 |---|---|---|
 | intrinsics, `opt-level = "z"` | 61,442,928 (58.60 MiB) | 17m13s |
-| **fearless_simd, `opt-level = 2`** | **112,087,952 (106.90 MiB)** | 33m05s |
-| | **+82.4%** | **+92%** |
+| **fearless_simd, `opt-level = 3`** | **117,397,488 (111.96 MiB)** | 34m43s |
+| | **+91.0%** | **+102%** |
 
 The binary ships as a prebuilt artifact (release archives, Homebrew, Scoop) and
 is spawned per Claude Code hook invocation, so this is download and cold-start
 cost, not disk. It was accepted deliberately.
 
-Note the earlier section quotes a `-Oz` baseline of 57,717,584 bytes and
-predicts +91%. That baseline was **6.5% stale** — the tree grew (harvest,
-`projects discover`) between that measurement and this one, so the prediction
-was measuring partly unrelated growth. Re-measuring the pair on one commit is
-what turned +94% into +82.4%. Old absolute byte counts in this document should
-be treated as of-their-time; the ratios are what carry.
+Note the earlier section quotes a `-Oz` baseline of 57,717,584 bytes. That
+baseline is **6.5% stale** — the tree gained harvest and `projects discover`
+between that measurement and this one — so any percentage computed against it
+is measuring partly unrelated growth. Old absolute byte counts in this document
+should be treated as of-their-time; only the ratios carry, and only when both
+halves were measured together.
 
 ## Why not just use `fastembed::similarity`?
 

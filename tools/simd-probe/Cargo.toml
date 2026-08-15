@@ -20,7 +20,7 @@ fearless_simd = "0.7.0"
 # on, unmeasured. Keep these five keys in sync with the root profile.
 [profile.release]
 lto = true
-opt-level = 2
+opt-level = 3
 strip = true
 panic = "abort"
 codegen-units = 1
@@ -33,9 +33,9 @@ codegen-units = 1
 inherits = "release"
 opt-level = "z"
 
-[profile.o3]
+[profile.o2]
 inherits = "release"
-opt-level = 3
+opt-level = 2
 
 # Unstripped, for disassembly and `nm --print-size`.
 [profile.syms]
