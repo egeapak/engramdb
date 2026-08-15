@@ -1201,7 +1201,19 @@ pub fn l2_normalized(v: &[f32]) -> Vec<f32> {
 /// Note the second row: hand-unrolling into independent accumulators is
 /// *slower than the naive loop* at `-Oz`, because the optimizer that would
 /// have cleaned it up is switched off. That shape only wins at
-/// `opt-level >= 2`, i.e. in `profile.bench` and not in production.
+/// `opt-level >= 2`.
+///
+/// The four backends below are the whole hand-written SIMD surface of this
+/// workspace, so "replace them with a portable SIMD crate" is a recurring and
+/// reasonable suggestion. `fearless_simd` v0.7.0 — safe, zero-dependency,
+/// one source for SSE2/AVX2/AVX-512/NEON — was measured for exactly that and
+/// is 1.3-2.5x slower here at every x86 level, AVX-512 included, because
+/// `-Oz` leaves its `vectorize` wrapper an out-of-line call — it is
+/// `#[inline]`, a hint, and its `#[target_feature]` blocks inlining into a
+/// caller like this one regardless. Within ~10% at `opt-level = 2`/`3`, so
+/// revisit if this profile ever changes. Probe: `tools/simd-probe/`;
+/// write-up: the "Why not a portable SIMD crate?" section of
+/// `docs/contributors/parallelization-simd.md`.
 ///
 /// Raising `opt-level` instead was measured and rejected: `2` doubles the
 /// binary (55.0 → 105.2 MiB) for less than a fifth of the gain this gets for

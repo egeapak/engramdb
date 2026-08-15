@@ -210,6 +210,150 @@ Reindex would not have moved much regardless: its bulk work is frontmatter
 deserialization and Snowball stemming, inside `toml`, `serde_yaml_ng` and
 `rust-stemmers`, not in EngramDB's crates.
 
+## Why not a portable SIMD crate? (`fearless_simd`, `wide`)
+
+The obvious objection to four hand-written backends is that a crate should own
+this. [`fearless_simd`](https://github.com/linebender/fearless_simd) is the
+strongest candidate on paper: safe public API, almost no `unsafe` inside, zero
+dependencies, sub-second build, one source covering SSE2 → AVX-512 → NEON →
+WASM, and runtime multiversioning built in. It would delete
+`dot_unit_{sse2,avx2,neon,scalar}` and every `unsafe` block in this repo — the
+entire hand-written SIMD surface is those four functions in
+`ops::compress`, and nothing else in the workspace touches `std::arch`.
+
+**It was evaluated at v0.7.0 and rejected, for this profile only.** The probe
+is committed at `tools/simd-probe/` — a standalone crate (its own
+`[workspace]`, like `fuzz/`) that mirrors `[profile.release]` exactly, so
+re-checking a future version is `cargo run --release` in that directory.
+
+### The numbers
+
+384-dim pairs, `opt-level = "z"` + `lto = true` + `codegen-units = 1`,
+candidates interleaved round-robin and scored on their minimum. `dispatch!`
+always normalises *up* to the best level the CPU has, so the lower levels are
+reached by rebuilding with `--cfg disable_dispatch_*` (the commands are in the
+probe's header). "`dot_unit`" is the backend this repo would actually run on a
+machine of that class — it has no AVX-512 path, so the top two rows are both
+its AVX2 one:
+
+| CPU class | fearless_simd | `dot_unit` | | ns/iteration |
+|---|---|---|---|---|
+| AVX-512 | 73.0 | 45.2 (AVX2) | **1.6× slower** | 6.08 vs 1.74 |
+| AVX2 | 75.4 | 45.9 (AVX2) | **1.6× slower** | 3.14 vs 1.74 |
+| SSE4.2 | 153.2 | 61.9 (SSE2) | **2.5× slower** | 3.19 vs 1.22 |
+| SSE2 | 77.3 | 58.5 (SSE2) | **1.3× slower** | 1.61 vs 1.22 |
+
+(ns/pair includes `dot_unit`'s runtime feature detection, ~3 ns, because
+production pays it on every call. The ns/iteration column excludes it — it is
+paid once per call, not once per iteration.)
+
+**Read the last column, not the third.** Absolute ns/pair on this host drifts
+by 2× between sessions — the *same binary* measured 30.2 ns and 75.5 ns hours
+apart — which is why every candidate is timed in one interleaved process and
+only within-row comparisons mean anything. An earlier session's AVX-512 row
+read as parity; it was a transient favourable clock, and it did not reproduce.
+
+Per iteration the story is stable and decomposes cleanly:
+
+- **SSE2 is the only level fearless_simd inlines**, and it is the closest:
+  1.61 vs 1.22 ns. That residual ~1.3× is the four bounds-check branches
+  `from_slice` leaves in the loop plus an out-of-line lane sum.
+- **SSE4.2 runs the identical 8-wide kernel at 2× the cost** (3.19 vs 1.61).
+  Nothing about the arithmetic changed — only that SSE4.2 is not in the
+  x86-64 baseline, so its `vectorize` wrapper cannot be inlined. That
+  inversion is the cleanest isolation of the trampoline cost in the whole
+  table.
+- **AVX2 pays the identical 3.14 ns/iteration** over twice the floats, which is
+  the whole of its advantage over SSE4.2: half the iterations, same cost each.
+  The per-iteration overhead is what it is regardless of vector width.
+- **AVX-512 doubles the width again and gets nothing back**: 6.08 ns/iter over
+  32 floats is 0.19 ns/float, exactly AVX2's 3.14/16. 512-bit ops trigger
+  frequency licensing on this part, so fearless_simd reaching for the widest
+  available vector is a liability here rather than the bonus it looks like.
+
+Hoisting `dispatch!` out of the O(n²) body — one monomorphised call for the
+whole pass, the best case the crate can offer — does not rescue it: 0.76× at
+AVX-512, 0.77× at AVX2, 0.46× at SSE2.
+
+### Why — and it is not the crate's fault
+
+From the disassembly, not inferred from the benchmark:
+
+```rust
+// fearless_simd/src/generated/avx2.rs
+#[inline]                                        // <-- a hint, not inline(always)
+fn vectorize<F: FnOnce() -> R, R>(self, f: F) -> R {
+    #[target_feature(enable = "avx2,...,fma,...")]
+    fn vectorize_avx2<F: FnOnce() -> R, R>(f: F) -> R { f() }
+    unsafe { vectorize_avx2(f) }
+}
+```
+
+**`#[target_feature]` is a structural barrier**: `vectorize_avx2` can never be
+inlined into a caller that lacks those features, and `dot_unit` — a plain
+function with no feature attribute — by construction does. `vectorize` itself
+is additionally only `#[inline]`, a hint rather than a guarantee.
+
+The disassembly of one `dispatch!` site shows both halves at once: the SSE2 arm
+is inlined straight into the caller as `mulps`/`addps`, because `sse2,fxsr` is
+already in the x86-64 baseline and the wrapper is therefore a feature-superset
+match — while the SSE4.2 and AVX2 arms are `call`s, with the closure's
+environment built on the stack at `0x10(%rsp)` and passed by pointer. That is
+the SSE2/SSE4.2 inversion in the table, read directly off the instructions.
+
+Inside the call the loop is *correct*: two `vfmadd231ps` per iteration, the
+same instructions the hand-written backend emits. But it carries four
+bounds-check branches from `from_slice`'s `try_into().unwrap()` on a
+runtime-length slice, and the horizontal lane sum is another out-of-line `call`
+to `core::iter::Sum::sum` — together the residual ~1.3× that even the inlined
+SSE2 level cannot shed.
+
+Feeding it compile-time-length `&[f32; N]` via `chunks_exact` + `load_array_ref`
+to kill those bounds checks was tried (`dot_fs_x8` in the probe) and is
+*worse* — at `-Oz` the `chunks_exact` iterator costs more than the checks it
+removes.
+
+aarch64 was not measured — there is no aarch64 host here — but the
+cross-compiled `-Oz` asm is worth one caveat rather than an extrapolation.
+NEON is baseline, so by the x86 argument its wrapper should inline the way
+SSE2's does; in the emitted asm it did not, leaving `bl vectorize_neon` plus
+six bounds-check branches and a `bl OUTLINED_FUNCTION_9` (`-Oz` runs the
+machine outliner, which replaces straight-line instruction sequences with calls
+to save bytes). That build was `-C lto=off`, so it is weaker evidence than the
+x86 numbers, and Apple Silicon is a very different machine. **If the question
+is ever "should we adopt this on macOS ARM only", measure there first — this
+document does not answer it.**
+
+### This is an `-Oz` finding, not a verdict on the crate
+
+Same probe, same machine, one profile key changed. Ratios are fearless_simd's
+best variant against `dot_unit`'s dispatch, both timed in the same process:
+
+| | AVX-512 | AVX2 |
+|---|---|---|
+| `opt-level = "z"` | **0.62×** | **0.61×** |
+| `opt-level = 2` | 0.94× | 1.02× |
+| `opt-level = 3` | 0.90× | 0.96× |
+
+At `2` or `3` the gap closes to within ~10% and sometimes reverses, because the
+inliner the crate is designed around is running. It is a good crate; it is a
+bad fit for a size-optimised build, for the same reason the `wide` crate was
+rejected — and `wide`'s 7× gap versus this 1.3–2.5× one is the measure of how
+much better fearless_simd's design survives `-Oz`.
+
+Note also which variant wins where: at `-Oz` the array-shaped `dot_fs_x8` is
+the *worst* candidate — 4.2× slower than the plain `S::f32s` loop — while at
+`2`/`3` it is usually the best. Tuning either of these at the wrong
+`opt-level` would pick the wrong kernel, which is the same trap that shipped a
+pessimization once already.
+
+**Revisit if** the release profile ever moves off `"z"` — then adopt it, since
+at parity it deletes all four backends and every `unsafe` block in the
+workspace, which is worth more than a few percent — or if fearless_simd marks
+`vectorize` `#[inline(always)]`. Track
+[linebender/fearless_simd](https://github.com/linebender/fearless_simd); v1.0
+is announced as upcoming.
+
 ## Why not just use `fastembed::similarity`?
 
 Reasonable question — `fastembed` is already in the tree and exports
@@ -504,6 +648,12 @@ not show up. If a future path parallelizes something long, route it through
   against 55 ns for intrinsics, because its abstraction layers do not get
   inlined without an optimizer. A good default in a normal profile; not in
   this one.
+- **The `fearless_simd` crate (v0.7.0).** The safe, portable, zero-dependency
+  replacement for all four hand-written backends — 1.3–2.5× slower than them at
+  `-Oz`, on every x86 level including AVX-512, because its `vectorize` wrapper
+  stays an out-of-line call there. Within ~10% at `opt-level = 2`/`3`, so this
+  is a verdict on the profile rather than the crate. Probe committed at
+  `tools/simd-probe/`; full write-up above.
 - **`std::simd`.** Nightly-only; the repo is stable-only.
 - **`-C target-cpu=native`.** Under 10% on the auto-vectorized variants, and it
   makes the binary unshippable as a prebuilt artifact. Runtime dispatch gets
@@ -514,12 +664,23 @@ not show up. If a future path parallelizes something long, route it through
 
 ## If you add more arithmetic-bound code
 
-1. Write it, and measure it at `opt-level = "z"` — not just via `cargo bench`,
-   which uses `opt-level = 2` and will rank candidates differently.
+1. Write it, and measure it at `opt-level = "z"`. `[profile.bench]` now matches
+   the shipping `opt-level` (it was `2` when the section above was written,
+   which is how a 1.6× pessimization got shipped) — but it still keeps
+   `lto = false` and `codegen-units = 16` so the suite stays usable for
+   iteration, which leaves *cross-crate inlining* unmeasured. For anything that
+   lives or dies on inlining, use a standalone crate that mirrors the real
+   profile key-for-key; `tools/simd-probe/` is the worked example.
 2. If it is a reduction over a slice of `f32`/`f64`, expect auto-vectorization
    to give you nothing and reach for `std::arch` intrinsics with runtime
    dispatch, following `ops::compress::dot_unit`.
 3. Disassemble the stripped release binary to confirm the instructions are
-   there (`objdump -d | grep vfmadd`). Do not infer it from a benchmark.
+   there (`objdump -d | grep vfmadd`). Do not infer it from a benchmark. If a
+   candidate is slower than it should be, the disassembly is also where the
+   *reason* is — bounds checks, an un-inlined trampoline, or an
+   `OUTLINED_FUNCTION_*` call from `-Oz`'s machine outliner.
 4. Test every backend against a scalar reference, not just the one your
-   machine dispatches to.
+   machine dispatches to. Runtime feature detection normally picks the best
+   level available, so the fallbacks need a build-time knob to be reachable at
+   all — `--cfg disable_dispatch_*` for `fearless_simd`, a forced call for
+   `dot_unit`'s own backends (`dot_unit_backends_agree`).
