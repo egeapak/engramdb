@@ -74,6 +74,11 @@ bundled-onnxruntime = ["engram-models/bundled-onnxruntime", "engram-onnx?/bundle
 test-support = ["engram-storage/test-support"]
 
 [dependencies]
+# Portable SIMD for `ops::compress::dot_unit`, replacing four hand-written
+# `std::arch` backends. Zero dependencies, sub-second build, and no `unsafe`
+# left in EngramDB's own logic. It needs an optimizer to earn its keep — see
+# `[profile.release]` below and `docs/contributors/parallelization-simd.md`.
+fearless_simd = "0.7.0"
 # Workspace sub-crates (extracted layers; re-exported from lib.rs so the
 # `engramdb::<module>` and `crate::<module>` paths stay stable in the core).
 engram-types = { path = "crates/engram-types" }
@@ -208,18 +213,35 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# `opt-level = 2`, not `"z"`. This was `"z"` for most of the project's life and
+# the reasoning below (in the per-package block) is why it changed.
+#
+# `-Oz` runs neither the loop vectorizer nor the inliner, which made two things
+# true at once: EngramDB's own hot arithmetic had to be hand-written
+# intrinsics to vectorize at all, and every portable SIMD crate measured
+# 1.3-7x slower than those intrinsics because their abstractions never got
+# inlined. At `2` both facts reverse. `ops::compress::dot_unit` is now
+# `fearless_simd` and beats the intrinsics it replaced, with no `unsafe` left
+# in EngramDB's own logic.
+#
+# `2` rather than `3`: measured on the dot product, `3` is not faster (33.7 vs
+# 34.3 ns/pair) and costs ~6 MiB more binary. See
+# `docs/contributors/parallelization-simd.md`.
 [profile.release]
 lto = true
-opt-level = "z"
+opt-level = 2
 strip = true
 panic = "abort"
 codegen-units = 1
 
-# Build the crates that do the per-memory bulk work for speed, and leave the
-# rest of the tree at the profile's "z". Chosen from what `reindex` actually
-# spends its time in: TOML frontmatter deserialization, YAML for the legacy V1
-# format, Snowball stemming for the keyword index, glob matching for scope
-# scores, and EngramDB's own three data crates.
+# Lift the crates that do the per-memory bulk work one level above the
+# profile's `2`. This block predates the `"z"` -> `2` baseline change above,
+# when it was the only thing standing between the hot paths and a build with
+# no optimizer at all; it is retained because `3` still measures slightly
+# faster on this list, but the margin is now small. Chosen from what `reindex`
+# actually spends its time in: TOML frontmatter deserialization, YAML for the
+# legacy V1 format, Snowball stemming for the keyword index, glob matching for
+# scope scores, and EngramDB's own three data crates.
 #
 # Measured on a 1,200-memory `reindex --index-only`, 9 reps, interleaved
 # against the other candidates:
@@ -230,10 +252,14 @@ codegen-units = 1
 #   whole tree at 2    110,273,616 (+91.06%)   147 ms (-17.9%)
 #   whole tree at 3    116,212,976 (+101.4%)   144 ms (-19.6%)
 #
-# Half the available speedup for a twentieth of the size. The binary ships as
-# a prebuilt artifact and is spawned per Claude Code hook invocation, so its
-# size is download and cold-start cost — +91% to gain another 8% is not a
-# trade worth making; +5% is.
+# That table is why this block existed: half the available speedup for a
+# twentieth of the size, back when the alternative was paying +91% binary.
+# **The +91% row is what ships now.** The binary is a prebuilt artifact spawned
+# per Claude Code hook invocation, so its size is download and cold-start cost,
+# and for a long time that ruled the trade out. It was reconsidered
+# deliberately: `-Oz` was also blocking `ops::compress` from using a safe SIMD
+# crate at all, so the size now buys both the whole-tree speedup and the
+# deletion of the hand-written SIMD `unsafe`.
 #
 # lance / datafusion / arrow / ort are deliberately absent: they dominate
 # binary size and their hot loops are already inside compiled C++ or their own
@@ -290,5 +316,5 @@ opt-level = 3
 # confirmed by disassembling a real release build before it is believed.
 [profile.bench]
 lto = false
-opt-level = "z"
+opt-level = 2
 codegen-units = 16

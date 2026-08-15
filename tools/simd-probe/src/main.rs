@@ -1,19 +1,27 @@
-//! Does a portable SIMD crate beat `ops::compress::dot_unit`'s hand-written
-//! intrinsics *at the profile EngramDB actually ships*?
+//! The harness behind `ops::compress::dot_unit`'s SIMD choice.
 //!
-//! Run:
+//! It compares the shipped `fearless_simd` kernel against the four hand-written
+//! `std::arch` backends it replaced, at the profile EngramDB actually builds
+//! with. Both are kept here permanently: the intrinsics are the baseline the
+//! crate has to keep beating, and the day it stops, this is where that shows.
+//!
+//! This is also what caught the two mistakes that made the first evaluation
+//! reject the crate outright — the wrong accumulator count and the wrong
+//! `opt-level`. Run it before changing the kernel, not after.
 //!
 //! ```text
 //! cd tools/simd-probe
-//! cargo run --release                       # the shipping profile, -Oz
-//! cargo run --profile o2                    # is a result an -Oz artifact?
-//! cargo run --profile o3
+//! cargo run --release     # mirrors [profile.release]: opt-level 2, fat LTO
+//! cargo run --profile oz    # what the old -Oz profile did
+//! cargo run --profile o3    # is a result opt-level-specific?
+//! ./size.sh               # the size axis
 //! ```
 //!
 //! `dispatch!` always normalises *up* to the best level the CPU has
 //! (`Level::__dispatch_target`), so a lower level cannot be selected at run
-//! time — it has to be excluded at build time. That matters here because a
-//! developer box picks AVX-512 while most users get AVX2:
+//! time — it has to be excluded at build time. Every dev box and CI runner has
+//! AVX2 or better, so this is the only way to exercise what a pre-Haswell CPU
+//! or an AVX2-masking VM will run:
 //!
 //! ```text
 //! RUSTFLAGS='--cfg disable_dispatch_avx512' cargo run --release
@@ -21,15 +29,17 @@
 //! RUSTFLAGS='--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2 --cfg disable_dispatch_sse4_2' cargo run --release
 //! ```
 //!
+//! (The `simd-levels` CI job runs the *correctness* tests that way. This probe
+//! is for performance; correctness lives in `ops::compress::tests`.)
+//!
 //! Two methodology notes, both learned the hard way:
 //!
 //! 1. **Candidates are interleaved**, round-robin inside one process, and
 //!    scored on their per-candidate minimum. Measuring them sequentially gave
 //!    a 70% swing between invocations of the same binary — a frequency dip
-//!    landed entirely on whichever candidate was running.
-//!    Absolute ns/pair on a shared host still drifts by 2x between sessions,
-//!    so compare *within* a run — every row is timed in this one process —
-//!    and treat cross-session absolutes as meaningless.
+//!    landed entirely on whichever candidate was running. Absolute ns/pair on
+//!    a shared host still drifts by 2x between sessions, so compare *within* a
+//!    run and treat cross-session absolutes as meaningless.
 //! 2. **Do not force a level with `Token::assume_supported()`.** It yields a
 //!    proof token but does *not* enable the target feature on the calling
 //!    function, so the monomorphised body compiles for the baseline and
@@ -131,6 +141,92 @@ fn dot_current(a: &[f32], b: &[f32]) -> f64 {
 }
 
 // ----------------------------------------------------------- fearless_simd ---
+//
+// The `dot_fs*` kernels below index manually (`&a[i..i + w]`). The crate's own
+// examples (`sigmoid.rs`, `disable_avx2_for_one_function.rs`) instead zip two
+// `chunks_exact` iterators, which is the documented idiom; `dot_idio*` are that
+// form. Both are kept so the difference is measurable rather than assumed.
+
+/// The documented idiom, one accumulator: zip two `chunks_exact(S::f32s::N)`.
+#[inline(always)]
+fn dot_idio1<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
+    let n = S::f32s::N;
+    let mut acc = S::f32s::splat(simd, 0.0);
+    let (mut ca, mut cb) = (a.chunks_exact(n), b.chunks_exact(n));
+    for (x, y) in (&mut ca).zip(&mut cb) {
+        acc = S::f32s::from_slice(simd, x).mul_add(S::f32s::from_slice(simd, y), acc);
+    }
+    let mut dot: f32 = acc.as_slice().iter().sum();
+    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+        dot += x * y;
+    }
+    dot as f64
+}
+
+/// The documented idiom, two independent accumulators — matching the shape the
+/// hand-written backends use, so the comparison stays like-for-like.
+#[inline(always)]
+fn dot_idio2<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
+    let n = S::f32s::N;
+    let step = n * 2;
+    let mut acc0 = S::f32s::splat(simd, 0.0);
+    let mut acc1 = S::f32s::splat(simd, 0.0);
+    let (mut ca, mut cb) = (a.chunks_exact(step), b.chunks_exact(step));
+    for (x, y) in (&mut ca).zip(&mut cb) {
+        let (x0, x1) = x.split_at(n);
+        let (y0, y1) = y.split_at(n);
+        acc0 = S::f32s::from_slice(simd, x0).mul_add(S::f32s::from_slice(simd, y0), acc0);
+        acc1 = S::f32s::from_slice(simd, x1).mul_add(S::f32s::from_slice(simd, y1), acc1);
+    }
+    let mut dot: f32 = (acc0 + acc1).as_slice().iter().sum();
+    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+        dot += x * y;
+    }
+    dot as f64
+}
+
+/// Four accumulators — more independent FMA chains to hide latency.
+#[inline(always)]
+fn dot_idio4<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
+    let n = S::f32s::N;
+    let step = n * 4;
+    let mut acc = [S::f32s::splat(simd, 0.0); 4];
+    let (mut ca, mut cb) = (a.chunks_exact(step), b.chunks_exact(step));
+    for (x, y) in (&mut ca).zip(&mut cb) {
+        for k in 0..4 {
+            acc[k] = S::f32s::from_slice(simd, &x[k * n..(k + 1) * n])
+                .mul_add(S::f32s::from_slice(simd, &y[k * n..(k + 1) * n]), acc[k]);
+        }
+    }
+    let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
+        .as_slice()
+        .iter()
+        .sum();
+    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+        dot += x * y;
+    }
+    dot as f64
+}
+
+/// `dot_idio2`, but never compiled for AVX-512.
+///
+/// Straight out of the crate's `disable_avx2_for_one_function.rs`, which exists
+/// for exactly this case: "useful if benchmarks show a specific instruction set
+/// regressing performance". Measured here, AVX-512 buys nothing — 0.19 ns per
+/// float, identical to AVX2 at half the width — because 512-bit ops trigger
+/// frequency licensing on this part. The downgrade only has to happen once
+/// anywhere in the call chain.
+#[inline(always)]
+fn dot_no512<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        let level = simd.level();
+        if let Level::Avx512(_) = level {
+            return dot_idio2(level.as_avx2().unwrap(), a, b);
+        }
+    }
+    dot_idio2(simd, a, b)
+}
 
 /// One accumulator at the CPU's native width.
 #[inline(always)]
@@ -227,6 +323,26 @@ fn dot_fs_x8_dispatch(a: &[f32], b: &[f32]) -> f64 {
     dispatch!(Level::new(), simd => dot_fs_x8(simd, a, b))
 }
 
+#[inline(never)]
+fn dot_idio1_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    dispatch!(Level::new(), simd => dot_idio1(simd, a, b))
+}
+
+#[inline(never)]
+fn dot_idio2_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    dispatch!(Level::new(), simd => dot_idio2(simd, a, b))
+}
+
+#[inline(never)]
+fn dot_idio4_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    dispatch!(Level::new(), simd => dot_idio4(simd, a, b))
+}
+
+#[inline(never)]
+fn dot_no512_dispatch(a: &[f32], b: &[f32]) -> f64 {
+    dispatch!(Level::new(), simd => dot_no512(simd, a, b))
+}
+
 // --------------------------------------------------- whole-pass comparison ---
 //
 // The per-call numbers above charge fearless_simd for one `dispatch!` per pair.
@@ -320,6 +436,10 @@ fn main() {
         ("fearless_simd 1 acc", dot_fs1_dispatch),
         ("fearless_simd 2 acc", dot_fs2_dispatch),
         ("fearless_simd x8 arrays", dot_fs_x8_dispatch),
+        ("fs idiomatic 1 acc", dot_idio1_dispatch),
+        ("fs idiomatic 2 acc", dot_idio2_dispatch),
+        ("fs idiomatic 4 acc", dot_idio4_dispatch),
+        ("fs idiomatic, no avx512", dot_no512_dispatch),
     ];
     #[cfg(target_arch = "x86_64")]
     {

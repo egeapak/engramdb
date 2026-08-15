@@ -9,6 +9,7 @@ use crate::storage::MemoryStore;
 use crate::title::TitleStrategy;
 use crate::types::{MemoryType, Provenance, Visibility};
 use anyhow::{bail, Result};
+use fearless_simd::{dispatch, prelude::*, Level};
 use serde::Serialize;
 
 /// A memory eligible for compression.
@@ -354,14 +355,28 @@ mod tests {
         }
     }
 
-    /// Every backend must agree, not just whichever one this host dispatches
-    /// to.
+    /// The dispatched kernel must agree with the scalar reference. Lengths
+    /// deliberately straddle the 4/8/16-element strides so the tail loop after
+    /// `chunks_exact` is exercised, including inputs shorter than one vector.
     ///
-    /// `dot_unit` picks AVX2 on any modern x86-64 machine, so without this the
-    /// SSE2 and scalar paths would be compiled, shipped, and never executed by
-    /// the suite — and the SSE2 path is what every pre-Haswell CPU and every
-    /// VM that masks AVX2 actually runs. Lengths deliberately straddle the
-    /// 4/8/16-element strides so each backend's scalar tail is exercised.
+    /// **This covers one SIMD level: whichever this host has.** When the
+    /// backends were hand-written they could be called directly, so a single
+    /// run checked all of them. `fearless_simd`'s `dispatch!` normalises *up*
+    /// to the best level the CPU supports and offers no runtime way down
+    /// (`Level::__dispatch_target`), so the lower levels are now only
+    /// reachable by rebuilding. A developer box and CI both run AVX2 or
+    /// better, which would leave SSE2 — what every pre-Haswell CPU and every
+    /// AVX2-masking VM executes — compiled, shipped and never executed.
+    ///
+    /// The `simd-levels` CI job is what restores that guarantee: it re-runs
+    /// this module under each `--cfg disable_dispatch_*` combination. If you
+    /// are debugging a level-specific result locally, that is the knob:
+    ///
+    /// ```text
+    /// RUSTFLAGS='--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2 \
+    ///            --cfg disable_dispatch_sse4_2' \
+    ///   cargo nextest run -p engramdb --lib -E 'test(compress::tests)'
+    /// ```
     #[test]
     fn dot_unit_backends_agree() {
         for dims in [1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 384, 385, 768] {
@@ -372,25 +387,10 @@ mod tests {
                 let dispatched = dot_unit(&a, &b);
                 assert!(
                     (reference - dispatched).abs() < 1e-5,
-                    "dims={dims} seed={seed}: scalar {reference} vs dispatched {dispatched}"
+                    "dims={dims} seed={seed}: scalar {reference} vs dispatched \
+                     {dispatched} (level {:?})",
+                    Level::new()
                 );
-                #[cfg(target_arch = "x86_64")]
-                {
-                    let sse2 = dot_unit_sse2(&a, &b);
-                    assert!(
-                        (reference - sse2).abs() < 1e-5,
-                        "dims={dims} seed={seed}: scalar {reference} vs sse2 {sse2}"
-                    );
-                    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
-                    {
-                        // SAFETY: guarded by the detection on this line.
-                        let avx2 = unsafe { dot_unit_avx2(&a, &b) };
-                        assert!(
-                            (reference - avx2).abs() < 1e-5,
-                            "dims={dims} seed={seed}: scalar {reference} vs avx2 {avx2}"
-                        );
-                    }
-                }
             }
         }
     }
@@ -1178,46 +1178,35 @@ pub fn l2_normalized(v: &[f32]) -> Vec<f32> {
 /// stops being true the moment production changes — which had already happened
 /// here once.
 ///
-/// Written with explicit SIMD intrinsics rather than a shape the
-/// auto-vectorizer might pick up, because **the release profile ships
-/// `opt-level = "z"`, which runs neither the loop vectorizer nor the
-/// unroller.** Any "vectorizer-friendly" formulation is therefore scalar in
-/// the binary users actually run. Intrinsics are semantic — they lower to the
-/// instruction regardless of the optimization level — so this is the only way
-/// to get vector arithmetic into a size-optimized build.
+/// Written with explicit SIMD — via [`fearless_simd`] — rather than a shape
+/// the auto-vectorizer might pick up, and that is *not* a consequence of the
+/// optimization level. A plain `f32` reduction does not vectorize at `-Oz`,
+/// at `2`, or at `3`: IEEE addition is not associative, so LLVM will not
+/// reassociate the accumulator without fast-math. Measured, 384-dim pairs, the
+/// scalar loop is 441 / 442 / 446 ns at those three levels — flat.
 ///
-/// Measured at `opt-level = "z"` with the real release profile (`lto = true`,
-/// `codegen-units = 1`), 384-dim pairs (`examples/` probe reproduced in
-/// `benches/parallel_simd.rs`):
+/// What the optimization level *does* decide is whether a safe SIMD
+/// abstraction can be used at all. Under the old `opt-level = "z"` profile
+/// nothing inlined, so this function was four hand-written `std::arch`
+/// backends and portable crates measured 1.3-7x slower than them. At the
+/// current `opt-level = 2` that reverses: one generic kernel over
+/// `fearless_simd` is *faster* than the intrinsics it replaced, and this was
+/// the last `unsafe` in EngramDB's own logic.
 ///
-/// | form | ns/pair |
-/// |---|---|
-/// | plain scalar loop | 461 |
-/// | eight unrolled accumulators (no intrinsics) | 720 |
-/// | [`wide`]-style portable SIMD wrapper | 384 |
-/// | SSE2 intrinsics (this, baseline path) | **65** |
-/// | AVX2 + FMA intrinsics (this, detected path) | **55** |
+/// Measured with the real release profile (`lto = true`, `codegen-units = 1`),
+/// 384-dim pairs, interleaved (`tools/simd-probe`):
 ///
-/// Note the second row: hand-unrolling into independent accumulators is
-/// *slower than the naive loop* at `-Oz`, because the optimizer that would
-/// have cleaned it up is switched off. That shape only wins at
-/// `opt-level >= 2`.
+/// | form | `-Oz` | `opt-level = 2` |
+/// |---|---|---|
+/// | plain scalar loop | 441 | 442 |
+/// | eight unrolled accumulators (no SIMD) | 720 | — |
+/// | old: SSE2 intrinsics | 61 | 60 |
+/// | old: AVX2 + FMA intrinsics, dispatched | 50 | 34 |
+/// | **this, `fearless_simd` x4 accumulators** | 185 | **34** |
 ///
-/// The four backends below are the whole hand-written SIMD surface of this
-/// workspace, so "replace them with a portable SIMD crate" is a recurring and
-/// reasonable suggestion. `fearless_simd` v0.7.0 — safe, zero-dependency,
-/// one source for SSE2/AVX2/AVX-512/NEON — was measured for exactly that and
-/// is 1.3-2.5x slower here at every x86 level, AVX-512 included, because
-/// `-Oz` leaves its `vectorize` wrapper an out-of-line call — it is
-/// `#[inline]`, a hint, and its `#[target_feature]` blocks inlining into a
-/// caller like this one regardless. Within ~10% at `opt-level = 2`/`3`, so
-/// revisit if this profile ever changes. Probe: `tools/simd-probe/`;
-/// write-up: the "Why not a portable SIMD crate?" section of
-/// `docs/contributors/parallelization-simd.md`.
-///
-/// Raising `opt-level` instead was measured and rejected: `2` doubles the
-/// binary (55.0 → 105.2 MiB) for less than a fifth of the gain this gets for
-/// free. See `docs/contributors/parallelization-simd.md`.
+/// Read the last two rows together: the profile change is what bought the
+/// speed (50 -> 34), and it would have bought it for the intrinsics too. What
+/// `fearless_simd` adds is that it matches them *and* deletes the `unsafe`.
 ///
 /// Why not `fastembed::similarity::cosine_similarity`, which is already in the
 /// tree? It cannot be reached from here — `fastembed` is an optional
@@ -1234,142 +1223,62 @@ pub fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    dot_unit_dispatch(a, b)
+    dispatch!(Level::new(), simd => dot_unit_kernel(simd, a, b))
 }
 
-/// Per-architecture backend selection, split out so each arch gets a plain
-/// function body rather than a stack of `#[cfg]` blocks with early returns.
+/// The kernel, generic over `fearless_simd`'s SIMD level.
 ///
-/// AVX2+FMA is not in the x86-64 baseline, so it is detected at run time.
-/// `is_x86_feature_detected!` caches its answer in an atomic after the first
-/// call, so this is a predictable load, not a `cpuid` per comparison.
-#[cfg(target_arch = "x86_64")]
-fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
-    if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") {
-        // SAFETY: guarded by the detection immediately above.
-        unsafe { dot_unit_avx2(a, b) }
-    } else {
-        dot_unit_sse2(a, b)
+/// `#[inline(always)]` is not optional: the crate creates target-feature
+/// contexts by inlining this body into a per-level wrapper, so without it the
+/// vector work compiles for the baseline and the whole thing is pointless.
+///
+/// **Four accumulators, not two.** Two was the obvious choice — it matches the
+/// old hand-written backends — and it left ~10% on the table against them. A
+/// 512-bit `mul_add` has enough latency that two dependency chains do not fill
+/// the pipeline; four do, and that alone is what took this from 0.90x of the
+/// intrinsics to 1.02x. Measured, not reasoned: `tools/simd-probe` carries the
+/// 1/2/4-accumulator variants side by side.
+///
+/// The loop shape is the crate's documented idiom — zip two `chunks_exact`
+/// iterators — from its own `sigmoid.rs` example. Hand-rolled `&a[i..i + w]`
+/// indexing was measured too and is slower here.
+///
+/// There is no horizontal-sum in `fearless_simd` v0.7.0 (no `reduce_sum`, and
+/// `SimdSplit` is not among `S::f32s`' bounds, so a log-depth fold cannot even
+/// be written generically), hence the scalar walk over the lanes at the end.
+/// It runs once per call, not once per element.
+#[inline(always)]
+fn dot_unit_kernel<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
+    let n = S::f32s::N;
+    let step = n * 4;
+    let mut acc = [S::f32s::splat(simd, 0.0); 4];
+    let (mut ca, mut cb) = (a.chunks_exact(step), b.chunks_exact(step));
+    for (x, y) in (&mut ca).zip(&mut cb) {
+        for k in 0..4 {
+            acc[k] = S::f32s::from_slice(simd, &x[k * n..(k + 1) * n])
+                .mul_add(S::f32s::from_slice(simd, &y[k * n..(k + 1) * n]), acc[k]);
+        }
     }
-}
-
-/// NEON is mandatory in the aarch64 baseline, so there is nothing to detect.
-#[cfg(target_arch = "aarch64")]
-fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
-    // SAFETY: `target_arch = "aarch64"` guarantees these instructions exist.
-    unsafe { dot_unit_neon(a, b) }
-}
-
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn dot_unit_dispatch(a: &[f32], b: &[f32]) -> f64 {
-    dot_unit_scalar(a, b)
-}
-
-/// Portable fallback. A single accumulator on purpose: at `-Oz` the unrolled
-/// form measured 1.6x *slower* (see [`dot_unit`]), and the architectures that
-/// reach this path are the ones we have not measured on.
-#[cfg_attr(any(target_arch = "x86_64", target_arch = "aarch64"), allow(dead_code))]
-fn dot_unit_scalar(a: &[f32], b: &[f32]) -> f64 {
-    let mut dot = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
+    let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
+        .as_slice()
+        .iter()
+        .sum();
+    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
         dot += x * y;
     }
     dot as f64
 }
 
-/// SSE2 is part of the x86-64 baseline, so this needs no `target_feature`
-/// attribute and no detection — it is always legal on the target.
+/// The scalar reference the kernel is scored against.
 ///
-/// Two accumulators so the two multiply-add chains are independent; a single
-/// one leaves half the FP issue width idle.
-#[cfg(target_arch = "x86_64")]
-fn dot_unit_sse2(a: &[f32], b: &[f32]) -> f64 {
-    use std::arch::x86_64::*;
-    // SAFETY: every intrinsic below is SSE2, which is unconditionally present
-    // on `x86_64`. The loads are unaligned (`loadu`) and bounded by `n`, which
-    // is `len` rounded down to a multiple of 8, so all 8 lanes of each pair of
-    // loads are in bounds; the tail is handled scalar-wise.
-    unsafe {
-        let (mut acc0, mut acc1) = (_mm_setzero_ps(), _mm_setzero_ps());
-        let n = a.len() / 8 * 8;
-        let mut i = 0;
-        while i < n {
-            let a0 = _mm_loadu_ps(a.as_ptr().add(i));
-            let b0 = _mm_loadu_ps(b.as_ptr().add(i));
-            let a1 = _mm_loadu_ps(a.as_ptr().add(i + 4));
-            let b1 = _mm_loadu_ps(b.as_ptr().add(i + 4));
-            acc0 = _mm_add_ps(acc0, _mm_mul_ps(a0, b0));
-            acc1 = _mm_add_ps(acc1, _mm_mul_ps(a1, b1));
-            i += 8;
-        }
-        let mut lanes = [0.0f32; 4];
-        _mm_storeu_ps(lanes.as_mut_ptr(), _mm_add_ps(acc0, acc1));
-        let mut dot: f32 = lanes.iter().sum();
-        while i < a.len() {
-            dot += a[i] * b[i];
-            i += 1;
-        }
-        dot as f64
-    }
-}
-
-/// AVX2 + FMA: 16 elements per iteration, one instruction per multiply-add.
-///
-/// # Safety
-/// The caller must have verified `avx2` and `fma` are available.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn dot_unit_avx2(a: &[f32], b: &[f32]) -> f64 {
-    use std::arch::x86_64::*;
-    let (mut acc0, mut acc1) = (_mm256_setzero_ps(), _mm256_setzero_ps());
-    let n = a.len() / 16 * 16;
-    let mut i = 0;
-    while i < n {
-        let a0 = _mm256_loadu_ps(a.as_ptr().add(i));
-        let b0 = _mm256_loadu_ps(b.as_ptr().add(i));
-        let a1 = _mm256_loadu_ps(a.as_ptr().add(i + 8));
-        let b1 = _mm256_loadu_ps(b.as_ptr().add(i + 8));
-        acc0 = _mm256_fmadd_ps(a0, b0, acc0);
-        acc1 = _mm256_fmadd_ps(a1, b1, acc1);
-        i += 16;
-    }
-    let mut lanes = [0.0f32; 8];
-    _mm256_storeu_ps(lanes.as_mut_ptr(), _mm256_add_ps(acc0, acc1));
-    let mut dot: f32 = lanes.iter().sum();
-    while i < a.len() {
-        dot += a[i] * b[i];
-        i += 1;
-    }
-    dot as f64
-}
-
-/// NEON, 8 elements per iteration. Mandatory on aarch64, so no detection.
-///
-/// # Safety
-/// `target_arch = "aarch64"` guarantees these instructions exist.
-#[cfg(target_arch = "aarch64")]
-unsafe fn dot_unit_neon(a: &[f32], b: &[f32]) -> f64 {
-    use std::arch::aarch64::*;
-    let (mut acc0, mut acc1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
-    let n = a.len() / 8 * 8;
-    let mut i = 0;
-    while i < n {
-        acc0 = vfmaq_f32(
-            acc0,
-            vld1q_f32(a.as_ptr().add(i)),
-            vld1q_f32(b.as_ptr().add(i)),
-        );
-        acc1 = vfmaq_f32(
-            acc1,
-            vld1q_f32(a.as_ptr().add(i + 4)),
-            vld1q_f32(b.as_ptr().add(i + 4)),
-        );
-        i += 8;
-    }
-    let mut dot = vaddvq_f32(vaddq_f32(acc0, acc1));
-    while i < a.len() {
-        dot += a[i] * b[i];
-        i += 1;
+/// Production no longer has a scalar path — `fearless_simd` supplies a
+/// `Fallback` level on targets with no SIMD baseline — but the equivalence
+/// tests need something to compare to that is obviously correct.
+#[cfg(test)]
+fn dot_unit_scalar(a: &[f32], b: &[f32]) -> f64 {
+    let mut dot = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
     }
     dot as f64
 }

@@ -20,25 +20,24 @@ fearless_simd = "0.7.0"
 # on, unmeasured. Keep these five keys in sync with the root profile.
 [profile.release]
 lto = true
-opt-level = "z"
+opt-level = 2
 strip = true
 panic = "abort"
 codegen-units = 1
 
-# For the "is this an -Oz artifact?" question. Same profile, one key changed.
-# Unstripped so `nm --print-size` can attribute bytes to individual kernels;
-# every candidate is `#[inline(never)]` precisely so it keeps its own symbol.
-[profile.o2]
+# `opt-level = "z"` is what this project shipped until `dot_unit` moved to
+# fearless_simd. Kept because the crate is 5x slower there, and a future
+# proposal to shrink the binary back down needs to know that it would take the
+# safe SIMD kernel with it.
+[profile.oz]
 inherits = "release"
-opt-level = 2
-strip = false
+opt-level = "z"
 
 [profile.o3]
 inherits = "release"
 opt-level = 3
-strip = false
 
-# The shipping profile, unstripped, for disassembly and symbol sizes.
+# Unstripped, for disassembly and `nm --print-size`.
 [profile.syms]
 inherits = "release"
 strip = false
