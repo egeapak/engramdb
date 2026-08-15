@@ -41,7 +41,9 @@ result, not the absolute times.
 >   irreducible.
 > - It is *faster* than the four hand-written backends it replaced (1.02×), not
 >   merely competitive.
-> - The binary is ~91% larger. That was the price, and it was paid knowingly.
+> - The binary is **+82.4% larger** (58.60 -> 106.90 MiB) and takes ~92% longer
+>   to build. That was the price, measured on one commit pair, and it was paid
+>   knowingly.
 >
 > Start at [Adopting fearless_simd](#adopting-fearless_simd-and-raising-opt-level).
 
@@ -292,6 +294,10 @@ got too. fearless_simd's contribution is the last 2% — and deleting four
 backends and the `unsafe` in them. Sell it as maintainability that costs
 nothing, not as a speedup.
 
+Confirmed in the shipped profile rather than inferred from the benchmark:
+the AVX-512 monomorphisation emits `vfmadd231ps` on `zmm` and the AVX2 one
+on `ymm`, two accumulators per issue, with `vaddps` folding them at the end.
+
 **`2`, not `3`.** `3` is not faster here (34.3 vs 33.7) and the doc's earlier
 whole-tree measurement put it ~6 MiB larger. Nothing in this workload wants
 `3`.
@@ -363,23 +369,45 @@ tests under each `--cfg disable_dispatch_*` combination. **This is not
 optional bookkeeping** — it is the only thing standing between a green suite
 and an untested kernel on the CPUs least likely to be in front of a developer.
 
-### Size
+### Size — what this actually cost
 
-`.text` bytes the kernel adds over a plain scalar loop, from `size.sh`
+Two scales. The kernel itself is noise; the profile change is the bill.
+
+**The kernel.** `.text` bytes added over a plain scalar loop, from `size.sh`
 (differencing three minimal single-kernel binaries so std and formatting
-cancel):
+cancel; the fearless case carries the same four-accumulator body that ships):
 
 | | intrinsics | fearless_simd |
 |---|---|---|
-| `-Oz` | +2,072 | +3,880 |
-| **`opt-level = 2`** | +2,179 | **+5,411** |
-| `opt-level = 3` | +2,163 | +5,411 |
+| `"z"` (old profile) | +2,088 | +4,520 |
+| **`2` (ships)** | +2,179 | **+6,291** |
+| `3` | +2,163 | +6,227 |
 
-fearless_simd is never the smaller option: `dispatch!` emits a copy of the
-kernel per SIMD level where the hand-written code emitted two. At ~3 KB on a
-multi-MB binary this is noise, and it is dwarfed by the whole-tree `opt-level`
-cost in the next section, which is the size decision that actually mattered.
+fearless_simd is never the smaller option — `dispatch!` emits a copy of the
+kernel per SIMD level where the hand-written code emitted two — and four
+accumulators cost ~900 bytes over two. At ~4 KB more than the intrinsics on a
+100 MB binary this does not register.
 
+**The profile.** This is the real number, and it is large. Same commit range,
+same machine, same toolchain — `HEAD~1` (intrinsics at `-Oz`) against `HEAD`
+(fearless_simd at `2`), both `cargo build --release`:
+
+| | binary | build |
+|---|---|---|
+| intrinsics, `opt-level = "z"` | 61,442,928 (58.60 MiB) | 17m13s |
+| **fearless_simd, `opt-level = 2`** | **112,087,952 (106.90 MiB)** | 33m05s |
+| | **+82.4%** | **+92%** |
+
+The binary ships as a prebuilt artifact (release archives, Homebrew, Scoop) and
+is spawned per Claude Code hook invocation, so this is download and cold-start
+cost, not disk. It was accepted deliberately.
+
+Note the earlier section quotes a `-Oz` baseline of 57,717,584 bytes and
+predicts +91%. That baseline was **6.5% stale** — the tree grew (harvest,
+`projects discover`) between that measurement and this one, so the prediction
+was measuring partly unrelated growth. Re-measuring the pair on one commit is
+what turned +94% into +82.4%. Old absolute byte counts in this document should
+be treated as of-their-time; the ratios are what carry.
 
 ## Why not just use `fastembed::similarity`?
 

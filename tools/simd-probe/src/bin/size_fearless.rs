@@ -1,5 +1,6 @@
 //! Size case: the same dot product via fearless_simd, with exactly **one**
-//! `dispatch!` site — what an adoption inside `dot_unit` would actually cost.
+//! `dispatch!` site, and the same four-accumulator body that ships — so this is
+//! what `ops::compress::dot_unit` actually costs.
 //!
 //! The main probe binary has four dispatch sites and so overstates this: each
 //! one monomorphises the kernel per SIMD level and drags in that level's
@@ -9,25 +10,22 @@ use fearless_simd::*;
 
 #[inline(always)]
 fn dot_inner<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let w = S::f32s::N;
-    let step = w * 2;
-    let mut acc0 = S::f32s::splat(simd, 0.0);
-    let mut acc1 = S::f32s::splat(simd, 0.0);
-    let n = a.len() / step * step;
-    let mut i = 0;
-    while i < n {
-        let a0 = S::f32s::from_slice(simd, &a[i..i + w]);
-        let b0 = S::f32s::from_slice(simd, &b[i..i + w]);
-        let a1 = S::f32s::from_slice(simd, &a[i + w..i + step]);
-        let b1 = S::f32s::from_slice(simd, &b[i + w..i + step]);
-        acc0 = a0.mul_add(b0, acc0);
-        acc1 = a1.mul_add(b1, acc1);
-        i += step;
+    let n = S::f32s::N;
+    let step = n * 4;
+    let mut acc = [S::f32s::splat(simd, 0.0); 4];
+    let (mut ca, mut cb) = (a.chunks_exact(step), b.chunks_exact(step));
+    for (x, y) in (&mut ca).zip(&mut cb) {
+        for k in 0..4 {
+            acc[k] = S::f32s::from_slice(simd, &x[k * n..(k + 1) * n])
+                .mul_add(S::f32s::from_slice(simd, &y[k * n..(k + 1) * n]), acc[k]);
+        }
     }
-    let mut d: f32 = (acc0 + acc1).as_slice().iter().sum();
-    while i < a.len() {
-        d += a[i] * b[i];
-        i += 1;
+    let mut d: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
+        .as_slice()
+        .iter()
+        .sum();
+    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+        d += x * y;
     }
     d as f64
 }
