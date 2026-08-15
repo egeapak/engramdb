@@ -399,8 +399,16 @@ that had already been hand-optimised into insensitivity.
 
 This also retired the `[profile.release.package.*]` block. Fourteen crates were
 pinned to `opt-level = 3` back when the profile was `"z"`; with the profile at
-`3` every entry named the value it already had, so they were deleted as dead
-config.
+`3` every entry named the value it already had.
+
+That removal was predicted to be byte-identical and **was not** — worth
+recording, because the prediction was the same kind of unverified reasoning
+this document keeps having to retract. The binary is 7,264 bytes *smaller*, and
+`.text` alone accounts for 6,720 of it, so codegen genuinely differs though no
+crate's `opt-level` did. The likeliest cause is fat-LTO module ordering
+shifting inlining decisions, since a per-package profile feeds cargo's crate
+metadata hash — but that is a hypothesis, not a finding. Speed is unaffected
+(138–140 ms either way) and the size moved the right way, so it was left there.
 
 ### Size — what this actually cost
 

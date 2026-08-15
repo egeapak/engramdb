@@ -250,9 +250,16 @@ codegen-units = 1
 # one: fourteen crates pinned to `opt-level = 3` while the profile itself was
 # `"z"`, which was the only thing standing between the hot paths (TOML
 # frontmatter, YAML for the legacy V1 format, Snowball stemming, glob matching)
-# and a build with no optimizer at all. The profile is now `3`, so every one of
-# those entries named the value it already had, and they were removed as dead
-# config rather than measured again.
+# and a build with no optimizer at all. The profile is now `3`, so every entry
+# named the value it already had.
+#
+# Removing them was expected to be a no-op and is NOT: the binary is 7,264
+# bytes smaller and `.text` alone moves by 6,720 (0.007%), so codegen really
+# does differ even though no crate's `opt-level` changed. Cause not
+# established — most likely fat-LTO module ordering shifting inlining
+# decisions, since cargo's per-package profile feeds the crate metadata hash.
+# Speed is unaffected (138-140 ms either way on the reindex benchmark below),
+# and the direction is favourable, so this is recorded rather than chased.
 #
 # Two things from that block are still worth knowing before adding one back.
 # Per-package `opt-level` is only *mostly* effective under `lto = true`: a
