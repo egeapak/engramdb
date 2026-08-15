@@ -186,23 +186,35 @@ fn dot_idio2<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
 }
 
 /// Four accumulators — more independent FMA chains to hide latency.
+///
+/// This is `ops::compress::dot_unit_kernel` verbatim, second loop included.
+/// Keep it that way: the probe exists to measure what ships, and it has
+/// silently drifted from production twice already.
 #[inline(always)]
 fn dot_idio4<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
     let n = S::f32s::N;
-    let step = n * 4;
     let mut acc = [S::f32s::splat(simd, 0.0); 4];
-    let (mut ca, mut cb) = (a.chunks_exact(step), b.chunks_exact(step));
-    for (x, y) in (&mut ca).zip(&mut cb) {
+    let (mut wide_a, mut wide_b) = (a.chunks_exact(n * 4), b.chunks_exact(n * 4));
+    for (x, y) in (&mut wide_a).zip(&mut wide_b) {
         for k in 0..4 {
             acc[k] = S::f32s::from_slice(simd, &x[k * n..(k + 1) * n])
                 .mul_add(S::f32s::from_slice(simd, &y[k * n..(k + 1) * n]), acc[k]);
         }
     }
+    // Whole vectors the wide loop could not take: without this, anything
+    // shorter than 4*N is entirely scalar.
+    let (mut tail_a, mut tail_b) = (
+        wide_a.remainder().chunks_exact(n),
+        wide_b.remainder().chunks_exact(n),
+    );
+    for (x, y) in (&mut tail_a).zip(&mut tail_b) {
+        acc[0] = S::f32s::from_slice(simd, x).mul_add(S::f32s::from_slice(simd, y), acc[0]);
+    }
     let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
         .as_slice()
         .iter()
         .sum();
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (x, y) in tail_a.remainder().iter().zip(tail_b.remainder()) {
         dot += x * y;
     }
     dot as f64
@@ -431,6 +443,9 @@ fn main() {
          dispatch! actually selects without changing this line.\n"
     );
 
+    // `mut` is only used by the x86-64 block below, which is cfg'd out
+    // elsewhere.
+    #[allow(unused_mut)]
     let mut kernels: Vec<Kernel> = vec![
         ("scalar (1 acc)", dot_scalar),
         ("fearless_simd 1 acc", dot_fs1_dispatch),

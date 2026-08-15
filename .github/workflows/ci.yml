@@ -364,7 +364,12 @@ jobs:
 
       - name: Run the SIMD kernel tests forced to ${{ matrix.level }}
         env:
-          RUSTFLAGS: ${{ matrix.flags }}
+          # `-C link-arg=-fuse-ld=lld` is repeated from `.cargo/config.toml`
+          # deliberately: setting the RUSTFLAGS *env var* makes cargo ignore the
+          # `[target.*] rustflags` in that file entirely (the sources are
+          # mutually exclusive, not additive), so without it this job installs
+          # lld and then silently links all three legs with BFD.
+          RUSTFLAGS: ${{ matrix.flags }} -C link-arg=-fuse-ld=lld
         run: |
           cargo nextest run -p engramdb --lib --locked \
             -E 'test(ops::compress::tests::dot_unit) + test(ops::compress::tests::similar_pairs)'

@@ -379,17 +379,28 @@ mod tests {
     /// ```
     #[test]
     fn dot_unit_backends_agree() {
-        for dims in [1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 384, 385, 768] {
+        // Straddles every stride the kernel has: N (4/8/16), the
+        // single-accumulator mop-up loop, and the 4*N wide loop (up to 64
+        // on AVX-512), plus the real embedding widths.
+        for dims in [
+            1, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 47, 63, 64, 65, 127, 128, 129, 384, 385,
+            768,
+        ] {
             for seed in 0..4u64 {
                 let a = l2_normalized(&synth_vector(seed * 2, dims));
                 let b = l2_normalized(&synth_vector(seed * 2 + 1, dims));
                 let reference = dot_unit_scalar(&a, &b);
                 let dispatched = dot_unit(&a, &b);
+                // `Level::new()` is the CPU's level; `dispatch!` normalises to
+                // the level actually *selected*, which is what the
+                // `--cfg disable_dispatch_*` CI legs change. Printing the
+                // former would name the wrong backend in exactly the runs the
+                // `simd-levels` job exists to cover.
+                let selected = dispatch!(Level::new(), simd => simd.level());
                 assert!(
                     (reference - dispatched).abs() < 1e-5,
                     "dims={dims} seed={seed}: scalar {reference} vs dispatched \
-                     {dispatched} (level {:?})",
-                    Level::new()
+                     {dispatched} (level {selected:?})"
                 );
             }
         }
@@ -1189,23 +1200,23 @@ pub fn l2_normalized(v: &[f32]) -> Vec<f32> {
 /// abstraction can be used at all. Under the old `opt-level = "z"` profile
 /// nothing inlined, so this function was four hand-written `std::arch`
 /// backends and portable crates measured 1.3-7x slower than them. At the
-/// current `opt-level = 2` that reverses: one generic kernel over
+/// current `opt-level = 3` that reverses: one generic kernel over
 /// `fearless_simd` is *faster* than the intrinsics it replaced, and this was
 /// the last `unsafe` in EngramDB's own logic.
 ///
 /// Measured with the real release profile (`lto = true`, `codegen-units = 1`),
 /// 384-dim pairs, interleaved (`tools/simd-probe`):
 ///
-/// | form | `-Oz` | `opt-level = 2` |
+/// | form | `-Oz` | `opt-level = 3` |
 /// |---|---|---|
-/// | plain scalar loop | 441 | 442 |
+/// | plain scalar loop | 441 | 446 |
 /// | eight unrolled accumulators (no SIMD) | 720 | — |
-/// | old: SSE2 intrinsics | 61 | 60 |
-/// | old: AVX2 + FMA intrinsics, dispatched | 50 | 34 |
-/// | **this, `fearless_simd` x4 accumulators** | 185 | **34** |
+/// | old: SSE2 intrinsics | 61 | 62 |
+/// | old: AVX2 + FMA intrinsics, dispatched | 50 | 37 |
+/// | **this, `fearless_simd` x4 accumulators** | 185 | **37** |
 ///
 /// Read the last two rows together: the profile change is what bought the
-/// speed (50 -> 34), and it would have bought it for the intrinsics too. What
+/// speed (50 -> 37), and it would have bought it for the intrinsics too. What
 /// `fearless_simd` adds is that it matches them *and* deletes the `unsafe`.
 ///
 /// Why not `fastembed::similarity::cosine_similarity`, which is already in the
@@ -1247,23 +1258,43 @@ pub fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
 /// `SimdSplit` is not among `S::f32s`' bounds, so a log-depth fold cannot even
 /// be written generically), hence the scalar walk over the lanes at the end.
 /// It runs once per call, not once per element.
+///
+/// **The second loop is not redundant.** Four accumulators means the first one
+/// only consumes multiples of `4 * N` — 64 floats on AVX-512 — so without it
+/// everything shorter runs entirely scalar, which the old hand-written
+/// backends did not do (they vectorized from 16 on AVX2, 8 on SSE2).
+/// `[embeddings].dimensions` is user-settable up to 4096, so a small-dimension
+/// config would otherwise fall off the ~10x cliff to the scalar path with no
+/// indication. The single-accumulator pass mops up the remaining whole vectors
+/// before the scalar tail gets what is genuinely left.
 #[inline(always)]
 fn dot_unit_kernel<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
     let n = S::f32s::N;
-    let step = n * 4;
     let mut acc = [S::f32s::splat(simd, 0.0); 4];
-    let (mut ca, mut cb) = (a.chunks_exact(step), b.chunks_exact(step));
-    for (x, y) in (&mut ca).zip(&mut cb) {
+
+    // Four independent FMA chains, `4 * N` floats per iteration.
+    let (mut wide_a, mut wide_b) = (a.chunks_exact(n * 4), b.chunks_exact(n * 4));
+    for (x, y) in (&mut wide_a).zip(&mut wide_b) {
         for k in 0..4 {
             acc[k] = S::f32s::from_slice(simd, &x[k * n..(k + 1) * n])
                 .mul_add(S::f32s::from_slice(simd, &y[k * n..(k + 1) * n]), acc[k]);
         }
     }
+
+    // Up to three whole vectors the wide loop could not take.
+    let (mut tail_a, mut tail_b) = (
+        wide_a.remainder().chunks_exact(n),
+        wide_b.remainder().chunks_exact(n),
+    );
+    for (x, y) in (&mut tail_a).zip(&mut tail_b) {
+        acc[0] = S::f32s::from_slice(simd, x).mul_add(S::f32s::from_slice(simd, y), acc[0]);
+    }
+
     let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
         .as_slice()
         .iter()
         .sum();
-    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+    for (x, y) in tail_a.remainder().iter().zip(tail_b.remainder()) {
         dot += x * y;
     }
     dot as f64

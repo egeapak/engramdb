@@ -10,7 +10,7 @@ For developers hacking on EngramDB itself. To use EngramDB, go to [../users/](..
 4. [extending.md](./extending.md) — recipes: new embedding provider, MCP tool, memory type, config field, daemon RPC.
 5. [embedding-analysis.md](./embedding-analysis.md) — benchmarked study of chunking, field composition, and aggregation.
 6. [embedding-model-alternatives.md](./embedding-model-alternatives.md) — model-by-model sweep of the embedding / reranker / NLI / title stack, with latency and footprint.
-7. [parallelization-simd.md](./parallelization-simd.md) — the CPU-bound bulk paths: what rayon bought, why an `f32` reduction never auto-vectorizes at any `opt-level`, and how `dot_unit` went from four hand-written `unsafe` backends to one safe `fearless_simd` kernel (with the profile change from `opt-level = "z"` to `2` that made it possible).
+7. [parallelization-simd.md](./parallelization-simd.md) — the CPU-bound bulk paths: what rayon bought, why an `f32` reduction never auto-vectorizes at any `opt-level`, and how `dot_unit` went from four hand-written `unsafe` backends to one safe `fearless_simd` kernel (with the profile change from `opt-level = "z"` to `3` that made it possible).
 
 The CI gate (`cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`) is enforced — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the canonical version.
 

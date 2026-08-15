@@ -1,6 +1,25 @@
-//! Size case: `ops::compress::dot_unit` as it ships — SSE2 baseline, AVX2+FMA
-//! behind runtime detection. Compare against `size_scalar`.
+//! Size case: the four hand-written `std::arch` backends `dot_unit` used to be
+//! — SSE2 baseline, AVX2+FMA behind runtime detection. Compare against
+//! `size_scalar`.
+//!
+//! x86-64 only, and gated so it still *builds* elsewhere: `size.sh` runs
+//! `cargo build --bins`, and aarch64 is the one target where this comparison
+//! matters most (it is where the deleted NEON backend lived), so the size axis
+//! has to at least compile there rather than failing the whole script.
 
+#[cfg(not(target_arch = "x86_64"))]
+fn dot(a: &[f32], b: &[f32]) -> f64 {
+    // The historical backends were per-architecture; only the x86-64 pair is
+    // reproduced here. Elsewhere this binary exists only so `--bins` succeeds,
+    // and it is excluded from the size table by `size.sh`.
+    let mut d = 0.0f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        d += x * y;
+    }
+    d as f64
+}
+
+#[cfg(target_arch = "x86_64")]
 fn dot(a: &[f32], b: &[f32]) -> f64 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -13,6 +32,7 @@ fn dot(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn sse2(a: &[f32], b: &[f32]) -> f64 {
     use std::arch::x86_64::*;
     // SAFETY: SSE2 is unconditionally present on x86_64; `n` is `len` rounded
@@ -43,6 +63,7 @@ fn sse2(a: &[f32], b: &[f32]) -> f64 {
 
 /// # Safety
 /// The caller must have verified `avx2` and `fma` are available.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn avx2(a: &[f32], b: &[f32]) -> f64 {
     use std::arch::x86_64::*;

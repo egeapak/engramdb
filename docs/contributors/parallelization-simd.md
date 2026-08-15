@@ -9,9 +9,12 @@ numbers.
 cargo bench --bench parallel_simd
 ```
 
-Numbers below: 4-core Intel Xeon @ 2.80GHz (AVX-512 capable), `profile.bench`
-(`opt-level = 2`), rayon's default pool (4 threads). Treat the ratios as the
-result, not the absolute times.
+Numbers below: 4-core Intel Xeon @ 2.80GHz (AVX-512 capable), `profile.bench`,
+rayon's default pool (4 threads). Treat the ratios as the result, not the
+absolute times — `profile.bench` tracks `[profile.release]`'s `opt-level`, and
+that value has changed twice over this document's life (`2`, then `"z"`, now
+`3`), so an absolute figure only means something next to the profile it was
+taken at.
 
 > **How this document evolved.** It started by measuring rayon over the bulk
 > paths, then claimed the fast dot product was SIMD, then retracted that after
@@ -271,13 +274,13 @@ axis. Re-checking a future version is one `cargo run --release`.
 384-dim pairs, AVX-512 host, candidates interleaved and scored on their
 minimum. "intrinsics dispatch" is the old `dot_unit`, verbatim:
 
-| kernel | `-Oz` | **`opt-level = 2`** | `opt-level = 3` |
+| kernel | `-Oz` | `opt-level = 2` | **`opt-level = 3`** |
 |---|---|---|---|
 | scalar loop | 441.0 | 442.1 | 445.9 |
 | intrinsics dispatch (the old `dot_unit`) | 49.7 | 34.4 | 36.3 |
 | fearless_simd, 1 accumulator | 373.0 | 53.0 | 53.3 |
 | fearless_simd, 2 accumulators | 317.0 | 38.2 | 38.6 |
-| **fearless_simd, 4 accumulators (shipped)** | 184.9 | **33.7** | 34.3 |
+| **fearless_simd, 4 accumulators (shipped)** | 184.9 | 33.7 | **34.3** |
 
 Three results in that table are worth stating outright.
 
@@ -764,10 +767,12 @@ not show up. If a future path parallelizes something long, route it through
 
 ## If you add more arithmetic-bound code
 
-1. **Measure at the profile that ships**, which is now `opt-level = 2`.
+1. **Measure at the profile that ships**, which is now `opt-level = 3`.
    `[profile.bench]` is kept in sync with it deliberately — it was `2` while
    release shipped `"z"`, and that mismatch is how a 1.6× pessimization got
-   merged. The bench profile still keeps `lto = false` / `codegen-units = 16`
+   merged. Measure the *workload* too, not only the kernel: picking `2` over
+   `3` on the dot product alone got the profile wrong by ~5%, because `reindex`
+   is bound by parsing and stemming rather than arithmetic. The bench profile still keeps `lto = false` / `codegen-units = 16`
    so the suite stays usable for iteration, which leaves *cross-crate inlining*
    unmeasured; for anything that lives or dies on inlining, use a standalone
    crate that mirrors `[profile.release]` key-for-key. `tools/simd-probe/` is
