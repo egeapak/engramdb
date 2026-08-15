@@ -26,15 +26,19 @@ panic = "abort"
 codegen-units = 1
 
 # For the "is this an -Oz artifact?" question. Same profile, one key changed.
+# Unstripped so `nm --print-size` can attribute bytes to individual kernels;
+# every candidate is `#[inline(never)]` precisely so it keeps its own symbol.
 [profile.o2]
 inherits = "release"
 opt-level = 2
+strip = false
 
 [profile.o3]
 inherits = "release"
 opt-level = 3
+strip = false
 
-# Unstripped, for disassembly.
+# The shipping profile, unstripped, for disassembly and symbol sizes.
 [profile.syms]
 inherits = "release"
 strip = false

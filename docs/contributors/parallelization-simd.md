@@ -341,6 +341,55 @@ bad fit for a size-optimised build, for the same reason the `wide` crate was
 rejected — and `wide`'s 7× gap versus this 1.3–2.5× one is the measure of how
 much better fearless_simd's design survives `-Oz`.
 
+### Speed against size, per `opt-level`
+
+Size matters here as much as speed: `-Oz` was chosen because the binary ships
+as a prebuilt artifact and is spawned per Claude Code hook invocation. Speed is
+ns/pair on an AVX-512 host; size is the `.text` bytes each kernel adds over a
+plain scalar loop, from `tools/simd-probe/size.sh`, which differences three
+minimal single-kernel binaries so that std, argv parsing and formatting cancel:
+
+| | intrinsics | | fearless_simd | |
+|---|---|---|---|---|
+| | ns/pair | `.text` | ns/pair | `.text` |
+| `"z"` (ships) | **45.2** | **+2,072** | 73.0 | +3,880 |
+| `opt-level = 2` | 38.2 | +2,179 | 40.8 | +5,411 |
+| `opt-level = 3` | 34.4 | +2,163 | 38.3 | +5,411 |
+
+Three things fall out of putting the two axes side by side.
+
+**The intrinsics are almost `opt-level`-independent in size** — 2,072 → 2,163
+bytes across the whole range, under 5% — and still get 1.3× faster from `"z"`
+to `3`. That is the point of intrinsics being *semantic*: the vector
+instructions are already there at `-Oz`, so raising `opt-level` only improves
+the scalar tail and the surrounding code. (The +2,072 here is consistent with
+the +2,968 measured for the real binary in the section above; this probe has
+no NEON arm and a smaller tail.)
+
+**fearless_simd buys its speed with size.** It gains 1.9× from `"z"` to `3`
+— far more than the intrinsics — and grows 39% doing it, 3,880 → 5,411 bytes.
+That growth *is* the inlining finally happening: the kernel gets inlined into
+each level's `vectorize` wrapper instead of being one shared out-of-line copy.
+The thing that makes it fast is the thing that makes it big.
+
+**It is never the smaller option**, at any `opt-level` — which disposes of the
+one argument that could have survived the speed result. "It deletes four
+backends and every `unsafe` block" is true of the *source*; the binary goes the
+other way, because `dispatch!` emits a copy per SIMD level where the
+hand-written code emits two.
+
+Keep the magnitude in perspective, though: the gap is ~1.8 KB at `-Oz` on a
+~57 MB binary, i.e. 0.003%. Size is not what decides this — it just fails to
+provide the counter-argument. **The decision rests on the `-Oz` speed result
+alone.**
+
+This table is the *kernel* scale. For the whole-program trade at the same three
+`opt-level`s — where raising it costs +91% binary for -18% on a reindex — see
+[Raising `opt-level` instead](#raising-opt-level-instead--built-and-rejected)
+above. The two scales point the same way for opposite reasons: the arithmetic
+is cheap to vectorise explicitly and expensive to vectorise by raising the
+optimiser, and the rest of the binary is the part that pays.
+
 Note also which variant wins where: at `-Oz` the array-shaped `dot_fs_x8` is
 the *worst* candidate — 4.2× slower than the plain `S::f32s` loop — while at
 `2`/`3` it is usually the best. Tuning either of these at the wrong
