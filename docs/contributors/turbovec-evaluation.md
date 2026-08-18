@@ -30,7 +30,7 @@ disqualifying on its own.
 | 4 | **Score semantics differ everywhere except two points.** We use `1/(1+‖q−v‖²)`; turbovec returns the inner product. For unit vectors these are `1/(3−2c)` vs `c`, which agree only at `c = 0.5` and `c = 1.0`, with the gain differing by 2–4.5× across MiniLM's working range. | R4 | Every weight in `retrieval.scoring` — user-facing config with published defaults — would need retuning. The semantic term also loses its `[0.2, 1.0]` floor and can go negative. |
 | 5 | **Adoption forces a lock onto a deliberately lock-free read path.** turbovec is sync (needs `spawn_blocking`), all mutations take `&mut self` (needs `RwLock`), and `sync()` explicitly does not support concurrent writers. | R5 | EngramDB runs one MCP server *per Claude Code session* plus CLI, hooks and daemon against one store. Today reads are lock-free via LanceDB MVCC. |
 | 6 | **`u64` ids vs our string ids, and a fourth consistency obligation.** `IdMapIndex` keys on `u64`; memory ids are UUIDv7 strings that appear in filenames and the `memory_id` column. `IdMapIndex` has no `from_parts`, so its id↔slot map is private state. | R5 | Either a truncating hash (a collision returns the *wrong memory*) or a persisted side-table that schema migration must rebuild — and migration rebuilds from the `.md` files, which a `.tvim` blob is not. |
-| 7 | **The one place with a plausible shape is machine-wide harvest search**, where per-project LanceDB opens dominate and recall loss is cheap. | R6 | Even there, cache the `Table` handle first. That is a smaller change than a dependency. |
+| 7 | **One real win exists, and it is not about vectors.** A single project's harvest search costs **5.55 ms at 4 rows** — pure overhead, 17× turbovec's whole load-and-query. But caching the `Table` handle recovers only 20% of it; **~2.2 ms per vector query is DataFusion planning**. | R6 | Two no-dependency fixes come first: cache the `Table` handle, and collapse the two per-project column queries into one. A flat file also needs a row store for the 15 scalar columns, which brings the open back. |
 
 Two findings **unrelated to turbovec** surfaced during the review and are worth
 fixing either way; both are written up in [Incidental findings](#incidental-findings).
@@ -276,26 +276,72 @@ The one latent trap: turbovec `=`-pins `rand_chacha 0.3.1` and `statrs 0.17.1`.
 An advisory against either fails our `cargo deny` with no local remediation —
 exactly the `quick-xml`/`pprof` situation `deny.toml` already documents.
 
-### R6 · Where a genuine win might exist
+### R6 · The one real win: per-project cost is DataFusion planning, not the scan
 
 Machine-wide harvest search (`ops::harvest_index::search_other_projects`) is the
 one path whose cost grows with something turbovec changes. Per project it pays
 `lancedb::connect` + **three** `open_table` calls (four with `--since`) + two
 DataFusion vector plans, because `ConversationIndex::table()` re-opens on every
-call and only the `Connection` is cached. With `--since` it additionally
-full-scans `session_id` + `ended_at` and builds a SQL `IN` list that can reach
-~100 KB of literals at 5,000 rows.
+call and only the `Connection` is cached.
 
-That is the shape where a memory-mapped flat file beats N table opens, and it is
-the one place recall loss is cheap — you are surfacing a transcript to read, not
-a convention gating a file edit.
+Measured against a table with the real `conversations` shape (15 scalar columns
+plus `digest_vec` and `summary_vec`), one project's search — the two column
+queries EngramDB actually issues:
 
-But two things must be true first, and only one is testable without a decision:
+| rows | LanceDB cold | LanceDB warm | turbovec load+query | turbovec warm query | `.tvim` size |
+|---|---|---|---|---|---|
+| 4 | **5.55 ms** | 4.45 ms | 316 µs | 145 µs | 440 KB |
+| 100 | 6.08 ms | 4.99 ms | 331 µs | 150 µs | 459 KB |
+| 500 | 7.40 ms | 6.02 ms | 428 µs | 182 µs | 536 KB |
+| 2,000 | 10.84 ms | 8.32 ms | 703 µs | 259 µs | 835 KB |
+| 5,000 | 21.20 ms | 17.27 ms | 1.35 ms | 435 µs | 1,435 KB |
 
-1. **Measure the LanceDB open cost.** [Pending — see Caveats.]
-2. **Try the cheaper fix.** Caching the `Table` handle per `ConversationIndex`,
-   or opening lazily, removes most of the per-project cost without a dependency.
-   If that closes the gap, the question is settled.
+*cold = fresh `connect` + `open_table` + 2 queries; warm = `Connection` and
+`Table` handles reused, only the 2 queries repeat.*
+
+Two things fall out, and the second contradicts the cheap fix this document
+originally proposed:
+
+1. **The per-project cost is ~5.5 ms and almost none of it is the scan.** At
+   **4 rows** — where the k-NN is free by construction — a search still costs
+   5.55 ms. That is fixed overhead, and it is 17× turbovec's whole
+   load-and-query.
+2. **Caching the `Table` handle recovers only ~20% of it.** Warm is 4.45 ms
+   against cold's 5.55 ms, so the three `open_table` calls are ~1.1 ms and the
+   remaining **~4.45 ms is the two DataFusion query plans themselves** — ~2.2 ms
+   per vector query, paid per project, per search, independent of row count.
+
+So the honest ordering of fixes for this path is:
+
+- **Cheapest, do first:** cache the `Table` handle on `ConversationIndex` (it
+  already caches the `Connection`). ~1.1 ms/project for a small change, and it
+  helps every caller, not just the fan-out.
+- **Worth pricing, but not obviously available:** the two column queries are
+  ~2.2 ms of planning each. `digest_vec` and `summary_vec` are searched
+  separately and merged in Rust (`conversation_index.rs:509-564`) because Lance
+  k-NNs one vector column per query — so "collapse them into one plan" is not a
+  fix that is known to exist, it is a question to ask of LanceDB. If it is not
+  available, skipping the `summary_vec` query when a project has no curated
+  summaries at all halves the cost for the common case at no risk.
+- **Only then consider a flat file.** A memory-mapped `.tvim` skips planning
+  entirely, which is why it lands at 316 µs. This is a genuine 15–17× on this
+  path, and it is the *one* place in the review where turbovec's shape is right:
+  many small indices, opened cold, scanned once, discarded — and where a recall
+  miss costs you a transcript to re-read rather than a convention that should
+  have gated a file edit.
+
+Even here, note what it does not buy. The fan-out is already 8-way concurrent
+(`SEARCH_CONCURRENCY = 8`), so 30 projects cost ~21 ms of wall clock, not 166 ms
+— comparable to the single query embedding that the same search already pays. And
+the `conversations` row still has to come from somewhere: turbovec stores vectors
+only, so the 15 scalar columns every hit renders (`first_prompt`, `summary`,
+`ended_at`, …) would need a row store beside it. Unless that row store is
+something cheaper than Lance, the per-project open comes straight back and the
+win evaporates.
+
+**Recommendation for this path: take the two no-dependency fixes and re-measure.**
+If ~2.2 ms/plan is still the floor and machine-wide search is still too slow,
+reopen the question with the row-store design worked out first.
 
 ## Incidental findings
 
@@ -350,8 +396,10 @@ wrong, as the initial brief for this review did.
   VNNI; we measured its AVX2 path. Latency figures are therefore conservative for
   turbovec; the R1 size figures and R2 recall figures are unaffected
   (quantization is architecture-independent).
-- **The LanceDB open cost is unmeasured.** This is the one number that decides
-  R6, and it is missing.
+- **R6 is measured on a synthetic table, not a real store.** The shape and column
+  set match `conversations`, but fragment layout and page-cache state on a store
+  that has been written incrementally over months may differ from one written in
+  a single batch.
 - **turbovec 1.0.0 is four months old** (first release 2026-04-13) and 1.0.0
   shipped 2026-08-18 — the day of this evaluation. 14 releases, an MSRV move from
   1.70 to 1.89, and a full dependency-stack rewrite (`faer`/`ndarray`/BLAS

@@ -122,11 +122,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ],
         )?;
         {
+            // Mirrors engram-storage: create_empty_table + merge_insert on the
+            // session_id key, rather than create_table over a reader.
             let conn = lancedb::connect(dir.to_str().unwrap()).execute().await?;
-            let reader = RecordBatchIterator::new(vec![Ok(batch.clone())], sch.clone());
-            conn.create_table("conversations", Box::new(reader))
+            conn.create_empty_table("conversations", sch.clone())
                 .execute()
                 .await?;
+            let tbl = conn.open_table("conversations").execute().await?;
+            let batches =
+                RecordBatchIterator::new(vec![Ok(batch.clone())].into_iter(), sch.clone());
+            let mut op = tbl.merge_insert(&["session_id"]);
+            op.when_not_matched_insert_all();
+            op.execute(Box::new(batches)).await?;
         }
 
         // --- LanceDB cold: fresh connect + open_table + 2 column searches (the fan-out shape) ---
