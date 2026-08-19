@@ -373,16 +373,34 @@ But nothing else moves, and two new costs appear:
   d=1536 at 4-bit is ~780 B/vector — a net **1.97×** against what we already have.
   You would quadruple the vector width in order to compress it 8×, to end up
   twice as small as not doing either.
-- **We have no 1536-dim local model, and the widest one we do have was already
-  rejected.** The provider table (`crates/engram-models/src/embeddings/onnx.rs`)
-  tops out at **1024** (`mxbai-embed-large-v1`); everything else is 384 or 768.
-  `embedding-model-alternatives.md` finding 5 re-confirmed "don't switch to
-  bge-small / nomic / **mxbai**". Reaching 1536 realistically means an API model
-  (OpenAI `text-embedding-3-small`), which contradicts the local/offline design
-  the whole ONNX stack exists to serve.
-- **It slows the path that actually dominates.** Warm embed for the current
-  default is 5.70 ms (`embedding-model-alternatives.md` R1) against a
-  vector scan of ~100–500 µs. A wider model costs multiples of that — the same
+- **1536 is not reachable locally at all, and 1024 costs 10× the model.**
+  fastembed 5.2's entire catalogue tops out at **1024 dims** (distinct widths:
+  384, 512, 768, 1024) — there is no 1536-dim option to select. Quantized wide
+  models do exist and are natively supported, so adding one is a spec constant
+  rather than an `hf_override`:
+
+  | model | dims | quantized ONNX |
+  |---|---|---|
+  | `BGELargeENV15Q` (`Qdrant/bge-large-en-v1.5-onnx-Q`) | 1024 | 668 MB (optimized fp32) |
+  | `MxbaiEmbedLargeV1Q` (`mixedbread-ai/mxbai-embed-large-v1`) | 1024 | **337 MB** |
+  | `GTELargeENV15Q` (`Alibaba-NLP/gte-large-en-v1.5`) | 1024 | 446 MB (int8/uint8) |
+  | `GTEBaseENV15Q` (`Alibaba-NLP/gte-base-en-v1.5`) | 768 | 147 MB |
+  | `NomicEmbedTextV15Q` (`nomic-ai/nomic-embed-text-v1.5`) | 768 | 137 MB |
+  | *current default* `all-MiniLM-L12-v2-u8` | 384 | **34 MB** |
+
+  So the cheapest 1024-dim quantized option is **10× the download and resident
+  footprint** of today's default, and the daemon holds it machine-wide.
+  `embedding-model-alternatives.md` finding 5 already re-confirmed "don't switch
+  to bge-small / nomic / **mxbai**" on quality-per-cost grounds. Reaching 1536
+  would mean an API model (OpenAI `text-embedding-3-small`), contradicting the
+  local/offline design the ONNX stack exists to serve.
+
+  Note that d=1024 is where top-1 already reaches 1.00 in the table above, so
+  1536 buys nothing over 1024 even if it were available.
+- **It slows a path that is only ~19% of the query.** Measured end to end
+  ([query-latency-profile.md](./query-latency-profile.md)), the embedding forward
+  pass is 3.8 ms of a ~21 ms query on a healthy store — the *smallest*
+  LanceDB-independent term. A wider model costs multiples of that — the same
   study measured bge-small-q at 5.7× warm latency "for no reliable gain". Paying
   ~4× on the dominant term to improve a term worth ~2% of the query is the wrong
   trade. turbovec's own scan also goes 4× slower (124 → 518 µs).

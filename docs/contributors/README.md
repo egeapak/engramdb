@@ -12,6 +12,7 @@ For developers hacking on EngramDB itself. To use EngramDB, go to [../users/](..
 6. [embedding-model-alternatives.md](./embedding-model-alternatives.md) — model-by-model sweep of the embedding / reranker / NLI / title stack, with latency and footprint.
 7. [parallelization-simd.md](./parallelization-simd.md) — the CPU-bound bulk paths: what rayon bought, why the release profile (`opt-level = "z"`) defeats auto-vectorization, and why the dot product uses explicit SIMD intrinsics.
 8. [turbovec-evaluation.md](./turbovec-evaluation.md) — why the TurboQuant quantized index was measured and rejected for memory vectors, with the harness in [turbovec-probe/](./turbovec-probe/).
+9. [query-latency-profile.md](./query-latency-profile.md) — where a query's milliseconds actually go, and why LanceDB fragment count (not row count) sets it.
 
 The CI gate (`cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`) is enforced — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the canonical version.
 
