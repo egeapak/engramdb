@@ -17,7 +17,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
 use lancedb::expr::{col, is_in, lit};
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
@@ -1461,6 +1461,15 @@ impl LanceIndex {
         // changes which memories the search returns.
         let mut vector_query = table
             .vector_search(query)?
+            // Project only what the aggregation loop below reads. LanceDB's
+            // default is `Select::All`, which decodes the full FixedSizeList
+            // vector — and every future column — for up to `chunk_limit`
+            // (≤65,536) candidate rows on EVERY semantic query, none of which
+            // is ever looked at. `_distance` is unaffected: scoring columns are
+            // auto-projected independently of this list (see
+            // `disable_scoring_autoprojection`, which we leave at its `false`
+            // default).
+            .select(Select::Columns(vec!["memory_id".into()]))
             .limit(chunk_limit)
             .nprobes(VECTOR_SEARCH_NPROBES)
             .refine_factor(VECTOR_SEARCH_REFINE_FACTOR);
