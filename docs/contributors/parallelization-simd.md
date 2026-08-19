@@ -359,6 +359,51 @@ overhead is gone, AVX-512 is fine. The lesson is the general one: a mechanism
 you did not verify is a guess, and this document should not have stated it as
 fact.
 
+### aarch64: no hardware, but not nothing
+
+The NEON backend was deleted with the rest, and every CI runner and dev box
+here is x86-64, so "did Apple Silicon regress?" had no obvious way to be
+answered. Two things can be established off-host, and `./aarch64.sh` in the
+probe does both (cross-compile + QEMU + `llvm-mca`; needs `qemu-user-static`,
+`gcc-aarch64-linux-gnu`, `llvm`, and the `aarch64-unknown-linux-gnu` target).
+
+**Correctness, exactly.** QEMU user-mode is an architectural emulator — the
+arithmetic it performs is the arithmetic the hardware performs. `Level::Neon`
+is selected, and the shipped kernel and the deleted NEON backend both agree
+with a scalar reference across 23 lengths × 8 seeds, worst absolute error
+9.537e-7 against a 1e-5 tolerance.
+
+**Throughput, as a static estimate.** `llvm-mca` models a named core's pipeline
+and reports cycles for a loop body; Apple M1 is one of the cores it models. The
+two hot loops, extracted from the cross-compiled binary:
+
+| core | NEON intrinsics (deleted) | fearless_simd (ships) | |
+|---|---|---|---|
+| **apple-m1** | 0.5014 cyc/float | **0.2507** | **2.0×** |
+| neoverse-n1 | 0.5013 | 0.2507 | 2.0× |
+| cortex-a72 | 0.6270 | 0.5636 | 1.11× |
+
+Both loops come out at ~4 cycles per iteration on M1 and N1 — but the new one
+does 16 floats per iteration against the old one's 8, because four accumulators
+fill the pipeline where two left it idle. Same effect as on x86, and it is the
+whole margin. On cortex-a72, a narrower older core, the loop is
+throughput-bound rather than latency-bound and the advantage mostly disappears.
+
+Worth noting separately: at `opt-level = 3` the kernel **inlines** on aarch64 —
+four `fmla` sit directly in `dot_fearless` with no `bl vectorize_neon`. At
+`-Oz` it did not, and that out-of-line wrapper was the single biggest reason
+the crate lost there. The disassembly is the evidence that the profile change
+fixed it on ARM too, not only on x86.
+
+**What this is not: a wall-clock benchmark.** QEMU timings are meaningless (it
+translates to x86), and `llvm-mca` assumes a perfect front end — no cache
+misses, no branch mispredicts — and models steady state only. Apple does not
+publish full pipeline details, so LLVM's M1 model is itself an approximation.
+Treat the *ratio* as the result and ignore the absolutes. **A measurement on
+real silicon supersedes all of this the moment anyone has a Mac to hand**; the
+claim being made here is the narrow one, that the NEON path is correct and is
+not obviously slower.
+
 ### Per-level test coverage had to be rebuilt
 
 The hand-written backends could be called directly, so one test run checked
