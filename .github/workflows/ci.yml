@@ -320,6 +320,60 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
 
+  # `ops::compress::dot_unit` is `fearless_simd`, whose `dispatch!` normalises
+  # *up* to the best SIMD level the CPU supports and offers no runtime way down.
+  # Every runner here has AVX2 or better, so without this job the SSE2 and
+  # SSE4.2 kernels would be compiled, shipped, and never once executed by the
+  # suite — and SSE2 is what every pre-Haswell CPU and every AVX2-masking VM
+  # runs. The hand-written backends this replaced could be called directly, so
+  # one run covered them all; that guarantee now costs a build per level.
+  #
+  # `--cfg disable_dispatch_*` is fearless_simd's own supported knob. Scoped to
+  # the arithmetic tests, and to `-p engramdb --lib`, so it stays a couple of
+  # minutes rather than a full matrix of the workspace.
+  simd-levels:
+    name: SIMD kernel at every dispatch level
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - level: avx2
+            flags: "--cfg disable_dispatch_avx512"
+          - level: sse4.2
+            flags: "--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2"
+          - level: sse2
+            flags: "--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2 --cfg disable_dispatch_sse4_2"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: simd-${{ matrix.level }}
+
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Run the SIMD kernel tests forced to ${{ matrix.level }}
+        env:
+          # `-C link-arg=-fuse-ld=lld` is repeated from `.cargo/config.toml`
+          # deliberately: setting the RUSTFLAGS *env var* makes cargo ignore the
+          # `[target.*] rustflags` in that file entirely (the sources are
+          # mutually exclusive, not additive), so without it this job installs
+          # lld and then silently links all three legs with BFD.
+          RUSTFLAGS: ${{ matrix.flags }} -C link-arg=-fuse-ld=lld
+        run: |
+          cargo nextest run -p engramdb --lib --locked \
+            -E 'test(ops::compress::tests::dot_unit) + test(ops::compress::tests::similar_pairs)'
+
   # `--all-features` necessarily turns `bundled-onnxruntime` back on, so the job
   # above links ONNX Runtime statically and never exercises what users actually
   # ship: default features, where the runtime is `dlopen`ed at run time. This job
