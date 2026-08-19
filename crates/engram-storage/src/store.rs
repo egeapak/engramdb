@@ -2949,6 +2949,81 @@ mod tests {
         assert!(!has_embedding_flag(&store, "he-1").await, "chunks deleted");
     }
 
+    /// REGRESSION: the BATCHED chunk delete must clear `has_embedding` too.
+    ///
+    /// `delete_chunks` cleared the flag but `delete_chunks_batch` did not,
+    /// while `upsert_chunks_batch` routes every entry whose text embedded to
+    /// nothing into the batched path. A memory edited down to empty content
+    /// therefore ended with zero chunk rows and `has_embedding = true`, and
+    /// stayed eligible for `has_embedding`-gated semantic ranking (R3) — with
+    /// no vectors to rank on — until the next reindex rebuilt the flag.
+    #[tokio::test]
+    async fn delete_chunks_batch_clears_has_embedding_flag() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for id in ["hb-1", "hb-2"] {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .upsert_chunks(id, vec![vec![0.2f32; 384]])
+                .await
+                .unwrap();
+            assert!(has_embedding_flag(&store, id).await);
+        }
+
+        store
+            .lance_index
+            .delete_chunks_batch(&["hb-1".to_string(), "hb-2".to_string()])
+            .await
+            .unwrap();
+
+        for id in ["hb-1", "hb-2"] {
+            assert!(
+                !has_embedding_flag(&store, id).await,
+                "{id}: batched chunk delete must clear has_embedding, \
+                 exactly as the per-memory delete does"
+            );
+        }
+    }
+
+    /// The empty-text path through `upsert_chunks_batch` (which delegates to
+    /// `delete_chunks_batch`) must leave the flag false — the end-to-end shape
+    /// of the regression above, driven through the public API.
+    #[tokio::test]
+    async fn upsert_chunks_batch_with_no_chunks_clears_has_embedding() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = create_test_memory("hb-empty", Visibility::Shared);
+        store.create(&mem).await.unwrap();
+        store
+            .upsert_chunks("hb-empty", vec![vec![0.2f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, "hb-empty").await);
+
+        // Re-embedding a now-empty memory yields no chunks for it.
+        let current = store.get("hb-empty").await.unwrap();
+        store
+            .upsert_chunks_batch(vec![(
+                "hb-empty".to_string(),
+                current.updated_at,
+                Vec::new(),
+            )])
+            .await
+            .unwrap();
+
+        assert!(
+            !has_embedding_flag(&store, "hb-empty").await,
+            "a memory re-embedded to zero chunks must not stay has_embedding=true"
+        );
+    }
+
     /// A store predating `keyword_stems` must gain populated stems on open,
     /// and they must equal what computing from the `.md` file would produce.
     /// Equality is the whole point: the stored value is only useful because

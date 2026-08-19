@@ -1269,6 +1269,14 @@ impl LanceIndex {
 
     /// Delete the chunks of many memories in ONE delete commit
     /// (`memory_id IN (...)`), instead of one dataset version per ID.
+    ///
+    /// Clears the memories-table `has_embedding` flag for the same ids, exactly
+    /// as the per-memory [`Self::delete_chunks`] does. Without it the batched
+    /// path left the flag stale-true: `upsert_chunks_batch` routes an entry
+    /// whose text embedded to nothing here (see its empty-input handling), so a
+    /// memory edited down to empty content kept `has_embedding = true` with zero
+    /// chunk rows and stayed eligible for `has_embedding`-gated semantic ranking
+    /// (R3) until the next reindex rebuilt the flag from the chunk-id snapshot.
     pub async fn delete_chunks_batch(&self, memory_ids: &[String]) -> Result<()> {
         if memory_ids.is_empty() {
             return Ok(());
@@ -1287,6 +1295,7 @@ impl LanceIndex {
                 .await
                 .context("Failed to delete chunk batch")?;
         }
+        self.set_has_embedding_batch(memory_ids, false).await?;
         Ok(())
     }
 
