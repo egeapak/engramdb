@@ -9,17 +9,45 @@ numbers.
 cargo bench --bench parallel_simd
 ```
 
-Numbers below: 4-core Intel Xeon @ 2.80GHz (AVX-512 capable), `profile.bench`
-(`opt-level = 2`), rayon's default pool (4 threads). Treat the ratios as the
-result, not the absolute times.
+Numbers below: 4-core Intel Xeon @ 2.80GHz (AVX-512 capable), `profile.bench`,
+rayon's default pool (4 threads). Treat the ratios as the result, not the
+absolute times — `profile.bench` tracks `[profile.release]`'s `opt-level`, and
+that value has changed twice over this document's life (`2`, then `"z"`, now
+`3`), so an absolute figure only means something next to the profile it was
+taken at.
 
 > **How this document evolved.** It started by measuring rayon over the bulk
 > paths, then claimed the fast dot product was SIMD, then retracted that after
 > disassembly showed it was instruction-level parallelism, then established
-> that neither survives the release profile — and finally arrived at explicit
-> intrinsics, which do. The dead ends are kept because each one is a trap
-> someone will otherwise re-enter. If you only read one section, read
-> [The release profile is the whole story](#the-release-profile-is-the-whole-story).
+> that neither survives the release profile — and arrived at explicit
+> intrinsics, which do. Then the release profile itself changed, and the
+> intrinsics were deleted. The dead ends are kept because each one is a trap
+> someone will otherwise re-enter.
+
+> ## ⚠️ Read this first: the profile changed
+>
+> **`[profile.release]` is `opt-level = 3`. It was `"z"` for most of this
+> document's life, and large parts of it are written against `"z"`.**
+>
+> Everything below that reasons about `-Oz` — that auto-vectorization is off,
+> that portable SIMD crates cannot be used, that hand-written `std::arch`
+> intrinsics are the only way to get vector instructions into the binary — was
+> true and is now history. It is kept because the measurements are real and the
+> reasoning is reusable, not because it describes the build you have.
+>
+> What is true today:
+>
+> - `ops::compress::dot_unit` is [`fearless_simd`](https://github.com/linebender/fearless_simd),
+>   one generic kernel, no `#[cfg(target_arch)]`, **no `unsafe`**. That was
+>   the last `unsafe` in EngramDB's own logic; the only production `unsafe`
+>   left in the workspace is the `dlopen` in `engram-onnx`, which is
+>   irreducible.
+> - It is *faster* than the four hand-written backends it replaced (1.02×), not
+>   merely competitive.
+> - The binary is **+91% larger** (58.60 -> 111.96 MiB) and takes about twice
+>   as long to build. That was the price, measured, and it was paid knowingly.
+>
+> Start at [Adopting fearless_simd](#adopting-fearless_simd-and-raising-opt-level).
 
 ## Summary
 
@@ -158,7 +186,13 @@ scalar elsewhere. Verified in the actual stripped release binary:
 
 **Cost: 2,968 bytes.** 57,717,584 → 57,720,552 (+0.01%).
 
-### Raising `opt-level` instead — built and rejected
+### Raising `opt-level` instead — rejected here, adopted later
+
+> **Superseded.** This section rejected raising `opt-level`; the project later
+> did it anyway. The measurements stand — the trade really is ~+91% binary for
+> ~23% off a reindex — but the conclusion drawn from them was reversed once
+> `-Oz` turned out to also be blocking a safe SIMD crate. See
+> [Adopting fearless_simd](#adopting-fearless_simd-and-raising-opt-level).
 
 The alternative is to let the auto-vectorizer do it, which means raising
 `opt-level` across the whole dependency chain. Both levels were built and
@@ -172,11 +206,16 @@ measured end to end (everything else in the profile held fixed; speed is
 | `3` | 110.83 MiB | **+101.4%** | 118 ms | 123 ms | 37m43s |
 
 Roughly **double the binary for ~23% off a reindex** — and `3` over `2` buys
-~3% more speed for another 5.7 MiB, so `2` is the knee. Against that, the
-intrinsics get 11–13× on the arithmetic for 3 KB. The binary ships as a
+~3% more speed for another 5.7 MiB, so `2` is the knee. The binary ships as a
 prebuilt artifact (release archives, Homebrew, Scoop) and is spawned per
 Claude Code hook invocation, so its size is download and cold-start cost, not
 disk.
+
+That is what made this look like a bad trade at the time: the intrinsics got
+11–13× on the arithmetic for 3 KB, so the arithmetic did not need `opt-level`.
+What the framing missed is that `opt-level` was not only buying arithmetic — it
+was also the thing keeping every safe SIMD crate out of the codebase. `2` is
+still the knee; it is now the shipped value.
 
 `reindex` improves far less than the microbenchmarks suggest because it is a
 *mixed* workload — LanceDB commits, file I/O, allocator traffic — in which
@@ -209,6 +248,254 @@ units — for a `reindex` A/B of 196 ms min / 248 ms median baseline vs 192 ms /
 Reindex would not have moved much regardless: its bulk work is frontmatter
 deserialization and Snowball stemming, inside `toml`, `serde_yaml_ng` and
 `rust-stemmers`, not in EngramDB's crates.
+
+## Adopting fearless_simd, and raising `opt-level`
+
+`ops::compress::dot_unit` used to be four hand-written backends
+(`dot_unit_{sse2,avx2,neon,scalar}`) behind `is_x86_feature_detected!`. It is
+now a single generic kernel over
+[`fearless_simd`](https://github.com/linebender/fearless_simd) — and with it
+went the last `unsafe` in EngramDB's own logic. (The workspace is not
+`unsafe`-free: `engram-onnx` still `dlopen`s the ONNX Runtime, which no crate
+can do safely, and two tests call `libc::mkfifo`.)
+
+That was only possible because `[profile.release]` moved off `opt-level = "z"`.
+The two decisions are one decision: at `-Oz` the crate was 1.3–2.5× *slower*
+than the intrinsics (measured in detail below, and kept, because it is the
+reason this took two attempts). At `2` or `3` it is ~1.02× *faster*.
+
+The probe is committed at `tools/simd-probe/` — a standalone crate (its own
+`[workspace]`, like `fuzz/`) that mirrors `[profile.release]` key-for-key, with
+every candidate timed interleaved in one process. `./size.sh` gives the size
+axis. Re-checking a future version is one `cargo run --release`.
+
+### The numbers that decided it
+
+384-dim pairs, AVX-512 host, candidates interleaved and scored on their
+minimum. "intrinsics dispatch" is the old `dot_unit`, verbatim:
+
+| kernel | `-Oz` | `opt-level = 2` | **`opt-level = 3`** |
+|---|---|---|---|
+| scalar loop | 441.0 | 442.1 | 445.9 |
+| intrinsics dispatch (the old `dot_unit`) | 49.7 | 34.4 | 36.3 |
+| fearless_simd, 1 accumulator | 373.0 | 53.0 | 53.3 |
+| fearless_simd, 2 accumulators | 317.0 | 38.2 | 38.6 |
+| **fearless_simd, 4 accumulators (shipped)** | 184.9 | 33.7 | **34.3** |
+
+Three results in that table are worth stating outright.
+
+**Four accumulators, not two.** Two is the obvious choice — it is what the
+hand-written backends did — and it left ~10% on the table. A 512-bit `mul_add`
+has enough latency that two dependency chains do not fill the pipeline. Going
+to four is the entire difference between 0.90× of the intrinsics and 1.02×. It
+cost one line and would never have been found by reasoning about it.
+
+**`opt-level` is the win; the crate is free.** Of the 49.7 → 33.7 ns, almost
+all of it (49.7 → 34.4) is the profile change, which the intrinsics would have
+got too. fearless_simd's contribution is the last 2% — and deleting four
+backends and the `unsafe` in them. Sell it as maintainability that costs
+nothing, not as a speedup.
+
+Confirmed in the shipped profile rather than inferred from the benchmark:
+the AVX-512 monomorphisation emits `vfmadd231ps` on `zmm` and the AVX2 one
+on `ymm`, two accumulators per issue, with `vaddps` folding them at the end.
+
+**The kernel cannot tell `2` from `3`** (33.7 vs 34.3 ns, inside the noise).
+That is a fact about the kernel, not about the profile — see
+[`2` vs `3`](#2-vs-3-the-kernel-is-the-wrong-place-to-ask) below, where the
+*workload* turns out to disagree.
+
+### The scalar loop never vectorizes, at any `opt-level`
+
+Note row one: 441 ns at `-Oz`, 442 at `2`, 446 at `3`. Raising `opt-level` does
+**not** make a plain `f32` dot product vectorize, because IEEE addition is not
+associative and LLVM will not reassociate the accumulator without fast-math.
+That is why this kernel is explicitly SIMD rather than a tidy loop, and it is
+unchanged by the profile move. `-Oz` was never the reason explicit SIMD was
+needed here; it was only the reason it had to be *unsafe* explicit SIMD.
+
+### Getting the API right — two mistakes worth not repeating
+
+**The loop shape is `opt-level`-dependent, and reverses.** The crate's
+documented idiom is zipping two `chunks_exact` iterators (its `sigmoid.rs`
+example). Hand-rolled `&a[i..i + w]` indexing measured **much better at `-Oz`**
+(75 vs 317 ns) and **worse at `2`** (49.8 vs 38.2). Had the API been evaluated
+only at `-Oz`, the idiomatic form — the one that wins in production — would
+have been discarded as hopeless.
+
+**Do not force a level with `Token::assume_supported()`.** It hands over a
+proof token but does *not* enable the target feature on the calling function,
+so the body compiles for the baseline and you measure emulation. That route
+reported AVX2 ~12× slower than the same kernel through `dispatch!`. The
+supported knob is `--cfg disable_dispatch_*` at build time.
+
+### What v0.7.0 does not have
+
+- **No horizontal sum.** There is no `reduce_sum`, and `SimdSplit` is not among
+  `S::f32s`' trait bounds, so a log-depth lane fold cannot even be *written*
+  generically. Every kernel here ends in a scalar walk over N lanes. It runs
+  once per call rather than once per element, so it does not show up at 384
+  dims, but it would at 16.
+- **No runtime way down a level.** `dispatch!` normalises *up* to the best the
+  CPU has (`Level::__dispatch_target`). This has a real testing consequence,
+  below.
+
+### The AVX-512 downgrade: offered, measured, not used
+
+`examples/disable_avx2_for_one_function.rs` exists for the case where "a
+specific instruction set regresses performance", and downgrading AVX-512 →
+AVX2 for this kernel looked indicated: at `-Oz` the AVX-512 level did 32 floats
+per iteration for the same time AVX2 took over 16.
+
+It was implemented (`dot_no512` in the probe) and measured: **37.3 ns against
+38.2 without it at `opt-level = 2` — inside the noise.** Not shipped.
+
+An earlier revision of this document explained that `-Oz` result as 512-bit
+frequency licensing. **That was speculation and it was wrong.** The real cause
+is that at `-Oz` the loop is bound by per-element overhead — bounds checks and
+an un-inlined wrapper — so vector *width* buys nothing at any level; per float
+all three levels cost the same 0.19 ns. Once the optimizer is on and that
+overhead is gone, AVX-512 is fine. The lesson is the general one: a mechanism
+you did not verify is a guess, and this document should not have stated it as
+fact.
+
+### aarch64: no hardware, but not nothing
+
+The NEON backend was deleted with the rest, and every CI runner and dev box
+here is x86-64, so "did Apple Silicon regress?" had no obvious way to be
+answered. Two things can be established off-host, and `./aarch64.sh` in the
+probe does both (cross-compile + QEMU + `llvm-mca`; needs `qemu-user-static`,
+`gcc-aarch64-linux-gnu`, `llvm`, and the `aarch64-unknown-linux-gnu` target).
+
+**Correctness, exactly.** QEMU user-mode is an architectural emulator — the
+arithmetic it performs is the arithmetic the hardware performs. `Level::Neon`
+is selected, and the shipped kernel and the deleted NEON backend both agree
+with a scalar reference across 23 lengths × 8 seeds, worst absolute error
+9.537e-7 against a 1e-5 tolerance.
+
+**Throughput, as a static estimate.** `llvm-mca` models a named core's pipeline
+and reports cycles for a loop body; Apple M1 is one of the cores it models. The
+two hot loops, extracted from the cross-compiled binary:
+
+| core | NEON intrinsics (deleted) | fearless_simd (ships) | |
+|---|---|---|---|
+| **apple-m1** | 0.5014 cyc/float | **0.2507** | **2.0×** |
+| neoverse-n1 | 0.5013 | 0.2507 | 2.0× |
+| cortex-a72 | 0.6270 | 0.5636 | 1.11× |
+
+Both loops come out at ~4 cycles per iteration on M1 and N1 — but the new one
+does 16 floats per iteration against the old one's 8, because four accumulators
+fill the pipeline where two left it idle. Same effect as on x86, and it is the
+whole margin. On cortex-a72, a narrower older core, the loop is
+throughput-bound rather than latency-bound and the advantage mostly disappears.
+
+Worth noting separately: at `opt-level = 3` the kernel **inlines** on aarch64 —
+four `fmla` sit directly in `dot_fearless` with no `bl vectorize_neon`. At
+`-Oz` it did not, and that out-of-line wrapper was the single biggest reason
+the crate lost there. The disassembly is the evidence that the profile change
+fixed it on ARM too, not only on x86.
+
+**What this is not: a wall-clock benchmark.** QEMU timings are meaningless (it
+translates to x86), and `llvm-mca` assumes a perfect front end — no cache
+misses, no branch mispredicts — and models steady state only. Apple does not
+publish full pipeline details, so LLVM's M1 model is itself an approximation.
+Treat the *ratio* as the result and ignore the absolutes. **A measurement on
+real silicon supersedes all of this the moment anyone has a Mac to hand**; the
+claim being made here is the narrow one, that the NEON path is correct and is
+not obviously slower.
+
+### Per-level test coverage had to be rebuilt
+
+The hand-written backends could be called directly, so one test run checked
+SSE2, AVX2, NEON and scalar together. `dispatch!` offers no runtime way down,
+and every dev box and CI runner has AVX2 or better — so the SSE2 kernel, which
+is what every pre-Haswell CPU and every AVX2-masking VM executes, would have
+been compiled, shipped, and never once executed.
+
+The `simd-levels` CI job restores the guarantee by rebuilding the arithmetic
+tests under each `--cfg disable_dispatch_*` combination. **This is not
+optional bookkeeping** — it is the only thing standing between a green suite
+and an untested kernel on the CPUs least likely to be in front of a developer.
+
+### `2` vs `3`: the kernel is the wrong place to ask
+
+The dot product cannot distinguish them — 33.7 ns at `2` against 34.3 at `3`,
+inside the run-to-run spread. On that evidence `2` was chosen, and an earlier
+revision of this document justified it with a borrowed figure: that `3` bought
+"~3% more speed for another 5.7 MiB".
+
+**Both halves of that were wrong**, and the whole-program measurement is what
+showed it. Three binaries, one commit, one machine, `reindex --index-only` over
+a 1,200-memory store, interleaved round-robin and scored on the minimum of 15:
+
+| build | binary | min | vs `"z"` |
+|---|---|---|---|
+| `"z"` + intrinsics | 61,442,928 (58.60 MiB) | 153 ms | — |
+| `opt-level = 2` | 112,087,952 (106.90 MiB) | 143 ms | +82% size, −7% time |
+| **`opt-level = 3` (ships)** | **117,397,488 (111.96 MiB)** | **136 ms** | +91% size, −11% time |
+
+`3` over `2` is **~5% faster for ~4.7% more binary** — close to 1:1, and an
+easy call once the +82% step has been taken. The old claim had it as 3% for
+5.7 MiB, i.e. a clearly bad trade.
+
+The reason the microbenchmark misleads is worth internalising, because it is
+the same shape as the `-Oz` mistake earlier in this document: **`reindex` is
+not arithmetic-bound.** Its time goes to TOML frontmatter deserialization and
+Snowball stemming, and those are exactly the code `3` helps and the dot product
+is not. Tuning the profile on the kernel measures the one part of the workload
+that had already been hand-optimised into insensitivity.
+
+This also retired the `[profile.release.package.*]` block. Fourteen crates were
+pinned to `opt-level = 3` back when the profile was `"z"`; with the profile at
+`3` every entry named the value it already had.
+
+That removal was predicted to be byte-identical and **was not** — worth
+recording, because the prediction was the same kind of unverified reasoning
+this document keeps having to retract. The binary is 7,264 bytes *smaller*, and
+`.text` alone accounts for 6,720 of it, so codegen genuinely differs though no
+crate's `opt-level` did. The likeliest cause is fat-LTO module ordering
+shifting inlining decisions, since a per-package profile feeds cargo's crate
+metadata hash — but that is a hypothesis, not a finding. Speed is unaffected
+(138–140 ms either way) and the size moved the right way, so it was left there.
+
+### Size — what this actually cost
+
+Two scales. The kernel itself is noise; the profile change is the bill.
+
+**The kernel.** `.text` bytes added over a plain scalar loop, from `size.sh`
+(differencing three minimal single-kernel binaries so std and formatting
+cancel; the fearless case carries the same four-accumulator body that ships):
+
+| | intrinsics | fearless_simd |
+|---|---|---|
+| `"z"` (old profile) | +2,088 | +4,520 |
+| `2` | +2,163 | +6,259 |
+| **`3` (ships)** | +2,163 | **+6,211** |
+
+fearless_simd is never the smaller option — `dispatch!` emits a copy of the
+kernel per SIMD level where the hand-written code emitted two — and four
+accumulators cost ~900 bytes over two. At ~4 KB more than the intrinsics on a
+100 MB binary this does not register.
+
+**The profile.** This is the real number, and it is large. Same commit range,
+same machine, same toolchain, both `cargo build --release`:
+
+| | binary | build |
+|---|---|---|
+| intrinsics, `opt-level = "z"` | 61,442,928 (58.60 MiB) | 17m13s |
+| **fearless_simd, `opt-level = 3`** | **117,397,488 (111.96 MiB)** | 34m43s |
+| | **+91.0%** | **+102%** |
+
+The binary ships as a prebuilt artifact (release archives, Homebrew, Scoop) and
+is spawned per Claude Code hook invocation, so this is download and cold-start
+cost, not disk. It was accepted deliberately.
+
+Note the earlier section quotes a `-Oz` baseline of 57,717,584 bytes. That
+baseline is **6.5% stale** — the tree gained harvest and `projects discover`
+between that measurement and this one — so any percentage computed against it
+is measuring partly unrelated growth. Old absolute byte counts in this document
+should be treated as of-their-time; only the ratios carry, and only when both
+halves were measured together.
 
 ## Why not just use `fastembed::similarity`?
 
@@ -495,15 +782,26 @@ not show up. If a future path parallelizes something long, route it through
 - **`[profile.release.package.*] opt-level`** — see above. Silently discarded
   under fat LTO; +1.46% binary for one crate, +37.2% for all seven, no
   surviving speedup.
-- **Raising `opt-level`** — see above. Roughly double the binary for ~23% off
-  a reindex; the intrinsics get 11–13× on the arithmetic for 3 KB.
+- ~~**Raising `opt-level`**~~ — **later adopted.** Roughly double the binary
+  for ~23% off a reindex. Rejected while the arithmetic was the only thing it
+  bought; taken once `-Oz` proved to be what blocked a safe SIMD crate.
 - **Hand-unrolled accumulators without intrinsics.** 1.6× *slower* than a
-  naive loop in a release build. Only wins at `opt-level >= 2`.
+  naive loop at `-Oz`; only wins at `opt-level >= 2`, which is now the shipped
+  value. Still not used: a plain `f32` reduction does not vectorize at any
+  `opt-level` (IEEE addition is not associative), so this buys ILP, not SIMD.
 - **The `wide` crate.** Safe, no `unsafe`, portable across x86 and aarch64 from
   one source, and it does emit `mulps`/`addps` at `-Oz` — but 384 ns/pair
   against 55 ns for intrinsics, because its abstraction layers do not get
-  inlined without an optimizer. A good default in a normal profile; not in
-  this one.
+  inlined without an optimizer. Measured only at `-Oz`; given that
+  `fearless_simd` went from 2.5× slower to 1.02× faster on the profile change
+  alone, this verdict should be treated as untested against the current
+  profile rather than settled.
+- ~~**The `fearless_simd` crate (v0.7.0)**~~ — **adopted; it is what
+  `dot_unit` is now.** Rejected on the first pass at 1.3–2.5× slower than the
+  intrinsics, which was a true measurement of `-Oz` and a wrong conclusion
+  about the crate. At `opt-level = 2` with four accumulators it is 1.02×
+  *faster*. Two things had to change together: the profile, and the kernel.
+  Full write-up above.
 - **`std::simd`.** Nightly-only; the repo is stable-only.
 - **`-C target-cpu=native`.** Under 10% on the auto-vectorized variants, and it
   makes the binary unshippable as a prebuilt artifact. Runtime dispatch gets
@@ -514,12 +812,36 @@ not show up. If a future path parallelizes something long, route it through
 
 ## If you add more arithmetic-bound code
 
-1. Write it, and measure it at `opt-level = "z"` — not just via `cargo bench`,
-   which uses `opt-level = 2` and will rank candidates differently.
-2. If it is a reduction over a slice of `f32`/`f64`, expect auto-vectorization
-   to give you nothing and reach for `std::arch` intrinsics with runtime
-   dispatch, following `ops::compress::dot_unit`.
-3. Disassemble the stripped release binary to confirm the instructions are
-   there (`objdump -d | grep vfmadd`). Do not infer it from a benchmark.
-4. Test every backend against a scalar reference, not just the one your
-   machine dispatches to.
+1. **Measure at the profile that ships**, which is now `opt-level = 3`.
+   `[profile.bench]` is kept in sync with it deliberately — it was `2` while
+   release shipped `"z"`, and that mismatch is how a 1.6× pessimization got
+   merged. Measure the *workload* too, not only the kernel: picking `2` over
+   `3` on the dot product alone got the profile wrong by ~5%, because `reindex`
+   is bound by parsing and stemming rather than arithmetic. The bench profile still keeps `lto = false` / `codegen-units = 16`
+   so the suite stays usable for iteration, which leaves *cross-crate inlining*
+   unmeasured; for anything that lives or dies on inlining, use a standalone
+   crate that mirrors `[profile.release]` key-for-key. `tools/simd-probe/` is
+   the worked example.
+2. **A reduction over `f32`/`f64` will not auto-vectorize at any `opt-level`** —
+   IEEE addition is not associative and LLVM will not reassociate the
+   accumulator without fast-math. Reach for `fearless_simd`, following
+   `ops::compress::dot_unit_kernel`. Do not add `unsafe` intrinsics; there are
+   none left in this workspace and the crate now beats the ones there were.
+3. **Use several accumulators, and measure how many.** Two matched the old
+   hand-written backends and left 10% on the table against them; four closed
+   it. Vector width and FMA latency both grow with the level, so the right
+   count is not the obvious one.
+4. **Test every SIMD level, not just this machine's.** `dispatch!` always
+   selects the best level the CPU has and offers no runtime way down, so
+   lower levels are only reachable by rebuilding with `--cfg
+   disable_dispatch_*`. The `simd-levels` CI job does this; extend its filter
+   when you add kernels, or they ship covered on AVX2 alone.
+5. **Disassemble the release binary** to confirm the instructions are there
+   (`objdump -d | grep vfmadd`). Do not infer it from a benchmark. When a
+   candidate is slower than it should be, the disassembly is also where the
+   *reason* is — surviving bounds checks, an un-inlined wrapper, or a call
+   into `core::iter::Sum`.
+6. **Do not state a mechanism you have not verified.** This document once
+   attributed an AVX-512 result to frequency licensing; the real cause was
+   per-element overhead, and the wrong explanation would have sent the next
+   reader after a non-existent problem.

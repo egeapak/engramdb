@@ -1,0 +1,13 @@
+# aarch64 cross-build support, used by `aarch64.sh`.
+#
+# Note there is no `rustflags` key here. The repo root's `.cargo/config.toml`
+# sets `-C link-arg=-fuse-ld=lld` for this target, which is right for a native
+# aarch64 host and wrong for a cross-link through `aarch64-linux-gnu-gcc`
+# (no lld for the target: "cannot find 'ld'"). Setting `rustflags = []` here
+# does NOT help — cargo *joins* rustflags arrays across config files rather
+# than letting the more specific one win. The only thing that replaces them is
+# the RUSTFLAGS env var, which is mutually exclusive with the config, so
+# `aarch64.sh` exports `RUSTFLAGS=""`.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+runner = "qemu-aarch64-static -L /usr/aarch64-linux-gnu"
