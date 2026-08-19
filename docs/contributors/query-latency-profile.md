@@ -131,9 +131,19 @@ Two new `[maintenance]` knobs:
 | `compaction_min_interval_secs` | `120` | floor on how often the trigger may fire, so a write-heavy session cannot spin compaction on every command. |
 
 Call sites: the CLI dispatch (beside `auto_maintain`, so every ordinary command
-is an opportunity) and the MCP server's `create` tool plus
-`maintain_main_project` — an MCP session is long-lived and writes throughout,
-so startup-only would have missed exactly the case that matters.
+is an opportunity) and, on the MCP server, the **`query`** tool plus
+`maintain_main_project`. Startup-only would have missed the case that matters,
+since an MCP session is long-lived and writes throughout.
+
+It deliberately rides the **read** path rather than the write path. Fragments
+are produced by writes but only ever paid for by reads, so a query is both where
+the cost lands and a point with nothing else in flight. Hanging it off `create`
+was tried first and was wrong on two counts: it adds latency to the
+agent-facing write, and that tool returns while a background ingest task is
+still running (`embed_async: true`) which stamps the embedding fingerprint on
+first embed — so *any* extra await between the write and the tool's return
+reorders those two. `reindex_re_embeds_in_error_mode_despite_mismatch` catches
+exactly that reordering, which is how the misplacement was found.
 
 **Measured A/B.** 150 memories seeded one at a time, identical corpus, trigger
 off vs on:

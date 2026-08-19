@@ -1092,9 +1092,9 @@ impl EngramDbServer {
     /// Compact the main project's tables if they have accumulated enough
     /// uncompacted fragments.
     ///
-    /// Unlike [`Self::maintain_main_project`] this is cheap enough to call
-    /// after every mutating tool: it stats one marker file and returns unless
-    /// the short throttle has expired. It has to run there rather than only at
+    /// Unlike [`Self::maintain_main_project`] this is cheap enough to call on
+    /// every query: it stats one marker file and returns unless the short
+    /// throttle has expired. It has to run per-call rather than only at
     /// startup, because an MCP session is long-lived and writes memories
     /// throughout — which is exactly what fragments the tables.
     pub async fn compact_if_needed(&self) {
@@ -1997,9 +1997,6 @@ impl EngramDbServer {
             summary: result.summary,
         })
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-        // A create appends a LanceDB fragment, and fragment count is what sets
-        // scan latency. Throttled to one file stat in the common case.
-        self.compact_if_needed().await;
         _scope.mark_success();
         Ok(r)
     }
@@ -2167,6 +2164,14 @@ impl EngramDbServer {
             "retrieval_quality": result.retrieval_quality,
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        // Compaction rides the *read* path, not the write path. Fragments are
+        // produced by writes but only ever paid for by reads, so a query is
+        // both where the cost lands and a point with nothing else in flight.
+        // Deliberately not on `create`: that tool returns while a background
+        // ingest task is still running (`embed_async: true`), and that task
+        // stamps the embedding fingerprint on first embed — anything that
+        // awaits between the write and the tool's return reorders the two.
+        self.compact_if_needed().await;
         _scope.mark_success();
         Ok(r)
     }
