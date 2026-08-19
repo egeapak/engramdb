@@ -1,0 +1,43 @@
+# Standalone (its own `[workspace]`, like `fuzz/`) so that evaluating a SIMD
+# crate never puts a dependency into the shipped tree. Nothing here is built by
+# a root `cargo build`.
+[package]
+name = "simd-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+fearless_simd = "0.7.0"
+
+# Mirrors `[profile.release]` in the root `Cargo.toml` exactly, and that is the
+# entire point of this crate. `profile.bench` there matches the shipping
+# `opt-level` but deliberately keeps `lto = false` / `codegen-units = 16` so the
+# bench suite stays usable for iteration — which leaves cross-crate inlining,
+# precisely the variable a generic `#[inline(always)]` SIMD crate lives or dies
+# on, unmeasured. Keep these five keys in sync with the root profile.
+[profile.release]
+lto = true
+opt-level = 3
+strip = true
+panic = "abort"
+codegen-units = 1
+
+# `opt-level = "z"` is what this project shipped until `dot_unit` moved to
+# fearless_simd. Kept because the crate is 5x slower there, and a future
+# proposal to shrink the binary back down needs to know that it would take the
+# safe SIMD kernel with it.
+[profile.oz]
+inherits = "release"
+opt-level = "z"
+
+[profile.o2]
+inherits = "release"
+opt-level = 2
+
+# Unstripped, for disassembly and `nm --print-size`.
+[profile.syms]
+inherits = "release"
+strip = false
