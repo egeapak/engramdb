@@ -63,6 +63,11 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     "on_disk": result.on_disk,
                     "stale_entries": result.stale_entries,
                     "orphaned_files": result.orphaned_files,
+                    // `null` when the drift check did not run, which is not the
+                    // same as an empty list and must stay distinguishable to a
+                    // scripted consumer.
+                    "drifted_entries": result.drifted_entries,
+                    "undetermined": result.undetermined,
                 })
             );
         } else {
@@ -84,15 +89,38 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     outln!(formatter, "  {}", short_id(id));
                 }
             }
+            if let Some(drifted) = result.drifted_entries.as_ref().filter(|d| !d.is_empty()) {
+                formatter.print_warning(&format!(
+                    "{} memories changed since they were indexed (edited outside \
+                     EngramDB, or restored by git):",
+                    drifted.len()
+                ));
+                for id in drifted {
+                    outln!(formatter, "  {}", short_id(id));
+                }
+            }
+            if !result.undetermined.is_empty() {
+                formatter.print_warning(&format!(
+                    "{} memories could not be checked (file unreadable):",
+                    result.undetermined.len()
+                ));
+                for id in &result.undetermined {
+                    outln!(formatter, "  {}", short_id(id));
+                }
+            }
             formatter.print_message("\nRun `engramdb reindex` to repair.");
         }
         // Unhealthy must exit non-zero so scripts/CI can gate on `doctor`.
         // The findings were already printed above; the error just sets the
-        // exit code (main maps Err → exit 1).
+        // exit code (main maps Err → exit 1). Every finding that can flip
+        // `healthy` must appear in this summary, or the exit line reports
+        // "0 stale, 0 orphaned" for a store that failed on something else.
         anyhow::bail!(
-            "store is unhealthy ({} stale, {} orphaned)",
+            "store is unhealthy ({} stale, {} orphaned, {} drifted, {} unreadable)",
             result.stale_entries.len(),
-            result.orphaned_files.len()
+            result.orphaned_files.len(),
+            result.drifted_entries.as_ref().map_or(0, |d| d.len()),
+            result.undetermined.len()
         );
     }
 

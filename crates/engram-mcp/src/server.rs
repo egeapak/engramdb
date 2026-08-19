@@ -2956,6 +2956,21 @@ impl EngramDbServer {
         if !result.orphaned_files.is_empty() {
             response["orphaned_files"] = serde_json::json!(result.orphaned_files);
         }
+        // Agents reach EngramDB primarily through this tool, so it is the main
+        // consumer of drift detection — a field added to `DoctorResult` and not
+        // added here is invisible to them.
+        match result.drifted_entries.as_ref() {
+            Some(drifted) if !drifted.is_empty() => {
+                response["drifted_entries"] = serde_json::json!(drifted);
+            }
+            // Distinguish "checked, none found" from "not checked": silence
+            // would read as the former, which this run cannot claim.
+            None => response["content_check"] = serde_json::json!("not_run"),
+            Some(_) => {}
+        }
+        if !result.undetermined.is_empty() {
+            response["undetermined"] = serde_json::json!(result.undetermined);
+        }
         if !result.healthy {
             response["fix"] = serde_json::json!("Run reindex to repair.");
         }

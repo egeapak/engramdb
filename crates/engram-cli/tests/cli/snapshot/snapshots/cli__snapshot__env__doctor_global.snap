@@ -203,11 +203,13 @@ exit: 0
     }
   ],
   "store_check": {
+    "drifted_entries": [],
     "healthy": true,
     "indexed": 0,
     "on_disk": 0,
     "orphaned_files": [],
-    "stale_entries": []
+    "stale_entries": [],
+    "undetermined": []
   }
 }
 --- stderr ---

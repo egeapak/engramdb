@@ -1824,6 +1824,70 @@ impl MemoryStore {
         Ok(fresh.into_iter().map(|(id, _, _)| id).collect())
     }
 
+    /// Whether the chunks table holds any row for `id`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn has_chunks_for(&self, id: &str) -> Result<bool> {
+        self.lance_index
+            .has_chunks(id)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB has_chunks failed: {}", e)))
+    }
+
+    /// Write an index row directly, bypassing the file write.
+    ///
+    /// Test-only: production always derives the row from the file it just
+    /// wrote, which is what keeps the content digest honest. Exposed for
+    /// fixtures that need to reproduce a row shape no current write path
+    /// produces (e.g. a pre-0.8.0 row with no digest).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn upsert_index_entry_for_test(
+        &self,
+        entry: &crate::lance_index::IndexEntry,
+    ) -> Result<()> {
+        self.lance_index
+            .upsert(entry)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))
+    }
+
+    /// Every indexed row's content digest (schema v0.8.0).
+    ///
+    /// See [`crate::lance_index::LanceIndex::list_digests`].
+    pub async fn index_digests(&self) -> Result<Vec<crate::lance_index::IndexDigest>> {
+        self.lance_index
+            .list_digests()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_digests failed: {}", e)))
+    }
+
+    /// The raw bytes of a memory's `.md` file: `Ok(None)` when no file exists,
+    /// `Err` when one exists but cannot be read.
+    ///
+    /// The distinction is the point. A currency check that folded an unreadable
+    /// file into "absent" would report it as clean — an assertion of health it
+    /// cannot support — while a missing file is a different finding that
+    /// `doctor` already reports as a stale index entry.
+    pub async fn read_memory_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        for visibility in [Visibility::Shared, Visibility::Personal] {
+            let dir = self.get_memories_dir(&visibility)?;
+            let mut paths = find_memory_files(&dir, id).await?;
+            // Newest wins, matching `get_from_dir`'s duplicate resolution: the
+            // row describes whichever file a reader would resolve to.
+            if paths.len() > 1 {
+                let mut with_mtime: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+                for p in paths {
+                    with_mtime.push((file_mtime(&p).await, p));
+                }
+                with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+                paths = with_mtime.into_iter().map(|(_, p)| p).collect();
+            }
+            if let Some(path) = paths.first() {
+                return async_fs::read(path).await.map(Some).map_err(Into::into);
+            }
+        }
+        Ok(None)
+    }
+
     /// Every embedded memory's `embed_sha256` (schema v0.8.0), keyed by memory
     /// id. See [`crate::lance_index::LanceIndex::list_embed_digests`].
     pub async fn embed_digests(&self) -> Result<HashMap<String, Option<String>>> {

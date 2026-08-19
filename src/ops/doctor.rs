@@ -18,6 +18,22 @@ pub struct DoctorResult {
     pub stale_entries: Vec<String>,
     /// Files on disk but missing from index (orphaned files).
     pub orphaned_files: Vec<String>,
+    /// IDs whose `.md` file no longer hashes to what the index row recorded —
+    /// edited in place, or restored by git, with nothing updating the index.
+    ///
+    /// `None` means **not checked**, which is not the same as "none found" and
+    /// must never be rendered as a clean result: the store predates schema
+    /// 0.8.0 (no digests to compare), or it shares its project ID with another
+    /// live checkout, where the two checkouts legitimately hold different bytes
+    /// for the same id and mutual drift reports would be noise.
+    pub drifted_entries: Option<Vec<String>>,
+    /// IDs whose file exists but could not be read or hashed (permissions, I/O
+    /// error, a FIFO left at the path).
+    ///
+    /// Neither stale nor orphaned nor drifted — and silently counted as clean
+    /// if it had no home, which is the loss path this codebase requires to be
+    /// declared rather than swallowed.
+    pub undetermined: Vec<String>,
     /// Whether the store is healthy (no issues found).
     pub healthy: bool,
 }
@@ -27,6 +43,7 @@ pub struct DoctorResult {
 /// Compares the LanceDB index against actual memory files on disk to detect:
 /// - Stale index entries: IDs in LanceDB with no backing `.md` file
 /// - Orphaned files: `.md` files not tracked in the LanceDB index
+/// - Drifted entries: files whose bytes no longer match the row's digest
 pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
     let ids = store.list_ids().await?;
     let indexed = ids.len();
@@ -67,15 +84,86 @@ pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
         .await;
     }
 
-    let healthy = stale_entries.is_empty() && orphaned_files.is_empty();
+    let (drifted_entries, undetermined) = check_content_drift(store).await;
+
+    // `drifted_entries: None` is "not checked" and must not read as clean, so
+    // it cannot contribute to `healthy` in either direction. `undetermined`
+    // likewise: a file we could not read is not evidence of health.
+    let healthy = stale_entries.is_empty()
+        && orphaned_files.is_empty()
+        && drifted_entries.as_ref().is_none_or(|d| d.is_empty())
+        && undetermined.is_empty();
 
     Ok(DoctorResult {
         indexed,
         on_disk,
         stale_entries,
         orphaned_files,
+        drifted_entries,
+        undetermined,
         healthy,
     })
+}
+
+/// Compare every indexed row's recorded content digest against the bytes on
+/// disk, returning `(drifted, undetermined)`.
+///
+/// Returns `(None, vec![])` when the comparison cannot be made meaningfully:
+///
+/// - **A shared project ID.** Two checkouts of one remote share this index, and
+///   on different branches the same memory id legitimately resolves to
+///   different bytes in each. Reporting that as breakage would leave both
+///   checkouts permanently unhealthy, each "fixable" only by a reindex that
+///   makes the other unhealthy — and with skipping enabled, a re-embed loop
+///   alternating which branch's text the shared vectors describe. It is
+///   reported as information elsewhere, never as a fault here.
+/// - **No digests at all**, i.e. a store whose rows all predate schema 0.8.0
+///   and has not been reindexed since. Nothing to compare.
+///
+/// Reading the files is the cost here — one open + hash per memory. That is why
+/// this lives in `doctor`, which is throttled or explicitly invoked, and not in
+/// `check_staleness`, which runs on every query.
+async fn check_content_drift(store: &MemoryStore) -> (Option<Vec<String>>, Vec<String>) {
+    if store.checkout_conflict().await.is_some() {
+        return (None, Vec::new());
+    }
+    let Ok(digests) = store.index_digests().await else {
+        return (None, Vec::new());
+    };
+    // Every row unknown ⇒ nothing to compare. A store with *some* digests is
+    // checked: the unknown rows simply do not contribute.
+    //
+    // `!is_empty()` matters: `all()` is vacuously true for an empty store, and
+    // an empty store has genuinely been checked — reporting "not run" there
+    // would put a spurious caveat on every brand-new project.
+    if !digests.is_empty() && digests.iter().all(|d| d.content_sha256.is_none()) {
+        return (None, Vec::new());
+    }
+
+    let mut drifted = Vec::new();
+    let mut undetermined = Vec::new();
+    for row in digests {
+        let Some(recorded) = row.content_sha256.as_deref() else {
+            continue;
+        };
+        match store.read_memory_bytes(&row.memory_id).await {
+            // A missing file is `stale_entries`' business, not ours — reporting
+            // it twice would double-count one problem.
+            Ok(None) => {}
+            Ok(Some(bytes)) => {
+                if crate::storage::FileDigest::of(&bytes).sha256 != recorded {
+                    drifted.push(row.memory_id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("cannot determine currency of memory {}: {e}", row.memory_id);
+                undetermined.push(row.memory_id);
+            }
+        }
+    }
+    drifted.sort();
+    undetermined.sort();
+    (Some(drifted), undetermined)
 }
 
 /// Scan a directory for `.md` memory files, counting total and collecting orphans.
@@ -286,10 +374,35 @@ pub async fn doctor_environment(
                         } else {
                             Some("Run `engramdb reindex` to repair".to_string())
                         },
-                        details: vec![
-                            format!("indexed: {}", result.indexed),
-                            format!("on disk: {}", result.on_disk),
-                        ],
+                        details: {
+                            let mut d = vec![
+                                format!("indexed: {}", result.indexed),
+                                format!("on disk: {}", result.on_disk),
+                            ];
+                            // Name every finding that can flip `passed`, or an
+                            // unhealthy store shows two in-sync counts and no
+                            // reason. Drift is reported only when it was
+                            // actually checked — `None` is "not checked", and
+                            // rendering it as 0 would assert an absence this
+                            // run cannot support.
+                            if !result.stale_entries.is_empty() {
+                                d.push(format!("stale entries: {}", result.stale_entries.len()));
+                            }
+                            if !result.orphaned_files.is_empty() {
+                                d.push(format!("orphaned files: {}", result.orphaned_files.len()));
+                            }
+                            match result.drifted_entries.as_ref() {
+                                Some(drifted) if !drifted.is_empty() => {
+                                    d.push(format!("changed since indexing: {}", drifted.len()));
+                                }
+                                None => d.push("content check: not run".to_string()),
+                                Some(_) => {}
+                            }
+                            if !result.undetermined.is_empty() {
+                                d.push(format!("unreadable: {}", result.undetermined.len()));
+                            }
+                            d
+                        },
                         status: None,
                     });
                     Some(result)
@@ -2849,6 +2962,147 @@ mod tests {
         assert_eq!(result.on_disk, 0);
         assert_eq!(result.stale_entries.len(), 1);
         assert_eq!(result.stale_entries[0], id);
+    }
+
+    // --- Content drift (schema 0.8.0) ---
+
+    /// Rewrite a memory's `.md` behind the store's back, as a hand edit or a
+    /// `git checkout` to another revision would.
+    async fn edit_file_behind_store(store: &MemoryStore, id: &str, replace: (&str, &str)) {
+        let dir = crate::storage::paths::memories_dir(&store.project_dir);
+        let mut found = None;
+        let mut rd = async_fs::read_dir(&dir).await.unwrap();
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "md")
+                && p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.contains(id))
+            {
+                found = Some(p);
+                break;
+            }
+        }
+        let path = found.expect("memory file");
+        let text = async_fs::read_to_string(&path).await.unwrap();
+        let edited = text.replace(replace.0, replace.1);
+        assert_ne!(text, edited, "the fixture edit must actually change bytes");
+        async_fs::write(&path, edited).await.unwrap();
+    }
+
+    /// THE headline case: a file edited in place is reported, even though the
+    /// counts and the id set are both completely unchanged.
+    #[tokio::test]
+    async fn doctor_reports_a_file_edited_behind_the_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(
+            MemoryType::Decision,
+            "Summary",
+            "Original content",
+            Provenance::human(),
+        );
+        let id = store.create(&mem).await.unwrap();
+
+        // Healthy before the edit, and the drift check DID run.
+        let before = doctor(&store).await.unwrap();
+        assert!(before.healthy);
+        assert_eq!(before.drifted_entries.as_deref(), Some(&[][..]));
+
+        edit_file_behind_store(&store, &id, ("Original content", "Rewritten content")).await;
+
+        let after = doctor(&store).await.unwrap();
+        assert!(!after.healthy, "an in-place edit must not read as healthy");
+        assert_eq!(after.drifted_entries.as_deref(), Some(&[id.clone()][..]));
+        // The pre-0.8.0 checks remain blind to it — which is the whole point.
+        assert!(after.stale_entries.is_empty());
+        assert!(after.orphaned_files.is_empty());
+        assert_eq!(after.indexed, after.on_disk);
+    }
+
+    /// Reindexing after an edit restamps the digest, so the store returns to
+    /// healthy. Without this the finding would be unclearable.
+    #[tokio::test]
+    async fn reindex_clears_a_drift_finding() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "S", "Original", Provenance::human());
+        let id = store.create(&mem).await.unwrap();
+        edit_file_behind_store(&store, &id, ("Original", "Edited")).await;
+        assert!(!doctor(&store).await.unwrap().healthy);
+
+        store.reindex().await.unwrap();
+
+        let after = doctor(&store).await.unwrap();
+        assert!(after.healthy, "reindex must clear the finding");
+        assert_eq!(after.drifted_entries.as_deref(), Some(&[][..]));
+    }
+
+    /// A store whose rows all predate 0.8.0 has nothing to compare. That must
+    /// report as *not checked* (`None`) rather than as a clean bill of health,
+    /// and must not flip `healthy` in either direction.
+    #[tokio::test]
+    async fn doctor_reports_not_checked_when_no_row_has_a_digest() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "S", "C", Provenance::human());
+        let id = store.create(&mem).await.unwrap();
+
+        // Reproduce a pre-0.8.0 index: rows present, no recorded digests.
+        let _ = id;
+        crate::storage::test_support::clear_content_digests(&store)
+            .await
+            .unwrap();
+
+        let result = doctor(&store).await.unwrap();
+        assert_eq!(
+            result.drifted_entries, None,
+            "no digests to compare must read as 'not checked', never as 'none found'"
+        );
+        assert!(result.healthy, "not-checked must not flip healthy");
+    }
+
+    /// Under a shared project ID the two checkouts legitimately hold different
+    /// bytes for the same id (different branches), so drift must NOT be
+    /// reported as breakage — that would leave both checkouts permanently
+    /// unhealthy, each "fixable" only by a reindex that breaks the other.
+    #[tokio::test]
+    async fn doctor_skips_the_drift_check_under_a_checkout_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let make = |name: &str| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(dir.join(".git")).unwrap();
+            std::fs::write(
+                dir.join(".git").join("config"),
+                "[remote \"origin\"]\n\turl = https://github.com/example/drift-conflict.git\n",
+            )
+            .unwrap();
+            dir
+        };
+        let a = make("clone-a");
+        let b = make("clone-b");
+        let registry = crate::storage::FileRegistry::global().unwrap();
+        let _store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+
+        // B's own file, then edited to hold different bytes than the shared
+        // index recorded — standing in for the two checkouts being on
+        // different branches.
+        let mem = Memory::new(MemoryType::Decision, "S", "Original", Provenance::human());
+        let id = store_b.create(&mem).await.unwrap();
+        edit_file_behind_store(&store_b, &id, ("Original", "Other branch")).await;
+
+        let result = doctor(&store_b).await.unwrap();
+        assert_eq!(
+            result.drifted_entries, None,
+            "a shared index must not report the other checkout's bytes as drift"
+        );
     }
 
     // --- Group 1: doctor() store health ---
