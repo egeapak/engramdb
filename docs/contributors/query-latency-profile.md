@@ -1,6 +1,6 @@
 # Where a query actually spends its time
 
-*2026-08-19 · benchmark asset: `examples/query_stage_profile.rs`*
+*2026-08-19 · benchmark assets: `examples/query_stage_profile.rs`, `examples/embed_model_bench.rs`*
 
 Measured to price a proposed daemon-side memory cache. The headline result is
 not about the cache: **query latency is dominated by LanceDB fragment count, not
@@ -17,9 +17,9 @@ numbers users actually get, not `opt-level = 3` numbers.
 
 | # | Finding | Consequence |
 |---|---------|-------------|
-| 1 | **Fragmentation, not scale, sets query cost.** At a *fixed* 400 rows, 100 uncompacted writes take `list_for_filtering` from 5.9 → 42.0 ms (7.1×) and `vector_search` from 3.5 → 15.7 ms (4.4×). | The cheapest large win in the product is compacting on fragment count, not only on a 6-hour timer. |
+| 1 | **Fragmentation, not scale, sets query cost.** At a *fixed* 400 rows, 100 uncompacted writes take `list_for_filtering` from 5.9 → 42.0 ms (7.1×) and `vector_search` from 3.5 → 15.7 ms (4.4×). | **Fixed** — a fragment-count trigger now compacts without waiting for the 6-hour window, worth **4.0× on a full query** (R5). |
 | 2 | **The file-read path is not hot, and does not fragment.** `get_batch(30)` is 2.2 ms and barely moves (1.3×) under the same fragmentation. | Caching parsed `.md` memories — the obvious "stop reading disk every time" fix — buys ~11% of a healthy query. It is the *wrong* thing to cache. |
-| 3 | **Embedding inference is ~19% and already handled.** The forward pass is 3.8 ms; the 211 ms model *load* is what the daemon amortizes, and it already does. | No change needed. Raising the embedding dimension would attack the one term that is already cheap and already solved. |
+| 3 | **Embedding inference is ~19% and already handled.** The forward pass is 3.8 ms; the 211 ms model *load* is what the daemon amortizes, and it already does. | No change needed. A 1024-dim model would cost **7.8× on the query path and 10× on disk** (R6) to widen the term that was already cheapest. |
 | 4 | **`restrict_to` is a 2.5× pessimization on latency.** On a clean store `vector_search` is 3.5 ms unrestricted and 8.9 ms with a 400-id allowlist; dirty, 15.7 vs 53.3 ms. | It exists for *ranking correctness* (and has tests pinning that), so this is a real cost knowingly paid — but it should be measured, not assumed free. |
 
 ## Method
@@ -110,6 +110,96 @@ A ~0.9 ms fixed floor (the two dirent scans) plus ~0.02 ms per memory. The
 marginal file read + parse is genuinely cheap; only the fixed scans are worth
 attacking, and they are worth ~1 ms.
 
+
+## R5 · The fragment-pressure compaction trigger (implemented)
+
+R2 said the fix was to compact on fragment count rather than only on a timer.
+That is now `ops::maintenance::auto_compact`, wired into both front-ends.
+
+**How it works.** The full maintenance pass stays on its 6-hour throttle,
+because it does expensive work (a registry sweep and a store health scan).
+Compaction gets its own, much cheaper trigger: stat one marker file, and only
+if a short throttle has expired open the store, read fragment metadata, and run
+`optimize()` if `small_fragments` is over the threshold. The common case costs a
+single `stat` — no store open, no LanceDB call.
+
+Two new `[maintenance]` knobs:
+
+| knob | default | meaning |
+|---|---|---|
+| `compaction_fragment_threshold` | `32` | uncompacted fragments that make compaction due early. `0` disables the trigger, restoring purely time-based behaviour. |
+| `compaction_min_interval_secs` | `120` | floor on how often the trigger may fire, so a write-heavy session cannot spin compaction on every command. |
+
+Call sites: the CLI dispatch (beside `auto_maintain`, so every ordinary command
+is an opportunity) and the MCP server's `create` tool plus
+`maintain_main_project` — an MCP session is long-lived and writes throughout,
+so startup-only would have missed exactly the case that matters.
+
+**Measured A/B.** 150 memories seeded one at a time, identical corpus, trigger
+off vs on:
+
+| stage | trigger **off** | trigger **on** | improvement |
+|---|---|---|---|
+| `list_for_filtering` | 95.66 ms | **26.64 ms** | **3.6×** |
+| `vector_search(restrict=all ids)` | 85.24 ms | **14.25 ms** | **6.0×** |
+| `vector_search` (as the engine calls it) | 47.44 ms | 9.10 ms | 5.2× |
+| `list_ids()` | 19.53 ms | 3.60 ms | 5.4× |
+| `count()` | 1.29 ms | 0.62 ms | 2.1× |
+| `get_batch(30)` | 2.87 ms | 2.24 ms | 1.3× |
+| `embed` | 7.63 ms | 4.89 ms | 1.6× (noise — it touches no LanceDB) |
+| **full query** (embed + projection + restricted k-NN + get_batch) | **191.4 ms** | **48.0 ms** | **4.0×** |
+
+The two stages that touch no LanceDB barely move, which is the control: the
+trigger is acting on fragmentation and nothing else.
+
+**Honest caveats.** The harness writes ~1 memory/second, roughly 60× faster
+than a real session, so it was run with `compaction_min_interval_secs = 5`
+rather than the shipped 120 — otherwise the trigger would get one firing for
+work a real session spreads over an hour, and the A/B would measure the
+throttle rather than the trigger. The shipped default is what a
+realistically-paced session gets.
+
+Also note the "on" column is still well above the 5.89 ms a *fully* compacted
+400-row store reaches (R1/R3). That is by design: a threshold trigger tolerates
+up to `compaction_fragment_threshold` fragments plus whatever arrived since the
+last firing. Driving it to zero would mean compacting on every write.
+
+
+## R6 · What a 1024-dim model would cost
+
+The other proposed lever was a wider embedding. fastembed 5.2's catalogue tops
+out at **1024 dims** (widths: 384, 512, 768, 1024), so 1536 is not selectable at
+all without leaving the local/offline stack. The three quantized 1024-dim models
+are now registered as selectable providers (`mxbai-embed-large-q`,
+`gte-large-en-q`, `bge-large-en-q`) — none is a default.
+
+Measured with `examples/embed_model_bench.rs` (same texts, same 256-token
+chunking, 40 warm iterations, all models pre-staged, `ENGRAMDB_OFFLINE=1`):
+
+| model | dims | warm p50 (query path) | ms/text at batch16 (create path) | ONNX on disk |
+|---|---|---|---|---|
+| **`all-MiniLM-L12-v2-u8`** *(shipped default)* | 384 | **3.72 ms** | **36.2** | **34 MB** |
+| `all-MiniLM-L12-v2-q` | 384 | 4.53 ms | 36.0 | 33 MB |
+| `all-MiniLM-L12-v2` fp32 | 384 | 6.71 ms | 55.2 | 128 MB |
+| `mxbai-embed-large-v1-q` | 1024 | **29.07 ms** | 288.0 | 337 MB |
+| `gte-large-en-v1.5-q` | 1024 | **32.32 ms** | 432.6 | 446 MB |
+| `bge-large-en-v1.5-q` | 1024 | 199.17 ms | 898.9 | 638 MB |
+
+Against the shipped default, the cheapest 1024-dim option costs **7.8× on the
+query path, 8× on the create path, and 10× on disk** — and the daemon holds that
+resident, machine-wide, for every project on the machine.
+
+Put it in the query budget from R1: embedding goes 3.8 ms → 29.1 ms, taking a
+healthy query from ~21 ms to ~46 ms. **Doubling query latency to widen vectors
+that R5 just showed were never the bottleneck** is the wrong trade. `bge-large-q`
+is worth flagging separately — its "-Q" repo ships `model_optimized.onnx`, which
+is optimized fp32 rather than quantized, which is why it is 5–7× the other two.
+
+This settles the open question in
+[turbovec-evaluation.md](./turbovec-evaluation.md) R7. Widening the embedding
+would rescue TurboQuant's recall at d=384 — but it is not worth doing for that
+reason, or for any reason these measurements surface.
+
 ## What this means for a daemon-side cache
 
 The motivation for caching in the **daemon** rather than per-MCP-process is
@@ -137,10 +227,10 @@ What the measurements change is **what to cache**, and how urgent it is:
 
 **Recommended order:**
 
-1. **Trigger compaction on fragment count, not only elapsed time.** This is a
-   small change to an existing throttled pass and recovers the entire 4–7×.
-2. **Measure again.** If the compacted baseline (~21 ms) is good enough, the
-   cache is optional.
+1. ~~Trigger compaction on fragment count, not only elapsed time.~~
+   **Done — see R5.** Measured at 4.0× on a full query.
+2. **Measure again in real use.** If the compacted baseline (~21–48 ms) is good
+   enough, the cache is optional. That is now the open question.
 3. **If a cache is still wanted, cache the index projection in the daemon**,
    validated against a cheap generation token rather than owned. Note the
    standing contract in CLAUDE.md — *"if the daemon is disabled or unreachable,
