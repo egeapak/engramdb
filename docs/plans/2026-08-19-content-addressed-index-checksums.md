@@ -5,6 +5,15 @@
 > staleness they can and cannot see, and what it would take to make reindex
 > content-addressed so it skips unchanged memories and can name the
 > updated-but-not-indexed ones.
+>
+> **The build order lives in
+> `2026-08-19-content-addressed-index-implementation-plan.md`,** which supersedes
+> this document in two places: the phasing in §5 (the incremental *metadata*
+> rebuild is demoted to optional — it closes none of the four blind spots and is
+> the only piece that weakens reindex's from-scratch repair guarantee), and the
+> `check_staleness` recommendation in §3.5 (it gets a tiered check that is exact
+> under a declared byte budget, not a deferral to `doctor`). The analysis below
+> is otherwise unchanged.
 
 ## Short answer
 
