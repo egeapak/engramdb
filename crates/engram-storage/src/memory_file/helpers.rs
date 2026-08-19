@@ -159,32 +159,43 @@ fn unescape_body_line(line: &str) -> &str {
 /// `memory_file_roundtrip` fuzz target). Whether a trailing `\r` is a CRLF
 /// terminator or content cannot be decided per line, so it is decided once
 /// for the file: see `crlf_file` below.
+/// Whether `text` is a CRLF-terminated file.
+///
+/// A file is CRLF-terminated or it is not; that cannot be decided per line.
+/// If EVERY non-final line ends in `\r`, this is a CRLF file and the trailing
+/// `\r` is a line terminator to drop. Otherwise the file is LF-terminated and
+/// any `\r` is content that must survive verbatim.
+///
+/// Shared by the parser ([`parse_body_sections`]) and by
+/// [`crate::digest::FileDigest`], which normalizes line endings before hashing
+/// so a `git core.autocrlf` rewrite does not read as content drift. Those two
+/// MUST agree: if the digest normalized a file the parser treats as
+/// LF-with-embedded-`\r`, two files that parse to different memories could hash
+/// identically — a missed drift, which is the dangerous direction.
+pub fn is_crlf_terminated(text: &str) -> bool {
+    let mut lines = text.split('\n').peekable();
+    let mut saw_line = false;
+    let mut all_cr = true;
+    while let Some(l) = lines.next() {
+        if lines.peek().is_none() {
+            break; // trailing fragment after the last `\n`
+        }
+        saw_line = true;
+        if !l.ends_with('\r') {
+            all_cr = false;
+            break;
+        }
+    }
+    saw_line && all_cr
+}
+
 pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
     let mut sections = HashMap::new();
     let mut current_section: Option<String> = None;
     let mut current_content = Vec::new();
     let mut in_hidden_block = false;
 
-    // A file is CRLF-terminated or it is not; that cannot be decided per line.
-    // If EVERY non-final line ends in `\r`, this is a CRLF file and the
-    // trailing `\r` is a line terminator to drop. Otherwise the file is
-    // LF-terminated and any `\r` is content that must survive verbatim.
-    let crlf_file = {
-        let mut lines = body.split('\n').peekable();
-        let mut saw_line = false;
-        let mut all_cr = true;
-        while let Some(l) = lines.next() {
-            if lines.peek().is_none() {
-                break; // trailing fragment after the last `\n`
-            }
-            saw_line = true;
-            if !l.ends_with('\r') {
-                all_cr = false;
-                break;
-            }
-        }
-        saw_line && all_cr
-    };
+    let crlf_file = is_crlf_terminated(body);
 
     for raw_line in body.split('\n') {
         let line = if crlf_file {
