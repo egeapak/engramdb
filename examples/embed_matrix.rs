@@ -30,8 +30,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
     chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
-    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS, ONNX_ARCTIC_XS_Q,
-    ONNX_BGE_SMALL_EN_Q, ONNX_NOMIC_EMBED_TEXT_Q,
+    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q,
+    ONNX_ARCTIC_XS, ONNX_ARCTIC_XS_Q, ONNX_BGE_LARGE_EN_Q, ONNX_BGE_SMALL_EN_Q,
+    ONNX_GTE_LARGE_EN_Q, ONNX_MXBAI_EMBED_LARGE_Q, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 use engramdb::onnx_ep::Backend;
 use serde::{Deserialize, Serialize};
@@ -453,6 +454,36 @@ const MODELS: &[ModelUnderTest] = &[
     ModelUnderTest {
         key: "minilm-l12-q",
         spec: ONNX_ALL_MINILM_L12_Q,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    // The shipped default (uint8 L12). The baseline every wider model has to
+    // beat by enough to justify its cost.
+    ModelUnderTest {
+        key: "minilm-l12-u8",
+        spec: ONNX_ALL_MINILM_L12_U8,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    // The quantized 1024-dim family — the widest embeddings available locally
+    // (fastembed's catalogue stops at 1024). 2.7x the width of the default at
+    // ~8x its query-path latency and ~10x its disk, so the question these
+    // answer is whether the retrieval quality is worth that.
+    ModelUnderTest {
+        key: "mxbai-large-q",
+        spec: ONNX_MXBAI_EMBED_LARGE_Q,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    ModelUnderTest {
+        key: "gte-large-q",
+        spec: ONNX_GTE_LARGE_EN_Q,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    ModelUnderTest {
+        key: "bge-large-q",
+        spec: ONNX_BGE_LARGE_EN_Q,
         query_prefix: None,
         doc_prefix: None,
     },
