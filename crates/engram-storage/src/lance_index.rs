@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, RecordBatch,
-    RecordBatchIterator, StringArray, UInt32Array,
+    RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
@@ -69,10 +69,10 @@ const VECTOR_SEARCH_NPROBES: usize = 48;
 /// (their stored vectors are already exact).
 const VECTOR_SEARCH_REFINE_FACTOR: u32 = 4;
 
-/// Full metadata entry stored in LanceDB (all 23 columns).
+/// Full metadata entry stored in LanceDB (all 28 columns).
 ///
 /// Used only for writing to LanceDB. For reads, prefer the narrower
-/// [`IndexSummary`] or [`IndexFilterable`] projections.
+/// [`IndexSummary`], [`IndexFilterable`] or [`IndexDigest`] projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub id: String,
@@ -138,6 +138,21 @@ pub struct IndexEntry {
     // every memory on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_sessions: Vec<String>,
+    // Added in schema v0.8.0 (index currency). The identity of the `.md` bytes
+    // this row was derived from: SHA-256 of the line-ending-normalized content,
+    // plus the raw on-disk length.
+    //
+    // `None` means *unknown*, never *current* — a row written before 0.8.0, or
+    // by a path with no file behind it. Every currency check compares against
+    // `Some(..)`, so unknown falls through to "must rebuild" by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
+    /// Raw on-disk byte length, comparable directly with
+    /// `std::fs::Metadata::len` so a staleness check can screen candidates
+    /// without reading anything. See [`crate::digest::FileDigest`] for why this
+    /// is raw while the hash beside it is normalized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_len: Option<u64>,
 }
 
 /// One memory's evidence link (schema v0.7.0): the sessions it was extracted
@@ -251,9 +266,36 @@ pub struct IndexFilterable {
     pub invalidated_at: Option<DateTime<Utc>>,
 }
 
-impl From<&Memory> for IndexEntry {
-    fn from(memory: &Memory) -> Self {
+impl IndexEntry {
+    /// Build the row for a memory that is backed by a file on disk, recording
+    /// the identity of the bytes it was derived from.
+    ///
+    /// **This is the production constructor.** It takes the digest rather than
+    /// defaulting it because the alternative — an infallible `From<&Memory>` —
+    /// is exactly the shape that made `has_embedding` fragile: a field no
+    /// constructor can know, defaulted to a plausible value, and patched by hand
+    /// at every call site. A new write path that forgets the digest would
+    /// silently disable drift detection for those rows; requiring it here makes
+    /// the compiler ask the question.
+    pub fn for_file(memory: &Memory, digest: &crate::digest::FileDigest) -> Self {
         Self {
+            content_sha256: Some(digest.sha256.clone()),
+            content_len: Some(digest.len),
+            ..Self::without_digest(memory)
+        }
+    }
+
+    /// Build the row without a content identity, for memories with no file
+    /// behind them.
+    ///
+    /// Only benchmarks and fixtures should need this: a row built here is
+    /// permanently invisible to drift detection, because `None` reads as
+    /// *unknown*. Production write paths use [`Self::for_file`].
+    #[doc(hidden)]
+    pub fn without_digest(memory: &Memory) -> Self {
+        Self {
+            content_sha256: None,
+            content_len: None,
             id: memory.id.clone(),
             type_: memory.type_,
             summary: memory.summary.clone(),
@@ -302,6 +344,20 @@ impl From<&Memory> for IndexEntry {
             source_sessions: memory.source_sessions.clone(),
         }
     }
+}
+
+/// One memory's index-currency digest (schema v0.8.0).
+///
+/// Its own narrow projection rather than fields on [`IndexForFiltering`]: this
+/// is read by reindex, `doctor` and the staleness check, and never by a query —
+/// so widening the hot projection to serve a maintenance scan would cost every
+/// query two columns it does not use.
+#[derive(Debug, Clone)]
+pub struct IndexDigest {
+    pub memory_id: String,
+    pub content_sha256: Option<String>,
+    pub content_len: Option<u64>,
+    pub has_embedding: bool,
 }
 
 /// A vector search result with ID and similarity score.
@@ -422,6 +478,18 @@ impl LanceIndex {
             // exactly "pins nothing", so it follows the `watch_paths`
             // convention rather than `audience`'s nullable one.
             Field::new("source_sessions", DataType::Utf8, false),
+            // Added in schema v0.8.0 (index currency). The identity of the
+            // `.md` bytes this row was derived from. Nullable because null
+            // means *unknown* — a pre-0.8.0 row, or one written with no file
+            // behind it — which every check reads as "must rebuild".
+            //
+            // `content_len` is UInt64, matching this codebase's rule that an
+            // unsigned quantity gets an unsigned Arrow type (`chunk_index`,
+            // `user_turns`, `indexed_chars`); there is no Int64 column
+            // anywhere, and adding one would introduce the first `as i64` /
+            // `as u64` cast pair in the Arrow layer.
+            Field::new("content_sha256", DataType::Utf8, true),
+            Field::new("content_len", DataType::UInt64, true),
         ]))
     }
 
@@ -789,6 +857,72 @@ impl LanceIndex {
             }
         }
         Ok(links)
+    }
+
+    /// Every row's index-currency digest (schema v0.8.0), as a 4-column
+    /// projection.
+    ///
+    /// Read by reindex, `doctor`, and the staleness check to answer "is this
+    /// row still current with the file it came from?". Deliberately NOT part of
+    /// [`Self::list_for_filtering`]'s projection: no query reads these columns,
+    /// and this scan is a maintenance cost that must not be charged to every
+    /// retrieval.
+    ///
+    /// A row whose `content_sha256` is null is returned with `None` rather than
+    /// skipped: null means *unknown*, and a caller deciding what to rebuild
+    /// needs to see the row in order to rebuild it.
+    pub async fn list_digests(&self) -> Result<Vec<IndexDigest>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "content_sha256".into(),
+                "content_len".into(),
+                "has_embedding".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for content digests")?;
+
+        let mut digests = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let id_col = batch
+                .column_by_name("id")
+                .context("Missing 'id' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'id'")?;
+            let sha_col = batch
+                .column_by_name("content_sha256")
+                .context("Missing 'content_sha256' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'content_sha256'")?;
+            let len_col = batch
+                .column_by_name("content_len")
+                .context("Missing 'content_len' column")?
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .context("Failed to cast 'content_len'")?;
+            let emb_col = batch
+                .column_by_name("has_embedding")
+                .context("Missing 'has_embedding' column")?
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .context("Failed to cast 'has_embedding'")?;
+            for i in 0..batch.num_rows() {
+                digests.push(IndexDigest {
+                    memory_id: id_col.value(i).to_string(),
+                    content_sha256: (!sha_col.is_null(i)).then(|| sha_col.value(i).to_string()),
+                    content_len: (!len_col.is_null(i)).then(|| len_col.value(i)),
+                    has_embedding: emb_col.value(i),
+                });
+            }
+        }
+        Ok(digests)
     }
 
     /// List entries with lightweight metadata (7 columns).
@@ -2047,6 +2181,8 @@ impl LanceIndex {
         let mut watch_paths_col = Vec::with_capacity(n);
         let mut audiences: Vec<Option<String>> = Vec::with_capacity(n);
         let mut source_sessions_col = Vec::with_capacity(n);
+        let mut content_sha256s: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut content_lens: Vec<Option<u64>> = Vec::with_capacity(n);
 
         for entry in entries {
             ids.push(entry.id.clone());
@@ -2094,6 +2230,8 @@ impl LanceIndex {
                 serde_json::to_string(&entry.source_sessions)
                     .context("Failed to serialize source_sessions")?,
             );
+            content_sha256s.push(entry.content_sha256.clone());
+            content_lens.push(entry.content_len);
         }
 
         let batch = RecordBatch::try_new(
@@ -2125,9 +2263,22 @@ impl LanceIndex {
                 Arc::new(StringArray::from(watch_paths_col)) as ArrayRef,
                 Arc::new(StringArray::from(audiences)) as ArrayRef,
                 Arc::new(StringArray::from(source_sessions_col)) as ArrayRef,
+                Arc::new(StringArray::from(content_sha256s)) as ArrayRef,
+                Arc::new(UInt64Array::from(content_lens)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
+
+        // `RecordBatch::try_new` validates the array count against the schema
+        // at RUNTIME, not compile time, so a column added to
+        // `memories_schema()` without a matching builder above fails every
+        // `create` rather than the build. Fail loudly in debug so a test — any
+        // test — catches it, instead of only the one that happens to write.
+        debug_assert_eq!(
+            batch.num_columns(),
+            self.memories_schema().fields().len(),
+            "entries_to_batch must supply exactly one array per memories_schema() field"
+        );
 
         Ok(batch)
     }
@@ -2708,7 +2859,7 @@ mod tests {
             accessed_at: Utc::now(),
             expires_at: None,
         };
-        IndexEntry::from(&memory)
+        IndexEntry::without_digest(&memory)
     }
 
     #[tokio::test]
@@ -3396,7 +3547,7 @@ mod tests {
             "Test content",
             Provenance::human(),
         );
-        let entry = IndexEntry::from(&memory);
+        let entry = IndexEntry::without_digest(&memory);
 
         assert_eq!(entry.id, memory.id);
         assert_eq!(entry.type_, MemoryType::Decision);

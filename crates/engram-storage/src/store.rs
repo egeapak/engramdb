@@ -514,6 +514,10 @@ impl MemoryStore {
         let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
         let content = memory_file::write_memory_file(memory)?;
+        // Stamp the identity of exactly the bytes we are about to write — not a
+        // re-serialization, and no re-read. `atomic_write` writes `content`
+        // verbatim, so this IS the on-disk identity.
+        let digest = crate::digest::FileDigest::of(content.as_bytes());
         atomic_write(&file_path, &content).await?;
 
         // Sweep up any pre-existing file(s) for this exact ID — in BOTH
@@ -563,7 +567,7 @@ impl MemoryStore {
         // current chunk-presence state forward. A fresh `IndexEntry`'s default
         // `false` would otherwise drop an already-embedded memory from semantic
         // ranking (R3). For a brand-new memory this is `false` as expected.
-        let mut entry = IndexEntry::from(memory);
+        let mut entry = IndexEntry::for_file(memory, &digest);
         entry.has_embedding =
             self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
@@ -622,6 +626,14 @@ impl MemoryStore {
         let ids: Vec<&str> = memories.iter().map(|m| m.id.as_str()).collect();
         let preexisting = self.batch_exists(&ids).await?;
 
+        // The index rows are built in a SECOND pass below (after one batched
+        // chunk-presence probe), by which point each `content` string is long
+        // out of scope — so the digests have to be carried forward rather than
+        // recomputed. Recomputing would mean re-reading every file we just
+        // wrote.
+        let mut digests: HashMap<String, crate::digest::FileDigest> =
+            HashMap::with_capacity(memories.len());
+
         for memory in memories {
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
             async_fs::create_dir_all(&memories_dir).await?;
@@ -629,6 +641,10 @@ impl MemoryStore {
             let filename = memory_file::memory_filename(memory);
             let file_path = memories_dir.join(&filename);
             let content = memory_file::write_memory_file(memory)?;
+            digests.insert(
+                memory.id.clone(),
+                crate::digest::FileDigest::of(content.as_bytes()),
+            );
             atomic_write(&file_path, &content).await?;
 
             // Same cross-visibility sweep as `create`, on the same condition:
@@ -672,7 +688,14 @@ impl MemoryStore {
         let entries: Vec<IndexEntry> = memories
             .iter()
             .map(|m| {
-                let mut entry = IndexEntry::from(m);
+                // Every id was inserted in the write loop above, so the lookup
+                // cannot miss; `without_digest` is an unreachable fallback that
+                // degrades to "unknown" rather than panicking on a future
+                // refactor that breaks the pairing.
+                let mut entry = match digests.get(&m.id) {
+                    Some(digest) => IndexEntry::for_file(m, digest),
+                    None => IndexEntry::without_digest(m),
+                };
                 entry.has_embedding = with_chunks.contains(&m.id);
                 entry
             })
@@ -965,15 +988,18 @@ impl MemoryStore {
             // path, and the rename-on-title-change cleanup is inherently
             // per-file. It is the LanceDB commits and the manifest scan that
             // were quadratic, not this.
-            if let Err(e) = self
+            let digest = match self
                 .write_updated_file_locked(&canonical, &memory, old_visibility)
                 .await
             {
-                errors.push((given.clone(), format!("{:#}", e)));
-                continue;
-            }
+                Ok(digest) => digest,
+                Err(e) => {
+                    errors.push((given.clone(), format!("{:#}", e)));
+                    continue;
+                }
+            };
 
-            let mut entry = IndexEntry::from(&memory);
+            let mut entry = IndexEntry::for_file(&memory, &digest);
             entry.has_embedding = self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
             })?;
@@ -1028,9 +1054,10 @@ impl MemoryStore {
         memory: &Memory,
         old_visibility: Visibility,
     ) -> Result<()> {
-        self.write_updated_file_locked(id, memory, old_visibility)
+        let digest = self
+            .write_updated_file_locked(id, memory, old_visibility)
             .await?;
-        self.sync_index_row_locked(memory).await
+        self.sync_index_row_locked(memory, &digest).await
     }
 
     /// The file half of [`Self::write_updated_locked`]: locate the old
@@ -1039,12 +1066,16 @@ impl MemoryStore {
     /// Split out so [`Self::update_batch_with`] reuses this exact code rather
     /// than reimplementing the durability ordering below — the ordering is
     /// subtle enough that a second copy would be a latent data-loss bug.
+    ///
+    /// Returns the identity of the bytes it wrote, so the index half stamps the
+    /// row from the same string rather than re-reading (or, worse,
+    /// re-serializing) the file.
     async fn write_updated_file_locked(
         &self,
         id: &str,
         memory: &Memory,
         old_visibility: Visibility,
-    ) -> Result<()> {
+    ) -> Result<crate::digest::FileDigest> {
         // Locate the existing file(s) for this memory before writing. `id`
         // may be a prefix; the filename may be about to change (title or
         // visibility update); and a stale duplicate from a previously
@@ -1057,6 +1088,7 @@ impl MemoryStore {
         let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
         let content = memory_file::write_memory_file(memory)?;
+        let digest = crate::digest::FileDigest::of(content.as_bytes());
 
         // Durability ordering: write the NEW file first, THEN remove any old
         // file at a different path. In the common case (filename unchanged)
@@ -1079,17 +1111,21 @@ impl MemoryStore {
             }
         }
 
-        Ok(())
+        Ok(digest)
     }
 
     /// The index half of [`Self::write_updated_locked`].
-    async fn sync_index_row_locked(&self, memory: &Memory) -> Result<()> {
+    async fn sync_index_row_locked(
+        &self,
+        memory: &Memory,
+        digest: &crate::digest::FileDigest,
+    ) -> Result<()> {
         // Upsert metadata to LanceDB (chunks are managed separately). An update
         // must not reset `has_embedding`: the memory may already have chunks
         // that this update isn't touching. Carry the current chunk-presence
         // state forward (a content-changing update's re-embed will set it true
         // again via `upsert_chunks` regardless).
-        let mut entry = IndexEntry::from(memory);
+        let mut entry = IndexEntry::for_file(memory, digest);
         // Propagate a chunk-presence read error rather than defaulting to
         // `false`: silently clearing the flag would drop a still-embedded memory
         // from `has_embedding`-gated semantic ranking (R3) until the next reindex.
@@ -1887,7 +1923,10 @@ impl MemoryStore {
     ) -> Result<()> {
         use rayon::prelude::*;
 
-        let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
+        use crate::digest::FileDigest;
+
+        let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory, FileDigest)> =
+            HashMap::new();
 
         // Phase 1 — enumerate. Cheap, and it has to be sequential anyway.
         let mut md_paths: Vec<PathBuf> = Vec::new();
@@ -1932,11 +1971,22 @@ impl MemoryStore {
         // latency-critical, so occupying the rayon pool here is free; the
         // calling tokio worker is blocked for a *shorter* time than before,
         // since the work used to run inline on it.
-        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory)> = read
+        // The content digest is computed HERE, not in phase 2 and not in phase
+        // 5. Phase 2's `content` strings are consumed by this very iterator, so
+        // by phase 5 they are gone — carrying them that far would hold every
+        // memory file's full text in memory across three phases, and re-reading
+        // the file afterwards would both cost a second I/O pass and race the
+        // writer we are not excluding (a foreign editor, not another EngramDB
+        // process). Hashing inside this closure rides the rayon pool that is
+        // already parallelising the parse, over bytes that are already hot.
+        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory, FileDigest)> = read
             .into_par_iter()
             .filter_map(
                 |(path, mtime, content)| match memory_file::parse_memory_file(&content) {
-                    Ok(memory) => Some((path, mtime, memory)),
+                    Ok(memory) => {
+                        let digest = FileDigest::of(content.as_bytes());
+                        Some((path, mtime, memory, digest))
+                    }
                     Err(e) => {
                         tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
                         None
@@ -1947,16 +1997,19 @@ impl MemoryStore {
 
         // Phase 4 — resolve duplicate IDs. Sequential by nature (it is a
         // fold over a shared map) and cheap: no I/O, no parsing.
-        for (path, mtime, memory) in parsed {
+        // The digest travels with its own file through this fold: when two
+        // files claim one id, the row must record the identity of the file that
+        // WON (the one left on disk), not the one about to be deleted.
+        for (path, mtime, memory, digest) in parsed {
             let stale = match by_id.entry(memory.id.clone()) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert((path, mtime, memory));
+                    slot.insert((path, mtime, memory, digest));
                     None
                 }
                 std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    let (ref slot_path, slot_mtime, _) = *slot.get();
+                    let (ref slot_path, slot_mtime, _, _) = *slot.get();
                     if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
-                        let (old_path, _, _) = slot.insert((path, mtime, memory));
+                        let (old_path, _, _, _) = slot.insert((path, mtime, memory, digest));
                         Some(old_path)
                     } else {
                         Some(path)
@@ -1978,7 +2031,7 @@ impl MemoryStore {
             }
         }
 
-        // Phase 5 — build the index rows, in parallel. `IndexEntry::from`
+        // Phase 5 — build the index rows, in parallel. `IndexEntry::for_file`
         // derives the memory's keyword stems (tokenize → stoplist → Snowball
         // stem → dedup for three fields), the second-largest CPU cost here at
         // ~16ms per 1,000 memories serially, ~5.7ms across four cores
@@ -1987,14 +2040,14 @@ impl MemoryStore {
         // One batched merge_insert instead of one commit (and one LanceDB
         // dataset version) per memory — reindexing a 1,000-memory store used
         // to perform 1,000 sequential commits that optimize() then compacted.
-        let owned: Vec<(String, Memory)> = by_id
+        let owned: Vec<(String, Memory, FileDigest)> = by_id
             .into_iter()
-            .map(|(id, (_path, _mtime, memory))| (id, memory))
+            .map(|(id, (_path, _mtime, memory, digest))| (id, memory, digest))
             .collect();
         let entries_batch: Vec<IndexEntry> = owned
             .par_iter()
-            .map(|(id, memory)| {
-                let mut index_entry = IndexEntry::from(memory);
+            .map(|(id, memory, digest)| {
+                let mut index_entry = IndexEntry::for_file(memory, digest);
                 index_entry.visibility = visibility;
                 // R3: stamp the embedding flag from the chunk-table snapshot so a
                 // reindex (including the on-open schema migration) leaves
@@ -2003,7 +2056,7 @@ impl MemoryStore {
                 index_entry
             })
             .collect();
-        indexed_ids.extend(owned.into_iter().map(|(id, _)| id));
+        indexed_ids.extend(owned.into_iter().map(|(id, _, _)| id));
         self.lance_index
             .upsert_batch(&entries_batch)
             .await
@@ -3117,17 +3170,306 @@ mod tests {
         );
     }
 
+    // ===================================================================
+    // Schema 0.8.0: content digests (index currency).
+    // ===================================================================
+
+    /// The row's recorded digest for `id`, or `None` when unknown.
+    async fn row_digest(store: &MemoryStore, id: &str) -> Option<crate::digest::FileDigest> {
+        let digests = store.lance_index.list_digests().await.unwrap();
+        let row = digests.into_iter().find(|d| d.memory_id == id)?;
+        Some(crate::digest::FileDigest {
+            sha256: row.content_sha256?,
+            len: row.content_len?,
+        })
+    }
+
+    /// The digest of whatever `id`'s file actually contains right now.
+    async fn disk_digest(store: &MemoryStore, id: &str) -> crate::digest::FileDigest {
+        let shared = paths::memories_dir(&store.project_dir);
+        let personal = paths::personal_memories_dir(&store.project_id).unwrap();
+        for dir in [shared, personal] {
+            if let Some(path) = find_memory_files(&dir, id)
+                .await
+                .unwrap()
+                .into_iter()
+                .next()
+            {
+                let bytes = async_fs::read(&path).await.unwrap();
+                return crate::digest::FileDigest::of(&bytes);
+            }
+        }
+        panic!("no file on disk for {id}");
+    }
+
+    /// `create` must stamp the identity of the bytes it wrote — not of a
+    /// re-serialization, and not nothing.
+    #[tokio::test]
+    async fn content_digest_stamped_on_create_matches_file_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-1", Visibility::Shared))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            row_digest(&store, "cd-1").await,
+            Some(disk_digest(&store, "cd-1").await),
+            "the row must record exactly what is on disk"
+        );
+    }
+
+    /// Every write path stamps: single update, batch update, and batch create.
+    #[tokio::test]
+    async fn content_digest_stamped_on_every_write_path() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // create_batch — the path where `content` is scoped to a different loop
+        // than the index rows, so the digest has to be carried forward.
+        store
+            .create_batch(&[
+                create_test_memory("cd-b1", Visibility::Shared),
+                create_test_memory("cd-b2", Visibility::Shared),
+            ])
+            .await
+            .unwrap();
+        for id in ["cd-b1", "cd-b2"] {
+            assert_eq!(
+                row_digest(&store, id).await,
+                Some(disk_digest(&store, id).await),
+                "{id}: create_batch must stamp each row from its own file"
+            );
+        }
+
+        // update_with — a content change must move the digest.
+        let before = row_digest(&store, "cd-b1").await.unwrap();
+        store
+            .update_with("cd-b1", |m| {
+                m.content = "materially different content".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let after = row_digest(&store, "cd-b1").await.unwrap();
+        assert_ne!(before.sha256, after.sha256, "update must restamp");
+        assert_eq!(after, disk_digest(&store, "cd-b1").await);
+
+        // update_batch_with — the separate batched path.
+        store
+            .update_batch_with(&["cd-b2".to_string()], |m| {
+                m.content = "batched rewrite".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            row_digest(&store, "cd-b2").await,
+            Some(disk_digest(&store, "cd-b2").await),
+            "update_batch_with must stamp too"
+        );
+    }
+
+    /// A title change renames the file. The row must record the digest of the
+    /// file that now exists, not of the one that was just deleted.
+    #[tokio::test]
+    async fn content_digest_survives_title_rename() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory(
+                "0190cdcd-bbbb-7ccc-8ddd-000000000001",
+                Visibility::Shared,
+            ))
+            .await
+            .unwrap();
+
+        store
+            .update_with("0190cdcd-bbbb-7ccc-8ddd-000000000001", |m| {
+                m.title = Some("a brand new title".to_string());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            row_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000001").await,
+            Some(disk_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000001").await),
+            "the surviving file's digest must be the one recorded"
+        );
+    }
+
+    /// `reindex` backfills digests from disk for rows that had none.
+    #[tokio::test]
+    async fn reindex_backfills_content_digest_from_disk() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-rx", Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Simulate a row that predates the column by clearing it in place.
+        let mut entry = IndexEntry::without_digest(&store.get("cd-rx").await.unwrap());
+        entry.has_embedding = false;
+        store.lance_index.upsert(&entry).await.unwrap();
+        assert_eq!(row_digest(&store, "cd-rx").await, None, "cleared");
+
+        store.reindex().await.unwrap();
+
+        assert_eq!(
+            row_digest(&store, "cd-rx").await,
+            Some(disk_digest(&store, "cd-rx").await),
+            "reindex must backfill the digest from the file it read"
+        );
+    }
+
+    /// When two files claim one ID, `reindex_dir` deletes the loser. The row
+    /// must carry the digest of the file left on disk — recording the deleted
+    /// one would report permanent drift against a file that no longer exists.
+    #[tokio::test]
+    async fn content_digest_follows_winner_of_duplicate_id_resolution() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut mem =
+            create_test_memory("0190cdcd-bbbb-7ccc-8ddd-000000000002", Visibility::Shared);
+        mem.title = Some("winner".to_string());
+        store.create(&mem).await.unwrap();
+
+        // A stale duplicate under a different slug, with an older mtime and
+        // materially different content.
+        let mut stale = mem.clone();
+        stale.title = Some("loser".to_string());
+        stale.content = "stale duplicate content".to_string();
+        let shared = paths::memories_dir(&store.project_dir);
+        let stale_path = shared.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+
+        store.reindex().await.unwrap();
+
+        assert!(!stale_path.exists(), "the older duplicate is removed");
+        assert_eq!(
+            row_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000002").await,
+            Some(disk_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000002").await),
+            "the digest must be the surviving file's"
+        );
+    }
+
+    /// The 0.8.0 migration against a store whose Arrow schema genuinely lacks
+    /// the columns: they appear, are populated from the `.md` files, vectors
+    /// survive, and the stamp advances.
+    #[tokio::test]
+    async fn schema_migration_to_0_8_0_upgrades_a_real_0_7_0_store() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-mig", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("cd-mig", vec![vec![0.4f32; 384]])
+            .await
+            .unwrap();
+        drop(store);
+
+        downgrade_to_0_7_0(tmp.path()).await;
+
+        // Opening migrates.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+
+        assert_eq!(
+            row_digest(&store, "cd-mig").await,
+            Some(disk_digest(&store, "cd-mig").await),
+            "migration must backfill the digest from the file"
+        );
+        assert_eq!(
+            store.export_chunks("cd-mig").await.unwrap(),
+            vec![vec![0.4f32; 384]],
+            "vectors must survive a metadata-only migration"
+        );
+        let m = manifest::load_manifest(&paths::project_dir(tmp.path()).join("manifest.toml"))
+            .await
+            .unwrap();
+        assert_eq!(m.schema_version, manifest::CURRENT_SCHEMA_VERSION);
+    }
+
+    /// A file edited behind the store's back must be visible as drift: the
+    /// recorded digest no longer matches the bytes on disk. This is the whole
+    /// point of the column — counts and id sets are both unchanged here.
+    #[tokio::test]
+    async fn hand_edited_file_diverges_from_its_recorded_digest() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-edit", Visibility::Shared))
+            .await
+            .unwrap();
+        let recorded = row_digest(&store, "cd-edit").await.unwrap();
+
+        // Edit the file directly, exactly as a human or `git checkout` would.
+        let shared = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&shared, "cd-edit")
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Test content", "Edited behind the store's back");
+        std::fs::write(&path, &edited).unwrap();
+
+        assert_ne!(
+            recorded,
+            disk_digest(&store, "cd-edit").await,
+            "an in-place edit must diverge from the recorded digest"
+        );
+        // ...and the checks that exist today cannot see it.
+        assert_eq!(store.list_ids().await.unwrap().len(), 1);
+        assert!(
+            store.check_staleness().await.unwrap().is_none(),
+            "the count-based check is blind to this — which is why the digest exists"
+        );
+    }
+
     /// Rewrite a store's `memories` table without the `source_sessions`
     /// column, and stamp the manifest at 0.6.0.
+    async fn downgrade_to_0_6_0(dir: &Path) {
+        downgrade_dropping(dir, &["source_sessions"], "0.6.0").await
+    }
+
+    /// Rewrite a store's `memories` table without the 0.8.0 content-digest
+    /// columns, and stamp the manifest at 0.7.0.
+    async fn downgrade_to_0_7_0(dir: &Path) {
+        downgrade_dropping(dir, &["content_sha256", "content_len"], "0.7.0").await
+    }
+
+    /// Rewrite a store's `memories` table with `drop_cols` removed from the
+    /// Arrow schema, and stamp the manifest at `version`.
     ///
     /// The other migration tests here downgrade only the manifest stamp, which
     /// exercises the backfill but never the case that actually breaks: a table
     /// whose Arrow schema is genuinely missing the new column. This builds that
-    /// table by reading the current one, dropping the field and its array, and
-    /// recreating the table from the reduced batches — so the fixture is the
+    /// table by reading the current one, dropping the fields and their arrays,
+    /// and recreating the table from the reduced batches — so the fixture is the
     /// previous version's on-disk shape rather than a stand-in for it, and it
     /// stays honest if a later version adds another column.
-    async fn downgrade_to_0_6_0(dir: &Path) {
+    async fn downgrade_dropping(dir: &Path, drop_cols: &[&str], version: &str) {
         use arrow_array::RecordBatchIterator;
         use futures_util::stream::StreamExt;
         use lancedb::query::ExecutableQuery;
@@ -3148,12 +3490,12 @@ mod tests {
             let batch = batch.unwrap();
             let schema = batch.schema();
             let keep: Vec<usize> = (0..schema.fields().len())
-                .filter(|i| schema.field(*i).name() != "source_sessions")
+                .filter(|i| !drop_cols.contains(&schema.field(*i).name().as_str()))
                 .collect();
             assert_eq!(
-                keep.len() + 1,
+                keep.len() + drop_cols.len(),
                 schema.fields().len(),
-                "fixture must actually remove the new column"
+                "fixture must actually remove every named column"
             );
             let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
             let new_schema = Arc::new(arrow_schema::Schema::new(fields));
@@ -3174,7 +3516,7 @@ mod tests {
 
         let manifest_path = paths::project_dir(dir).join("manifest.toml");
         let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
-        m.schema_version = "0.6.0".to_string();
+        m.schema_version = version.to_string();
         // Only the schema axis may trigger: leaving the normalizer stale would
         // migrate for the wrong reason and the test would pass with the version
         // gate broken.
