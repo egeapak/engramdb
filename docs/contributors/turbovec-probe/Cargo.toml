@@ -37,6 +37,10 @@ name = "allowlist"
 path = "src/bin/allowlist.rs"
 
 [[bin]]
+name = "dsweep"
+path = "src/bin/dsweep.rs"
+
+[[bin]]
 name = "vs_lance"
 path = "src/bin/vs_lance.rs"
 

@@ -13,6 +13,7 @@ cd docs/contributors/turbovec-probe
 cargo run --release --bin probe      # recall@10 + top-1 vs exact cosine, d=384
 cargo run --release --bin overhead   # fixed per-index bytes; vs a plain f32 scan
 cargo run --release --bin allowlist  # allowlist selectivity; UnknownId semantics
+cargo run --release --bin dsweep     # recall vs embedding dimension (384..1536)
 cargo run --release --bin vs_lance   # per-project search cost vs LanceDB
 ```
 

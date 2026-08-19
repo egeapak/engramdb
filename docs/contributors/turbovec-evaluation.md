@@ -25,7 +25,7 @@ disqualifying on its own.
 | # | Finding | Evidence | Consequence |
 |---|---------|----------|-------------|
 | 1 | **The compression argument inverts at our scale.** turbovec carries a fixed per-index overhead of **248 KB (2-bit) / 451 KB (4-bit)** at d=384, independent of vector count. Break-even against raw f32 is **~339 vectors at 4-bit**, ~174 at 2-bit. | R1 | A project below ~340 chunks uses *more* space with turbovec. The whole corpus is 0.3–4 MB of f32 anyway. |
-| 2 | **4-bit costs 12–25% of top-1 results at d=384.** Measured recall@10 0.86–0.96 and **top-1 0.74–0.96** against exact cosine, degrading as n grows. 2-bit is unusable (top-1 0.36–0.60). | R2 | For a store whose job is surfacing *the* relevant convention before a file edit, a 1-in-6 top-1 miss is a product regression, not a tuning knob. The reranker cannot recover a memory that never entered the shortlist. |
+| 2 | **4-bit costs 12–25% of top-1 results at d=384** — but this is dimension-specific and largely goes away by d=1024 (R7). Measured recall@10 0.86–0.96 and **top-1 0.74–0.96** against exact cosine, degrading as n grows. 2-bit is unusable (top-1 0.36–0.60). | R2 | For a store whose job is surfacing *the* relevant convention before a file edit, a 1-in-6 top-1 miss is a product regression, not a tuning knob. The reranker cannot recover a memory that never entered the shortlist. |
 | 3 | **The allowlist prefilter — the headline feature — is real but sublinear, and we already have it.** At 1% selectivity it is only ~2× faster than an unfiltered scan, not ~100×; at 100% allowed it is *slower* than no filter. And it returns `Err(UnknownId)` for any id absent from the index, failing the whole query. | R3 | `restrict_to` (`lance_index.rs:1458`) and `session_id IN/NOT IN` (`conversation_index.rs:607`) are genuine pushdowns already, with regression tests. And our restrict lists legitimately contain ids with `has_embedding = false`, which turbovec would reject outright. |
 | 4 | **Score semantics differ everywhere except two points.** We use `1/(1+‖q−v‖²)`; turbovec returns the inner product. For unit vectors these are `1/(3−2c)` vs `c`, which agree only at `c = 0.5` and `c = 1.0`, with the gain differing by 2–4.5× across MiniLM's working range. | R4 | Every weight in `retrieval.scoring` — user-facing config with published defaults — would need retuning. The semantic term also loses its `[0.2, 1.0]` floor and can go negative. |
 | 5 | **Adoption forces a lock onto a deliberately lock-free read path.** turbovec is sync (needs `spawn_blocking`), all mutations take `&mut self` (needs `RwLock`), and `sync()` explicitly does not support concurrent writers. | R5 | EngramDB runs one MCP server *per Claude Code session* plus CLI, hooks and daemon against one store. Today reads are lock-free via LanceDB MVCC. |
@@ -125,7 +125,7 @@ turbovec fits it in 4 GB"* — is a real and impressive claim about a corpus fou
 orders of magnitude larger than ours. At our scale we would be trading single-digit
 megabytes for the accuracy in R2.
 
-### R2 · 4-bit costs 12–25% of top-1 results at d=384; 2-bit is unusable
+### R2 · 4-bit costs 12–25% of top-1 results **at d=384**; 2-bit is unusable
 
 recall@10 and top-1 agreement against exact cosine, TQ+ calibration as noted:
 
@@ -151,6 +151,10 @@ Three things matter here:
    warning at four times our dimensionality, and the README explicitly names low
    dimension as "the harder regime — at low dim the asymptotic Beta assumption is
    looser."
+
+**This result is specific to d=384 and largely dissolves at higher dimensions —
+see R7.** TurboQuant's Beta/Gaussian coordinate assumption is asymptotic in `d`,
+so 384 is close to its worst case among realistic embedding widths.
 
 Score error is small in absolute terms (4-bit: mean |Δ| 0.004, p95 0.011) but
 MiniLM adjacent-rank cosine gaps in a topical corpus are routinely below 0.05,
@@ -342,6 +346,54 @@ win evaporates.
 **Recommendation for this path: take the two no-dependency fixes and re-measure.**
 If ~2.2 ms/plan is still the floor and machine-wide search is still too slow,
 reopen the question with the row-store design worked out first.
+
+### R7 · Raising the embedding dimension fixes R2 — and only R2
+
+The obvious rescue for R2 is a wider embedding: TurboQuant's coordinate
+distribution assumption is asymptotic in `d`, so more dimensions should quantize
+better. Measured (4-bit, TQ+ calibrated, anisotropic corpus, 30 queries):
+
+| d | n=500 recall@10 / top-1 | n=2000 recall@10 / top-1 | query (n=2000) | fixed bytes | break-even n |
+|---|---|---|---|---|---|
+| 384 | 0.963 / 0.97 | 0.937 / **0.80** | 124 µs | 451 KB | 339 |
+| 768 | 0.980 / 0.97 | 0.927 / **0.97** | 239 µs | 856 KB | 320 |
+| 1024 | 0.950 / 0.97 | 0.957 / **1.00** | 332 µs | 1,126 KB | 315 |
+| 1536 | 0.963 / 1.00 | 0.947 / **1.00** | 518 µs | 1,666 KB | 311 |
+
+**The effect is real: top-1 goes from 0.80 at d=384 to 1.00 at d=1024–1536.** So
+R2 is not an indictment of TurboQuant in general — it is an artefact of running it
+at the narrowest width in common use.
+
+But nothing else moves, and two new costs appear:
+
+- **Break-even n is dimension-invariant (~311–339 vectors at every width).**
+  Fixed overhead scales linearly with `d` — 451 KB → 1,666 KB — at exactly the
+  rate the data does, so R1 is unchanged by this lever.
+- **The storage argument becomes circular.** Today is d=384 f32 at 1,536 B/vector.
+  d=1536 at 4-bit is ~780 B/vector — a net **1.97×** against what we already have.
+  You would quadruple the vector width in order to compress it 8×, to end up
+  twice as small as not doing either.
+- **We have no 1536-dim local model, and the widest one we do have was already
+  rejected.** The provider table (`crates/engram-models/src/embeddings/onnx.rs`)
+  tops out at **1024** (`mxbai-embed-large-v1`); everything else is 384 or 768.
+  `embedding-model-alternatives.md` finding 5 re-confirmed "don't switch to
+  bge-small / nomic / **mxbai**". Reaching 1536 realistically means an API model
+  (OpenAI `text-embedding-3-small`), which contradicts the local/offline design
+  the whole ONNX stack exists to serve.
+- **It slows the path that actually dominates.** Warm embed for the current
+  default is 5.70 ms (`embedding-model-alternatives.md` R1) against a
+  vector scan of ~100–500 µs. A wider model costs multiples of that — the same
+  study measured bge-small-q at 5.7× warm latency "for no reliable gain". Paying
+  ~4× on the dominant term to improve a term worth ~2% of the query is the wrong
+  trade. turbovec's own scan also goes 4× slower (124 → 518 µs).
+- **It is a full migration.** Changing `[embeddings].dimensions` changes the
+  `EmbeddingFingerprint`, requires `reindex --embeddings-only` on every store, and
+  trips `ConversationIndex::ensure_table`'s width check on every project.
+
+**Verdict: the dimension lever works, and is not worth pulling for this reason.**
+If a wider model is ever adopted on its own merits — better retrieval quality,
+which is how `embedding-model-alternatives.md` decides these — then R2 stops being
+a blocker and turbovec deserves a fresh look. It is not a reason to widen.
 
 ## Incidental findings
 
