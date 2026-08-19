@@ -22,7 +22,8 @@
 //!
 //! Run: `cargo run --release --example embed_matrix`
 //! Env: `EMBED_EVAL_DATA` (dataset path), `EMBED_EVAL_OUT` (results JSON),
-//!      `EMBED_EVAL_MODELS` (comma filter, e.g. "minilm-q,bge-small-q").
+//!      `EMBED_EVAL_MODELS` (comma filter, e.g. "minilm-q,bge-small-q"),
+//!      `EMBED_EVAL_VARIANTS` (comma filter, e.g. "fieldvec_c256" = production).
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -788,6 +789,13 @@ async fn main() -> Result<()> {
         std::env::var("EMBED_EVAL_DATA").unwrap_or_else(|_| "examples/data/embed_eval.json".into());
     let out_path = std::env::var("EMBED_EVAL_OUT")
         .unwrap_or_else(|_| "target/embed_matrix_results.json".into());
+    // Variant filter: the full 16-variant sweep re-embeds the corpus once per
+    // variant, which a 1024-dim model turns into hours. A comparison between
+    // models only needs the production variant (`fieldvec_c256`, i.e.
+    // `metadata_vector = true` at the 256-token budget).
+    let variant_filter: Option<Vec<String>> = std::env::var("EMBED_EVAL_VARIANTS")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
     let model_filter: Option<Vec<String>> = std::env::var("EMBED_EVAL_MODELS")
         .ok()
         .map(|s| s.split(',').map(|m| m.trim().to_string()).collect());
@@ -870,6 +878,11 @@ async fn main() -> Result<()> {
         }
         let mut texts: HashMap<(&str, &str), Vec<Vec<String>>> = HashMap::new();
         for v in DOC_VARIANTS {
+            if let Some(f) = &variant_filter {
+                if !f.iter().any(|x| x == v.name) {
+                    continue;
+                }
+            }
             let budget = v.chunk_tokens.min(mut_.spec.max_tokens);
             for dm in &doc_modes {
                 let per_mem: Vec<Vec<String>> = ds
@@ -938,6 +951,11 @@ async fn main() -> Result<()> {
         let mut baseline_ranks: HashMap<&str, usize> = HashMap::new();
 
         for v in DOC_VARIANTS {
+            if let Some(f) = &variant_filter {
+                if !f.iter().any(|x| x == v.name) {
+                    continue;
+                }
+            }
             for qm in &query_modes {
                 let dm = if *qm == "prefixed" && mut_.doc_prefix.is_some() {
                     "prefixed"
@@ -1021,6 +1039,11 @@ async fn main() -> Result<()> {
             "variant(max,raw)", "P@1", "R@5", "MRR", "nDCG", "win/loss", "chunks"
         );
         for v in DOC_VARIANTS {
+            if let Some(f) = &variant_filter {
+                if !f.iter().any(|x| x == v.name) {
+                    continue;
+                }
+            }
             if let Some(r) = results
                 .get(v.name)
                 .and_then(|a| a.get("max"))
