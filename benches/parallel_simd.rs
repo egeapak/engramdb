@@ -722,7 +722,14 @@ fn store_batch_benchmarks(c: &mut Criterion) {
                 let entries: Vec<_> = mems
                     .iter()
                     .enumerate()
-                    .map(|(i, m)| (m.id.clone(), m.updated_at, vec![synth_vector(i as u64)]))
+                    .map(|(i, m)| {
+                        (
+                            m.id.clone(),
+                            m.updated_at,
+                            vec![synth_vector(i as u64)],
+                            None,
+                        )
+                    })
                     .collect();
                 store.upsert_chunks_batch(entries).await.expect("batch");
             });

@@ -129,6 +129,16 @@ async fn migrate_dir(
         .export_chunks_batch(&migrate_ids)
         .await
         .unwrap_or_default();
+    // Carry each memory's embed digest across with its vectors. The digest is
+    // salted with the embedding model, dimensions, composition and chunk size,
+    // so copying it verbatim is self-validating and needs no comparison of the
+    // two stores' configs: the worktree store loads its OWN `config.toml`, and
+    // if any of those differ, the copied digest is simply not what the main
+    // store's engine would compute, so the memory re-embeds on the next pass.
+    // When they match — the overwhelmingly common case, since a worktree is a
+    // checkout of the same project — the digest matches too and the relocated
+    // vectors are correctly recognised as current.
+    let mut digests_by_id = wt_store.embed_digests().await.unwrap_or_default();
 
     // Phase 4 — write into main with a single batched create.
     //
@@ -149,11 +159,12 @@ async fn migrate_dir(
     // batched commit there is no mid-loop to crash in — either every memory
     // is in main or none is, and in the latter case every source file is
     // still present for a re-run.
-    let mut relocate: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)> = Vec::new();
+    let mut relocate: Vec<crate::lance_index::GuardedChunkWrite> = Vec::new();
     for (path, memory) in &to_migrate {
         if let Some(chunks) = chunks_by_id.remove(&memory.id) {
             if !chunks.is_empty() {
-                relocate.push((memory.id.clone(), memory.updated_at, chunks));
+                let digest = digests_by_id.remove(&memory.id).flatten();
+                relocate.push((memory.id.clone(), memory.updated_at, chunks, digest));
             }
         }
         let _ = async_fs::remove_file(path).await;

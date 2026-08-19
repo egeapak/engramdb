@@ -472,7 +472,7 @@ impl RetrievalEngine {
         let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let vectors = self.embed_texts(&text_refs).await;
 
-        let mut entries: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)> =
+        let mut entries: Vec<crate::storage::lance_index::GuardedChunkWrite> =
             Vec::with_capacity(memories.len());
         let mut errors: Vec<(String, String)> = Vec::new();
         for (memory, (start, end)) in memories.iter().zip(spans) {
@@ -493,7 +493,15 @@ impl RetrievalEngine {
                 errors.push((memory.id.clone(), "embedding failed".to_string()));
                 continue;
             }
-            entries.push((memory.id.clone(), memory.updated_at, chunks));
+            // The digest covers this memory's own texts, computed from the same
+            // slice of the flattened stream that produced its vectors.
+            let digest = embed_digest(
+                &texts[start..end],
+                provider.as_ref(),
+                metadata_vector,
+                chunk_tokens,
+            );
+            entries.push((memory.id.clone(), memory.updated_at, chunks, Some(digest)));
         }
 
         match self.store.upsert_chunks_batch(entries).await {
@@ -1783,6 +1791,72 @@ fn metadata_row(memory: &Memory) -> Option<String> {
 
 /// The document string the cross-encoder reranker scores against the query.
 ///
+/// The identity of the text a memory's stored vectors were computed from.
+///
+/// SHA-256 over the embed texts, **salted** with everything else that decides
+/// what those vectors are: the model id, the vector width, the composition, and
+/// the chunk-token budget. One column and one comparison then cover all four
+/// ways vectors go stale — the text changed, the model was swapped, the
+/// composition flipped, or `[embeddings].max_tokens` was retuned.
+///
+/// The first three are also tracked store-wide by `EmbeddingFingerprint`; the
+/// fourth is not, so a `max_tokens` change re-chunks today with nothing
+/// detecting it. Salting rather than deferring to the store fingerprint also
+/// makes the answer *per memory*, which is what lets a reindex interrupted by
+/// provider failures resume, and what lets a dry run name individual memories.
+///
+/// Salting has a second, quieter payoff: a digest is self-validating across
+/// stores. Worktree consolidation copies a digest computed under the worktree's
+/// own config; if any salt component differs, the copied value is simply not
+/// what this store's engine would compute, and the memory re-embeds — with no
+/// config comparison anywhere.
+///
+/// NOT covered, deliberately and with a known limit: the ONNX **runtime** that
+/// executed the model. `model_id()` names the weights, not the build that ran
+/// them, and this repo has a measured incident where a bad prebuilt runtime
+/// embedded the same text to unrelated vectors under an unchanged model id
+/// (see `docs/contributors/embedding-model-alternatives.md`, R6/R9). That is
+/// exactly why skipping re-embeds is opt-in rather than the default: a plain
+/// `reindex` must stay the repair for vectors that are wrong for reasons no
+/// digest can see.
+pub(crate) fn embed_digest(
+    texts: &[String],
+    provider: &dyn EmbeddingProvider,
+    metadata_vector: bool,
+    chunk_tokens: usize,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // NUL-separated so no field boundary can be forged by content: a NUL
+    // cannot appear in a model id, and the texts are UTF-8 from `.md` files.
+    hasher.update(provider.model_id().as_bytes());
+    hasher.update([0]);
+    hasher.update(provider.dimensions().to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(
+        if metadata_vector {
+            crate::storage::manifest::COMPOSITION_METADATA_V1
+        } else {
+            "legacy"
+        }
+        .as_bytes(),
+    );
+    hasher.update([0]);
+    hasher.update(chunk_tokens.to_string().as_bytes());
+    for text in texts {
+        hasher.update([0]);
+        hasher.update(text.as_bytes());
+    }
+    // `sha2` 0.11's `finalize` returns a `hybrid_array::Array` with no
+    // `LowerHex`, so `{:x}` does not compile — the same gotcha every other
+    // digest site in this codebase documents.
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Mirrors the embedding-side composition ([`embedding_texts`] /
 /// [`metadata_row`]): title and tags are included so a candidate surfaced
 /// via its metadata vector is re-scored on text that still contains the
@@ -1857,8 +1931,9 @@ async fn embed_memory_with(
     // Freshness-guarded: this runs in detached ingest tasks with no ordering
     // guarantee, so an embed of an older snapshot must not overwrite newer
     // vectors, and an embed racing a delete must not re-insert orphan chunks.
+    let digest = embed_digest(&chunks, provider, metadata_vector, chunk_tokens);
     let written = store
-        .upsert_chunks_if_current(&memory.id, vectors, memory.updated_at)
+        .upsert_chunks_if_current(&memory.id, vectors, memory.updated_at, Some(digest))
         .await?;
     if !written {
         tracing::debug!(
@@ -2008,6 +2083,89 @@ mod tests {
         fn model_id(&self) -> String {
             "onnx/constant-stub".to_string()
         }
+    }
+
+    /// [`ConstantEmbedding`] with a configurable identity, for asserting that
+    /// the embed digest is salted by model id and vector width.
+    struct IdentityEmbedding {
+        model: &'static str,
+        dims: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for IdentityEmbedding {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5f32; self.dims])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.5f32; self.dims]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            self.dims
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            self.model.to_string()
+        }
+    }
+
+    /// The embed digest must move when ANY of its four salt components moves —
+    /// the text, the model, the vector width, the composition, or the chunk
+    /// budget. Each assertion here is one way stored vectors go stale, and the
+    /// last is the one the store-wide `EmbeddingFingerprint` does not cover.
+    #[test]
+    fn embed_digest_is_salted_by_every_input() {
+        let base_texts = vec!["alpha".to_string(), "beta".to_string()];
+        let p = IdentityEmbedding {
+            model: "onnx/a",
+            dims: 384,
+        };
+        let base = embed_digest(&base_texts, &p, true, 256);
+
+        // Stable for identical inputs — otherwise nothing could ever be skipped.
+        assert_eq!(base, embed_digest(&base_texts, &p, true, 256));
+
+        // 1. Text.
+        let other_texts = vec!["alpha".to_string(), "GAMMA".to_string()];
+        assert_ne!(base, embed_digest(&other_texts, &p, true, 256));
+
+        // 2. Model identity.
+        let other_model = IdentityEmbedding {
+            model: "onnx/b",
+            dims: 384,
+        };
+        assert_ne!(base, embed_digest(&base_texts, &other_model, true, 256));
+
+        // 3. Vector width.
+        let other_dims = IdentityEmbedding {
+            model: "onnx/a",
+            dims: 768,
+        };
+        assert_ne!(base, embed_digest(&base_texts, &other_dims, true, 256));
+
+        // 4. Composition (metadata_vector on/off).
+        assert_ne!(base, embed_digest(&base_texts, &p, false, 256));
+
+        // 5. Chunk budget — the axis `EmbeddingFingerprint` misses entirely, so
+        // without this a `[embeddings].max_tokens` change would re-chunk with
+        // nothing detecting it.
+        assert_ne!(base, embed_digest(&base_texts, &p, true, 128));
+    }
+
+    /// Field boundaries must not be forgeable by content: two different
+    /// (model, texts) splits that concatenate to the same bytes must still
+    /// digest differently.
+    #[test]
+    fn embed_digest_field_boundaries_are_unambiguous() {
+        let p = IdentityEmbedding {
+            model: "onnx/a",
+            dims: 384,
+        };
+        let one = embed_digest(&["x".to_string(), "y".to_string()], &p, true, 256);
+        let two = embed_digest(&["xy".to_string()], &p, true, 256);
+        assert_ne!(one, two, "chunk boundaries must be part of the identity");
     }
 
     /// Stub NLI: everything is a maximal contradiction. No model load.

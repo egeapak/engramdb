@@ -1509,6 +1509,25 @@ impl MemoryStore {
             stored_normalizer.as_deref().unwrap_or("<none>"),
             engram_types::NORMALIZER_STAMP
         );
+        // The chunks table has no `.md` files to rebuild from — recreating it
+        // would destroy the vectors the rebuild exists to preserve — so any new
+        // column there is added in place, as all-nulls (= "provenance
+        // unknown" = re-embed when asked). Done HERE rather than at store open
+        // because it commits a Lance `Merge`, which conflicts with any
+        // concurrent write: unlocked at open, a parallel MCP session writing
+        // chunks would fail the loser's `MemoryStore::open` and break an
+        // ordinary read command. `reindex_with` below takes the lock, so this
+        // runs just before it, under the lock acquired for the stamp.
+        {
+            let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+            self.lance_index
+                .add_missing_chunk_columns()
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!("chunks-table column add failed: {}", e))
+                })?;
+        }
+
         // `force_schema_reset`: a schema migration must recreate the memories
         // table with the current columns. The default (upsert-only) reindex path
         // taken under a foreign checkout can't add columns and would fail on a
@@ -1688,11 +1707,21 @@ impl MemoryStore {
             })
     }
 
-    /// Upsert embedding chunks for a memory.
+    /// Upsert embedding chunks for a memory, recording no provenance for them.
+    ///
+    /// The un-digested entry point: the vectors are stored with a null
+    /// `embed_sha256`, which every currency check reads as *unknown* and
+    /// therefore "re-embed when asked". That is the correct answer for its two
+    /// real callers — worktree consolidation, which **relocates** vectors it did
+    /// not compute (and cannot compute a digest for: the source store has its
+    /// own config, so its model, dimensions, composition and chunk size may all
+    /// differ), and tests. The digest-carrying paths are
+    /// [`Self::upsert_chunks_if_current`] and [`Self::upsert_chunks_batch`],
+    /// which the retrieval engine drives.
     pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         self.lance_index
-            .upsert_chunks(memory_id, chunks)
+            .upsert_chunks(memory_id, chunks, None)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e)))
     }
@@ -1710,11 +1739,16 @@ impl MemoryStore {
     /// variant re-reads the memory UNDER the write lock and skips the write
     /// when the memory is gone or its `updated_at` no longer equals
     /// `snapshot_updated_at`.
+    ///
+    /// `embed_sha256` describes the text `chunks` were computed from and is
+    /// written in the same `RecordBatch` as the vectors, so it can never end up
+    /// describing a different snapshot than the vectors beside it.
     pub async fn upsert_chunks_if_current(
         &self,
         memory_id: &str,
         chunks: Vec<Vec<f32>>,
         snapshot_updated_at: chrono::DateTime<chrono::Utc>,
+        embed_sha256: Option<String>,
     ) -> Result<bool> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         match self.get(memory_id).await {
@@ -1732,7 +1766,7 @@ impl MemoryStore {
             Err(e) => return Err(e),
         }
         self.lance_index
-            .upsert_chunks(memory_id, chunks)
+            .upsert_chunks(memory_id, chunks, embed_sha256.as_deref())
             .await
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e))
@@ -1755,20 +1789,22 @@ impl MemoryStore {
     /// Returns the ids actually written.
     pub async fn upsert_chunks_batch(
         &self,
-        entries: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)>,
+        entries: Vec<crate::lance_index::GuardedChunkWrite>,
     ) -> Result<Vec<String>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        let ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
+        let ids: Vec<&str> = entries.iter().map(|(id, _, _, _)| id.as_str()).collect();
         let current: HashMap<String, Memory> = self.get_batch(&ids).await?.into_iter().collect();
 
-        let mut fresh: Vec<(String, Vec<Vec<f32>>)> = Vec::with_capacity(entries.len());
-        for (id, snapshot_updated_at, chunks) in entries {
+        let mut fresh: Vec<crate::lance_index::ChunkWrite> = Vec::with_capacity(entries.len());
+        for (id, snapshot_updated_at, chunks, digest) in entries {
             match current.get(&id) {
-                Some(mem) if mem.updated_at == snapshot_updated_at => fresh.push((id, chunks)),
+                Some(mem) if mem.updated_at == snapshot_updated_at => {
+                    fresh.push((id, chunks, digest))
+                }
                 Some(_) => tracing::debug!(
                     "skipping stale chunk upsert for {id}: memory changed since snapshot"
                 ),
@@ -1785,7 +1821,15 @@ impl MemoryStore {
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB upsert_chunks_batch failed: {}", e))
             })?;
-        Ok(fresh.into_iter().map(|(id, _)| id).collect())
+        Ok(fresh.into_iter().map(|(id, _, _)| id).collect())
+    }
+
+    /// Every embedded memory's `embed_sha256` (schema v0.8.0), keyed by memory
+    /// id. See [`crate::lance_index::LanceIndex::list_embed_digests`].
+    pub async fn embed_digests(&self) -> Result<HashMap<String, Option<String>>> {
+        self.lance_index.list_embed_digests().await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB list_embed_digests failed: {}", e))
+        })
     }
 
     /// Delete all embedding chunks for a memory.
@@ -2512,6 +2556,7 @@ mod tests {
                     m.id.clone(),
                     m.updated_at,
                     vec![vec![i as f32; 384], vec![(i + 100) as f32; 384]],
+                    None,
                 )
             })
             .collect();
@@ -2544,12 +2589,18 @@ mod tests {
         store.create(&stale).await.unwrap();
 
         let entries = vec![
-            (fresh.id.clone(), fresh.updated_at, vec![vec![1.0f32; 384]]),
+            (
+                fresh.id.clone(),
+                fresh.updated_at,
+                vec![vec![1.0f32; 384]],
+                None,
+            ),
             // A snapshot timestamp that no longer matches the stored memory.
             (
                 stale.id.clone(),
                 stale.updated_at - chrono::Duration::seconds(60),
                 vec![vec![2.0f32; 384]],
+                None,
             ),
         ];
         let written = store.upsert_chunks_batch(entries).await.unwrap();
@@ -2584,6 +2635,7 @@ mod tests {
                 rewritten.id.clone(),
                 rewritten.updated_at,
                 vec![vec![3.0f32; 384]],
+                None,
             )])
             .await
             .unwrap();
@@ -2610,13 +2662,19 @@ mod tests {
                 m.id.clone(),
                 m.updated_at,
                 vec![vec![1.0f32; 384], vec![2.0f32; 384], vec![3.0f32; 384]],
+                None,
             )])
             .await
             .unwrap();
         assert_eq!(store.export_chunks(&m.id).await.unwrap().len(), 3);
 
         store
-            .upsert_chunks_batch(vec![(m.id.clone(), m.updated_at, vec![vec![4.0f32; 384]])])
+            .upsert_chunks_batch(vec![(
+                m.id.clone(),
+                m.updated_at,
+                vec![vec![4.0f32; 384]],
+                None,
+            )])
             .await
             .unwrap();
         assert_eq!(
@@ -3067,6 +3125,7 @@ mod tests {
                 "hb-empty".to_string(),
                 current.updated_at,
                 Vec::new(),
+                None,
             )])
             .await
             .unwrap();
@@ -3445,6 +3504,182 @@ mod tests {
             store.check_staleness().await.unwrap().is_none(),
             "the count-based check is blind to this — which is why the digest exists"
         );
+    }
+
+    /// The embed digest rides the same write as the vectors, and is readable
+    /// back per memory.
+    #[tokio::test]
+    async fn embed_digest_is_written_and_read_back_with_its_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = create_test_memory("ed-1", Visibility::Shared);
+        store.create(&m).await.unwrap();
+
+        store
+            .upsert_chunks_batch(vec![(
+                "ed-1".to_string(),
+                m.updated_at,
+                vec![vec![0.1f32; 384], vec![0.2f32; 384]],
+                Some("digest-abc".to_string()),
+            )])
+            .await
+            .unwrap();
+
+        let digests = store.embed_digests().await.unwrap();
+        assert_eq!(
+            digests.get("ed-1"),
+            Some(&Some("digest-abc".to_string())),
+            "the digest must be readable back for the memory it was written with"
+        );
+        // The vectors are unaffected by carrying the digest alongside them.
+        assert_eq!(store.export_chunks("ed-1").await.unwrap().len(), 2);
+    }
+
+    /// The un-digested entry point records `None`, which reads as *unknown* —
+    /// never as *current*. Worktree relocation and tests take this path.
+    #[tokio::test]
+    async fn upsert_chunks_without_digest_records_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("ed-2", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("ed-2", vec![vec![0.3f32; 384]])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.embed_digests().await.unwrap().get("ed-2"),
+            Some(&None),
+            "present but unknown — the memory has vectors, of unrecorded provenance"
+        );
+    }
+
+    /// Deleting a memory's chunks takes its digest with them: absent from the
+    /// map entirely, not left behind as a stale claim about vectors that are
+    /// gone.
+    #[tokio::test]
+    async fn deleting_chunks_removes_the_digest_too() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = create_test_memory("ed-3", Visibility::Shared);
+        store.create(&m).await.unwrap();
+        store
+            .upsert_chunks_batch(vec![(
+                "ed-3".to_string(),
+                m.updated_at,
+                vec![vec![0.4f32; 384]],
+                Some("digest-xyz".to_string()),
+            )])
+            .await
+            .unwrap();
+        assert!(store.embed_digests().await.unwrap().contains_key("ed-3"));
+
+        store.delete_chunks("ed-3").await.unwrap();
+
+        assert!(
+            !store.embed_digests().await.unwrap().contains_key("ed-3"),
+            "no vectors ⇒ no digest; the two are written and deleted together"
+        );
+    }
+
+    /// A chunks table written before 0.8.0 has no `embed_sha256` column at all.
+    /// The migration must add it in place — the vectors cannot be rebuilt from
+    /// anything, so recreating the table would destroy exactly what the
+    /// metadata-only migration exists to preserve.
+    #[tokio::test]
+    async fn schema_migration_adds_the_chunks_digest_column_in_place() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("ed-mig", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("ed-mig", vec![vec![0.7f32; 384]])
+            .await
+            .unwrap();
+        drop(store);
+
+        drop_chunks_column(tmp.path(), "embed_sha256").await;
+        downgrade_to_0_7_0(tmp.path()).await;
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+
+        // The column is back, the vectors survived, and their provenance reads
+        // as unknown (so they re-embed when asked, rather than being trusted).
+        assert_eq!(
+            store.export_chunks("ed-mig").await.unwrap(),
+            vec![vec![0.7f32; 384]],
+            "vectors must survive the in-place column add"
+        );
+        assert_eq!(
+            store.embed_digests().await.unwrap().get("ed-mig"),
+            Some(&None)
+        );
+
+        // Idempotent: opening again must not fail or duplicate the column.
+        drop(store);
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(store.export_chunks("ed-mig").await.unwrap().len(), 1);
+    }
+
+    /// Rewrite a store's `chunks` table without `col`, reproducing a table
+    /// written before that column existed.
+    async fn drop_chunks_column(dir: &Path, col: &str) {
+        use arrow_array::RecordBatchIterator;
+        use futures_util::stream::StreamExt;
+        use lancedb::query::ExecutableQuery;
+        use std::sync::Arc;
+
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id).unwrap();
+        let conn = lancedb::connect(lance_path.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let table = conn.open_table("chunks").execute().await.unwrap();
+
+        let mut stream = table.query().execute().await.unwrap();
+        let mut reduced = Vec::new();
+        let mut reduced_schema = None;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            let keep: Vec<usize> = (0..schema.fields().len())
+                .filter(|i| schema.field(*i).name() != col)
+                .collect();
+            assert_eq!(
+                keep.len() + 1,
+                schema.fields().len(),
+                "fixture must actually remove {col}"
+            );
+            let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
+            let new_schema = Arc::new(arrow_schema::Schema::new(fields));
+            let columns: Vec<_> = keep.iter().map(|i| batch.column(*i).clone()).collect();
+            reduced.push(arrow_array::RecordBatch::try_new(new_schema.clone(), columns).unwrap());
+            reduced_schema = Some(new_schema);
+        }
+        let schema = reduced_schema.expect("fixture needs at least one chunk");
+
+        conn.drop_table("chunks", &[]).await.unwrap();
+        let batches: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
+            RecordBatchIterator::new(reduced.into_iter().map(Ok), schema),
+        );
+        conn.create_table("chunks", batches)
+            .execute()
+            .await
+            .unwrap();
     }
 
     /// Rewrite a store's `memories` table without the `source_sessions`
@@ -4799,7 +5034,12 @@ mod tests {
 
         // Current snapshot: written.
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.1f32; 384]], memory.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.1f32; 384]],
+                memory.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(written);
@@ -4813,14 +5053,24 @@ mod tests {
             .await
             .unwrap();
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.9f32; 384]], newer.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.9f32; 384]],
+                newer.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(written);
 
         // ...so the OLD snapshot's late-arriving vectors are refused.
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.1f32; 384]], memory.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.1f32; 384]],
+                memory.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(!written, "stale snapshot must not overwrite newer vectors");
@@ -4833,7 +5083,12 @@ mod tests {
         // Deleted memory: a late embed must not re-insert orphan chunks.
         store.delete("guarded-chunks").await.unwrap();
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.5f32; 384]], newer.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.5f32; 384]],
+                newer.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(!written, "deleted memory must not get orphan chunks");
