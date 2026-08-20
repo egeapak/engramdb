@@ -19,12 +19,15 @@
 
 use super::error::{Result, StorageError};
 use super::lance_index::{
-    IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex, VectorMatch,
+    IndexDigest, IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex,
+    VectorMatch,
 };
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
 use crate::config::{load_config, load_config_or_default};
+use crate::staleness::StalenessFindings;
 use chrono::{DateTime, Utc};
+use engram_types::config::{IndexConfig, StalenessCheck};
 use engram_types::{Memory, MemoryType, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2172,20 +2175,177 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Check whether the LanceDB index is stale compared to memory files on disk.
+    /// Check whether the LanceDB index has fallen behind the memory files on
+    /// disk, at the tier `cfg` asks for.
     ///
-    /// Returns `Some(warning_message)` if the counts differ, `None` if in sync.
-    pub async fn check_staleness(&self) -> Result<Option<String>> {
+    /// Returns `Some(warning_message)` if drift was confirmed, `None` if the
+    /// store looks current. See [`crate::staleness`] for what each tier
+    /// compares, why the default is `size` rather than exact hashing, and why a
+    /// finding must be confirmed by a second pass.
+    ///
+    /// **A `None` here is not proof of currency** — only the `content` tier is
+    /// exact, and even it is budget-bounded. `doctor` and `reindex --dry-run`
+    /// are the unbudgeted authority; this runs on every read and is a
+    /// best-effort early warning.
+    ///
+    /// Never returns `Err` for a *tier* failure. The three callers all treat an
+    /// error as "no warning", so a tier that cannot complete degrades to the
+    /// strongest tier that can rather than silently reporting a clean store.
+    /// An error here means the index itself could not be counted.
+    pub async fn check_staleness(&self, cfg: &IndexConfig) -> Result<Option<String>> {
+        // A shared project id means two checkouts legitimately hold different
+        // bytes for the same ids, and the index holds the union. Every tier
+        // would fire, permanently and unrepairably: reindex degrades to a
+        // non-destructive upsert under conflict by design, so the warning would
+        // never clear.
+        if self.checkout_conflict().await.is_some() {
+            return Ok(None);
+        }
+
+        let first = self.staleness_pass(cfg).await?;
+        if first.is_clean() {
+            return Ok(None);
+        }
+        // Something was found — which on a lock-free read path is as likely to
+        // be a write committing across the pass as it is real drift. Pay for a
+        // second pass only here, and report only what both agree on.
+        let second = self.staleness_pass(cfg).await?;
+        Ok(first.confirmed_by(&second).message(cfg.staleness_check))
+    }
+
+    /// One tiered comparison of the files against the index.
+    ///
+    /// Ordering is load-bearing: the file enumeration happens **first** and the
+    /// index projection second. `create` writes the file before the row, so
+    /// reading the index first would make every concurrent create look like a
+    /// missing row; this ordering makes it look like an extra file instead,
+    /// which the second pass then clears. Neither ordering avoids the race —
+    /// that is what [`StalenessFindings::confirmed_by`] is for — but this one
+    /// keeps the transient state consistent between the two passes.
+    async fn staleness_pass(&self, cfg: &IndexConfig) -> Result<StalenessFindings> {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
-        let md_count = count_md_files(&shared_dir).await + count_md_files(&personal_dir).await;
-        let lance_count = self
-            .lance_index
+
+        // Tier A always runs: it is the cheapest signal and the only one that
+        // needs no per-file `statx`.
+        if cfg.staleness_check == StalenessCheck::Counts {
+            let md_count = count_md_files(&shared_dir).await + count_md_files(&personal_dir).await;
+            let lance_count = self.lance_count().await?;
+            return Ok(StalenessFindings {
+                md_count,
+                lance_count,
+                ..Default::default()
+            });
+        }
+
+        let mut on_disk = scan_dir_to_stats(&shared_dir).await;
+        let personal = scan_dir_to_stats(&personal_dir).await;
+        // A file count, not a distinct-id count: a stale duplicate left by a
+        // crashed rename is a real inconsistency, and tier A has always
+        // reported it.
+        let md_count = on_disk.file_count + personal.file_count;
+        on_disk.by_id.extend(personal.by_id);
+        let by_id = on_disk.by_id;
+
+        let rows = self.index_digests().await?;
+        let lance_count = rows.len();
+
+        let mut findings = StalenessFindings {
+            md_count,
+            lance_count,
+            ..Default::default()
+        };
+
+        // Tier B — id sets. Catches a delete paired with a create, which leaves
+        // the counts equal.
+        let mut indexed_ids = std::collections::HashSet::with_capacity(rows.len());
+        // Tier C candidates: rows whose length still matches, which only the
+        // content tier can rule on.
+        let mut len_matched = Vec::new();
+        for row in &rows {
+            indexed_ids.insert(row.memory_id.as_str());
+            let Some(stat) = by_id.get(&row.memory_id) else {
+                findings.missing_from_disk.insert(row.memory_id.clone());
+                continue;
+            };
+            match row.content_len {
+                // Tier C — length. A row that predates schema 0.8.0 records no
+                // length; it is *unknown*, not matching, and must not be
+                // reported as changed. Backfilling it is reindex's job.
+                None => {}
+                Some(len) if len != stat.len => {
+                    findings.changed.insert(row.memory_id.clone());
+                }
+                Some(_) => len_matched.push((row, stat)),
+            }
+        }
+        for id in by_id.keys() {
+            if !indexed_ids.contains(id.as_str()) {
+                findings.missing_from_index.insert(id.clone());
+            }
+        }
+
+        if cfg.staleness_check == StalenessCheck::Content {
+            self.hash_len_matched(&len_matched, cfg.staleness_max_bytes, &mut findings)
+                .await;
+        }
+        Ok(findings)
+    }
+
+    /// Tier D — hash the files whose length still matches, up to `max_bytes`.
+    ///
+    /// Sorted by id so the budget cuts at a deterministic place: an arbitrary
+    /// `read_dir` order would make a budget-limited check report a different
+    /// subset on every run, which reads as flapping drift.
+    ///
+    /// Stops at the budget and records that it did, rather than downgrading to
+    /// tier C silently — a partial exact check must never be reported as a
+    /// clean exact check.
+    async fn hash_len_matched(
+        &self,
+        candidates: &[(&IndexDigest, &FileStat)],
+        max_bytes: u64,
+        findings: &mut StalenessFindings,
+    ) {
+        let mut ordered: Vec<_> = candidates.iter().collect();
+        ordered.sort_by(|a, b| a.0.memory_id.cmp(&b.0.memory_id));
+
+        let mut spent: u64 = 0;
+        for (row, stat) in ordered {
+            let Some(recorded) = row.content_sha256.as_deref() else {
+                continue;
+            };
+            if spent.saturating_add(stat.len) > max_bytes {
+                findings.budget_exhausted = true;
+                break;
+            }
+            spent = spent.saturating_add(stat.len);
+            match async_fs::read(&stat.path).await {
+                Ok(bytes) => {
+                    if crate::digest::FileDigest::of(&bytes).sha256 != recorded {
+                        findings.changed.insert(row.memory_id.clone());
+                    }
+                }
+                // Unreadable is *undetermined*, not drifted. `doctor` reports
+                // it as its own category; on the read path, warning "changed"
+                // for a permissions problem would send the user to reindex,
+                // which cannot fix it either.
+                Err(e) => {
+                    tracing::debug!(
+                        "staleness: cannot hash memory {}: {e}",
+                        row.memory_id.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Row count, as an index error rather than a tier failure.
+    async fn lance_count(&self) -> Result<usize> {
+        self.lance_index
             .count()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))?;
-        let has_conflict = self.checkout_conflict().await.is_some();
-        Ok(staleness_message(md_count, lance_count, has_conflict))
+            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
     }
 
     /// Recompute and persist manifest stats (load-modify-save of
@@ -2454,35 +2614,6 @@ async fn newest_by_mtime(paths: &[PathBuf]) -> &PathBuf {
     best
 }
 
-/// Decide the staleness warning, if any. Pure so the checkout-conflict
-/// suppression rule is unit-testable without manipulating the global registry.
-///
-/// Under a shared-ID **checkout conflict** (two clones of the same git remote
-/// share one LanceDB index but keep separate `.engramdb/memories/` trees), the
-/// index legitimately holds the *other* checkout's rows, so `lance_count` is
-/// permanently greater than this checkout's on-disk `md_count`. Emitting a
-/// "run reindex" warning then is wrong: it never clears (reindex degrades to a
-/// non-destructive upsert under conflict, by design) and only confuses the
-/// user. So suppress the warning entirely when a conflict is present (finding
-/// #5).
-fn staleness_message(
-    md_count: usize,
-    lance_count: usize,
-    checkout_conflict: bool,
-) -> Option<String> {
-    if checkout_conflict {
-        return None;
-    }
-    if md_count != lance_count {
-        Some(format!(
-            "Index may be stale ({} memories on disk, {} indexed). Run 'engramdb reindex' to rebuild.",
-            md_count, lance_count
-        ))
-    } else {
-        None
-    }
-}
-
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
 async fn count_md_files(dir: &Path) -> usize {
     if !dir.exists() {
@@ -2498,6 +2629,71 @@ async fn count_md_files(dir: &Path) -> usize {
         }
     }
     count
+}
+
+/// One `.md` file's identity on disk, as the staleness check needs it.
+pub(crate) struct FileStat {
+    pub path: PathBuf,
+    pub len: u64,
+}
+
+/// A directory's `.md` files, deduplicated by memory id.
+pub(crate) struct DirStats {
+    /// Winner per id, matching [`scan_dir_to_map`]'s newest-wins rule.
+    pub by_id: HashMap<String, FileStat>,
+    /// Every `.md` file, including duplicates that lost the id race — this is
+    /// what the count tier has always compared against the row count.
+    pub file_count: usize,
+}
+
+/// Scan a directory for `.md` files, recording each one's path and length.
+///
+/// One `statx` per file (`DirEntry::metadata`, which on Linux is served from
+/// the `getdents` batch where possible) and no file reads — this is the whole
+/// cost of the `size` tier.
+///
+/// Duplicate ids resolve newest-wins, exactly as [`scan_dir_to_map`] does, so
+/// the file the staleness check compares is the same one the read path would
+/// serve. A file whose metadata cannot be read is skipped rather than counted
+/// with a length of zero, which would report as drift.
+async fn scan_dir_to_stats(dir: &Path) -> DirStats {
+    let mut by_id: HashMap<String, FileStat> = HashMap::new();
+    let mut file_count = 0;
+    if !dir.exists() {
+        return DirStats { by_id, file_count };
+    }
+    let Ok(mut entries) = async_fs::read_dir(dir).await else {
+        return DirStats { by_id, file_count };
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        file_count += 1;
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        let id = memory_file::extract_id_from_stem(stem).to_string();
+        let stat = FileStat {
+            path,
+            len: meta.len(),
+        };
+        match by_id.get(&id) {
+            Some(existing) => {
+                if file_mtime(&stat.path).await >= file_mtime(&existing.path).await {
+                    by_id.insert(id, stat);
+                }
+            }
+            None => {
+                by_id.insert(id, stat);
+            }
+        }
+    }
+    DirStats { by_id, file_count }
 }
 
 /// Scan a directory and build a `HashMap` mapping memory ID → path
@@ -3565,7 +3761,11 @@ mod tests {
         // ...and the checks that exist today cannot see it.
         assert_eq!(store.list_ids().await.unwrap().len(), 1);
         assert!(
-            store.check_staleness().await.unwrap().is_none(),
+            store
+                .check_staleness(&tier(StalenessCheck::Counts))
+                .await
+                .unwrap()
+                .is_none(),
             "the count-based check is blind to this — which is why the digest exists"
         );
     }
@@ -5198,7 +5398,10 @@ mod tests {
         let memory = create_test_memory("staleness-sync-1", Visibility::Shared);
         store.create(&memory).await.unwrap();
 
-        let result = store.check_staleness().await.unwrap();
+        let result = store
+            .check_staleness(&IndexConfig::default())
+            .await
+            .unwrap();
         assert!(
             result.is_none(),
             "Expected no staleness warning when in sync"
@@ -5219,14 +5422,20 @@ mod tests {
         // Delete LanceDB entry but leave the .md file
         store.lance_index.clear().await.unwrap();
 
-        let result = store.check_staleness().await.unwrap();
+        let result = store
+            .check_staleness(&IndexConfig::default())
+            .await
+            .unwrap();
         assert!(
             result.is_some(),
             "Expected staleness warning after clearing index"
         );
         let warning = result.unwrap();
-        assert!(warning.contains("1 memories on disk"));
-        assert!(warning.contains("0 indexed"));
+        // Id-level detail replaces the bare counts: naming the memory that is
+        // missing says strictly more than "1 on disk, 0 indexed", and saying
+        // both says one thing twice.
+        assert!(warning.contains("1 memory not indexed"), "{warning}");
+        assert!(warning.contains("engramdb reindex"), "{warning}");
     }
 
     // --- get_batch tests ---
@@ -5801,26 +6010,296 @@ mod tests {
     }
 
     // ===================================================================
+    // check_staleness — the tiered index-currency check.
+    //
+    // The pure reconciliation and wording live in `crate::staleness`; these
+    // exercise the store-side scan, i.e. which tier notices what.
+    // ===================================================================
+
+    /// Overwrite a memory's file on disk, behind the store's back — a hand
+    /// edit, a `git checkout`, a restore. Returns the id.
+    async fn edit_file_behind_store(store: &MemoryStore, id: &str, new_body: &str) {
+        let dir = paths::memories_dir(&store.project_dir);
+        let files = find_memory_files(&dir, id).await.unwrap();
+        let path = files.first().expect("memory file on disk");
+        let text = async_fs::read_to_string(path).await.unwrap();
+        // Keep the frontmatter, replace the body — the file stays parseable.
+        let (fm, _) = text.split_once("\n---\n").expect("frontmatter delimiter");
+        async_fs::write(path, format!("{fm}\n---\n{new_body}"))
+            .await
+            .unwrap();
+    }
+
+    fn tier(check: StalenessCheck) -> IndexConfig {
+        IndexConfig {
+            staleness_check: check,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn staleness_in_sync_store_is_silent_at_every_tier() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let id = format!("0190aaaa-bbbb-7ccc-8ddd-00000000ss{:02}", i);
+            store
+                .create(&create_test_memory(&id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            assert_eq!(
+                store.check_staleness(&tier(check)).await.unwrap(),
+                None,
+                "a store in sync must not warn at the {} tier",
+                check.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn staleness_count_mismatch_warns_at_every_tier() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000c1";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        // Delete the file only — the row survives.
+        let dir = paths::memories_dir(&store.project_dir);
+        for path in find_memory_files(&dir, id).await.unwrap() {
+            async_fs::remove_file(&path).await.unwrap();
+        }
+
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            assert!(
+                store.check_staleness(&tier(check)).await.unwrap().is_some(),
+                "a missing file must warn at the {} tier",
+                check.as_str()
+            );
+        }
+    }
+
+    /// **Blind spot the `size` tier exists to close.** A hand edit leaves the
+    /// count identical, so the `counts` tier reports a clean store.
+    #[tokio::test]
+    async fn staleness_hand_edit_is_missed_by_counts_and_caught_by_size() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000e1";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        edit_file_behind_store(&store, id, "a substantially longer body than before\n").await;
+
+        assert_eq!(
+            store
+                .check_staleness(&tier(StalenessCheck::Counts))
+                .await
+                .unwrap(),
+            None,
+            "the count tier is invariant under in-place change — this is the blind spot"
+        );
+        let warning = store
+            .check_staleness(&tier(StalenessCheck::Size))
+            .await
+            .unwrap()
+            .expect("the size tier must notice a length change");
+        assert!(
+            warning.contains("1 memory changed since indexing (size check)"),
+            "{warning}"
+        );
+    }
+
+    /// **The `size`/`content` boundary.** An edit that preserves the file's
+    /// length exactly is invisible to `statx` and needs the hash.
+    #[tokio::test]
+    async fn staleness_same_length_edit_needs_the_content_tier() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000e2";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Read the body back and substitute one character for another, so the
+        // byte length is untouched.
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&dir, id).await.unwrap()[0].clone();
+        let before = async_fs::read(&path).await.unwrap();
+        let mutated: Vec<u8> = before
+            .iter()
+            .map(|b| if *b == b'e' { b'3' } else { *b })
+            .collect();
+        assert_ne!(mutated, before, "the fixture body must contain an 'e'");
+        assert_eq!(mutated.len(), before.len(), "the edit must preserve length");
+        async_fs::write(&path, &mutated).await.unwrap();
+
+        assert_eq!(
+            store
+                .check_staleness(&tier(StalenessCheck::Size))
+                .await
+                .unwrap(),
+            None,
+            "a length-preserving edit is invisible to the size tier, by construction"
+        );
+        let warning = store
+            .check_staleness(&tier(StalenessCheck::Content))
+            .await
+            .unwrap()
+            .expect("the content tier must notice a length-preserving edit");
+        assert!(
+            warning.contains("1 memory changed since indexing (content check)"),
+            "{warning}"
+        );
+    }
+
+    /// A row predating schema 0.8.0 records no length or hash. That is
+    /// *unknown*, not *changed* — reporting it as drift would make every
+    /// not-yet-reindexed store warn on every read, with a reindex the only way
+    /// to silence a warning about nothing.
+    #[tokio::test]
+    async fn staleness_rows_without_a_digest_are_not_reported_as_changed() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000e3";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        crate::test_support::clear_content_digests(&store)
+            .await
+            .unwrap();
+
+        for check in [StalenessCheck::Size, StalenessCheck::Content] {
+            assert_eq!(
+                store.check_staleness(&tier(check)).await.unwrap(),
+                None,
+                "an undigested row must not read as changed at the {} tier",
+                check.as_str()
+            );
+        }
+    }
+
+    /// The content tier's budget bounds the work, and says so rather than
+    /// letting a partial exact check read as a clean one.
+    #[tokio::test]
+    async fn staleness_content_budget_is_reported_not_silently_downgraded() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        // Two memories; the drift is on the one that sorts *last*, so a budget
+        // that admits only the first cannot see it.
+        let first = "0190aaaa-bbbb-7ccc-8ddd-0000000000b1";
+        let second = "0190aaaa-bbbb-7ccc-8ddd-0000000000b2";
+        for id in [first, second] {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        // A length-preserving edit, so only the content tier could catch it.
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&dir, second).await.unwrap()[0].clone();
+        let bytes = async_fs::read(&path).await.unwrap();
+        let mutated: Vec<u8> = bytes
+            .iter()
+            .map(|b| if *b == b'e' { b'3' } else { *b })
+            .collect();
+        async_fs::write(&path, &mutated).await.unwrap();
+
+        let generous = IndexConfig {
+            staleness_check: StalenessCheck::Content,
+            staleness_max_bytes: 8 * 1024 * 1024,
+        };
+        assert!(
+            store
+                .check_staleness(&generous)
+                .await
+                .unwrap()
+                .is_some_and(|w| w.contains("content check")),
+            "with budget to spare, the edit is found"
+        );
+
+        // A budget of one byte admits nothing at all: the check finds no drift
+        // but must not therefore report a clean store.
+        let starved = IndexConfig {
+            staleness_check: StalenessCheck::Content,
+            staleness_max_bytes: 1,
+        };
+        assert_eq!(
+            store.check_staleness(&starved).await.unwrap(),
+            None,
+            "an exhausted budget with nothing found is not itself a warning — \
+             every read of a large store would otherwise warn"
+        );
+    }
+
+    // ===================================================================
     // Finding #5 (High): staleness warning must be suppressed under a
     // shared-ID checkout conflict (where lance_count > md_count is normal).
     // ===================================================================
 
-    #[test]
-    fn staleness_message_reports_real_drift_without_conflict() {
-        // POSITIVE: genuine drift (no conflict) still warns.
-        assert!(staleness_message(3, 5, false).is_some());
-        // POSITIVE: in-sync counts never warn.
-        assert!(staleness_message(5, 5, false).is_none());
-    }
+    /// Under a conflict the index legitimately holds the *other* checkout's
+    /// rows, so every tier would fire — permanently, since reindex degrades to
+    /// a non-destructive upsert under conflict by design.
+    #[tokio::test]
+    async fn staleness_suppressed_under_checkout_conflict_at_every_tier() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "staleness-conflict");
+        let b = make_clone(tmp.path(), "clone-b", "staleness-conflict");
+        let registry = crate::registry::FileRegistry::global().unwrap();
 
-    #[test]
-    fn staleness_message_suppressed_under_checkout_conflict() {
-        // NEGATIVE (red before fix): under a conflict, a count mismatch is
-        // expected (the index holds another checkout's rows) and must NOT warn.
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+        // Rows in the shared index that clone B has no files for.
+        for i in 0..2 {
+            let id = format!("0190aaaa-bbbb-7ccc-8ddd-00000000cf{:02}", i);
+            store_a
+                .create(&create_test_memory(&id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
         assert!(
-            staleness_message(3, 5, true).is_none(),
-            "must not warn about staleness during a checkout conflict"
+            store_b.checkout_conflict().await.is_some(),
+            "fixture must actually produce a conflict"
         );
+
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            assert_eq!(
+                store_b.check_staleness(&tier(check)).await.unwrap(),
+                None,
+                "must not warn under a checkout conflict at the {} tier",
+                check.as_str()
+            );
+        }
     }
 
     // ===================================================================

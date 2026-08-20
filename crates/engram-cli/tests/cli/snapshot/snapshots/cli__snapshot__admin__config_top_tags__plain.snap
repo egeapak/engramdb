@@ -26,6 +26,9 @@ Embedding
   provider:               onnx
   dimensions:             384
 
+Index currency
+  staleness check:        size
+
 Top tags (most used first)
   alpha                    2
   beta                     1

@@ -269,6 +269,15 @@ fn add_editor_launch_failure() {
 /// the file rather than to the index; the early return skips `update_memory`,
 /// so the LanceDB row still holds the pre-edit text and only a `reindex`
 /// would reconcile them.
+///
+/// **The `get` now says so out loud**, and that warning line is the point of
+/// this snapshot. `-e` deliberately edits the file without touching the store
+/// — it loads no embedding model, which is what makes it quick — so the row
+/// goes stale by design. Before the content digest existed, nothing could see
+/// that: the counts still matched and the id set was unchanged, so the user
+/// was told nothing and served the pre-edit text on every semantic query until
+/// they happened to reindex. The `size`-tier staleness check is what turns
+/// that silent desync into an instruction.
 #[test]
 fn update_editor_success() {
     let f = Fixture::new();

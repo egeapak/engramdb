@@ -141,6 +141,21 @@ pub async fn run_config(
     );
 
     outln!(formatter);
+    outln!(formatter, "Index currency");
+    outln!(
+        formatter,
+        "  staleness check:        {}{}",
+        view.index.staleness_check,
+        // The budget only means something at the tier that hashes, so naming
+        // it under `counts`/`size` would suggest a bound that is not in play.
+        if view.index.staleness_check == "content" {
+            format!(" (up to {} bytes)", view.index.staleness_max_bytes)
+        } else {
+            String::new()
+        }
+    );
+
+    outln!(formatter);
     if tags.is_empty() {
         outln!(formatter, "Top tags: (none yet)");
     } else {

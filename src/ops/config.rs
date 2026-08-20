@@ -105,6 +105,22 @@ pub struct EmbeddingView {
     pub dimensions: usize,
 }
 
+/// How hard the read path works to notice that the index has fallen behind the
+/// files on disk.
+///
+/// Worth surfacing rather than leaving as a silent knob: the tiers differ in
+/// what they can *see*, so "no staleness warning" means something different
+/// under each one. At `counts` an in-place edit is invisible; at `size` a
+/// length-preserving edit is; only `content` is exact, and even it is bounded
+/// by `staleness_max_bytes`. `doctor` always runs the exact check regardless.
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexView {
+    /// Effective `[index].staleness_check` tier: `counts` | `size` | `content`.
+    pub staleness_check: String,
+    /// Byte budget for the `content` tier's hashing (ignored by the others).
+    pub staleness_max_bytes: u64,
+}
+
 /// The agent-facing effective-config view (config values only; tags are
 /// attached separately by the caller since they require store access).
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +129,7 @@ pub struct AgentConfigView {
     pub retrieval: RetrievalView,
     pub features: FeaturesView,
     pub embedding: EmbeddingView,
+    pub index: IndexView,
 }
 
 impl AgentConfigView {
@@ -141,6 +158,10 @@ impl AgentConfigView {
             embedding: EmbeddingView {
                 provider: config.embeddings.provider.clone(),
                 dimensions: config.embeddings.dimensions,
+            },
+            index: IndexView {
+                staleness_check: config.index.staleness_check.as_str().to_string(),
+                staleness_max_bytes: config.index.staleness_max_bytes,
             },
         }
     }

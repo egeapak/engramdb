@@ -26,5 +26,8 @@ Embedding
   provider:               onnx
   dimensions:             384
 
+Index currency
+  staleness check:        size
+
 Top tags: (none yet)
 --- stderr ---
