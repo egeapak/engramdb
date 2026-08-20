@@ -9,12 +9,37 @@ use anyhow::Result;
 pub struct ReindexResult {
     pub indexed: usize,
     pub embedded: usize,
+    /// Memories whose vectors were already current and were left alone.
+    ///
+    /// Counted rather than inferred: a skip that is not reported is a silent
+    /// loss path, and "embedded: 3" on a 900-memory store has to be
+    /// distinguishable from a reindex that failed on 897 of them.
+    pub skipped: usize,
     pub errors: Vec<String>,
     /// Non-fatal conditions the user must see — e.g. re-embedding was
     /// skipped because no embedding provider was available. Existing
     /// vectors are preserved in that case, but the user asked for a full
     /// reindex and didn't get one, so surfaces (CLI/MCP) must render these.
     pub warnings: Vec<String>,
+}
+
+/// What a [`reindex`] call should do.
+///
+/// A struct rather than two positional `bool`s: `embeddings_only` and `force`
+/// are adjacent, same-typed, and mean very different things, which is exactly
+/// the shape that gets transposed at a call site and compiles fine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReindexOptions {
+    /// Re-embed only; skip the metadata rebuild.
+    pub embeddings_only: bool,
+    /// Re-embed every memory even when its vectors are provably current.
+    ///
+    /// This is the repair setting. Skipping trusts the digest stored beside
+    /// the vectors, so anything that corrupts a chunk row without disturbing
+    /// its digest is invisible to the skip predicate — `force` is what fixes
+    /// that. `doctor --fix` and `projects repair` therefore always pass it: a
+    /// repair that trusts the stamp it is repairing is not a repair.
+    pub force: bool,
 }
 
 /// What a reindex would change, without changing it.
@@ -195,10 +220,15 @@ fn finish(plan: &mut ReindexPlan) {
 pub async fn reindex(
     store: &MemoryStore,
     engine: Option<&RetrievalEngine>,
-    embeddings_only: bool,
+    options: ReindexOptions,
 ) -> Result<ReindexResult> {
+    let ReindexOptions {
+        embeddings_only,
+        force,
+    } = options;
     let mut indexed = 0;
     let mut embedded = 0;
+    let mut skipped = 0;
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
@@ -240,42 +270,44 @@ pub async fn reindex(
     // Re-embed all memories if engine has embeddings
     if let Some(engine) = engine {
         if embeddings_available {
-            // Full reindex with a confirmed provider: drop and recreate the
-            // chunks table so stale vectors are fully replaced and a
-            // dimension change in config takes effect. Only safe here —
-            // every memory is re-embedded immediately below. Under a
-            // checkout conflict the table is left in place instead: the
-            // per-memory `upsert_chunks` below still replaces this
-            // checkout's vectors atomically, while the other clone's
-            // vectors survive.
-            if !embeddings_only && foreign_checkout.is_none() {
+            // A dimension change makes skipping impossible and a table
+            // recreation mandatory, in BOTH branches: the chunks table is
+            // opened as-is with its stored width, so every upsert below would
+            // otherwise fail against the old schema and the run would error on
+            // every memory. Detected before anything else because it decides
+            // whether this run is a full rebuild.
+            let live_dims = engine
+                .embedding_fingerprint()
+                .map(|f| f.dimensions)
+                .unwrap_or(0);
+            let stored_dims = store.chunks_table_dimensions().await?;
+            let dimension_change =
+                live_dims > 0 && stored_dims.is_some_and(|stored| stored != live_dims);
+            if dimension_change {
+                warnings.push(format!(
+                    "chunks table stored {}-dimension vectors but the provider produces \
+                     {live_dims}; recreating the table and re-embedding everything",
+                    stored_dims.unwrap_or(0)
+                ));
+            }
+
+            // `force` and a dimension change are the two ways a run rebuilds
+            // every vector unconditionally; everything else may skip.
+            let full_rebuild = force || dimension_change;
+
+            // Dropping the chunks table is only safe when every memory is
+            // about to be re-embedded — which is exactly `full_rebuild`. When
+            // skipping is live, the surviving vectors ARE the result, so
+            // clearing them would delete precisely what the skip predicate is
+            // about to decide to keep. Nothing is leaked by not clearing:
+            // `upsert_chunks_batch` replaces a memory's chunks atomically and
+            // drops surplus ones, and the metadata rebuild above prunes chunks
+            // orphaned by deleted memories.
+            //
+            // Suppressed under a checkout conflict either way: the other
+            // clone's vectors live in this same table and must survive.
+            if full_rebuild && foreign_checkout.is_none() {
                 store.clear_chunks().await?;
-            } else if embeddings_only && foreign_checkout.is_none() {
-                // `--embeddings-only` is the advertised remediation for an
-                // embedding-model mismatch — including DIMENSION changes. The
-                // chunks table is opened as-is with its stored width, so
-                // after a dimension change every upsert below would fail
-                // against the old schema and the loop would error on every
-                // memory. Since this branch re-embeds everything anyway,
-                // recreating the table is as safe as the full path; it is
-                // suppressed under a checkout conflict exactly like above
-                // (the other clone's vectors must survive).
-                let live_dims = engine
-                    .embedding_fingerprint()
-                    .map(|f| f.dimensions)
-                    .unwrap_or(0);
-                if live_dims > 0 {
-                    if let Some(stored) = store.chunks_table_dimensions().await? {
-                        if stored != live_dims {
-                            warnings.push(format!(
-                                "chunks table stored {stored}-dimension vectors but the \
-                                 provider produces {live_dims}; recreating the table before \
-                                 re-embedding"
-                            ));
-                            store.clear_chunks().await?;
-                        }
-                    }
-                }
             }
 
             // Under a checkout conflict the shared index also lists the other
@@ -308,6 +340,44 @@ pub async fn reindex(
                     None => errors.push(format!("{}: memory file not found", id)),
                 }
             }
+            // Drop the memories whose vectors are provably already current.
+            //
+            // The predicate is a digest comparison, nothing more: the digest
+            // stored beside a memory's vectors covers its chunk texts, the
+            // model id, the dimensions, the composition and the chunk width,
+            // so an equal digest means re-embedding would produce byte-for-byte
+            // the same vectors. Anything that changes the answer changes the
+            // digest — edit the text, switch the model, retune `max_tokens`,
+            // flip `metadata_vector` — and the memory is embedded again.
+            //
+            // Deliberately NOT also requiring `has_embedding`: the presence of
+            // a digest entry already covers the provider-was-down case and is
+            // atomic with the vectors it describes, whereas `has_embedding` is
+            // a separate commit that can lag.
+            //
+            // Read outside the write lock, which is safe in the only direction
+            // that matters: a memory updated between this read and the write is
+            // caught by `upsert_chunks_batch`'s re-read under the lock, so the
+            // worst case is embedding something that did not need it.
+            if !full_rebuild {
+                let stored = store.embed_digests().await?;
+                let before = to_embed.len();
+                to_embed.retain(|memory| {
+                    match (
+                        stored.get(&memory.id).and_then(Option::as_deref),
+                        engine.expected_embed_digest(memory),
+                    ) {
+                        // Current — leave the vectors exactly as they are.
+                        (Some(recorded), Some(expected)) => recorded != expected,
+                        // No digest recorded: vectors of unknown provenance, or
+                        // none at all. Either way the only way to know is to
+                        // rebuild them.
+                        _ => true,
+                    }
+                });
+                skipped = before - to_embed.len();
+            }
+
             // One batched inference + one batched chunk write for the whole
             // store. `embed_memory` per memory was a small `embed_batch`, a
             // write lock, a full directory scan and two LanceDB commits EACH —
@@ -356,6 +426,7 @@ pub async fn reindex(
     Ok(ReindexResult {
         indexed,
         embedded,
+        skipped,
         errors,
         warnings,
     })
@@ -418,6 +489,521 @@ mod tests {
         }
     }
 
+    /// Deterministic provider that derives each vector from the text and
+    /// counts how many texts it was asked to embed.
+    ///
+    /// Both properties are load-bearing. The count is what proves a skip
+    /// actually skipped rather than re-embedding to the same answer, and
+    /// text-derived vectors are what make the skip-vs-force equivalence test
+    /// mean something — with a constant vector, every possible implementation
+    /// passes it.
+    struct CountingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        model: String,
+        dims: usize,
+        max_tokens: usize,
+    }
+
+    impl CountingProvider {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                model: "onnx/stub".to_string(),
+                dims: 384,
+                max_tokens: 256,
+            }
+        }
+        fn with_model(mut self, model: &str) -> Self {
+            self.model = model.to_string();
+            self
+        }
+        fn with_dims(mut self, dims: usize) -> Self {
+            self.dims = dims;
+            self
+        }
+        fn counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.calls)
+        }
+        fn vector_for(&self, text: &str) -> Vec<f32> {
+            // Cheap deterministic spread so different texts differ.
+            let mut seed: u64 = 1469598103934665603;
+            for b in text.as_bytes() {
+                seed ^= *b as u64;
+                seed = seed.wrapping_mul(1099511628211);
+            }
+            (0..self.dims)
+                .map(|i| (((seed >> (i % 32)) & 0xff) as f32) / 255.0)
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for CountingProvider {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.vector_for(text))
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.calls
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            Ok(texts.iter().map(|t| self.vector_for(t)).collect())
+        }
+        fn dimensions(&self) -> usize {
+            self.dims
+        }
+        fn max_tokens(&self) -> usize {
+            self.max_tokens
+        }
+        fn model_id(&self) -> String {
+            self.model.clone()
+        }
+    }
+
+    fn calls(c: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        c.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A store with `n` memories, plus a handle to open engines against it.
+    async fn seeded_store(tmp: &TempDir, n: usize) -> (MemoryStore, Vec<String>) {
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let m = Memory::new(
+                MemoryType::Decision,
+                format!("summary {i}"),
+                format!("content number {i}"),
+                Provenance::human(),
+            );
+            ids.push(m.id.clone());
+            store.create(&m).await.unwrap();
+        }
+        (store, ids)
+    }
+
+    fn engine_with(store: MemoryStore, provider: CountingProvider) -> RetrievalEngine {
+        RetrievalEngine::new(store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(provider))
+    }
+
+    fn engine_with_config(
+        store: MemoryStore,
+        config: EngramConfig,
+        provider: CountingProvider,
+    ) -> RetrievalEngine {
+        RetrievalEngine::new(store, config).with_embedding_provider(Arc::new(provider))
+    }
+
+    // ===================================================================
+    // Phase 2 — skipping the re-embed when the vectors are already current
+    // ===================================================================
+
+    /// The headline: a second reindex over an unchanged store embeds nothing.
+    #[tokio::test]
+    async fn reindex_skips_unchanged_memories() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 3).await;
+
+        let first = CountingProvider::new();
+        let first_calls = first.counter();
+        let engine = engine_with(MemoryStore::open(tmp.path()).await.unwrap(), first);
+        let r1 = reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(r1.embedded, 3);
+        assert_eq!(r1.skipped, 0, "nothing to skip on a cold store");
+        assert!(first_calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+
+        let second = CountingProvider::new();
+        let second_calls = second.counter();
+        let engine2 = engine_with(MemoryStore::open(tmp.path()).await.unwrap(), second);
+        let r2 = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(r2.skipped, 3, "every memory's vectors were already current");
+        assert_eq!(r2.embedded, 0);
+        assert_eq!(
+            calls(&second_calls),
+            0,
+            "the provider must not be called at all — a skip that still embeds is not a skip"
+        );
+        // And the vectors are still there.
+        for id in &ids {
+            assert!(!store.export_chunks(id).await.unwrap().is_empty());
+        }
+    }
+
+    /// Only the memory whose text changed is re-embedded; its neighbours are
+    /// left alone.
+    #[tokio::test]
+    async fn reindex_reembeds_only_the_changed_memory() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 3).await;
+        let engine = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new(),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        store
+            .update(
+                &ids[1],
+                crate::types::MemoryUpdate {
+                    content: Some("entirely different content".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let provider = CountingProvider::new();
+        let counter = provider.counter();
+        let engine2 = engine_with(MemoryStore::open(tmp.path()).await.unwrap(), provider);
+        let r = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(r.embedded, 1, "only the edited memory");
+        assert_eq!(r.skipped, 2);
+        assert!(
+            calls(&counter) > 0,
+            "the edited memory must actually reach the provider"
+        );
+    }
+
+    /// The model id is part of the digest, so swapping models re-embeds
+    /// everything without anyone having to notice the swap.
+    #[tokio::test]
+    async fn reindex_reembeds_when_model_changes() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = seeded_store(&tmp, 2).await;
+        let engine = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new().with_model("onnx/model-a"),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        let engine2 = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new().with_model("onnx/model-b"),
+        );
+        let r = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(r.embedded, 2, "a different model invalidates every vector");
+        assert_eq!(r.skipped, 0);
+    }
+
+    /// `metadata_vector` changes what text is embedded, so flipping it must
+    /// re-embed even though the memories are untouched.
+    #[tokio::test]
+    async fn reindex_reembeds_when_composition_flips() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = seeded_store(&tmp, 2).await;
+
+        let mut cfg = EngramConfig::default();
+        cfg.embeddings.metadata_vector = true;
+        let engine = engine_with_config(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            cfg.clone(),
+            CountingProvider::new(),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        cfg.embeddings.metadata_vector = false;
+        let engine2 = engine_with_config(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            cfg,
+            CountingProvider::new(),
+        );
+        let r = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(r.embedded, 2, "composition change must invalidate vectors");
+        assert_eq!(r.skipped, 0);
+    }
+
+    /// `max_tokens` changes the chunk boundaries — the axis the store-level
+    /// embedding fingerprint does not capture at all.
+    #[tokio::test]
+    async fn reindex_reembeds_when_chunk_tokens_change() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        // Content long enough that the chunk width actually changes the split.
+        let body = "lorem ipsum dolor sit amet ".repeat(200);
+        let m = Memory::new(MemoryType::Decision, "long", &body, Provenance::human());
+        store.create(&m).await.unwrap();
+
+        let mut cfg = EngramConfig::default();
+        cfg.embeddings.max_tokens = 256;
+        let engine = engine_with_config(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            cfg.clone(),
+            CountingProvider::new(),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        cfg.embeddings.max_tokens = 64;
+        let engine2 = engine_with_config(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            cfg,
+            CountingProvider::new(),
+        );
+        let r = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            r.embedded, 1,
+            "a different chunk width produces different vectors and must not be skipped"
+        );
+        assert_eq!(r.skipped, 0);
+    }
+
+    /// A memory that never got vectors has no digest, and unknown provenance
+    /// falls through to "rebuild" rather than to "skip".
+    #[tokio::test]
+    async fn reindex_reembeds_memory_with_no_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 2).await;
+        let engine = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new(),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        // Drop one memory's vectors, leaving the other's intact.
+        store.delete_chunks(&ids[0]).await.unwrap();
+
+        let engine2 = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new(),
+        );
+        let r = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(r.embedded, 1, "the memory with no vectors is rebuilt");
+        assert_eq!(r.skipped, 1, "the untouched one is still skipped");
+        assert!(!store.export_chunks(&ids[0]).await.unwrap().is_empty());
+    }
+
+    /// `--force` is the repair: it embeds everything, skipping nothing.
+    #[tokio::test]
+    async fn reindex_force_reembeds_everything() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = seeded_store(&tmp, 3).await;
+        let engine = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new(),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        let provider = CountingProvider::new();
+        let counter = provider.counter();
+        let engine2 = engine_with(MemoryStore::open(tmp.path()).await.unwrap(), provider);
+        let r = reindex(
+            &store,
+            Some(&engine2),
+            ReindexOptions {
+                force: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(r.embedded, 3);
+        assert_eq!(r.skipped, 0, "force must not skip anything");
+        assert!(calls(&counter) > 0);
+    }
+
+    /// A dimension change forces the full path in both branches: the chunks
+    /// table is recreated at the new width, so nothing can be skipped even
+    /// though skipping was not disabled.
+    #[tokio::test]
+    async fn reindex_with_dimension_change_ignores_skips_and_recreates_table() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = seeded_store(&tmp, 2).await;
+        let engine = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new().with_dims(384),
+        );
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(store.chunks_table_dimensions().await.unwrap(), Some(384));
+
+        // The store's own `config.toml` is what fixes the LanceDB column
+        // width (`LanceIndex::new(.., config.embeddings.dimensions)`), so a
+        // real dimension change edits that file. Changing only the engine's
+        // in-memory config would leave the table at 384 and every upsert would
+        // fail — which is precisely the state this code path exists to repair,
+        // so the fixture has to reproduce the user's action, not just the
+        // engine's view of it.
+        let config_path = tmp.path().join(".engramdb").join("config.toml");
+        // Serialized from a real `EngramConfig` rather than hand-written.
+        // Appending a second `[embeddings]` section is a TOML duplicate-key
+        // error, and a hand-written minimal one omits `provider`/`max_tokens`,
+        // which carry no serde default — both parse-fail, and `open` logs the
+        // failure and silently falls back to the 384-dimension default, so the
+        // test fails for a reason unrelated to the code under test.
+        let mut on_disk = EngramConfig::default();
+        on_disk.embeddings.dimensions = 128;
+        tokio::fs::write(&config_path, toml::to_string(&on_disk).unwrap())
+            .await
+            .unwrap();
+        // Reopen so the store picks up the new width.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+
+        let mut cfg = EngramConfig::default();
+        cfg.embeddings.dimensions = 128;
+        let engine2 = engine_with_config(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            cfg,
+            CountingProvider::new().with_dims(128),
+        );
+        let r = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+
+        assert_eq!(r.skipped, 0, "a dimension change cannot skip anything");
+        assert_eq!(
+            r.embedded, 2,
+            "errors={:?} warnings={:?}",
+            r.errors, r.warnings
+        );
+        assert_eq!(
+            store.chunks_table_dimensions().await.unwrap(),
+            Some(128),
+            "the table must be recreated at the new width"
+        );
+        assert!(
+            r.warnings.iter().any(|w| w.contains("dimension")),
+            "the recreation must be reported: {:?}",
+            r.warnings
+        );
+    }
+
+    /// **The gate.** Skipping is only sound if it produces the same store a
+    /// full rebuild would. Same seed, two paths, byte-identical vectors.
+    #[tokio::test]
+    async fn reindex_skip_matches_force_result() {
+        let build = |force: bool| async move {
+            let tmp = TempDir::new().unwrap();
+            let (store, ids) = seeded_store(&tmp, 4).await;
+            let engine = engine_with(
+                MemoryStore::open(tmp.path()).await.unwrap(),
+                CountingProvider::new(),
+            );
+            // First pass populates vectors on both arms identically.
+            reindex(&store, Some(&engine), ReindexOptions::default())
+                .await
+                .unwrap();
+            // Change one memory so the two arms have real work to do.
+            store
+                .update(
+                    &ids[2],
+                    crate::types::MemoryUpdate {
+                        content: Some("changed body".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let engine2 = engine_with(
+                MemoryStore::open(tmp.path()).await.unwrap(),
+                CountingProvider::new(),
+            );
+            reindex(
+                &store,
+                Some(&engine2),
+                ReindexOptions {
+                    force,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+            let mut vectors = Vec::new();
+            for id in &ids {
+                vectors.push(store.export_chunks(id).await.unwrap());
+            }
+            // TempDir must outlive the reads.
+            drop(tmp);
+            vectors
+        };
+
+        let skipped = build(false).await;
+        let forced = build(true).await;
+        assert_eq!(
+            skipped, forced,
+            "a skipping reindex must leave exactly the store a forced one would"
+        );
+    }
+
+    /// Per-provider-failure resumability: the memories that embedded cleanly
+    /// keep their vectors and are skipped on the retry, so a retry after a
+    /// provider outage does not start from scratch.
+    ///
+    /// Not crash-resumability — `ops::reindex` performs one batched write at
+    /// the end, so a crash before it writes nothing. That would need the embed
+    /// loop chunked, which is a separate change.
+    #[tokio::test]
+    async fn reindex_resumes_after_provider_failure() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _) = seeded_store(&tmp, 2).await;
+
+        // A run where the provider is down leaves no vectors and no digests.
+        let failing = RetrievalEngine::new(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            EngramConfig::default(),
+        )
+        .with_embedding_provider(Arc::new(FailingEmbeddingProvider));
+        let failed = reindex(&store, Some(&failing), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(failed.embedded, 0);
+        assert_eq!(failed.skipped, 0, "nothing was current, so nothing skipped");
+
+        // The provider recovers: everything is embedded, nothing skipped.
+        let engine = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new(),
+        );
+        let recovered = reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(recovered.embedded, 2);
+        assert_eq!(recovered.skipped, 0);
+
+        // A third run now has nothing to do.
+        let engine2 = engine_with(
+            MemoryStore::open(tmp.path()).await.unwrap(),
+            CountingProvider::new(),
+        );
+        let settled = reindex(&store, Some(&engine2), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(settled.skipped, 2);
+        assert_eq!(settled.embedded, 0);
+    }
+
     /// CRITICAL data-loss guard: a full reindex with NO embedding provider
     /// (offline machine, missing model cache — the exact state `doctor`
     /// tells users to fix by running reindex) must preserve existing
@@ -441,7 +1027,9 @@ mod tests {
         let engine = RetrievalEngine::new(engine_store, EngramConfig::default());
         assert!(!engine.embeddings_available());
 
-        let result = reindex(&store, Some(&engine), false).await.unwrap();
+        let result = reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
 
         assert_eq!(result.indexed, 1, "metadata must still be rebuilt");
         assert_eq!(result.embedded, 0);
@@ -482,9 +1070,16 @@ mod tests {
         let engine_store = MemoryStore::open(temp_dir.path()).await.unwrap();
         let engine = RetrievalEngine::new(engine_store, EngramConfig::default());
 
-        let err = reindex(&store, Some(&engine), true)
-            .await
-            .expect_err("embeddings-only without a provider must fail fast");
+        let err = reindex(
+            &store,
+            Some(&engine),
+            ReindexOptions {
+                embeddings_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("embeddings-only without a provider must fail fast");
         assert!(
             err.to_string().contains("embedding provider unavailable"),
             "error must explain the refusal, got: {err}"
@@ -492,7 +1087,16 @@ mod tests {
 
         // No engine at all (e.g. embeddings_only combined with index_only)
         // must fail the same way.
-        assert!(reindex(&store, None, true).await.is_err());
+        assert!(reindex(
+            &store,
+            None,
+            ReindexOptions {
+                embeddings_only: true,
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
 
         let chunks = store.export_chunks(&mem.id).await.unwrap();
         assert_eq!(chunks.len(), 1, "vectors must survive the refused reindex");
@@ -527,7 +1131,9 @@ mod tests {
         let engine = RetrievalEngine::new(engine_store, EngramConfig::default())
             .with_embedding_provider(Arc::new(StubEmbeddingProvider));
 
-        let result = reindex(&store, Some(&engine), false).await.unwrap();
+        let result = reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
 
         assert_eq!(result.indexed, 1);
         assert_eq!(result.embedded, 1);
@@ -609,7 +1215,9 @@ mod tests {
         let engine = RetrievalEngine::new(engine_store, EngramConfig::default())
             .with_embedding_provider(Arc::new(StubEmbeddingProvider));
 
-        let result = reindex(&store_b, Some(&engine), false).await.unwrap();
+        let result = reindex(&store_b, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
 
         assert_eq!(result.indexed, 1, "only B's files are scanned");
         assert_eq!(result.embedded, 1, "only B's local memory is re-embedded");
@@ -673,7 +1281,9 @@ mod tests {
         let engine = RetrievalEngine::new(engine_store, EngramConfig::default())
             .with_embedding_provider(Arc::new(FailingEmbeddingProvider));
 
-        let result = reindex(&store, Some(&engine), false).await.unwrap();
+        let result = reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
 
         assert_eq!(result.embedded, 0, "no memory should embed successfully");
         assert!(
@@ -731,7 +1341,9 @@ mod tests {
         store.create(&mem).await.unwrap();
         let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
         // Embed so the vectors exist and carry a current digest.
-        reindex(&store, Some(&engine), false).await.unwrap();
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
 
         let plan = reindex_dry_run(&store, Some(&engine)).await.unwrap();
         assert!(plan.is_current(), "{plan:?}");
@@ -751,7 +1363,9 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
         store.create(&mem).await.unwrap();
         let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
-        reindex(&store, Some(&engine), false).await.unwrap();
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
 
         edit_behind_store(&store, &mem.id, "an edited body\n").await;
 
@@ -775,7 +1389,9 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "T", "original", Provenance::human());
         store.create(&mem).await.unwrap();
         let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
-        reindex(&store, Some(&engine), false).await.unwrap();
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
         assert!(reindex_dry_run(&store, Some(&engine))
             .await
             .unwrap()
@@ -867,7 +1483,9 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
         store.create(&mem).await.unwrap();
         let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
-        reindex(&store, Some(&engine), false).await.unwrap();
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
         crate::storage::test_support::clear_content_digests(&store)
             .await
             .unwrap();

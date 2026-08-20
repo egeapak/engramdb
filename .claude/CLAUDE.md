@@ -257,7 +257,7 @@ MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
 ### Storage (`crates/engram-storage/src/`, crate `engram-storage`, re-exported as `engramdb::storage`)
 
 - **`MemoryStore`** (`store.rs`) is the orchestrator. Memories live on disk as TOML-frontmatter markdown files in `.engramdb/memories/`. A single LanceDB table (`lance_index.rs`) holds both metadata-for-filtering and (optional) embedding vectors — there is no separate metadata DB.
-- **Schema migration (`manifest::CURRENT_SCHEMA_VERSION`, currently `0.7.0`).** The memories-table column set is versioned in the manifest. `MemoryStore::migrate_schema_if_needed` runs on every store open (`init`/`init_global`/`open_global`): when the recorded version is behind, it reindexes (rebuild the memories table from the `.md` files — seconds, vectors preserved, no re-embed) and stamps the current version. New stores are born current. Adding a memories-table column ⇒ bump `CURRENT_SCHEMA_VERSION` so existing stores backfill on open. The `decay` (JSON `Option<Decay>`) and `has_embedding` columns were added this way (R2/R3); `has_embedding` mirrors chunk-table presence and is maintained via `LanceIndex::{has_chunks,set_has_embedding}` on the write path. The 0.3.0 bump added the seven epistemic columns (`epistemic`, `verified_at`, `generality`, `origin_task`, `valid_from`, `invalidated_at`, `watch_paths`); see `docs/contributors/architecture.md` ("Epistemic classes and bi-temporal validity"). The 0.6.0 bump is different in kind: it added a whole new **table** (`conversation_index.rs`'s `conversations`) rather than a memories-table column, so the migration it triggers rewrites nothing — it exists only so a store created before the table gets one. The 0.7.0 bump added `source_sessions`, the harvest evidence link (the sessions a memory was extracted from, which also pins their transcript copies against eviction — see "Harvest provenance and pinning" below). Because the migration rebuilds the memories table **from the `.md` files**, any relation that must survive it has to be *in* those files: that is why provenance is a field on the memory rather than a join table, and why a test builds a real pre-0.7.0 table (`store::tests::downgrade_to_0_6_0` strips the column from the live Arrow schema) rather than only downgrading the manifest stamp.
+- **Schema migration (`manifest::CURRENT_SCHEMA_VERSION`, currently `0.8.0`).** The memories-table column set is versioned in the manifest. `MemoryStore::migrate_schema_if_needed` runs on every store open (`init`/`init_global`/`open_global`): when the recorded version is behind, it reindexes (rebuild the memories table from the `.md` files — seconds, vectors preserved, no re-embed) and stamps the current version. New stores are born current. Adding a memories-table column ⇒ bump `CURRENT_SCHEMA_VERSION` so existing stores backfill on open. The `decay` (JSON `Option<Decay>`) and `has_embedding` columns were added this way (R2/R3); `has_embedding` mirrors chunk-table presence and is maintained via `LanceIndex::{has_chunks,set_has_embedding}` on the write path. The 0.3.0 bump added the seven epistemic columns (`epistemic`, `verified_at`, `generality`, `origin_task`, `valid_from`, `invalidated_at`, `watch_paths`); see `docs/contributors/architecture.md` ("Epistemic classes and bi-temporal validity"). The 0.6.0 bump is different in kind: it added a whole new **table** (`conversation_index.rs`'s `conversations`) rather than a memories-table column, so the migration it triggers rewrites nothing — it exists only so a store created before the table gets one. The 0.8.0 bump added `content_sha256` / `content_len` (what bytes a row was built from) and, on the chunks table, `embed_sha256` (what a memory's vectors were embedded from). The 0.7.0 bump added `source_sessions`, the harvest evidence link (the sessions a memory was extracted from, which also pins their transcript copies against eviction — see "Harvest provenance and pinning" below). Because the migration rebuilds the memories table **from the `.md` files**, any relation that must survive it has to be *in* those files: that is why provenance is a field on the memory rather than a join table, and why a test builds a real pre-0.7.0 table (`store::tests::downgrade_to_0_6_0` strips the column from the live Arrow schema) rather than only downgrading the manifest stamp.
 - **Concurrency:** mutating ops acquire a per-project advisory `flock(2)` (`write_lock.rs`); reads are lock-free and rely on LanceDB MVCC. File writes are atomic temp-then-rename.
 - **Paths (`paths.rs`)** resolve platform dirs via the `dirs` crate. Project-local data lives in `<project>/.engramdb/`; **personal** memories and LanceDB indices live in `<global_data_dir>/projects/<id>/{personal,lancedb}/`. `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` override these (the test harness uses them).
 - **`project_id.rs` / `registry.rs`** — every project gets a 16-char SHA-256-derived ID; a global `FileRegistry` tracks them. The well-known global store ID starts with underscores so it cannot collide.
@@ -275,6 +275,49 @@ MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
 - **Two rules the harvest work paid for in defects, both general.** (1) **Never compare paths textually.** Go through `project_id::compute_project_id` or `std::fs::canonicalize` — never `==` on a `Path`. The shipped MCP entry is `serve --dir .`, so the invoking directory is literally `"."` while the registry holds the canonical absolute path; a relative `--dir`, a symlinked checkout, and `/tmp` → `/private/tmp` on macOS all do the same. Two separate defects came from `==`, one of which deadlocked that shipped configuration. (Which of the two helpers depends on the question: `compute_project_id` keys off the git remote first, so two checkouts of one repository share an id — use `canonicalize` when a genuine sub-project must stay distinct from its root, as `adopt_ledger` does.) (2) **A loss path the code does not declare is a bug.** `capped_events` and `skipped_records` exist because the digest claimed a completeness it did not have; the ledger drain warns per session rather than dropping quietly; compaction's one microsecond-wide race is written down in `maybe_compact`'s doc comment. Anything that can silently drop a record must say so, in the doc comment and at runtime.
 - **`worktree.rs`** — when invoked inside a git worktree, `cli::run` transparently routes ops to the **main** worktree's project and registers the worktree as a sub-project. Init/serve/completions/setup/daemon are exempt because they own their own behavior. Don't bypass `resolve_project_root` for normal commands.
 - **`manifest.rs` + `EmbeddingFingerprint`** — each store records `model_id()` and dimensions for its embeddings. On open, `expected_embedding_fingerprint(config)` is compared to the live provider; mismatches surface as a `doctor`/warning saying "run `engramdb reindex --embeddings-only`". The fingerprint table and the provider-resolver share **one** `provider_specs` map in `ops/mod.rs` — this unification is intentional (preventing silent vector corruption) and changes to providers must be added in that single map.
+
+### Index currency (content and embed digests)
+
+Every index row records **what it was built from**, and every memory's vectors
+record **what they were embedded from**. These are separate digests because
+they answer separate questions and change independently.
+
+- **`content_sha256` / `content_len`** (memories table, schema 0.8.0) — a
+  SHA-256 over the `.md` file's line-ending-normalized bytes, plus its raw
+  length. Stamped from the exact string the write path is about to
+  `atomic_write`. **Never hash a re-serialization of a parsed memory**: a file
+  written by an older binary need not round-trip to identical bytes, so that
+  would mark it permanently dirty and no currency check would ever settle.
+- **`embed_sha256`** (chunks table) — salted with the chunk texts, the model
+  id, the dimensions, the composition and the chunk window, so an equal digest
+  means re-embedding would produce identical vectors. It rides the *same* write
+  as the vectors it describes, which is what makes it atomic with them.
+
+Three surfaces read them, at deliberately different costs. `check_staleness`
+runs on **every** `query`/`list`/`get` and is tiered by
+`[index].staleness_check` (`counts` | `size` | `content`, default `size`) —
+see `crates/engram-storage/src/staleness.rs`. `doctor` and `stats` hash every
+file. `reindex --dry-run` hashes files *and* recomputes every would-be
+embedding input; it is the only surface that can report stale **vectors**,
+because that needs a live provider and no doctor path builds an engine.
+
+**`reindex` skips a memory whose `embed_sha256` still matches**, which makes it
+incremental. Two consequences to keep in mind:
+
+- **Any change that alters the vectors must alter the digest.** Model, width,
+  composition and chunk window are all salted in, so those are covered. A
+  change to the *chunking algorithm* or to `embedding_texts`' composition that
+  keeps the same inputs is **not** — it silently keeps stale vectors. Treat
+  such a change like a schema bump: it needs `--force` in the release notes, or
+  a new salt in `embed_digest`.
+- **A repair must pass `force`.** Skipping trusts the stamp, so `doctor --fix`
+  and `projects repair` always force; a repair that trusts the stamp it is
+  repairing is not a repair.
+
+**Anything that rewrites memory files must refresh the index.** `migrate` and
+`rollback` rewrite every file under the project lock; without a following
+`store.reindex()` (lock dropped first — it is not reentrant) every row is
+drifted and every query warns, for a rewrite that changed no memory's meaning.
 
 ### Retrieval & scoring
 

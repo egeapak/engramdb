@@ -254,7 +254,34 @@ engramdb reindex [[--embeddings-only|--index-only] [--dry-run] [--global] | --ar
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
 | `--dry-run` | Change nothing; report what a rebuild would fix. Names the memories whose file changed since it was indexed, whose vectors no longer match their text, and which are not indexed or not embedded at all. `--index-only` is ignored here: it narrows what a *rebuild* touches, not what the report may look at. |
+| `--force` | Re-embed every memory, including ones whose vectors are provably current. The repair-grade rebuild — see below. |
 | `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
+
+### Reused embeddings, and when to override
+
+A reindex re-embeds only what it has to. Each memory's vectors are stored with
+a digest of everything that determines them — the chunk texts, the model id,
+the vector width, the composition and the chunk window — so a memory whose
+digest still matches would embed to byte-identical vectors and is left alone:
+
+```
+Done. Rebuilt index with 900 entries.
+Embedded 3 memories.
+Reused 897 up-to-date embeddings (pass --force to re-embed everything).
+```
+
+The metadata rows are always rebuilt; only the embedding step is skipped. Any
+change that would alter the vectors also alters the digest, so switching
+models, retuning `[embeddings].max_tokens`, flipping `metadata_vector`, or
+editing a memory all re-embed on their own without anyone having to remember
+to force it. A `[embeddings].dimensions` change is stronger still: the chunks
+table is recreated and nothing is skipped.
+
+Reach for `--force` when the vectors may be wrong in a way the digest cannot
+see — a chunk row damaged by something other than EngramDB, or a suspected bug
+in the embedding path. `engramdb doctor --fix` and `engramdb projects repair`
+always force, because a repair that trusts the stamp it is repairing is not a
+repair.
 
 ### Checking currency without rebuilding
 

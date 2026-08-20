@@ -429,6 +429,12 @@ impl FixAction {
                     &registry,
                     crate::commands::reindex::ReindexParams {
                         embeddings_only: *embeddings_only,
+                        // `force`: doctor --fix invokes reindex AS A REPAIR.
+                        // Skipping trusts the digest stored beside the vectors,
+                        // so a chunk row damaged without its digest changing —
+                        // exactly the state a user runs `doctor --fix` to get
+                        // out of — would be skipped by a plain reindex.
+                        force: true,
                         ..crate::commands::reindex::ReindexParams::full(global, None)
                     },
                     formatter,

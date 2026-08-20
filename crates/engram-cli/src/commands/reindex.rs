@@ -26,6 +26,8 @@ pub struct ReindexParams {
     pub archive_only: bool,
     /// Report what would change and write nothing.
     pub dry_run: bool,
+    /// Re-embed everything, including vectors that are provably current.
+    pub force: bool,
     pub embedding_backend: Option<engramdb::types::EmbeddingBackend>,
 }
 
@@ -41,6 +43,7 @@ impl ReindexParams {
             index_only: false,
             archive_only: false,
             dry_run: false,
+            force: false,
             embedding_backend,
         }
     }
@@ -63,6 +66,7 @@ pub async fn run_reindex(
         index_only,
         archive_only,
         dry_run,
+        force,
         embedding_backend,
     } = params;
 
@@ -111,7 +115,15 @@ pub async fn run_reindex(
         }
     }
 
-    let result = reindex(&store, engine.as_ref(), embeddings_only).await?;
+    let result = reindex(
+        &store,
+        engine.as_ref(),
+        engramdb::ops::ReindexOptions {
+            embeddings_only,
+            force,
+        },
+    )
+    .await?;
 
     // Print results
     if result.indexed > 0 {
@@ -122,6 +134,20 @@ pub async fn run_reindex(
     }
     if result.embedded > 0 {
         formatter.print_success(&format!("Embedded {} memories.", result.embedded));
+    }
+    // A skip that is not reported is a silent loss path: without this line,
+    // "Embedded 3 memories" on a 900-memory store is indistinguishable from a
+    // reindex that failed on the other 897.
+    if result.skipped > 0 {
+        formatter.print_message(&format!(
+            "Reused {} up-to-date {} (pass --force to re-embed everything).",
+            result.skipped,
+            if result.skipped == 1 {
+                "embedding"
+            } else {
+                "embeddings"
+            }
+        ));
     }
     for warning in &result.warnings {
         formatter.print_warning(warning);
@@ -134,6 +160,7 @@ pub async fn run_reindex(
     }
     if result.indexed == 0
         && result.embedded == 0
+        && result.skipped == 0
         && result.errors.is_empty()
         && result.warnings.is_empty()
     {

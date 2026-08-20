@@ -503,6 +503,11 @@ struct ReindexInput {
     dry_run: Option<bool>,
 
     #[schemars(
+        description = "Re-embed every memory, even ones whose vectors are provably current. A plain reindex reuses vectors whose stored digest still matches; force is the repair-grade rebuild for a chunk row damaged without its digest changing."
+    )]
+    force: Option<bool>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
@@ -1608,7 +1613,21 @@ impl EngramDbServer {
             .assemble_engine_for(None)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        ops::reindex(&store, Some(&engine), true).await?;
+        // `embeddings_only`, not `force`: this fires *because* the model
+        // changed, and the model id is part of every embed digest — so every
+        // memory's digest already mismatches and nothing is skipped. Passing
+        // `force` would produce the identical result at the cost of making the
+        // digest's correctness untested on the one path that most depends on
+        // it.
+        ops::reindex(
+            &store,
+            Some(&engine),
+            ops::ReindexOptions {
+                embeddings_only: true,
+                ..Default::default()
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -2869,13 +2888,21 @@ impl EngramDbServer {
             return Ok(r);
         }
 
-        let result = ops::reindex(store, engine.as_ref(), embeddings_only)
-            .await
-            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        let result = ops::reindex(
+            store,
+            engine.as_ref(),
+            ops::ReindexOptions {
+                embeddings_only,
+                force: input.force.unwrap_or(false),
+            },
+        )
+        .await
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let r = serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
             "embedded": result.embedded,
+            "skipped": result.skipped,
             "errors": result.errors,
             "warnings": result.warnings
         }))

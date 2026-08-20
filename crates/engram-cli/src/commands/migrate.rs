@@ -97,6 +97,43 @@ pub async fn run_migrate(
         .await;
     }
 
+    // Every rewritten file has new bytes, so every index row's content digest
+    // now describes a file that no longer exists in that form. Left alone,
+    // `doctor` would report the whole store as drifted, `stats` would warn, and
+    // the read-path staleness check would fire on every query — for a rewrite
+    // that changed no memory's *meaning*.
+    //
+    // The metadata rebuild is exactly the right repair and is cheap: it
+    // re-reads the files and restamps the rows, needs no embedding provider,
+    // and leaves vectors untouched. They stay correct precisely because this
+    // drift is semantically a no-op — the parsed memory is unchanged, so its
+    // embed digest still matches and a later reindex will skip it.
+    //
+    // The write lock is dropped first: `MemoryStore::reindex` takes the same
+    // per-project advisory lock, which is not reentrant.
+    drop(_write_lock);
+    if !dry_run && migrated > 0 {
+        let opened = if global {
+            engramdb::storage::MemoryStore::open_global().await
+        } else {
+            engramdb::storage::MemoryStore::open(dir).await
+        };
+        match opened {
+            Ok(store) => {
+                if let Err(e) = store.reindex().await {
+                    formatter.print_warning(&format!(
+                        "memories were rewritten but the index could not be refreshed ({e}) —                          run `engramdb reindex` so queries stop matching the pre-migration text."
+                    ));
+                }
+            }
+            // No store to refresh (no manifest, no LanceDB): the files were
+            // still migrated, and there is no index to have gone stale.
+            Err(e) => {
+                tracing::debug!("skipping post-migration index refresh: {e}");
+            }
+        }
+    }
+
     // Report results
     if dry_run {
         formatter.print_message(&format!(
@@ -317,6 +354,59 @@ mod tests {
         let detected = detect_format_version(&after);
         assert_eq!(detected, Some(CURRENT_FORMAT_VERSION));
         assert!(after.contains(&format!("version: {}", CURRENT_FORMAT_VERSION)));
+    }
+
+    /// After a real migration the store must be **current**, not wholly
+    /// drifted.
+    ///
+    /// `migrate` rewrites every file's bytes, which invalidates every index
+    /// row's content digest even though no memory's meaning changed. Without
+    /// the post-migration metadata rebuild, `doctor` reports the entire store
+    /// as drifted, `stats` warns, and every query prints a staleness warning —
+    /// for a no-op rewrite. This drives the whole thing against a real store,
+    /// unlike the fixtures above which use a bare directory with no index at
+    /// all.
+    #[tokio::test]
+    async fn migrate_leaves_the_index_current_not_wholly_drifted() {
+        use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = make_memory();
+        store.create(&mem).await.unwrap();
+
+        // Rewrite the file in the legacy format so there is something to
+        // migrate. The row still carries the digest of the current-format
+        // bytes the store wrote, so the store is now genuinely drifted.
+        let dir = engramdb::storage::paths::memories_dir(tmp.path());
+        let file = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "md"))
+            .expect("the created memory's file");
+        std::fs::write(&file, V1Writer.write(&mem).unwrap()).unwrap();
+
+        let before = engramdb::ops::reindex_dry_run(&store, None).await.unwrap();
+        assert_eq!(
+            before.drifted.len(),
+            1,
+            "fixture must actually produce drift: {before:?}"
+        );
+
+        run_migrate(tmp.path(), false, false, &json_formatter())
+            .await
+            .unwrap();
+
+        // Reopen: the rows were rebuilt underneath this handle.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let after = engramdb::ops::reindex_dry_run(&store, None).await.unwrap();
+        assert!(
+            after.drifted.is_empty(),
+            "migrate must leave the index describing the files it just wrote: {after:?}"
+        );
     }
 
     #[tokio::test]

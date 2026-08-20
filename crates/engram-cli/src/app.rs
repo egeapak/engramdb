@@ -1276,6 +1276,17 @@ pub enum Command {
         #[arg(long, conflicts_with = "archive_only")]
         dry_run: bool,
 
+        /// Re-embed every memory, even ones whose vectors are provably current
+        ///
+        /// A plain reindex reuses vectors whose stored digest still matches
+        /// what the current text, model and chunk width would produce. That
+        /// makes it fast but leaves anything that damaged a chunk row without
+        /// disturbing its digest in place. `--force` is the repair: it embeds
+        /// everything unconditionally, which is what this command did before
+        /// skipping existed.
+        #[arg(long, conflicts_with_all = ["archive_only", "dry_run"])]
+        force: bool,
+
         /// Reindex the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,

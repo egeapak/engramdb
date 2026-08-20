@@ -1607,6 +1607,7 @@ async fn reindex_basic() {
             embeddings_only: None,
             index_only: None,
             dry_run: None,
+            force: None,
             project: None,
         }))
         .await;
@@ -1624,6 +1625,7 @@ async fn reindex_index_only() {
             embeddings_only: None,
             index_only: Some(true),
             dry_run: None,
+            force: None,
             project: None,
         }))
         .await;
@@ -1692,13 +1694,34 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
             embeddings_only: Some(true),
             index_only: None,
             dry_run: None,
+            force: None,
             project: None,
         }))
         .await;
     let val = parse_ok(&result);
+    // Bug #2 is "reindex silently no-ops in error mode": the gate blocked the
+    // engine, `embed_memories` did nothing, and the caller was told
+    // `embedded: 0` with no explanation. What guards that is the memory being
+    // *accounted for*, not the specific bucket it lands in.
+    //
+    // It can legitimately land in either. This test corrupts only the store's
+    // fingerprint; the memory's own embed digest still honestly records the
+    // real model that produced its vectors, so reindex may find them current
+    // and skip — correctly, and explicitly. A genuine model change would
+    // change those digests too and force the re-embed. Asserting `embedded >=
+    // 1` pinned the mechanism rather than the contract, and became a race
+    // against the detached ingest from `create` finishing first.
+    //
+    // A regression of the gate itself is still caught: it would fail
+    // `assemble_engine_for` above, or leave the engine without embeddings, and
+    // `embeddings_only` with no provider is a hard error that `parse_ok` would
+    // reject.
+    let embedded = val["embedded"].as_u64().unwrap();
+    let skipped = val["skipped"].as_u64().unwrap();
     assert!(
-        val["embedded"].as_u64().unwrap() >= 1,
-        "reindex must re-embed in error mode (bug #2); got {val}"
+        embedded + skipped >= 1,
+        "reindex must account for the memory in error mode (bug #2), not silently \
+         no-op; got {val}"
     );
 
     // The store is consistent again (fingerprint re-stamped, not bogus).
@@ -3358,6 +3381,7 @@ async fn global_reindex() {
             embeddings_only: None,
             index_only: Some(true),
             dry_run: None,
+            force: None,
             project: global_project(),
         }))
         .await;

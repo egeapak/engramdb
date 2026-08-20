@@ -641,6 +641,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             index_only,
             archive_only,
             dry_run,
+            force,
             global,
         } => {
             commands::reindex::run_reindex(
@@ -652,6 +653,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     index_only,
                     archive_only,
                     dry_run,
+                    force,
                     embedding_backend: backend,
                 },
                 &formatter,

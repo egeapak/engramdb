@@ -207,7 +207,18 @@ async fn reindex_after_repair(
     let store = MemoryStore::open(dir).await?;
     let cache = ops::ProviderCache::new();
     let engine = engine_for_project(store.clone(), embedding_backend, cell, policy, &cache).await;
-    ops::reindex(&store, Some(&engine), false).await
+    // `force`: this is a repair. Skipping trusts the digest stored beside the
+    // vectors, and a repair that trusts the stamp it is repairing cannot fix a
+    // chunk row whose digest is intact but whose vectors are not.
+    ops::reindex(
+        &store,
+        Some(&engine),
+        ops::ReindexOptions {
+            force: true,
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 /// Exit non-zero when the index rebuild failed — after its document/message
