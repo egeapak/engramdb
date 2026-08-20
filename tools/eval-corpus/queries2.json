@@ -1,0 +1,20 @@
+[
+  {"id": "s2q01", "text": "what do i need to update when adding a new config option", "archetype": "natural", "relevant": {"d070": 2, "d154": 1}},
+  {"id": "s2q02", "text": "what happens to query speed if i never compact the store", "archetype": "natural", "relevant": {"d122": 2, "c005": 1}},
+  {"id": "s2q03", "text": "is it safe for two agent sessions to write at the same time", "archetype": "natural", "relevant": {"d054": 2, "c042": 1}},
+  {"id": "s2q04", "text": "can a quick local timing test mislead me about production speed", "archetype": "paraphrase", "relevant": {"d078": 2, "d090": 1}},
+  {"id": "s2q05", "text": "why would one input give different answers when the machine is busy", "archetype": "paraphrase", "relevant": {"d114": 2, "d110": 1}},
+  {"id": "s2q06", "text": "reloading a saved entry changes its description on its own", "archetype": "paraphrase", "relevant": {"c022": 2, "c042": 1}},
+  {"id": "s2q07", "text": "what caps the number of observations in one consolidation pass", "archetype": "buried_fact", "relevant": {"d098": 2, "d102": 1}},
+  {"id": "s2q08", "text": "default depth limit when scanning directories for unregistered projects", "archetype": "buried_fact", "relevant": {"c010": 2}},
+  {"id": "s2q09", "text": "default staleness window before a memory is suggested for review", "archetype": "buried_fact", "relevant": {"c034": 2}},
+  {"id": "s2q10", "text": "which env vars keep tests off the real data directory", "archetype": "distractor_trap", "relevant": {"d146": 2}},
+  {"id": "s2q11", "text": "why does reading chunks per memory slow down as the table grows", "archetype": "distractor_trap", "relevant": {"d094": 2}},
+  {"id": "s2q12", "text": "how did we make crate versions a single source of truth", "archetype": "distractor_trap", "relevant": {"c046": 2}},
+  {"id": "s2q13", "text": "provider cache key stale bundle", "archetype": "keyword", "relevant": {"d154": 2, "d057": 1}},
+  {"id": "s2q14", "text": "filter vector search composite score rerank", "archetype": "keyword", "relevant": {"d058": 2, "d151": 1}},
+  {"id": "s2q15", "text": "keep the dag a dag", "archetype": "title_echo", "relevant": {"d066": 2, "d051": 1}},
+  {"id": "s2q16", "text": "per memory metadata vector and chunker fixes", "archetype": "title_echo", "relevant": {"c030": 2}},
+  {"id": "s2q17", "text": "engramdb scope daemon fix", "archetype": "tag_only", "relevant": {"c018": 2}},
+  {"id": "s2q18", "text": "engramdb compress perf", "archetype": "tag_only", "relevant": {"c002": 2, "d082": 1}}
+]

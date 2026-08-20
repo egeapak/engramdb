@@ -1,0 +1,20 @@
+[
+  {"id": "s0q01", "text": "why do i need to install onnx runtime separately to run the binary", "archetype": "natural", "relevant": {"d144": 2, "d148": 1, "c027": 1}},
+  {"id": "s0q02", "text": "how do i keep a write heavy session from slowing down every query", "archetype": "natural", "relevant": {"c004": 2, "d122": 1, "d120": 1}},
+  {"id": "s0q03", "text": "how do i stop the cli and the mcp server from drifting apart", "archetype": "natural", "relevant": {"d052": 2, "d068": 1}},
+  {"id": "s0q04", "text": "why is the default rust test runner not enough for this repo", "archetype": "paraphrase", "relevant": {"d060": 2, "d146": 1}},
+  {"id": "s0q05", "text": "why not reuse an existing crate for the vector arithmetic here", "archetype": "paraphrase", "relevant": {"d092": 2, "d093": 1}},
+  {"id": "s0q06", "text": "why is work only spread across cores above a certain size", "archetype": "paraphrase", "relevant": {"d100": 2, "d103": 1}},
+  {"id": "s0q07", "text": "what is the largest tuple size that std derives debug for", "archetype": "buried_fact", "relevant": {"c020": 2}},
+  {"id": "s0q08", "text": "how much time does title generation add to each create call", "archetype": "buried_fact", "relevant": {"d116": 2}},
+  {"id": "s0q09", "text": "how many vectors before a compressed index actually saves space", "archetype": "buried_fact", "relevant": {"c008": 2, "d131": 1}},
+  {"id": "s0q10", "text": "why does cargo check --locked fail inside the fuzz directory", "archetype": "distractor_trap", "relevant": {"c016": 2}},
+  {"id": "s0q11", "text": "the release build cannot find the binary after the workspace split", "archetype": "distractor_trap", "relevant": {"c048": 2}},
+  {"id": "s0q12", "text": "does raising the optimization level make the dot product vectorize", "archetype": "distractor_trap", "relevant": {"d084": 2, "d079": 1}},
+  {"id": "s0q13", "text": "windows named pipe transport", "archetype": "keyword", "relevant": {"c044": 2}},
+  {"id": "s0q14", "text": "doctor validate fix flag", "archetype": "keyword", "relevant": {"c040": 2}},
+  {"id": "s0q15", "text": "typed lancedb predicates and keyword scorer overhaul", "archetype": "title_echo", "relevant": {"c028": 2}},
+  {"id": "s0q16", "text": "intel mac tract fallback backend", "archetype": "title_echo", "relevant": {"c036": 2, "d115": 1}},
+  {"id": "s0q17", "text": "engramdb deps chore dependency bump", "archetype": "tag_only", "relevant": {"c012": 2, "c013": 2, "c021": 1}},
+  {"id": "s0q18", "text": "engramdb docs query latency profile", "archetype": "tag_only", "relevant": {"d120": 2, "d124": 1}}
+]

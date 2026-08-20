@@ -1,0 +1,20 @@
+[
+  {"id": "s1q01", "text": "why do queries get slower after a write heavy session", "archetype": "natural", "relevant": {"c005": 2, "c004": 1, "d125": 1}},
+  {"id": "s1q02", "text": "how does the cli avoid paying the onnx cold start every time", "archetype": "natural", "relevant": {"c045": 2, "d152": 1}},
+  {"id": "s1q03", "text": "how do i share one memory across several related repos", "archetype": "natural", "relevant": {"c029": 2, "d156": 1}},
+  {"id": "s1q04", "text": "how do we stop rare processor paths from going unexercised in ci", "archetype": "paraphrase", "relevant": {"d089": 2, "c002": 1}},
+  {"id": "s1q05", "text": "why did tuning one crate's compiler settings produce the same executable", "archetype": "paraphrase", "relevant": {"d081": 2, "d077": 1}},
+  {"id": "s1q06", "text": "why do we not hand the similarity computation down to the query engine", "archetype": "paraphrase", "relevant": {"d093": 2, "d098": 1}},
+  {"id": "s1q07", "text": "what row count gates building an ann index", "archetype": "buried_fact", "relevant": {"d129": 2, "c008": 1}},
+  {"id": "s1q08", "text": "how many characters can the session start hook inject", "archetype": "buried_fact", "relevant": {"d153": 2, "d074": 1}},
+  {"id": "s1q09", "text": "how many decoder steps does title generation take per memory", "archetype": "buried_fact", "relevant": {"d113": 2}},
+  {"id": "s1q10", "text": "the cross encoder loaded from cache even in offline mode", "archetype": "distractor_trap", "relevant": {"c017": 2}},
+  {"id": "s1q11", "text": "why was the arm linux release artifact removed", "archetype": "distractor_trap", "relevant": {"c037": 2}},
+  {"id": "s1q12", "text": "why must every test command name the whole workspace", "archetype": "distractor_trap", "relevant": {"d061": 2, "d144": 1}},
+  {"id": "s1q13", "text": "provider cache key", "archetype": "keyword", "relevant": {"d057": 2, "d154": 1}},
+  {"id": "s1q14", "text": "insta snapshot tiers", "archetype": "keyword", "relevant": {"c009": 2, "d145": 1, "d063": 1}},
+  {"id": "s1q15", "text": "one table not two", "archetype": "title_echo", "relevant": {"d053": 2, "d150": 1}},
+  {"id": "s1q16", "text": "split the monolith into a layered cargo workspace", "archetype": "title_echo", "relevant": {"c049": 2, "d065": 1, "d066": 1}},
+  {"id": "s1q17", "text": "engramdb plugin docs", "archetype": "tag_only", "relevant": {"c025": 2, "c039": 1}},
+  {"id": "s1q18", "text": "engramdb docs query latency profile", "archetype": "tag_only", "relevant": {"d121": 2, "d125": 1, "c005": 1}}
+]

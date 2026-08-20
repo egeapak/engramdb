@@ -1,0 +1,20 @@
+[
+  {"id": "s3q01", "text": "why did the daemon fail to start with no error anywhere", "archetype": "natural", "relevant": {"c015": 2, "c024": 1}},
+  {"id": "s3q02", "text": "where do i extend the composite score formula for a new input", "archetype": "natural", "relevant": {"d071": 2, "d151": 1}},
+  {"id": "s3q03", "text": "why do commands inside a git worktree target the main project", "archetype": "natural", "relevant": {"d055": 2}},
+  {"id": "s3q04", "text": "our ci wastes minutes building the test runner every time", "archetype": "paraphrase", "relevant": {"c047": 2}},
+  {"id": "s3q05", "text": "the nearest neighbour ranking value is not the metric it claims", "archetype": "paraphrase", "relevant": {"d139": 2}},
+  {"id": "s3q06", "text": "why is the tidy up work done on reads rather than writes", "archetype": "paraphrase", "relevant": {"c003": 2, "d123": 2}},
+  {"id": "s3q07", "text": "what happens to quality if the rerank window drops to five", "archetype": "buried_fact", "relevant": {"c023": 2}},
+  {"id": "s3q08", "text": "how many accumulators does the dot product kernel need", "archetype": "buried_fact", "relevant": {"d083": 2, "d091": 1}},
+  {"id": "s3q09", "text": "is the length cap counted in bytes or characters", "archetype": "buried_fact", "relevant": {"c031": 2}},
+  {"id": "s3q10", "text": "which fuzz targets cover the dot notation scope math", "archetype": "distractor_trap", "relevant": {"d147": 2}},
+  {"id": "s3q11", "text": "which directory must downloaded weights be written to", "archetype": "distractor_trap", "relevant": {"d155": 2}},
+  {"id": "s3q12", "text": "why did the installed plugin keep loading a stale cached version", "archetype": "distractor_trap", "relevant": {"c039": 2}},
+  {"id": "s3q13", "text": "avx512 frequency licensing", "archetype": "keyword", "relevant": {"d087": 2}},
+  {"id": "s3q14", "text": "insta snapshot tiers", "archetype": "keyword", "relevant": {"d063": 2, "d145": 1}},
+  {"id": "s3q15", "text": "epistemic classes and bi-temporal validity", "archetype": "title_echo", "relevant": {"d059": 2, "c033": 2}},
+  {"id": "s3q16", "text": "intrinsics work where auto-vectorization cannot", "archetype": "title_echo", "relevant": {"d079": 2, "d084": 1}},
+  {"id": "s3q17", "text": "query latency profile docs", "archetype": "tag_only", "relevant": {"d123": 2, "d127": 1}},
+  {"id": "s3q18", "text": "turbovec evaluation docs", "archetype": "tag_only", "relevant": {"d131": 2, "d135": 2, "c007": 1}}
+]

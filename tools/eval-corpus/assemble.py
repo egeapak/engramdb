@@ -58,9 +58,27 @@ def main():
                 problems.append(f"{f.name}/{q.get('id')}: no grade-2 relevant")
         queries.extend(qs)
 
-    dupes = [t for t, c in collections.Counter(
-        q["text"].strip().lower() for q in queries).items() if c > 1]
-    problems += [f"duplicate query text: {t!r}" for t in dupes]
+    # Two slices can independently produce the same query text while labelling
+    # different memories, because each author only sees their own slice. The
+    # query really does have all of them relevant, so merge rather than drop:
+    # the union (max grade) is strictly better ground truth than either half.
+    merged, by_text = [], {}
+    for q in queries:
+        key = q["text"].strip().lower()
+        if key in by_text:
+            keep = by_text[key]
+            for r, g in q["relevant"].items():
+                keep["relevant"][r] = max(int(g), int(keep["relevant"].get(r, 0)))
+            keep.setdefault("merged_from", []).append(q["id"])
+            if keep["archetype"] != q["archetype"]:
+                problems.append(
+                    f"merged {q['id']} into {keep['id']} across archetypes "
+                    f"({q['archetype']} vs {keep['archetype']})")
+            continue
+        by_text[key] = q
+        merged.append(q)
+    dropped = len(queries) - len(merged)
+    queries = merged
 
     leaky = []
     for q in queries:
@@ -79,7 +97,8 @@ def main():
            "queries": queries}
     pathlib.Path(a.out).write_text(json.dumps(out, indent=1) + "\n")
 
-    print(f"memories: {len(mems)}   queries: {len(queries)}   -> {a.out}")
+    print(f"memories: {len(mems)}   queries: {len(queries)} "
+          f"({dropped} merged as duplicate text)   -> {a.out}")
     print("archetypes:", dict(collections.Counter(q["archetype"] for q in queries)))
     print("relevant-set sizes:", dict(collections.Counter(len(q["relevant"]) for q in queries)))
     covered = {r for q in queries for r in q["relevant"]}
