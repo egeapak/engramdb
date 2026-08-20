@@ -245,7 +245,7 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 ## `reindex` — rebuild vectors and index
 
 ```bash
-engramdb reindex [[--embeddings-only|--index-only] [--global] | --archive-only]
+engramdb reindex [[--embeddings-only|--index-only] [--dry-run] [--global] | --archive-only]
 ```
 
 | Flag | What runs |
@@ -253,7 +253,39 @@ engramdb reindex [[--embeddings-only|--index-only] [--global] | --archive-only]
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
+| `--dry-run` | Change nothing; report what a rebuild would fix. Names the memories whose file changed since it was indexed, whose vectors no longer match their text, and which are not indexed or not embedded at all. `--index-only` is ignored here: it narrows what a *rebuild* touches, not what the report may look at. |
 | `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
+
+### Checking currency without rebuilding
+
+`--dry-run` is the exact, unbudgeted currency check, and the only surface that
+reports stale **vectors**:
+
+```bash
+engramdb reindex --dry-run                  # human summary, ids named
+engramdb --format json reindex --dry-run    # one JSON document for scripts
+```
+
+Two different kinds of staleness, both invisible to the counts:
+
+- **Changed since indexing** — the `.md` file no longer hashes to what its
+  index row was built from. Queries match the old summary and the old keyword
+  stems. `engramdb doctor` reports this too.
+- **Vectors out of date** — the file and its row agree, but the text, the
+  embedding model or the chunk width has changed since the vectors were
+  written, so semantic search is scoring against a stale representation.
+  `doctor` cannot report this: computing the expected digest needs a live
+  embedding provider, and no `doctor` path builds one.
+
+Memories with no vectors yet are reported as **not embedded**, never as stale —
+`add` returns before its background embedding finishes, so a memory created
+moments ago is not a fault. Rows written before EngramDB recorded content
+digests are counted separately and do not make a store non-current; a reindex
+backfills them.
+
+The cheap version of the same question runs automatically on every
+`query` / `list` / `get`, at the tier `[index].staleness_check` selects — see
+[configuration.md](./configuration.md).
 
 ## `migrate` / `rollback` — memory format migrations
 

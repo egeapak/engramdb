@@ -101,9 +101,27 @@ pub async fn run_stats(
         let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
         print_embeddings_status(model, backend, formatter).await;
 
-        if challenged_count > 0 || needs_review_count > 0 {
+        // "What should I run next" is exactly the question this block answers,
+        // and until now it could not mention the most actionable answer of all:
+        // that the index is serving text the files no longer contain. Content
+        // drift only — the vector half needs an engine, which `stats` has no
+        // reason to build; `reindex --dry-run` reports both.
+        let drifted_count = drifted_memory_count(&store).await;
+
+        if challenged_count > 0 || needs_review_count > 0 || drifted_count > 0 {
             outln!(formatter);
             outln!(formatter, "Health Warnings:");
+            if drifted_count > 0 {
+                formatter.print_error(&format!(
+                    "  {} {} changed since indexing (run 'engramdb reindex')",
+                    drifted_count,
+                    if drifted_count == 1 {
+                        "memory"
+                    } else {
+                        "memories"
+                    }
+                ));
+            }
             if challenged_count > 0 {
                 formatter.print_error(&format!(
                     "  {} memories are challenged (run 'engramdb review --challenged-only')",
@@ -306,6 +324,36 @@ async fn print_embeddings_status(
         formatter,
         "Embeddings: Not available (run 'engramdb init' to download model)"
     );
+}
+
+/// How many indexed rows no longer match the file they were built from.
+///
+/// Best-effort by design: `stats` is a report, and a store whose digests
+/// cannot be read is not a reason to fail it — the count simply drops to zero
+/// and the other warnings still print. `doctor` and `reindex --dry-run` are
+/// the surfaces that distinguish "clean" from "could not tell".
+///
+/// Returns 0 under a checkout conflict, where two checkouts legitimately hold
+/// different bytes for one id and the drift is not a fault any reindex clears.
+async fn drifted_memory_count(store: &MemoryStore) -> usize {
+    if store.checkout_conflict().await.is_some() {
+        return 0;
+    }
+    let Ok(rows) = store.index_digests().await else {
+        return 0;
+    };
+    let mut drifted = 0;
+    for row in rows {
+        let Some(recorded) = row.content_sha256.as_deref() else {
+            continue;
+        };
+        if let Ok(Some(bytes)) = store.read_memory_bytes(&row.memory_id).await {
+            if engramdb::storage::FileDigest::of(&bytes).sha256 != recorded {
+                drifted += 1;
+            }
+        }
+    }
+    drifted
 }
 
 #[cfg(test)]
