@@ -49,6 +49,18 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
             "Store is healthy. {} memories indexed, {} on disk.",
             result.indexed, result.on_disk
         ));
+        // `drifted_entries: None` means the content check could not run — a
+        // shared project id, or an index whose digests could not be read. Every
+        // other consumer preserves that distinction (the JSON branch emits
+        // null, `doctor_environment` says "content check: not run", MCP says
+        // "not_run"); without this line the healthy branch was the one place
+        // that rendered "not checked" as an unqualified clean bill of health.
+        if result.drifted_entries.is_none() {
+            formatter.print_message(
+                "Content check did not run, so drift was not verified \
+                 (shared project ID, or no recorded digests yet).",
+            );
+        }
     } else {
         if formatter.is_json() {
             // One machine-readable object on stdout: the raw per-id lines in

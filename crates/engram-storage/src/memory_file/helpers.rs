@@ -141,24 +141,6 @@ fn unescape_body_line(line: &str) -> &str {
     line
 }
 
-/// Parse the body into named sections. Recognizes:
-/// - `# heading` → stored under key `__h1__` (only the first, and only in the
-///   preamble before any `## ` section — matching the writer's layout)
-/// - `> blockquote` → stored under key `__blockquote__`
-/// - `## SectionName` → stored under key `SectionName` (first occurrence wins;
-///   the writer emits each section exactly once)
-/// - the writer-emitted `<!-- engramdb ... -->` block is skipped entirely
-///   (parsed separately by `parse_hidden_meta`)
-///
-/// Escaped lines (see module docs) are unescaped as they are accumulated.
-///
-/// Line splitting deliberately avoids [`str::lines`]. `lines()` strips one
-/// trailing `\r` from every line, and section text is rebuilt from those
-/// lines — so content ending in several carriage returns lost one on every
-/// parse, and the write never reached a fixed point (found by the
-/// `memory_file_roundtrip` fuzz target). Whether a trailing `\r` is a CRLF
-/// terminator or content cannot be decided per line, so it is decided once
-/// for the file: see `crlf_file` below.
 /// Whether `text` is a CRLF-terminated file.
 ///
 /// A file is CRLF-terminated or it is not; that cannot be decided per line.
@@ -189,6 +171,24 @@ pub fn is_crlf_terminated(text: &str) -> bool {
     saw_line && all_cr
 }
 
+/// Parse the body into named sections. Recognizes:
+/// - `# heading` → stored under key `__h1__` (only the first, and only in the
+///   preamble before any `## ` section — matching the writer's layout)
+/// - `> blockquote` → stored under key `__blockquote__`
+/// - `## SectionName` → stored under key `SectionName` (first occurrence wins;
+///   the writer emits each section exactly once)
+/// - the writer-emitted `<!-- engramdb ... -->` block is skipped entirely
+///   (parsed separately by `parse_hidden_meta`)
+///
+/// Escaped lines (see module docs) are unescaped as they are accumulated.
+///
+/// Line splitting deliberately avoids [`str::lines`]. `lines()` strips one
+/// trailing `\r` from every line, and section text is rebuilt from those
+/// lines — so content ending in several carriage returns lost one on every
+/// parse, and the write never reached a fixed point (found by the
+/// `memory_file_roundtrip` fuzz target). Whether a trailing `\r` is a CRLF
+/// terminator or content cannot be decided per line, so it is decided once
+/// for the file: see `crlf_file` below.
 pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
     let mut sections = HashMap::new();
     let mut current_section: Option<String> = None;

@@ -275,6 +275,15 @@ async fn report_dry_run(
     }
     if plan.is_current() {
         formatter.print_success("Index is current with the files on disk.");
+    } else if plan.embeddings_unavailable
+        && plan.not_indexed.is_empty()
+        && plan.drifted.is_empty()
+        && plan.undetermined.is_empty()
+    {
+        // Content is current but the vector half could not be computed. Saying
+        // "current" here would be a clean bill of health for a check that did
+        // not run; the warning above already named the missing provider.
+        formatter.print_message("Content is current; vector currency was not checked.");
     } else {
         formatter.print_message("Run 'engramdb reindex' to rebuild.");
     }

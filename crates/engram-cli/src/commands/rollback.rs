@@ -140,7 +140,9 @@ pub async fn run_rollback(
             Ok(store) => {
                 if let Err(e) = store.reindex().await {
                     formatter.print_warning(&format!(
-                        "memories were rewritten but the index could not be refreshed ({e}) —                          run `engramdb reindex` so queries stop matching the pre-rollback text."
+                        "memories were rewritten but the index could not be refreshed ({e}) — run \
+                         `engramdb reindex` so queries stop matching the pre-rollback \
+                         text."
                     ));
                 }
             }

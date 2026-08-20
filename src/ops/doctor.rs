@@ -127,8 +127,16 @@ async fn check_content_drift(store: &MemoryStore) -> (Option<Vec<String>>, Vec<S
     if store.checkout_conflict().await.is_some() {
         return (None, Vec::new());
     }
-    let Ok(digests) = store.index_digests().await else {
-        return (None, Vec::new());
+    let digests = match store.index_digests().await {
+        Ok(d) => d,
+        // "Not checked", and it must stay distinguishable from "checked and
+        // clean" all the way to the surface — see `DoctorResult::drifted_entries`.
+        // Warn rather than swallow: an index that cannot be read is worth
+        // knowing about even though it cannot flip `healthy` on its own.
+        Err(e) => {
+            tracing::warn!("content drift check skipped: cannot read index digests: {e}");
+            return (None, Vec::new());
+        }
     };
     // Every row unknown ⇒ nothing to compare. A store with *some* digests is
     // checked: the unknown rows simply do not contribute.
@@ -140,30 +148,32 @@ async fn check_content_drift(store: &MemoryStore) -> (Option<Vec<String>>, Vec<S
         return (None, Vec::new());
     }
 
+    // One batched filesystem pass. `read_memory_bytes` per row is a full
+    // `read_dir` of two directories each, which made this quadratic over the
+    // store — and `doctor` runs it on every invocation.
+    let (on_disk, unreadable) = match store.file_digests().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("content drift check skipped: cannot read memory files: {e}");
+            return (None, Vec::new());
+        }
+    };
+
     let mut drifted = Vec::new();
-    let mut undetermined = Vec::new();
     for row in digests {
         let Some(recorded) = row.content_sha256.as_deref() else {
             continue;
         };
-        match store.read_memory_bytes(&row.memory_id).await {
-            // A missing file is `stale_entries`' business, not ours — reporting
-            // it twice would double-count one problem.
-            Ok(None) => {}
-            Ok(Some(bytes)) => {
-                if crate::storage::FileDigest::of(&bytes).sha256 != recorded {
-                    drifted.push(row.memory_id);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("cannot determine currency of memory {}: {e}", row.memory_id);
-                undetermined.push(row.memory_id);
+        // A missing file is `stale_entries`' business, not ours — reporting
+        // it twice would double-count one problem.
+        if let Some(actual) = on_disk.get(&row.memory_id) {
+            if actual.sha256 != recorded {
+                drifted.push(row.memory_id);
             }
         }
     }
     drifted.sort();
-    undetermined.sort();
-    (Some(drifted), undetermined)
+    (Some(drifted), unreadable)
 }
 
 /// Scan a directory for `.md` memory files, counting total and collecting orphans.

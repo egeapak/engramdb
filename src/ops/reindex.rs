@@ -93,8 +93,14 @@ impl ReindexPlan {
     /// `without_digest` is deliberately excluded: a store that has simply not
     /// been reindexed since 0.8.0 is not *stale*, and calling it so would push
     /// every such user into a rebuild that changes no answer they get.
+    /// `embeddings_unavailable` is deliberately disqualifying: with no
+    /// provider the vector half of the check never ran, so both vector lists
+    /// are empty for want of an answer rather than for want of a problem.
+    /// Reading that as "current" is the one thing this whole feature exists to
+    /// stop — a clean report from a check that did not happen.
     pub fn is_current(&self) -> bool {
-        self.not_indexed.is_empty()
+        !self.embeddings_unavailable
+            && self.not_indexed.is_empty()
             && self.drifted.is_empty()
             && self.stale_vectors.is_empty()
             && self.not_embedded.is_empty()
@@ -122,46 +128,60 @@ pub async fn reindex_dry_run(
     let mut plan = ReindexPlan::default();
     let conflicted = store.checkout_conflict().await.is_some();
 
-    let ids = store.list_ids().await?;
-    plan.on_disk = ids.len();
+    // Files from the FILESYSTEM, rows from the index. Reading both sides from
+    // `list_ids()` compared the index against itself: `not_indexed` was then
+    // empty by construction and `on_disk` was a row count wearing a file
+    // count's name, so a memory that had never been indexed — the single
+    // loudest thing a dry run should report — was invisible and the plan said
+    // "current".
+    let file_ids = store.list_file_ids().await?;
+    plan.on_disk = file_ids.len();
 
     let rows = store.index_digests().await?;
     plan.indexed = rows.len();
     let by_id: std::collections::HashMap<&str, &_> =
         rows.iter().map(|r| (r.memory_id.as_str(), r)).collect();
 
-    for id in &ids {
+    for id in &file_ids {
         if !by_id.contains_key(id.as_str()) {
             plan.not_indexed.push(id.clone());
         }
     }
 
     // --- content currency -------------------------------------------------
+    // One batched pass, not one `read_memory_bytes` per row: that resolves each
+    // id with a full `read_dir` of two directories, so a whole-store check was
+    // quadratic in dirent work.
     if !conflicted {
+        let (digests, unreadable) = store.file_digests().await?;
+        plan.undetermined = unreadable;
         for row in &rows {
             let Some(recorded) = row.content_sha256.as_deref() else {
                 plan.without_digest += 1;
                 continue;
             };
-            match store.read_memory_bytes(&row.memory_id).await {
-                // A row with no file is the `stale_entries` problem doctor
-                // already reports; counting it as drift too would double-count
-                // one fault.
-                Ok(None) => {}
-                Ok(Some(bytes)) => {
-                    if crate::storage::FileDigest::of(&bytes).sha256 != recorded {
-                        plan.drifted.push(row.memory_id.clone());
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("cannot determine currency of {}: {e}", row.memory_id);
-                    plan.undetermined.push(row.memory_id.clone());
+            // A row with no file is the `stale_entries` problem doctor already
+            // reports; counting it as drift too would double-count one fault.
+            if let Some(actual) = digests.get(&row.memory_id) {
+                if actual.sha256 != recorded {
+                    plan.drifted.push(row.memory_id.clone());
                 }
             }
         }
     }
 
     // --- vector currency --------------------------------------------------
+    // Gated on the conflict exactly like the content half. Under a shared
+    // project id the index holds the OTHER checkout's rows, whose vectors this
+    // checkout can neither validate nor rebuild, so reporting them as stale is
+    // a permanent finding no reindex clears — the same reason `doctor`,
+    // `stats` and `check_staleness` all suppress there.
+    if conflicted {
+        plan.embeddings_unavailable = engine.is_none_or(|e| !e.embeddings_available());
+        finish(&mut plan);
+        return Ok(plan);
+    }
+
     let Some(engine) = engine.filter(|e| e.embeddings_available()) else {
         plan.embeddings_unavailable = true;
         finish(&mut plan);
@@ -171,7 +191,7 @@ pub async fn reindex_dry_run(
     let stored = store.embed_digests().await?;
     // One batched load, matching `reindex` itself: a per-id `store.get` is a
     // full directory scan each, which is quadratic over a whole store.
-    let loaded = store.get_batch(&ids).await?;
+    let loaded = store.get_batch(&file_ids).await?;
     for (id, memory) in loaded {
         // `has_embedding == false` is "not embedded yet", a different state
         // that is reported separately. `create` returns before its detached
@@ -182,16 +202,16 @@ pub async fn reindex_dry_run(
             plan.not_embedded.push(id);
             continue;
         }
-        // A stored digest of `None` means vectors written before the digest
-        // existed: their currency is unknown, and re-embedding is the only way
-        // to find out — which is exactly what the user is asking about.
-        match (
-            stored.get(&id).and_then(Option::as_deref),
-            engine.expected_embed_digest(&memory),
-        ) {
-            (Some(recorded), Some(expected)) if recorded != expected => plan.stale_vectors.push(id),
-            (None, Some(_)) => plan.stale_vectors.push(id),
-            _ => {}
+        // Mirror `reindex`'s own retain predicate exactly. It rebuilds unless
+        // BOTH digests exist and agree, so a memory whose expected digest is
+        // `None` (it produces no embed text, and reindex will delete its
+        // chunks) must read as work to do here too — otherwise the dry run
+        // calls a store current that the very next reindex would change.
+        let recorded = stored.get(&id).and_then(Option::as_deref);
+        let expected = engine.expected_embed_digest(&memory);
+        let current = matches!((recorded, &expected), (Some(r), Some(e)) if r == e);
+        if !current {
+            plan.stale_vectors.push(id);
         }
     }
 
@@ -305,12 +325,27 @@ pub async fn reindex(
             let stored_dims = store.chunks_table_dimensions().await?;
             let dimension_change =
                 live_dims > 0 && stored_dims.is_some_and(|stored| stored != live_dims);
+            // Worded from what will actually happen. Under a checkout conflict
+            // the recreation below is suppressed so the other clone's vectors
+            // survive, and claiming a repair that did not occur sends the user
+            // away believing the mismatch is resolved.
             if dimension_change {
-                warnings.push(format!(
-                    "chunks table stored {}-dimension vectors but the provider produces \
-                     {live_dims}; recreating the table and re-embedding everything",
-                    stored_dims.unwrap_or(0)
-                ));
+                if foreign_checkout.is_none() {
+                    warnings.push(format!(
+                        "chunks table stored {}-dimension vectors but the provider produces \
+                         {live_dims}; recreating the table and re-embedding everything",
+                        stored_dims.unwrap_or(0)
+                    ));
+                } else {
+                    warnings.push(format!(
+                        "chunks table stored {}-dimension vectors but the provider produces \
+                         {live_dims}; the table was NOT recreated because this checkout shares \
+                         its project ID with another one, whose vectors would be destroyed. \
+                         Re-embedding will fail against the stored width until you reindex from \
+                         the registered checkout.",
+                        stored_dims.unwrap_or(0)
+                    ));
+                }
             }
 
             // `force` and a dimension change are the two ways a run rebuilds
@@ -1350,6 +1385,74 @@ mod tests {
     fn stub_engine(store: MemoryStore) -> RetrievalEngine {
         RetrievalEngine::new(store, EngramConfig::default())
             .with_embedding_provider(Arc::new(StubEmbeddingProvider))
+    }
+
+    /// **Review finding.** A file that was never indexed must be reported.
+    ///
+    /// `on_disk` and `not_indexed` were both derived from `store.list_ids()`,
+    /// which reads the LanceDB table — the same table the rows come from. The
+    /// two sets were therefore identical by construction: `not_indexed` could
+    /// never be non-empty, `on_disk` was a row count wearing a file count's
+    /// name, and the single loudest thing a dry run should report was
+    /// structurally invisible.
+    #[tokio::test]
+    async fn dry_run_reports_a_file_that_was_never_indexed() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let indexed = Memory::new(MemoryType::Decision, "indexed", "C", Provenance::human());
+        store.create(&indexed).await.unwrap();
+
+        // A memory file on disk that the index has never seen: written
+        // directly, exactly as a `git checkout` of a colleague's memory would
+        // arrive.
+        let orphan = Memory::new(MemoryType::Decision, "unindexed", "C", Provenance::human());
+        let text = crate::storage::memory_file::latest_writer()
+            .write(&orphan)
+            .unwrap();
+        let dir = crate::storage::paths::memories_dir(tmp.path());
+        tokio::fs::write(dir.join(format!("{}.md", orphan.id)), text)
+            .await
+            .unwrap();
+
+        let plan = reindex_dry_run(&store, None).await.unwrap();
+        assert_eq!(plan.on_disk, 2, "on_disk must count FILES: {plan:?}");
+        assert_eq!(
+            plan.not_indexed,
+            vec![orphan.id.clone()],
+            "the unindexed file must be named: {plan:?}"
+        );
+        assert!(!plan.is_current());
+    }
+
+    /// **Review finding.** With no provider the vector half never ran, so
+    /// neither list can mean "nothing wrong" — reporting `current` would be a
+    /// clean bill of health for a check that did not happen.
+    #[tokio::test]
+    async fn dry_run_is_not_current_when_vectors_could_not_be_checked() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "T",
+                "C",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        store.reindex().await.unwrap();
+
+        let plan = reindex_dry_run(&store, None).await.unwrap();
+        assert!(plan.embeddings_unavailable);
+        assert!(plan.drifted.is_empty(), "content really is current");
+        assert!(
+            !plan.is_current(),
+            "an unchecked vector half must not read as current: {plan:?}"
+        );
     }
 
     /// A clean store reports nothing to do — and says so with `is_current`,

@@ -122,7 +122,9 @@ pub async fn run_migrate(
             Ok(store) => {
                 if let Err(e) = store.reindex().await {
                     formatter.print_warning(&format!(
-                        "memories were rewritten but the index could not be refreshed ({e}) —                          run `engramdb reindex` so queries stop matching the pre-migration text."
+                        "memories were rewritten but the index could not be refreshed ({e}) — run \
+                         `engramdb reindex` so queries stop matching the pre-migration \
+                         text."
                     ));
                 }
             }

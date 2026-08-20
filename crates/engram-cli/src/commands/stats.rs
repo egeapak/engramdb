@@ -342,18 +342,22 @@ async fn drifted_memory_count(store: &MemoryStore) -> usize {
     let Ok(rows) = store.index_digests().await else {
         return 0;
     };
-    let mut drifted = 0;
-    for row in rows {
-        let Some(recorded) = row.content_sha256.as_deref() else {
-            continue;
-        };
-        if let Ok(Some(bytes)) = store.read_memory_bytes(&row.memory_id).await {
-            if engramdb::storage::FileDigest::of(&bytes).sha256 != recorded {
-                drifted += 1;
-            }
-        }
-    }
-    drifted
+    // Batched: the per-row `read_memory_bytes` this replaced was a full
+    // `read_dir` of two directories each, so `stats` — a command that
+    // previously did no file I/O at all — became quadratic in the store size.
+    let Ok((on_disk, _unreadable)) = store.file_digests().await else {
+        return 0;
+    };
+    rows.iter()
+        .filter(|row| {
+            let Some(recorded) = row.content_sha256.as_deref() else {
+                return false;
+            };
+            on_disk
+                .get(&row.memory_id)
+                .is_some_and(|actual| actual.sha256 != recorded)
+        })
+        .count()
 }
 
 #[cfg(test)]

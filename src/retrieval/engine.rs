@@ -1826,8 +1826,6 @@ fn metadata_row(memory: &Memory) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(". "))
 }
 
-/// The document string the cross-encoder reranker scores against the query.
-///
 /// The identity of the text a memory's stored vectors were computed from.
 ///
 /// SHA-256 over the embed texts, **salted** with everything else that decides
@@ -1864,8 +1862,13 @@ pub(crate) fn embed_digest(
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    // NUL-separated so no field boundary can be forged by content: a NUL
-    // cannot appear in a model id, and the texts are UTF-8 from `.md` files.
+    // NUL-separated, and length-prefixed for the texts.
+    //
+    // The separator alone is NOT injective: U+0000 is valid UTF-8 and survives
+    // `read_to_string`, so a memory containing a literal NUL could otherwise
+    // make two different chunk splits hash identically — a collision in the
+    // direction that matters (stale vectors read as current). Prefixing each
+    // text with its byte length removes the ambiguity regardless of content.
     hasher.update(provider.model_id().as_bytes());
     hasher.update([0]);
     hasher.update(provider.dimensions().to_string().as_bytes());
@@ -1882,6 +1885,8 @@ pub(crate) fn embed_digest(
     hasher.update(chunk_tokens.to_string().as_bytes());
     for text in texts {
         hasher.update([0]);
+        hasher.update(text.len().to_le_bytes());
+        hasher.update([0]);
         hasher.update(text.as_bytes());
     }
     // `sha2` 0.11's `finalize` returns a `hybrid_array::Array` with no
@@ -1894,6 +1899,8 @@ pub(crate) fn embed_digest(
         .collect()
 }
 
+/// The document string the cross-encoder reranker scores against the query.
+///
 /// Mirrors the embedding-side composition ([`embedding_texts`] /
 /// [`metadata_row`]): title and tags are included so a candidate surfaced
 /// via its metadata vector is re-scored on text that still contains the
