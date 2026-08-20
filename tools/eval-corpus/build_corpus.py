@@ -7,7 +7,7 @@ alongside. Deterministic: same repo state in, same corpus out.
 
     python3 tools/eval-corpus/build_corpus.py [--out examples/data/engramdb_eval_memories.json]
 """
-import argparse, collections, json, pathlib, re, subprocess, sys
+import argparse, collections, hashlib, json, math, pathlib, re, subprocess, sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 
@@ -27,6 +27,12 @@ DOCS = [
 MIN_COMMIT_BODY = 250
 MIN_DOC_SECTION = 400
 MAX_CONTENT = 1800
+
+
+def stable_id(prefix, seed):
+    """Content-derived id, so regenerating after new commits land does not
+    renumber everything and silently repoint every authored label."""
+    return prefix + hashlib.sha256(seed.encode()).hexdigest()[:6]
 
 
 def sh(*a):
@@ -63,7 +69,7 @@ def from_commits(mems):
         prefix, scope, rest = m.group(1), m.group(2), m.group(3)
         rest = re.sub(r"\s*\(#\d+\)$", "", rest).strip()
         mems.append({
-            "id": f"c{len(mems):03d}",
+            "id": stable_id("c", h),
             "type": TYPE_BY_PREFIX.get(prefix, "insight"),
             "title": rest[:120],
             "summary": summarize(body),
@@ -92,7 +98,7 @@ def from_docs(mems):
                 continue
             stem = pathlib.Path(rel).stem.replace(".", "")
             mems.append({
-                "id": f"d{len(mems):03d}",
+                "id": stable_id("d", f"{rel}#{title}"),
                 "type": "convention" if ("test" in rel or "CLAUDE" in rel) else "insight",
                 "title": title[:120],
                 "summary": summarize(body),
@@ -103,6 +109,68 @@ def from_docs(mems):
             })
 
 
+STOPWORDS = set("""
+this that these those with from into over under about after before which while
+when where what whom whose there here then than them they their theirs been being
+have has had having does did doing done make makes made take takes taken give
+gives given only just also even still much many more most less least such same
+other another every each both some none only very will would could should must
+can may might shall need needs needed use uses used using
+whether looks look arrows shows show showing said says say goes going went
+thing things way ways lot lots bit bits kind sort part parts side sides
+one two three four five first second third last next previous above below
+new old good bad big small long short high low full empty real actual
+rather instead however therefore because since though although unless
+""".split())
+
+
+def assign_tags(mems, per_memory=4):
+    """Give each memory a few *discriminative* tags, TF-IDF style.
+
+    The first version of this generator tagged from the conventional-commit
+    prefix and the doc filename, which produced `docs` on 111 of 157 memories
+    and `feat`/`fix` on most of the rest. Tags that generic make a tag-only
+    query unanswerable — 125 memories share a token with it and only two are
+    labelled relevant — so they measure the labeller's arbitrariness, not the
+    retriever. A real agent tags a memory with what it is *about*.
+
+    So: score every term by tf-idf against the corpus and keep the top few.
+    Rare, topical terms win; corpus-wide filler loses.
+    """
+    # Candidates come from title+summary only. That is what a human or agent
+    # tagging a memory actually draws on, and scoring the whole body instead
+    # surfaces incidental words ("arrows", "looks", "whether") that happen to
+    # be rare rather than terms the memory is about.
+    docs = []
+    for m in mems:
+        salient = re.findall(r"[a-z][a-z0-9_]{3,}", f"{m['title']} {m['summary']}".lower())
+        docs.append(collections.Counter(t for t in salient if t not in STOPWORDS))
+    # Document frequency over the whole corpus body, so a term that is common
+    # project-wide is discounted even when it is rare in this memory's title.
+    df = collections.Counter()
+    for m in mems:
+        body = set(re.findall(r"[a-z][a-z0-9_]{3,}", f"{m['title']} {m['summary']} {m['content']}".lower()))
+        df.update(body)
+    n = len(docs)
+    for m, d in zip(mems, docs):
+        total = sum(d.values()) or 1
+        scored = sorted(
+            ((cnt / total) * math.log(n / (1 + df[t])), t) for t, cnt in d.items()
+        )
+        picked, seen = [], set()
+        for _, t in reversed(scored):
+            # Skip terms that are near-duplicates of one already picked
+            # (plural/inflection), so the tag set stays four distinct ideas.
+            if any(t.startswith(p[:5]) or p.startswith(t[:5]) for p in picked):
+                continue
+            if df[t] > n * 0.35:        # still too common to discriminate
+                continue
+            picked.append(t)
+            if len(picked) == per_memory:
+                break
+        m["tags"] = sorted(picked)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="tools/eval-corpus/memories.json")
@@ -111,6 +179,7 @@ def main():
     mems = []
     from_commits(mems)
     from_docs(mems)
+    assign_tags(mems)
 
     out = REPO / args.out
     out.parent.mkdir(parents=True, exist_ok=True)
