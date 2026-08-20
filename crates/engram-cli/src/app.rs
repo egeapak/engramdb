@@ -1287,6 +1287,20 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["archive_only", "dry_run"])]
         force: bool,
 
+        /// Rebuild only the index rows whose file changed since it was indexed
+        ///
+        /// Measured 56-72% faster than a full rebuild on a store where
+        /// nothing changed. The saving scales down with how many files
+        /// actually changed, and cannot reach 100%: deciding whether a file
+        /// changed means reading and hashing it, so both paths enumerate,
+        /// read and hash every file identically. What is skipped is the
+        /// parse, the keyword-stem derivation and the row write.
+        ///
+        /// Both paths produce the same index. Ignored under `--force`, which
+        /// rebuilds everything by definition.
+        #[arg(long, conflicts_with_all = ["archive_only", "dry_run", "embeddings_only"])]
+        incremental: bool,
+
         /// Reindex the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,

@@ -314,6 +314,19 @@ incremental. Two consequences to keep in mind:
   and `projects repair` always force; a repair that trusts the stamp it is
   repairing is not a repair.
 
+**`reindex --incremental` skips rows whose file is unchanged**, opt-in and off
+by default. Measured at 56–72% faster on an unchanged store (100–2000 memories,
+`examples/reindex_incremental_bench.rs`) — the parse, the stem derivation and
+the row write are all real cost. It cannot reach 100%: deciding whether a file
+changed means reading and hashing it, so both paths enumerate, read and hash
+identically. It never skips enumeration or
+duplicate-id resolution (that walk deletes the loser of a duplicate pair), it
+reconciles deletions explicitly from the *full* row set rather than the digest
+map (a digest-less row whose file is gone must still be removed), and it falls
+back to a full rebuild when the schema or normalizer stamp is behind — those
+mean the derivation changed even where the bytes did not. `indexed_ids` must
+include skipped memories or the orphan-chunk prune deletes their vectors.
+
 **Anything that rewrites memory files must refresh the index.** `migrate` and
 `rollback` rewrite every file under the project lock; without a following
 `store.reindex()` (lock dropped first — it is not reentrant) every row is

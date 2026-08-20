@@ -255,6 +255,7 @@ engramdb reindex [[--embeddings-only|--index-only] [--dry-run] [--global] | --ar
 | `--index-only` | Rebuild the index without re-embedding. |
 | `--dry-run` | Change nothing; report what a rebuild would fix. Names the memories whose file changed since it was indexed, whose vectors no longer match their text, and which are not indexed or not embedded at all. `--index-only` is ignored here: it narrows what a *rebuild* touches, not what the report may look at. |
 | `--force` | Re-embed every memory, including ones whose vectors are provably current. The repair-grade rebuild — see below. |
+| `--incremental` | Rebuild only the index rows whose file changed. Opt-in; 56–72% faster on an unchanged store — see below. |
 | `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
 
 ### Reused embeddings, and when to override
@@ -282,6 +283,53 @@ see — a chunk row damaged by something other than EngramDB, or a suspected bug
 in the embedding path. `engramdb doctor --fix` and `engramdb projects repair`
 always force, because a repair that trusts the stamp it is repairing is not a
 repair.
+
+### `--incremental`
+
+`--incremental` rebuilds only the index rows whose file changed since it was
+indexed, reusing the rest:
+
+```
+Done. Rebuilt index with 2000 entries.
+Reused 2000 unchanged index rows.
+```
+
+Measured on this repo's benchmark
+(`cargo run --release --example reindex_incremental_bench`), rebuilding a store
+where nothing has changed:
+
+| memories | full | `--incremental` | saved |
+|---------:|-----:|----------------:|------:|
+| 100 | 14.1 ms | 6.3 ms | 56% |
+| 500 | 77.5 ms | 21.8 ms | 72% |
+| 2000 | 314.5 ms | 134.7 ms | 57% |
+
+Those are best-case figures — a steady state where every row is reused. The
+saving scales down with the proportion of files that actually changed, and it
+can never reach 100%: deciding whether a file changed means reading and hashing
+it, so both paths enumerate, read, hash and deduplicate every file identically.
+What `--incremental` removes is the frontmatter parse, the keyword-stem
+derivation and the row write.
+
+It stays opt-in rather than becoming the default because the plain rebuild is
+the simpler thing to reason about and reindex is not usually on a hot path.
+Reach for it on large, mostly-static stores. Both produce the same index, which
+a test asserts directly by rebuilding the same store each way and comparing
+every row.
+
+Three things it deliberately does not do:
+
+- **It never skips enumeration or deduplication.** Reindex resolves two files
+  claiming one memory id by keeping the newer and deleting the loser; skipping
+  the walk would leave stale files on disk indefinitely.
+- **It falls back to a full rebuild** when the store's schema version or
+  keyword-normalizer stamp is behind this binary's. Those mean the row
+  *derivation* changed even where the bytes did not, so an unchanged file is
+  exactly the case that needs rebuilding.
+- **It is not exposed over MCP.** The flag is a performance trade on a specific
+  store, not a semantic choice an agent should be making remotely.
+
+`--force` implies a full row rebuild and overrides this.
 
 ### Checking currency without rebuilding
 

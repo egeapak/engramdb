@@ -1022,6 +1022,7 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l index-only
 complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l archive-only -d 'Rebuild the conversation search rows from the stored transcript copies instead of touching memories. Mirrors `--embeddings-only`: a rebuild of one index, from bytes that were kept verbatim so a better reduction is always a re-derivation away'
 complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l dry-run -d 'Report what a reindex would rebuild, without changing anything'
 complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l force -d 'Re-embed every memory, even ones whose vectors are provably current'
+complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l incremental -d 'Rebuild only the index rows whose file changed since it was indexed'
 complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l global -d 'Reindex the global (cross-project) memory store instead of the current project'
 complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -l json -d 'Output as JSON'
 complete -c engramdb -n "__fish_engramdb_using_subcommand reindex" -s q -l quiet -d 'Suppress non-essential output'

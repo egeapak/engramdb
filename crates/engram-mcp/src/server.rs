@@ -2893,6 +2893,11 @@ impl EngramDbServer {
             engine.as_ref(),
             ops::ReindexOptions {
                 embeddings_only,
+                // Not exposed on MCP. It is opt-in, saves only the parse and
+                // stem derivation (the file read and hash happen either way),
+                // and an agent has no way to judge that trade for a store it
+                // cannot measure. The CLI flag is where it belongs.
+                incremental: false,
                 force: input.force.unwrap_or(false),
             },
         )
@@ -2903,6 +2908,7 @@ impl EngramDbServer {
             "indexed": result.indexed,
             "embedded": result.embedded,
             "skipped": result.skipped,
+            "rows_skipped": result.rows_skipped,
             "errors": result.errors,
             "warnings": result.warnings
         }))

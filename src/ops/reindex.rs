@@ -9,6 +9,10 @@ use anyhow::Result;
 pub struct ReindexResult {
     pub indexed: usize,
     pub embedded: usize,
+    /// Index rows whose file was unchanged, so the row was left alone.
+    ///
+    /// Only ever non-zero for an `incremental` run.
+    pub rows_skipped: usize,
     /// Memories whose vectors were already current and were left alone.
     ///
     /// Counted rather than inferred: a skip that is not reported is a silent
@@ -32,6 +36,14 @@ pub struct ReindexResult {
 pub struct ReindexOptions {
     /// Re-embed only; skip the metadata rebuild.
     pub embeddings_only: bool,
+    /// Rebuild only the index rows whose file changed since it was indexed.
+    ///
+    /// Opt-in, and a smaller win than it sounds: deciding whether a file
+    /// changed means reading and hashing it, so the I/O is unchanged and only
+    /// the parse, the stem derivation and the row write are saved. Mutually
+    /// exclusive with `force` in spirit — `force` implies a full rebuild — and
+    /// ignored entirely when `embeddings_only` is set, which rebuilds no rows.
+    pub incremental: bool,
     /// Re-embed every memory even when its vectors are provably current.
     ///
     /// This is the repair setting. Skipping trusts the digest stored beside
@@ -224,11 +236,13 @@ pub async fn reindex(
 ) -> Result<ReindexResult> {
     let ReindexOptions {
         embeddings_only,
+        incremental,
         force,
     } = options;
     let mut indexed = 0;
     let mut embedded = 0;
     let mut skipped = 0;
+    let mut rows_skipped = 0;
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
@@ -254,7 +268,15 @@ pub async fn reindex(
     // Rebuild index from files (unless embeddings_only). This rebuilds only
     // the metadata table; existing embedding vectors survive.
     if !embeddings_only {
-        indexed = store.reindex().await?;
+        // `force` means "rebuild everything", which includes the rows: a
+        // repair that skipped rows would not be a repair.
+        if incremental && !force {
+            let counts = store.reindex_incremental().await?;
+            indexed = counts.indexed;
+            rows_skipped = counts.skipped;
+        } else {
+            indexed = store.reindex().await?;
+        }
         if let Some(other) = &foreign_checkout {
             warnings.push(format!(
                 "this checkout shares its project ID (and index) with another checkout \
@@ -426,6 +448,7 @@ pub async fn reindex(
     Ok(ReindexResult {
         indexed,
         embedded,
+        rows_skipped,
         skipped,
         errors,
         warnings,

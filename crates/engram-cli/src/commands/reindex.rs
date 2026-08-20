@@ -28,6 +28,8 @@ pub struct ReindexParams {
     pub dry_run: bool,
     /// Re-embed everything, including vectors that are provably current.
     pub force: bool,
+    /// Rebuild only the rows whose file changed since it was indexed.
+    pub incremental: bool,
     pub embedding_backend: Option<engramdb::types::EmbeddingBackend>,
 }
 
@@ -44,6 +46,7 @@ impl ReindexParams {
             archive_only: false,
             dry_run: false,
             force: false,
+            incremental: false,
             embedding_backend,
         }
     }
@@ -67,6 +70,7 @@ pub async fn run_reindex(
         archive_only,
         dry_run,
         force,
+        incremental,
         embedding_backend,
     } = params;
 
@@ -120,6 +124,7 @@ pub async fn run_reindex(
         engine.as_ref(),
         engramdb::ops::ReindexOptions {
             embeddings_only,
+            incremental,
             force,
         },
     )
@@ -130,6 +135,17 @@ pub async fn run_reindex(
         formatter.print_success(&format!(
             "Done. Rebuilt index with {} entries.",
             result.indexed
+        ));
+    }
+    if result.rows_skipped > 0 {
+        formatter.print_message(&format!(
+            "Reused {} unchanged index {}.",
+            result.rows_skipped,
+            if result.rows_skipped == 1 {
+                "row"
+            } else {
+                "rows"
+            }
         ));
     }
     if result.embedded > 0 {
@@ -161,6 +177,7 @@ pub async fn run_reindex(
     if result.indexed == 0
         && result.embedded == 0
         && result.skipped == 0
+        && result.rows_skipped == 0
         && result.errors.is_empty()
         && result.warnings.is_empty()
     {
