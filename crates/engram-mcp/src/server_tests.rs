@@ -1606,6 +1606,7 @@ async fn reindex_basic() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: None,
             index_only: None,
+            dry_run: None,
             project: None,
         }))
         .await;
@@ -1622,6 +1623,7 @@ async fn reindex_index_only() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: None,
             index_only: Some(true),
+            dry_run: None,
             project: None,
         }))
         .await;
@@ -1689,6 +1691,7 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: Some(true),
             index_only: None,
+            dry_run: None,
             project: None,
         }))
         .await;
@@ -3354,6 +3357,7 @@ async fn global_reindex() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: None,
             index_only: Some(true),
+            dry_run: None,
             project: global_project(),
         }))
         .await;

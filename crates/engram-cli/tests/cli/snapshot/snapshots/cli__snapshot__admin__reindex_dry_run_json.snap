@@ -1,0 +1,25 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"--format\", \"json\", \"reindex\", \"--dry-run\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format json reindex --dry-run
+exit: 0
+--- stdout ---
+{
+  "current": false,
+  "drifted": [],
+  "dry_run": true,
+  "embeddings_unavailable": false,
+  "indexed": 3,
+  "not_embedded": [
+    "[UUID]",
+    "[UUID]",
+    "[UUID]"
+  ],
+  "not_indexed": [],
+  "on_disk": 3,
+  "stale_vectors": [],
+  "undetermined": [],
+  "without_digest": 0
+}
+--- stderr ---

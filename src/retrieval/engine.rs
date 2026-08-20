@@ -344,6 +344,43 @@ impl RetrievalEngine {
         self.config.content.summary_max_chars
     }
 
+    /// What this memory's embed digest **would** be if it were embedded right
+    /// now, without running the model.
+    ///
+    /// This is the whole basis of `reindex --dry-run`'s stale-vector report:
+    /// comparing it to the digest stored alongside the vectors answers "are
+    /// these vectors still the ones this text, this model and this chunk width
+    /// produce?" — and answers it for the price of a hash.
+    ///
+    /// Composition is deliberately routed through the *same* [`embedding_texts`]
+    /// and [`effective_chunk_tokens`] the write path uses. A second, parallel
+    /// derivation here would drift from the real one and the dry run would
+    /// confidently report the wrong answer; that is exactly the failure mode
+    /// this digest exists to detect, so it must not be reintroduced by the
+    /// detector.
+    ///
+    /// `None` when no embedding provider is configured — with nothing to embed
+    /// with there is no expected digest, which is a different statement from
+    /// "the vectors are stale".
+    pub fn expected_embed_digest(&self, memory: &Memory) -> Option<String> {
+        let provider = self.embedding_provider.as_ref()?;
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+        let texts = embedding_texts(memory, chunk_tokens, metadata_vector);
+        // An empty memory has its chunks deleted rather than embedded, so it
+        // has no digest to match against.
+        if texts.is_empty() {
+            return None;
+        }
+        Some(embed_digest(
+            &texts,
+            provider.as_ref(),
+            metadata_vector,
+            chunk_tokens,
+        ))
+    }
+
     /// Identity of the embedding model in use, for stamping the store
     /// after a (re)embed. `None` when embeddings are disabled. Includes the
     /// embed-text composition (from `embeddings.metadata_vector`) so a later

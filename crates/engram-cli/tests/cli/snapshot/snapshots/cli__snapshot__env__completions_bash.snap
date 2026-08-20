@@ -4302,7 +4302,7 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__reindex)
-            opts="-q -v -h --embeddings-only --index-only --archive-only --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            opts="-q -v -h --embeddings-only --index-only --archive-only --dry-run --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

@@ -19,6 +19,11 @@ Options:
       --archive-only
           Rebuild the conversation search rows from the stored transcript copies instead of touching memories. Mirrors `--embeddings-only`: a rebuild of one index, from bytes that were kept verbatim so a better reduction is always a re-derivation away
 
+      --dry-run
+          Report what a reindex would rebuild, without changing anything
+          
+          The exact, unbudgeted currency check: every memory file is hashed against the digest its index row was built from, and — when an embedding provider is available — every memory's would-be embedding input is hashed against the digest stored with its vectors. This is the only surface that reports stale *vectors*; `doctor` has no engine and so can only report content drift.
+
       --global
           Reindex the global (cross-project) memory store instead of the current project
 

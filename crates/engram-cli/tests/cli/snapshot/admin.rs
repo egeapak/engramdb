@@ -190,6 +190,38 @@ fn reindex_index_only() {
     insta::assert_snapshot!("reindex_index_only", f.run(&["reindex", "--index-only"]));
 }
 
+/// `--dry-run` reports and writes nothing — the human rendering.
+///
+/// `--format plain` because this tier's default is JSON (see
+/// `reindex_index_only` above), and the per-category id listing exists only on
+/// the human path.
+///
+/// The seeded memories are indexed but hold no vectors — `add` returns before
+/// its detached ingest embeds — so this pins the distinction the report is
+/// built around: they land in `not embedded`, never in `vectors out of date`.
+/// Reporting a just-created memory as stale-vectored is the false positive an
+/// agent that calls `create` then `reindex --dry-run` would hit every time.
+#[test]
+fn reindex_dry_run() {
+    let f = seeded();
+    insta::assert_snapshot!(
+        "reindex_dry_run",
+        f.run(&["--format", "plain", "reindex", "--dry-run"])
+    );
+}
+
+/// The JSON shape agents and scripts consume — and the one-document rule: a
+/// dry run in JSON mode emits exactly one object, with no human lines leaking
+/// onto stdout beside it.
+#[test]
+fn reindex_dry_run_json() {
+    let f = seeded();
+    insta::assert_snapshot!(
+        "reindex_dry_run_json",
+        f.run(&["--format", "json", "reindex", "--dry-run"])
+    );
+}
+
 // =====================================================================
 // challenge
 // =====================================================================

@@ -17,6 +17,160 @@ pub struct ReindexResult {
     pub warnings: Vec<String>,
 }
 
+/// What a reindex would change, without changing it.
+///
+/// Every list holds memory ids, sorted, so the output is deterministic and two
+/// runs are diffable.
+#[derive(Debug, Default)]
+pub struct ReindexPlan {
+    /// Memory files found on disk.
+    pub on_disk: usize,
+    /// Rows currently in the index.
+    pub indexed: usize,
+    /// Files with no index row — invisible to every query until reindexed.
+    pub not_indexed: Vec<String>,
+    /// Rows whose file has changed since it was indexed (content-digest
+    /// mismatch). The row serves the *old* summary and keyword stems.
+    pub drifted: Vec<String>,
+    /// Rows with vectors whose embed digest no longer matches what the current
+    /// text, model and chunk width would produce.
+    ///
+    /// Excludes memories with no vectors at all — see [`Self::not_embedded`].
+    pub stale_vectors: Vec<String>,
+    /// Memories with no vectors, so unreachable by semantic search.
+    pub not_embedded: Vec<String>,
+    /// Rows whose currency could not be determined — the file could not be
+    /// read or hashed. Not clean, not drifted; declared rather than dropped.
+    pub undetermined: Vec<String>,
+    /// Rows predating schema 0.8.0, which record no content digest. A reindex
+    /// backfills them; until then their currency is simply unknown.
+    pub without_digest: usize,
+    /// Set when no embedding provider was available, so the vector columns of
+    /// this plan could not be computed at all.
+    pub embeddings_unavailable: bool,
+}
+
+impl ReindexPlan {
+    /// True when a reindex would change nothing.
+    ///
+    /// `without_digest` is deliberately excluded: a store that has simply not
+    /// been reindexed since 0.8.0 is not *stale*, and calling it so would push
+    /// every such user into a rebuild that changes no answer they get.
+    pub fn is_current(&self) -> bool {
+        self.not_indexed.is_empty()
+            && self.drifted.is_empty()
+            && self.stale_vectors.is_empty()
+            && self.not_embedded.is_empty()
+            && self.undetermined.is_empty()
+    }
+}
+
+/// Compute what [`reindex`] would do, touching nothing.
+///
+/// This is the unbudgeted authority the read-path staleness check defers to:
+/// it hashes every file and, when an engine with a provider is supplied, every
+/// memory's would-be embedding input. `doctor` reports the same content drift
+/// but cannot report the vector half — computing an embed digest needs
+/// `embedding_texts` and the live provider, and no doctor path builds an
+/// engine.
+///
+/// A checkout conflict makes the content comparison meaningless (two checkouts
+/// legitimately hold different bytes for one id, and the index holds the
+/// union), so the drift columns are left empty there rather than reporting a
+/// fault that no reindex can clear.
+pub async fn reindex_dry_run(
+    store: &MemoryStore,
+    engine: Option<&RetrievalEngine>,
+) -> Result<ReindexPlan> {
+    let mut plan = ReindexPlan::default();
+    let conflicted = store.checkout_conflict().await.is_some();
+
+    let ids = store.list_ids().await?;
+    plan.on_disk = ids.len();
+
+    let rows = store.index_digests().await?;
+    plan.indexed = rows.len();
+    let by_id: std::collections::HashMap<&str, &_> =
+        rows.iter().map(|r| (r.memory_id.as_str(), r)).collect();
+
+    for id in &ids {
+        if !by_id.contains_key(id.as_str()) {
+            plan.not_indexed.push(id.clone());
+        }
+    }
+
+    // --- content currency -------------------------------------------------
+    if !conflicted {
+        for row in &rows {
+            let Some(recorded) = row.content_sha256.as_deref() else {
+                plan.without_digest += 1;
+                continue;
+            };
+            match store.read_memory_bytes(&row.memory_id).await {
+                // A row with no file is the `stale_entries` problem doctor
+                // already reports; counting it as drift too would double-count
+                // one fault.
+                Ok(None) => {}
+                Ok(Some(bytes)) => {
+                    if crate::storage::FileDigest::of(&bytes).sha256 != recorded {
+                        plan.drifted.push(row.memory_id.clone());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("cannot determine currency of {}: {e}", row.memory_id);
+                    plan.undetermined.push(row.memory_id.clone());
+                }
+            }
+        }
+    }
+
+    // --- vector currency --------------------------------------------------
+    let Some(engine) = engine.filter(|e| e.embeddings_available()) else {
+        plan.embeddings_unavailable = true;
+        finish(&mut plan);
+        return Ok(plan);
+    };
+
+    let stored = store.embed_digests().await?;
+    // One batched load, matching `reindex` itself: a per-id `store.get` is a
+    // full directory scan each, which is quadratic over a whole store.
+    let loaded = store.get_batch(&ids).await?;
+    for (id, memory) in loaded {
+        // `has_embedding == false` is "not embedded yet", a different state
+        // that is reported separately. `create` returns before its detached
+        // ingest embeds, so counting those as stale would make every
+        // just-created memory report as needing a rebuild.
+        let has_vectors = by_id.get(id.as_str()).is_some_and(|r| r.has_embedding);
+        if !has_vectors {
+            plan.not_embedded.push(id);
+            continue;
+        }
+        // A stored digest of `None` means vectors written before the digest
+        // existed: their currency is unknown, and re-embedding is the only way
+        // to find out — which is exactly what the user is asking about.
+        match (
+            stored.get(&id).and_then(Option::as_deref),
+            engine.expected_embed_digest(&memory),
+        ) {
+            (Some(recorded), Some(expected)) if recorded != expected => plan.stale_vectors.push(id),
+            (None, Some(_)) => plan.stale_vectors.push(id),
+            _ => {}
+        }
+    }
+
+    finish(&mut plan);
+    Ok(plan)
+}
+
+/// Sort every list so the plan is deterministic and two runs diff cleanly.
+fn finish(plan: &mut ReindexPlan) {
+    plan.not_indexed.sort();
+    plan.drifted.sort();
+    plan.stale_vectors.sort();
+    plan.not_embedded.sort();
+    plan.undetermined.sort();
+}
+
 /// Rebuild index and optionally re-embed all memories.
 ///
 /// Behavior matrix:
@@ -530,6 +684,200 @@ mod tests {
             store.embedding_fingerprint().await.unwrap(),
             Some(original),
             "fingerprint must be unchanged after a failed re-embed"
+        );
+    }
+
+    // ===================================================================
+    // reindex --dry-run
+    // ===================================================================
+
+    /// Overwrite a memory's file behind the store's back — a hand edit, a
+    /// `git checkout`, a restore.
+    async fn edit_behind_store(store: &MemoryStore, id: &str, body: &str) {
+        let dir = crate::storage::paths::memories_dir(&store.project_dir);
+        let mut entries = tokio::fs::read_dir(&dir).await.unwrap();
+        while let Ok(Some(e)) = entries.next_entry().await {
+            let path = e.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("md") {
+                continue;
+            }
+            if !path.file_stem().unwrap().to_str().unwrap().contains(id) {
+                continue;
+            }
+            let text = tokio::fs::read_to_string(&path).await.unwrap();
+            let (fm, _) = text.split_once("\n---\n").unwrap();
+            tokio::fs::write(&path, format!("{fm}\n---\n{body}"))
+                .await
+                .unwrap();
+            return;
+        }
+        panic!("no file for {id}");
+    }
+
+    fn stub_engine(store: MemoryStore) -> RetrievalEngine {
+        RetrievalEngine::new(store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(StubEmbeddingProvider))
+    }
+
+    /// A clean store reports nothing to do — and says so with `is_current`,
+    /// not merely by having empty lists.
+    #[tokio::test]
+    async fn dry_run_reports_a_current_store_as_current() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+        let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
+        // Embed so the vectors exist and carry a current digest.
+        reindex(&store, Some(&engine), false).await.unwrap();
+
+        let plan = reindex_dry_run(&store, Some(&engine)).await.unwrap();
+        assert!(plan.is_current(), "{plan:?}");
+        assert_eq!(plan.on_disk, 1);
+        assert_eq!(plan.indexed, 1);
+        assert!(plan.drifted.is_empty());
+        assert!(plan.stale_vectors.is_empty());
+    }
+
+    /// The content half: an edit behind the store shows up as drift, named.
+    #[tokio::test]
+    async fn dry_run_names_the_memory_whose_file_changed() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+        let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
+        reindex(&store, Some(&engine), false).await.unwrap();
+
+        edit_behind_store(&store, &mem.id, "an edited body\n").await;
+
+        let plan = reindex_dry_run(&store, Some(&engine)).await.unwrap();
+        assert_eq!(plan.drifted, vec![mem.id.clone()]);
+        assert!(!plan.is_current());
+        // The rebuild was NOT run — a dry run that changed something would be
+        // the one bug this command cannot have.
+        let after = reindex_dry_run(&store, Some(&engine)).await.unwrap();
+        assert_eq!(after.drifted, vec![mem.id], "dry run must not repair");
+    }
+
+    /// The vector half, which `doctor` structurally cannot report: the text
+    /// changed, so the stored vectors no longer describe it.
+    #[tokio::test]
+    async fn dry_run_reports_vectors_that_no_longer_match_their_text() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "original", Provenance::human());
+        store.create(&mem).await.unwrap();
+        let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
+        reindex(&store, Some(&engine), false).await.unwrap();
+        assert!(reindex_dry_run(&store, Some(&engine))
+            .await
+            .unwrap()
+            .is_current());
+
+        // Change the content through the store, but do not re-embed: the row
+        // is current with the file while the vectors are not.
+        store
+            .update(
+                &mem.id,
+                crate::types::MemoryUpdate {
+                    content: Some("completely different text".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let plan = reindex_dry_run(&store, Some(&engine)).await.unwrap();
+        assert_eq!(
+            plan.stale_vectors,
+            vec![mem.id.clone()],
+            "the embed digest must no longer match the new text: {plan:?}"
+        );
+        assert!(
+            plan.drifted.is_empty(),
+            "the row itself was rewritten by the update, so it is current"
+        );
+    }
+
+    /// **`create` returns before its detached ingest embeds.** A memory with
+    /// no vectors is "not embedded yet", not "stale" — counting it as stale
+    /// would make every just-created memory report as needing a rebuild.
+    #[tokio::test]
+    async fn dry_run_separates_never_embedded_from_stale() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+        // No reindex, so no vectors were ever written.
+        let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
+
+        let plan = reindex_dry_run(&store, Some(&engine)).await.unwrap();
+        assert_eq!(plan.not_embedded, vec![mem.id.clone()]);
+        assert!(
+            plan.stale_vectors.is_empty(),
+            "never-embedded must not be reported as stale: {plan:?}"
+        );
+    }
+
+    /// Without a provider the vector half cannot be computed at all, and the
+    /// plan says so rather than reporting an empty list as "all current".
+    #[tokio::test]
+    async fn dry_run_declares_when_vectors_could_not_be_checked() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "T",
+                "C",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+
+        let plan = reindex_dry_run(&store, None).await.unwrap();
+        assert!(plan.embeddings_unavailable);
+        assert!(plan.stale_vectors.is_empty());
+        assert!(
+            plan.not_embedded.is_empty(),
+            "with no provider, nothing can be said about vectors either way"
+        );
+    }
+
+    /// Rows predating schema 0.8.0 record no digest. That is *unknown*, and
+    /// counting it as staleness would push every un-reindexed store into a
+    /// rebuild that changes no answer they get.
+    #[tokio::test]
+    async fn dry_run_counts_undigested_rows_without_calling_them_stale() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = Memory::new(MemoryType::Decision, "T", "C", Provenance::human());
+        store.create(&mem).await.unwrap();
+        let engine = stub_engine(MemoryStore::open(tmp.path()).await.unwrap());
+        reindex(&store, Some(&engine), false).await.unwrap();
+        crate::storage::test_support::clear_content_digests(&store)
+            .await
+            .unwrap();
+
+        let plan = reindex_dry_run(&store, Some(&engine)).await.unwrap();
+        assert_eq!(plan.without_digest, 1);
+        assert!(plan.drifted.is_empty());
+        assert!(
+            plan.is_current(),
+            "an undigested row is unknown, not stale: {plan:?}"
         );
     }
 }

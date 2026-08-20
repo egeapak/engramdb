@@ -427,11 +427,10 @@ impl FixAction {
                 crate::commands::run_reindex(
                     dir,
                     &registry,
-                    global,
-                    *embeddings_only,
-                    false,
-                    false,
-                    None,
+                    crate::commands::reindex::ReindexParams {
+                        embeddings_only: *embeddings_only,
+                        ..crate::commands::reindex::ReindexParams::full(global, None)
+                    },
                     formatter,
                     &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
                     engramdb::daemon::DaemonPolicy::InProcess,

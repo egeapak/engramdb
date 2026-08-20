@@ -498,6 +498,11 @@ struct ReindexInput {
     index_only: Option<bool>,
 
     #[schemars(
+        description = "Report what a reindex would rebuild and change nothing. Names the memories whose file changed since it was indexed, and whose vectors no longer match their text."
+    )]
+    dry_run: Option<bool>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
@@ -2806,10 +2811,17 @@ impl EngramDbServer {
         Parameters(input): Parameters<ReindexInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("reindex", input.project.as_deref());
+        let dry_run = input.dry_run.unwrap_or(false);
+        // A dry run writes nothing, but it reads every memory's bytes in
+        // another project's store, so it stays behind the same gate as the
+        // rebuild rather than becoming a read-anything side door.
         self.check_cross_project_write(input.project.as_deref())
             .await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
-        let index_only = input.index_only.unwrap_or(false);
+        // A dry run needs a provider to report vector currency at all, so
+        // `index_only` must not suppress the engine here — it narrows what a
+        // rebuild touches, not what the report may look at.
+        let index_only = input.index_only.unwrap_or(false) && !dry_run;
 
         // Build engine outside conditional so it stays alive for the
         // reference. `reindex` is the remediation path for an embedding
@@ -2834,6 +2846,28 @@ impl EngramDbServer {
             .map(|e| e.store())
             .or(opened_store.as_ref())
             .expect("either the engine or the direct open supplies a store");
+
+        if dry_run {
+            let plan = ops::reindex_dry_run(store, engine.as_ref())
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            let r = serde_json::to_string(&serde_json::json!({
+                "dry_run": true,
+                "current": plan.is_current(),
+                "on_disk": plan.on_disk,
+                "indexed": plan.indexed,
+                "not_indexed": plan.not_indexed,
+                "drifted": plan.drifted,
+                "stale_vectors": plan.stale_vectors,
+                "not_embedded": plan.not_embedded,
+                "undetermined": plan.undetermined,
+                "without_digest": plan.without_digest,
+                "embeddings_unavailable": plan.embeddings_unavailable,
+            }))
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            _scope.mark_success();
+            return Ok(r);
+        }
 
         let result = ops::reindex(store, engine.as_ref(), embeddings_only)
             .await

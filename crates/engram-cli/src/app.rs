@@ -1265,6 +1265,17 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["embeddings_only", "index_only", "global"])]
         archive_only: bool,
 
+        /// Report what a reindex would rebuild, without changing anything
+        ///
+        /// The exact, unbudgeted currency check: every memory file is hashed
+        /// against the digest its index row was built from, and — when an
+        /// embedding provider is available — every memory's would-be
+        /// embedding input is hashed against the digest stored with its
+        /// vectors. This is the only surface that reports stale *vectors*;
+        /// `doctor` has no engine and so can only report content drift.
+        #[arg(long, conflicts_with = "archive_only")]
+        dry_run: bool,
+
         /// Reindex the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
