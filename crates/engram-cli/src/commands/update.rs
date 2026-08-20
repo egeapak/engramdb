@@ -99,6 +99,11 @@ pub async fn run_update(
             .split_first()
             .ok_or_else(|| anyhow::anyhow!("EDITOR environment variable is empty"))?;
 
+        // `$EDITOR` is pointed at the memory file itself, so whatever it writes
+        // becomes the memory — the bytes the index row and the vectors were
+        // derived from. Snapshot them to tell a real edit from a no-op quit.
+        let before = tokio::fs::read(&memory_file_path).await.ok();
+
         let status = std::process::Command::new(editor_cmd)
             .args(editor_args)
             .arg(&memory_file_path)
@@ -111,8 +116,26 @@ pub async fn run_update(
 
         formatter.print_success(&format!("Edited memory {} with {}", params.id, editor_cmd));
 
-        // If only editor flag was provided, return early
-        if params.type_.is_none()
+        let file_changed = tokio::fs::read(&memory_file_path).await.ok() != before;
+
+        // Return early only when there is genuinely nothing left to do: no
+        // other field was given AND the editor left the file byte-identical.
+        //
+        // **When the file did change, falling through is the fix.** `-e` used
+        // to return here unconditionally, before the store was even opened, so
+        // the index row kept the old summary, the old keyword stems and the
+        // old vectors while the file said something else. Every subsequent
+        // query scored against the pre-edit text, and nothing said so until a
+        // reindex happened to run. Falling through re-reads the edited file
+        // (`store.get` reads the file, not the row), restamps the row and
+        // re-embeds — exactly what `-e` combined with any other flag has
+        // always done.
+        //
+        // The all-`None` `MemoryUpdate` this produces changes no field; the
+        // work is the re-read and re-derive, and `updated_at` is bumped
+        // because the memory genuinely changed.
+        if !file_changed
+            && params.type_.is_none()
             && params.content.is_none()
             && params.summary.is_none()
             && params.title.is_none()

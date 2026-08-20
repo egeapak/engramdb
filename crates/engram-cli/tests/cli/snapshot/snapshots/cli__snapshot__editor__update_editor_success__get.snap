@@ -35,4 +35,3 @@ exit: 0
   "visibility": "Shared"
 }
 --- stderr ---
-{"warning":"Index may be stale (1 memory changed since indexing (size check)). Run 'engramdb reindex' to rebuild."}
