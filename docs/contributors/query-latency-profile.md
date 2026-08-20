@@ -10,8 +10,13 @@ compaction pass runs.
 
 Everything below is `target/release` on the web sandbox (Intel Xeon @ 2.80 GHz,
 4 vCPU, AVX2), real ONNX `all-MiniLM-L12-v2-u8`, a real store on a real
-filesystem. Note the release profile is `opt-level = "z"`, so these are the
-numbers users actually get, not `opt-level = 3` numbers.
+filesystem.
+
+**These were measured before #110 raised `[profile.release]` from
+`opt-level = "z"` to `3`.** The ratios are what this document argues from and
+they are structural — fragment count, not codegen — but the absolute
+milliseconds are now conservative, and the LanceDB-bound stages in particular
+should be re-measured before anyone quotes them as current.
 
 ## TL;DR
 

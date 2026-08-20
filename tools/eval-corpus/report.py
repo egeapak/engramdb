@@ -9,7 +9,8 @@ part that decides the 384-vs-1024 question: a win concentrated in
 MRR/nDCG with P@1 and R@5 flat is precision the existing cross-encoder
 supplies far more cheaply.
 """
-import argparse, json, pathlib, sys
+import argparse
+import glob, json, pathlib, sys
 
 ORDER = ["title_echo", "keyword", "tag_only", "natural",
          "paraphrase", "buried_fact", "distractor_trap"]
@@ -31,13 +32,19 @@ def pick(report, agg):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--results", default="tools/eval-corpus/results.json")
+    # One file per model: the sandbox reverted mid-sweep more than once, so
+    # each model writes its own results and a completed one never has to be
+    # re-run. Merge whatever is present.
+    ap.add_argument("results", nargs="*",
+                    default=sorted(glob.glob("tools/eval-corpus/res_*.json")),
+                    help="embed_matrix results JSON files (default: res_*.json)")
     ap.add_argument("--baseline", default="minilm-l12-u8")
     ap.add_argument("--agg", default="max", help="chunk aggregation; max matches production")
     a = ap.parse_args()
 
-    data = json.load(open(a.results))
-    models = data["models"]
+    models = {}
+    for f in a.results:
+        models.update(json.load(open(f))["models"])
     cells = {}
     for key, m in models.items():
         label, res = pick(m, a.agg)
