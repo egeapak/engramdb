@@ -245,7 +245,7 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 ## `reindex` — rebuild vectors and index
 
 ```bash
-engramdb reindex [[--embeddings-only|--index-only] [--global] | --archive-only]
+engramdb reindex [[--embeddings-only|--index-only] [--dry-run] [--global] | --archive-only]
 ```
 
 | Flag | What runs |
@@ -253,7 +253,114 @@ engramdb reindex [[--embeddings-only|--index-only] [--global] | --archive-only]
 | (no flag) | Re-embed everything + rebuild the LanceDB index. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
+| `--dry-run` | Change nothing; report what a rebuild would fix. Names the memories whose file changed since it was indexed, whose vectors no longer match their text, and which are not indexed or not embedded at all. `--index-only` is ignored here: it narrows what a *rebuild* touches, not what the report may look at. |
+| `--force` | Re-embed every memory, including ones whose vectors are provably current. The repair-grade rebuild — see below. |
+| `--incremental` | Rebuild only the index rows whose file changed. Opt-in; 56–72% faster on an unchanged store — see below. |
 | `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
+
+### Reused embeddings, and when to override
+
+A reindex re-embeds only what it has to. Each memory's vectors are stored with
+a digest of everything that determines them — the chunk texts, the model id,
+the vector width, the composition and the chunk window — so a memory whose
+digest still matches would embed to byte-identical vectors and is left alone:
+
+```
+Done. Rebuilt index with 900 entries.
+Embedded 3 memories.
+Reused 897 up-to-date embeddings (pass --force to re-embed everything).
+```
+
+The metadata rows are always rebuilt; only the embedding step is skipped. Any
+change that would alter the vectors also alters the digest, so switching
+models, retuning `[embeddings].max_tokens`, flipping `metadata_vector`, or
+editing a memory all re-embed on their own without anyone having to remember
+to force it. A `[embeddings].dimensions` change is stronger still: the chunks
+table is recreated and nothing is skipped.
+
+Reach for `--force` when the vectors may be wrong in a way the digest cannot
+see — a chunk row damaged by something other than EngramDB, or a suspected bug
+in the embedding path. `engramdb doctor --fix` and `engramdb projects repair`
+always force, because a repair that trusts the stamp it is repairing is not a
+repair.
+
+### `--incremental`
+
+`--incremental` rebuilds only the index rows whose file changed since it was
+indexed, reusing the rest:
+
+```
+Done. Rebuilt index with 2000 entries.
+Reused 2000 unchanged index rows.
+```
+
+Measured on this repo's benchmark
+(`cargo run --release --example reindex_incremental_bench`), rebuilding a store
+where nothing has changed:
+
+| memories | full | `--incremental` | saved |
+|---------:|-----:|----------------:|------:|
+| 100 | 14.1 ms | 6.3 ms | 56% |
+| 500 | 77.5 ms | 21.8 ms | 72% |
+| 2000 | 314.5 ms | 134.7 ms | 57% |
+
+Those are best-case figures — a steady state where every row is reused. The
+saving scales down with the proportion of files that actually changed, and it
+can never reach 100%: deciding whether a file changed means reading and hashing
+it, so both paths enumerate, read, hash and deduplicate every file identically.
+What `--incremental` removes is the frontmatter parse, the keyword-stem
+derivation and the row write.
+
+It stays opt-in rather than becoming the default because the plain rebuild is
+the simpler thing to reason about and reindex is not usually on a hot path.
+Reach for it on large, mostly-static stores. Both produce the same index, which
+a test asserts directly by rebuilding the same store each way and comparing
+every row.
+
+Three things it deliberately does not do:
+
+- **It never skips enumeration or deduplication.** Reindex resolves two files
+  claiming one memory id by keeping the newer and deleting the loser; skipping
+  the walk would leave stale files on disk indefinitely.
+- **It falls back to a full rebuild** when the store's schema version or
+  keyword-normalizer stamp is behind this binary's. Those mean the row
+  *derivation* changed even where the bytes did not, so an unchanged file is
+  exactly the case that needs rebuilding.
+- **It is not exposed over MCP.** The flag is a performance trade on a specific
+  store, not a semantic choice an agent should be making remotely.
+
+`--force` implies a full row rebuild and overrides this.
+
+### Checking currency without rebuilding
+
+`--dry-run` is the exact, unbudgeted currency check, and the only surface that
+reports stale **vectors**:
+
+```bash
+engramdb reindex --dry-run                  # human summary, ids named
+engramdb --format json reindex --dry-run    # one JSON document for scripts
+```
+
+Two different kinds of staleness, both invisible to the counts:
+
+- **Changed since indexing** — the `.md` file no longer hashes to what its
+  index row was built from. Queries match the old summary and the old keyword
+  stems. `engramdb doctor` reports this too.
+- **Vectors out of date** — the file and its row agree, but the text, the
+  embedding model or the chunk width has changed since the vectors were
+  written, so semantic search is scoring against a stale representation.
+  `doctor` cannot report this: computing the expected digest needs a live
+  embedding provider, and no `doctor` path builds one.
+
+Memories with no vectors yet are reported as **not embedded**, never as stale —
+`add` returns before its background embedding finishes, so a memory created
+moments ago is not a fault. Rows written before EngramDB recorded content
+digests are counted separately and do not make a store non-current; a reindex
+backfills them.
+
+The cheap version of the same question runs automatically on every
+`query` / `list` / `get`, at the tier `[index].staleness_check` selects — see
+[configuration.md](./configuration.md).
 
 ## `migrate` / `rollback` — memory format migrations
 

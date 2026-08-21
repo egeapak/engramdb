@@ -244,11 +244,17 @@ pub async fn auto_maintain_with_engine(
                 match doctor(&store).await {
                     Ok(result) => {
                         if !result.healthy {
+                            // Every finding that can flip `healthy` is named
+                            // here. Listing only two of them printed
+                            // "0 stale, 0 orphaned" for a store that failed on
+                            // a third — a warning that told the user nothing.
                             tracing::warn!(
-                                "engramdb auto-maintenance: store at {} is unhealthy ({} stale index entr(ies), {} orphaned file(s)) — run `engramdb reindex` to repair",
+                                "engramdb auto-maintenance: store at {} is unhealthy ({} stale index entr(ies), {} orphaned file(s), {} changed since indexing, {} unreadable) — run `engramdb reindex` to repair",
                                 dir.display(),
                                 result.stale_entries.len(),
-                                result.orphaned_files.len()
+                                result.orphaned_files.len(),
+                                result.drifted_entries.as_ref().map_or(0, |d| d.len()),
+                                result.undetermined.len()
                             );
                         }
                         report.doctor = Some(result);

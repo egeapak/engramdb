@@ -20,6 +20,7 @@ mod tests;
 use super::error::Result;
 use engram_types::Memory;
 
+pub use helpers::is_crlf_terminated;
 pub use v1::{V1Parser, V1Writer};
 pub use v2::{V2Parser, V2Writer};
 

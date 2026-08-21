@@ -66,3 +66,22 @@ pub use stats::run_stats;
 pub use task::{run_task_complete, run_task_current};
 pub use update::{run_update, UpdateParams};
 pub use verify::run_verify;
+
+/// Load the `[index]` settings that govern the read path's staleness check.
+///
+/// `MemoryStore` holds no config — it is `{ project_dir, project_id,
+/// lance_index }` — so the three read commands that warn about a stale index
+/// (`query`, `list`, `get`) each have to load it. This keeps that one line
+/// honest in one place rather than three.
+///
+/// Falls back to defaults on an unreadable or malformed config: a staleness
+/// *warning* must never be the thing that fails a read. The `size` tier that
+/// results is the same one a user with no `[index]` section gets.
+pub(crate) async fn staleness_config(
+    store: &engramdb::storage::MemoryStore,
+) -> engramdb::types::config::IndexConfig {
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
+    engramdb::storage::config::load_config_or_default(&config_path)
+        .await
+        .index
+}

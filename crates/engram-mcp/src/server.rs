@@ -498,6 +498,16 @@ struct ReindexInput {
     index_only: Option<bool>,
 
     #[schemars(
+        description = "Report what a reindex would rebuild and change nothing. Names the memories whose file changed since it was indexed, and whose vectors no longer match their text."
+    )]
+    dry_run: Option<bool>,
+
+    #[schemars(
+        description = "Re-embed every memory, even ones whose vectors are provably current. A plain reindex reuses vectors whose stored digest still matches; force is the repair-grade rebuild for a chunk row damaged without its digest changing."
+    )]
+    force: Option<bool>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
@@ -1603,7 +1613,21 @@ impl EngramDbServer {
             .assemble_engine_for(None)
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
-        ops::reindex(&store, Some(&engine), true).await?;
+        // `embeddings_only`, not `force`: this fires *because* the model
+        // changed, and the model id is part of every embed digest — so every
+        // memory's digest already mismatches and nothing is skipped. Passing
+        // `force` would produce the identical result at the cost of making the
+        // digest's correctness untested on the one path that most depends on
+        // it.
+        ops::reindex(
+            &store,
+            Some(&engine),
+            ops::ReindexOptions {
+                embeddings_only: true,
+                ..Default::default()
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -2806,10 +2830,17 @@ impl EngramDbServer {
         Parameters(input): Parameters<ReindexInput>,
     ) -> Result<String, String> {
         let _scope = self.scope("reindex", input.project.as_deref());
+        let dry_run = input.dry_run.unwrap_or(false);
+        // A dry run writes nothing, but it reads every memory's bytes in
+        // another project's store, so it stays behind the same gate as the
+        // rebuild rather than becoming a read-anything side door.
         self.check_cross_project_write(input.project.as_deref())
             .await?;
         let embeddings_only = input.embeddings_only.unwrap_or(false);
-        let index_only = input.index_only.unwrap_or(false);
+        // A dry run needs a provider to report vector currency at all, so
+        // `index_only` must not suppress the engine here — it narrows what a
+        // rebuild touches, not what the report may look at.
+        let index_only = input.index_only.unwrap_or(false) && !dry_run;
 
         // Build engine outside conditional so it stays alive for the
         // reference. `reindex` is the remediation path for an embedding
@@ -2835,13 +2866,49 @@ impl EngramDbServer {
             .or(opened_store.as_ref())
             .expect("either the engine or the direct open supplies a store");
 
-        let result = ops::reindex(store, engine.as_ref(), embeddings_only)
-            .await
+        if dry_run {
+            let plan = ops::reindex_dry_run(store, engine.as_ref())
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            let r = serde_json::to_string(&serde_json::json!({
+                "dry_run": true,
+                "current": plan.is_current(),
+                "on_disk": plan.on_disk,
+                "indexed": plan.indexed,
+                "not_indexed": plan.not_indexed,
+                "drifted": plan.drifted,
+                "stale_vectors": plan.stale_vectors,
+                "not_embedded": plan.not_embedded,
+                "undetermined": plan.undetermined,
+                "without_digest": plan.without_digest,
+                "embeddings_unavailable": plan.embeddings_unavailable,
+            }))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            _scope.mark_success();
+            return Ok(r);
+        }
+
+        let result = ops::reindex(
+            store,
+            engine.as_ref(),
+            ops::ReindexOptions {
+                embeddings_only,
+                // Not exposed on MCP. It is opt-in, saves only the parse and
+                // stem derivation (the file read and hash happen either way),
+                // and an agent has no way to judge that trade for a store it
+                // cannot measure. The CLI flag is where it belongs.
+                incremental: false,
+                force: input.force.unwrap_or(false),
+            },
+        )
+        .await
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
         let r = serde_json::to_string(&serde_json::json!({
             "indexed": result.indexed,
             "embedded": result.embedded,
+            "skipped": result.skipped,
+            "rows_skipped": result.rows_skipped,
             "errors": result.errors,
             "warnings": result.warnings
         }))
@@ -2955,6 +3022,21 @@ impl EngramDbServer {
         }
         if !result.orphaned_files.is_empty() {
             response["orphaned_files"] = serde_json::json!(result.orphaned_files);
+        }
+        // Agents reach EngramDB primarily through this tool, so it is the main
+        // consumer of drift detection — a field added to `DoctorResult` and not
+        // added here is invisible to them.
+        match result.drifted_entries.as_ref() {
+            Some(drifted) if !drifted.is_empty() => {
+                response["drifted_entries"] = serde_json::json!(drifted);
+            }
+            // Distinguish "checked, none found" from "not checked": silence
+            // would read as the former, which this run cannot claim.
+            None => response["content_check"] = serde_json::json!("not_run"),
+            Some(_) => {}
+        }
+        if !result.undetermined.is_empty() {
+            response["undetermined"] = serde_json::json!(result.undetermined);
         }
         if !result.healthy {
             response["fix"] = serde_json::json!("Run reindex to repair.");

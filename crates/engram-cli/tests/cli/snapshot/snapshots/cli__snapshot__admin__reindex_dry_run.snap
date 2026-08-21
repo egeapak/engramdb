@@ -1,0 +1,14 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"--format\", \"plain\", \"reindex\", \"--dry-run\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain reindex --dry-run
+exit: 0
+--- stdout ---
+Dry run — nothing was changed. 3 memories on disk, 3 indexed.
+3 not embedded:
+  [UUID]
+  [UUID]
+  [UUID]
+Run 'engramdb reindex' to rebuild.
+--- stderr ---

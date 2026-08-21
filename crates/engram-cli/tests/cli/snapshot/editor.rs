@@ -265,10 +265,21 @@ fn add_editor_launch_failure() {
 ///
 /// Two things beyond the success message. The reported `$1` shows *which*
 /// file `memory_path` resolved — the shared-memories markdown, named for the
-/// id. And the follow-up `get` shows the edited body, because a read goes to
-/// the file rather than to the index; the early return skips `update_memory`,
-/// so the LanceDB row still holds the pre-edit text and only a `reindex`
-/// would reconcile them.
+/// id. And the follow-up `get` shows the edited body.
+///
+/// **The `get` must carry no staleness warning**, and that absence is the
+/// point of this snapshot. `-e` used to return before the store was ever
+/// opened, so the row kept the pre-edit summary, stems and vectors while the
+/// file said something else — every later query scored against text the file
+/// no longer contained, and nothing reported it until a reindex happened to
+/// run. Now the edit falls through to the normal update path, so the row is
+/// restamped from the edited bytes and the memory is current the moment the
+/// editor exits.
+///
+/// The exit code is 1 here for the reason every other tier-2 `update` case
+/// ends that way: the fall-through re-embeds, and no embedding provider
+/// resolves in this fixture. That is the *proof* the fall-through happened —
+/// an early return could not reach the re-embed at all.
 #[test]
 fn update_editor_success() {
     let f = Fixture::new();
@@ -285,6 +296,28 @@ fn update_editor_success() {
         f.run_with_editor(&["update", &id, "-e"], &editor_arg(&editor))
     );
     insta::assert_snapshot!("update_editor_success__get", f.run(&["get", &id]));
+}
+
+/// The other half of the fall-through contract: an editor that writes nothing
+/// still returns early.
+///
+/// Quitting without saving must stay free — no store open, no re-embed, no
+/// `updated_at` bump, no rewrite of a file the user did not change. That is
+/// what the before/after byte comparison buys, and without it every `-e` that
+/// opened and closed a file would cost a full re-embed. The proof is the exit
+/// code: `0` here, where the editing case is `1` because it reaches the
+/// re-embed.
+#[test]
+fn update_editor_no_op_quit_returns_early() {
+    let f = Fixture::new();
+    f.init();
+    let id = add_one(&f);
+    // Reads the file, writes nothing.
+    let editor = f.fake_editor("look-only.sh", "cat \"$1\" > /dev/null\n");
+    insta::assert_snapshot!(
+        "update_editor_no_op_quit",
+        f.run_with_editor(&["update", &id, "-e"], &editor_arg(&editor))
+    );
 }
 
 /// An unknown id fails while *locating* the file — before `$EDITOR` is read at

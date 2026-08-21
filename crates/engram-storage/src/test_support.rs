@@ -66,3 +66,23 @@ pub async fn acquire_global_test_lock() -> GlobalTestLock {
 
     GlobalTestLock { _inner: guard }
 }
+
+/// Strip every row's content digest, reproducing a store whose index predates
+/// schema 0.8.0.
+///
+/// Test-only, and deliberately here rather than as a `MemoryStore` method:
+/// production has no reason to un-record a digest, and widening the store's API
+/// to construct a test fixture would put a footgun in the real surface. It
+/// rewrites each row through the normal upsert path, so the result is a genuine
+/// row with null digest columns, not a mocked one.
+pub async fn clear_content_digests(store: &crate::MemoryStore) -> crate::Result<()> {
+    for id in store.list_ids().await? {
+        let Ok(memory) = store.get(&id).await else {
+            continue;
+        };
+        let mut entry = crate::lance_index::IndexEntry::without_digest(&memory);
+        entry.has_embedding = store.has_chunks_for(&id).await?;
+        store.upsert_index_entry_for_test(&entry).await?;
+    }
+    Ok(())
+}

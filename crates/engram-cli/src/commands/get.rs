@@ -1,5 +1,6 @@
 //! Get a single memory by ID.
 
+use super::staleness_config;
 use crate::output::{outln, outraw, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::get_memory;
@@ -33,7 +34,7 @@ pub async fn run_get(
     } else {
         MemoryStore::open(dir).await?
     };
-    if let Ok(Some(warning)) = store.check_staleness().await {
+    if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);
     }
     let memory = get_memory(&store, id).await?;

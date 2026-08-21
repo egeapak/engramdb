@@ -450,13 +450,17 @@ fn cosine_benchmarks(c: &mut Criterion) {
 
 /// The two CPU-bound phases of `reindex_dir`, in the shape production uses.
 ///
-/// Corrected twice over. It used to fuse parse and stems into one `par_iter`,
-/// but `reindex_dir` runs them as two separate parallel passes with a
-/// sequential duplicate-ID fold in between (it cannot fuse them — the fold
-/// needs every parsed memory before any index row is built). And phase 5 is
-/// `IndexEntry::from`, which is `KeywordStems::compute` *plus* ~25 field
-/// clones; measuring only the stems under-reported it.
+/// Corrected three times over. It used to fuse parse and stems into one
+/// `par_iter`, but `reindex_dir` runs them as two separate parallel passes with
+/// a sequential duplicate-ID fold in between (it cannot fuse them — the fold
+/// needs every parsed memory before any index row is built). Phase 5 is
+/// `IndexEntry::for_file`, which is `KeywordStems::compute` *plus* ~25 field
+/// clones; measuring only the stems under-reported it. And phase 3 now hashes
+/// each file's bytes (schema 0.8.0 content digests) alongside the parse, on the
+/// same rayon pass — omitting that would under-report the phase whose cost
+/// decided the whole incremental-reindex phasing.
 fn reindex_cpu_benchmarks(c: &mut Criterion) {
+    use engramdb::storage::digest::FileDigest;
     use engramdb::storage::lance_index::IndexEntry;
 
     let mut group = c.benchmark_group("reindex_cpu");
@@ -470,32 +474,45 @@ fn reindex_cpu_benchmarks(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("serial", n), &files, |b, files| {
             b.iter(|| {
-                // Phase 3 equivalent: parse.
-                let parsed: Vec<Memory> = files
+                // Phase 3 equivalent: parse + content digest, one pass.
+                let parsed: Vec<(Memory, FileDigest)> = files
                     .iter()
-                    .filter_map(|c| parse_memory_file(c).ok())
+                    .filter_map(|c| {
+                        parse_memory_file(c)
+                            .ok()
+                            .map(|m| (m, FileDigest::of(c.as_bytes())))
+                    })
                     .collect();
                 // Phase 4: sequential dedup fold (cheap, but it is the barrier
                 // that stops phases 3 and 5 being fused).
-                let by_id: HashMap<String, Memory> =
-                    parsed.into_iter().map(|m| (m.id.clone(), m)).collect();
+                let by_id: HashMap<String, (Memory, FileDigest)> =
+                    parsed.into_iter().map(|p| (p.0.id.clone(), p)).collect();
                 // Phase 5 equivalent: build the index rows.
-                let entries: Vec<IndexEntry> = by_id.values().map(IndexEntry::from).collect();
+                let entries: Vec<IndexEntry> = by_id
+                    .values()
+                    .map(|(m, d)| IndexEntry::for_file(m, d))
+                    .collect();
                 entries.len()
             });
         });
 
         group.bench_with_input(BenchmarkId::new("rayon", n), &files, |b, files| {
             b.iter(|| {
-                let parsed: Vec<Memory> = files
+                let parsed: Vec<(Memory, FileDigest)> = files
                     .par_iter()
-                    .filter_map(|c| parse_memory_file(c).ok())
+                    .filter_map(|c| {
+                        parse_memory_file(c)
+                            .ok()
+                            .map(|m| (m, FileDigest::of(c.as_bytes())))
+                    })
                     .collect();
-                let by_id: HashMap<String, Memory> =
-                    parsed.into_iter().map(|m| (m.id.clone(), m)).collect();
-                let owned: Vec<&Memory> = by_id.values().collect();
-                let entries: Vec<IndexEntry> =
-                    owned.par_iter().map(|m| IndexEntry::from(*m)).collect();
+                let by_id: HashMap<String, (Memory, FileDigest)> =
+                    parsed.into_iter().map(|p| (p.0.id.clone(), p)).collect();
+                let owned: Vec<&(Memory, FileDigest)> = by_id.values().collect();
+                let entries: Vec<IndexEntry> = owned
+                    .par_iter()
+                    .map(|(m, d)| IndexEntry::for_file(m, d))
+                    .collect();
                 entries.len()
             });
         });
@@ -705,7 +722,14 @@ fn store_batch_benchmarks(c: &mut Criterion) {
                 let entries: Vec<_> = mems
                     .iter()
                     .enumerate()
-                    .map(|(i, m)| (m.id.clone(), m.updated_at, vec![synth_vector(i as u64)]))
+                    .map(|(i, m)| {
+                        (
+                            m.id.clone(),
+                            m.updated_at,
+                            vec![synth_vector(i as u64)],
+                            None,
+                        )
+                    })
                     .collect();
                 store.upsert_chunks_batch(entries).await.expect("batch");
             });

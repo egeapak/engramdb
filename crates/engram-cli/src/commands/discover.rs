@@ -323,7 +323,11 @@ async fn adopt(
     // resolves. Without a provider `reindex` still rebuilds the metadata table
     // and reports a warning rather than failing.
     let engine = engine_for_project(store.clone(), embedding_backend, cell, policy, cache).await;
-    let result = ops::reindex(&store, Some(&engine), false).await?;
+    // Not `force`: a rediscovered project usually has no vectors on this
+    // machine at all, so there is nothing for the skip predicate to skip — and
+    // where vectors DO survive with a matching digest, reusing them is the
+    // whole point.
+    let result = ops::reindex(&store, Some(&engine), ops::ReindexOptions::default()).await?;
     // `ReindexResult::errors` is populated only by the embedding loop
     // (`ops::reindex`), so these memories ARE in the metadata index — they just
     // have no vector, and semantic search will miss them. Saying "could not be

@@ -49,6 +49,18 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
             "Store is healthy. {} memories indexed, {} on disk.",
             result.indexed, result.on_disk
         ));
+        // `drifted_entries: None` means the content check could not run — a
+        // shared project id, or an index whose digests could not be read. Every
+        // other consumer preserves that distinction (the JSON branch emits
+        // null, `doctor_environment` says "content check: not run", MCP says
+        // "not_run"); without this line the healthy branch was the one place
+        // that rendered "not checked" as an unqualified clean bill of health.
+        if result.drifted_entries.is_none() {
+            formatter.print_message(
+                "Content check did not run, so drift was not verified \
+                 (shared project ID, or no recorded digests yet).",
+            );
+        }
     } else {
         if formatter.is_json() {
             // One machine-readable object on stdout: the raw per-id lines in
@@ -63,6 +75,11 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     "on_disk": result.on_disk,
                     "stale_entries": result.stale_entries,
                     "orphaned_files": result.orphaned_files,
+                    // `null` when the drift check did not run, which is not the
+                    // same as an empty list and must stay distinguishable to a
+                    // scripted consumer.
+                    "drifted_entries": result.drifted_entries,
+                    "undetermined": result.undetermined,
                 })
             );
         } else {
@@ -84,15 +101,38 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     outln!(formatter, "  {}", short_id(id));
                 }
             }
+            if let Some(drifted) = result.drifted_entries.as_ref().filter(|d| !d.is_empty()) {
+                formatter.print_warning(&format!(
+                    "{} memories changed since they were indexed (edited outside \
+                     EngramDB, or restored by git):",
+                    drifted.len()
+                ));
+                for id in drifted {
+                    outln!(formatter, "  {}", short_id(id));
+                }
+            }
+            if !result.undetermined.is_empty() {
+                formatter.print_warning(&format!(
+                    "{} memories could not be checked (file unreadable):",
+                    result.undetermined.len()
+                ));
+                for id in &result.undetermined {
+                    outln!(formatter, "  {}", short_id(id));
+                }
+            }
             formatter.print_message("\nRun `engramdb reindex` to repair.");
         }
         // Unhealthy must exit non-zero so scripts/CI can gate on `doctor`.
         // The findings were already printed above; the error just sets the
-        // exit code (main maps Err → exit 1).
+        // exit code (main maps Err → exit 1). Every finding that can flip
+        // `healthy` must appear in this summary, or the exit line reports
+        // "0 stale, 0 orphaned" for a store that failed on something else.
         anyhow::bail!(
-            "store is unhealthy ({} stale, {} orphaned)",
+            "store is unhealthy ({} stale, {} orphaned, {} drifted, {} unreadable)",
             result.stale_entries.len(),
-            result.orphaned_files.len()
+            result.orphaned_files.len(),
+            result.drifted_entries.as_ref().map_or(0, |d| d.len()),
+            result.undetermined.len()
         );
     }
 
@@ -399,11 +439,16 @@ impl FixAction {
                 crate::commands::run_reindex(
                     dir,
                     &registry,
-                    global,
-                    *embeddings_only,
-                    false,
-                    false,
-                    None,
+                    crate::commands::reindex::ReindexParams {
+                        embeddings_only: *embeddings_only,
+                        // `force`: doctor --fix invokes reindex AS A REPAIR.
+                        // Skipping trusts the digest stored beside the vectors,
+                        // so a chunk row damaged without its digest changing —
+                        // exactly the state a user runs `doctor --fix` to get
+                        // out of — would be skipped by a plain reindex.
+                        force: true,
+                        ..crate::commands::reindex::ReindexParams::full(global, None)
+                    },
                     formatter,
                     &std::sync::Arc::new(engramdb::daemon::DaemonCell::new()),
                     engramdb::daemon::DaemonPolicy::InProcess,

@@ -10,6 +10,7 @@
 
 pub mod config;
 pub mod conversation_index;
+pub mod digest;
 pub mod error;
 pub mod harvest_state;
 pub mod lance_index;
@@ -18,6 +19,7 @@ pub mod memory_file;
 pub mod paths;
 pub mod project_id;
 pub mod registry;
+pub mod staleness;
 mod state_file;
 pub mod store;
 pub mod task_state;
@@ -30,6 +32,7 @@ pub mod worktree;
 pub mod write_lock;
 
 pub use conversation_index::{ConversationHit, ConversationIndex, ConversationRow, MatchedOn};
+pub use digest::FileDigest;
 pub use error::{Result, StorageError};
 pub use lance_index::{
     IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary, VectorMatch,

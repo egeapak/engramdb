@@ -19,12 +19,16 @@
 
 use super::error::{Result, StorageError};
 use super::lance_index::{
-    IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex, VectorMatch,
+    IndexDigest, IndexEntry, IndexFilterable, IndexForFiltering, IndexSummary, LanceIndex,
+    VectorMatch,
 };
 use super::registry::RegistryBackend;
 use super::{manifest, memory_file, paths, project_id, write_lock};
 use crate::config::{load_config, load_config_or_default};
+use crate::digest::FileDigest;
+use crate::staleness::StalenessFindings;
 use chrono::{DateTime, Utc};
+use engram_types::config::{IndexConfig, StalenessCheck};
 use engram_types::{Memory, MemoryType, MemoryUpdate, Visibility};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -514,6 +518,10 @@ impl MemoryStore {
         let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
         let content = memory_file::write_memory_file(memory)?;
+        // Stamp the identity of exactly the bytes we are about to write — not a
+        // re-serialization, and no re-read. `atomic_write` writes `content`
+        // verbatim, so this IS the on-disk identity.
+        let digest = crate::digest::FileDigest::of(content.as_bytes());
         atomic_write(&file_path, &content).await?;
 
         // Sweep up any pre-existing file(s) for this exact ID — in BOTH
@@ -563,7 +571,7 @@ impl MemoryStore {
         // current chunk-presence state forward. A fresh `IndexEntry`'s default
         // `false` would otherwise drop an already-embedded memory from semantic
         // ranking (R3). For a brand-new memory this is `false` as expected.
-        let mut entry = IndexEntry::from(memory);
+        let mut entry = IndexEntry::for_file(memory, &digest);
         entry.has_embedding =
             self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
@@ -622,6 +630,14 @@ impl MemoryStore {
         let ids: Vec<&str> = memories.iter().map(|m| m.id.as_str()).collect();
         let preexisting = self.batch_exists(&ids).await?;
 
+        // The index rows are built in a SECOND pass below (after one batched
+        // chunk-presence probe), by which point each `content` string is long
+        // out of scope — so the digests have to be carried forward rather than
+        // recomputed. Recomputing would mean re-reading every file we just
+        // wrote.
+        let mut digests: HashMap<String, crate::digest::FileDigest> =
+            HashMap::with_capacity(memories.len());
+
         for memory in memories {
             let memories_dir = self.get_memories_dir(&memory.visibility)?;
             async_fs::create_dir_all(&memories_dir).await?;
@@ -629,6 +645,10 @@ impl MemoryStore {
             let filename = memory_file::memory_filename(memory);
             let file_path = memories_dir.join(&filename);
             let content = memory_file::write_memory_file(memory)?;
+            digests.insert(
+                memory.id.clone(),
+                crate::digest::FileDigest::of(content.as_bytes()),
+            );
             atomic_write(&file_path, &content).await?;
 
             // Same cross-visibility sweep as `create`, on the same condition:
@@ -672,7 +692,14 @@ impl MemoryStore {
         let entries: Vec<IndexEntry> = memories
             .iter()
             .map(|m| {
-                let mut entry = IndexEntry::from(m);
+                // Every id was inserted in the write loop above, so the lookup
+                // cannot miss; `without_digest` is an unreachable fallback that
+                // degrades to "unknown" rather than panicking on a future
+                // refactor that breaks the pairing.
+                let mut entry = match digests.get(&m.id) {
+                    Some(digest) => IndexEntry::for_file(m, digest),
+                    None => IndexEntry::without_digest(m),
+                };
                 entry.has_embedding = with_chunks.contains(&m.id);
                 entry
             })
@@ -965,15 +992,18 @@ impl MemoryStore {
             // path, and the rename-on-title-change cleanup is inherently
             // per-file. It is the LanceDB commits and the manifest scan that
             // were quadratic, not this.
-            if let Err(e) = self
+            let digest = match self
                 .write_updated_file_locked(&canonical, &memory, old_visibility)
                 .await
             {
-                errors.push((given.clone(), format!("{:#}", e)));
-                continue;
-            }
+                Ok(digest) => digest,
+                Err(e) => {
+                    errors.push((given.clone(), format!("{:#}", e)));
+                    continue;
+                }
+            };
 
-            let mut entry = IndexEntry::from(&memory);
+            let mut entry = IndexEntry::for_file(&memory, &digest);
             entry.has_embedding = self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
             })?;
@@ -1028,9 +1058,10 @@ impl MemoryStore {
         memory: &Memory,
         old_visibility: Visibility,
     ) -> Result<()> {
-        self.write_updated_file_locked(id, memory, old_visibility)
+        let digest = self
+            .write_updated_file_locked(id, memory, old_visibility)
             .await?;
-        self.sync_index_row_locked(memory).await
+        self.sync_index_row_locked(memory, &digest).await
     }
 
     /// The file half of [`Self::write_updated_locked`]: locate the old
@@ -1039,12 +1070,16 @@ impl MemoryStore {
     /// Split out so [`Self::update_batch_with`] reuses this exact code rather
     /// than reimplementing the durability ordering below — the ordering is
     /// subtle enough that a second copy would be a latent data-loss bug.
+    ///
+    /// Returns the identity of the bytes it wrote, so the index half stamps the
+    /// row from the same string rather than re-reading (or, worse,
+    /// re-serializing) the file.
     async fn write_updated_file_locked(
         &self,
         id: &str,
         memory: &Memory,
         old_visibility: Visibility,
-    ) -> Result<()> {
+    ) -> Result<crate::digest::FileDigest> {
         // Locate the existing file(s) for this memory before writing. `id`
         // may be a prefix; the filename may be about to change (title or
         // visibility update); and a stale duplicate from a previously
@@ -1057,6 +1092,7 @@ impl MemoryStore {
         let filename = memory_file::memory_filename(memory);
         let file_path = memories_dir.join(&filename);
         let content = memory_file::write_memory_file(memory)?;
+        let digest = crate::digest::FileDigest::of(content.as_bytes());
 
         // Durability ordering: write the NEW file first, THEN remove any old
         // file at a different path. In the common case (filename unchanged)
@@ -1079,17 +1115,21 @@ impl MemoryStore {
             }
         }
 
-        Ok(())
+        Ok(digest)
     }
 
     /// The index half of [`Self::write_updated_locked`].
-    async fn sync_index_row_locked(&self, memory: &Memory) -> Result<()> {
+    async fn sync_index_row_locked(
+        &self,
+        memory: &Memory,
+        digest: &crate::digest::FileDigest,
+    ) -> Result<()> {
         // Upsert metadata to LanceDB (chunks are managed separately). An update
         // must not reset `has_embedding`: the memory may already have chunks
         // that this update isn't touching. Carry the current chunk-presence
         // state forward (a content-changing update's re-embed will set it true
         // again via `upsert_chunks` regardless).
-        let mut entry = IndexEntry::from(memory);
+        let mut entry = IndexEntry::for_file(memory, digest);
         // Propagate a chunk-presence read error rather than defaulting to
         // `false`: silently clearing the flag would drop a still-embedded memory
         // from `has_embedding`-gated semantic ranking (R3) until the next reindex.
@@ -1359,7 +1399,33 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB list_summary failed: {}", e)))
     }
 
-    /// List all memory IDs.
+    /// Every memory id that has a **file on disk**, plus the bytes-on-disk
+    /// length of each.
+    ///
+    /// Deliberately distinct from [`Self::list_ids`], which reads the *index*.
+    /// Anything comparing the two sides — "which files are not indexed?",
+    /// "how many memories are actually on disk?" — must read this side from the
+    /// filesystem, or it is comparing the index against itself and can only
+    /// ever report agreement.
+    ///
+    /// Duplicate ids resolve newest-wins, matching what a reader would get.
+    pub async fn list_file_ids(&self) -> Result<Vec<String>> {
+        let shared = scan_dir_to_stats(&paths::memories_dir(&self.project_dir)).await;
+        let personal = scan_dir_to_stats(&paths::personal_memories_dir(&self.project_id)?).await;
+        let mut ids: Vec<String> = shared
+            .by_id
+            .into_keys()
+            .chain(personal.by_id.into_keys())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// List all memory IDs **from the index**.
+    ///
+    /// Not the files — see [`Self::list_file_ids`] when the question is what
+    /// exists on disk.
     pub async fn list_ids(&self) -> Result<Vec<String>> {
         self.lance_index
             .list_ids()
@@ -1473,11 +1539,30 @@ impl MemoryStore {
             stored_normalizer.as_deref().unwrap_or("<none>"),
             engram_types::NORMALIZER_STAMP
         );
+        // The chunks table has no `.md` files to rebuild from — recreating it
+        // would destroy the vectors the rebuild exists to preserve — so any new
+        // column there is added in place, as all-nulls (= "provenance
+        // unknown" = re-embed when asked). Done HERE rather than at store open
+        // because it commits a Lance `Merge`, which conflicts with any
+        // concurrent write: unlocked at open, a parallel MCP session writing
+        // chunks would fail the loser's `MemoryStore::open` and break an
+        // ordinary read command. `reindex_with` below takes the lock, so this
+        // runs just before it, under the lock acquired for the stamp.
+        {
+            let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+            self.lance_index
+                .add_missing_chunk_columns()
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!("chunks-table column add failed: {}", e))
+                })?;
+        }
+
         // `force_schema_reset`: a schema migration must recreate the memories
         // table with the current columns. The default (upsert-only) reindex path
         // taken under a foreign checkout can't add columns and would fail on a
         // schema mismatch, so migration forces the table rebuild even then.
-        self.reindex_with(true).await?;
+        self.reindex_with(true, false).await?;
         // reindex's `update_manifest_stats` rewrote the manifest but preserved
         // the old `schema_version`; stamp the new one now that the rebuild
         // succeeded (mirrors how the embedding fingerprint is stamped only on
@@ -1503,7 +1588,50 @@ impl MemoryStore {
     }
 
     pub async fn reindex(&self) -> Result<usize> {
-        self.reindex_with(false).await
+        Ok(self.reindex_with(false, false).await?.indexed)
+    }
+
+    /// Rebuild only the rows whose file has changed since it was indexed.
+    ///
+    /// Every file is still enumerated, read, hashed and deduplicated — the skip
+    /// removes the *parse*, the stem derivation and the row write, not the I/O,
+    /// because deciding whether a file changed requires reading it. That bounds
+    /// the possible win; see `docs/contributors/architecture.md`.
+    ///
+    /// Falls back to a full rebuild, by design, when the manifest says this
+    /// store's rows were not derived by this binary — a schema version or
+    /// normalizer stamp behind the current one means the *derivation* changed
+    /// even where the bytes did not, and an unchanged file is then exactly the
+    /// case that needs rebuilding. The returned `skipped` is zero on that path.
+    pub async fn reindex_incremental(&self) -> Result<ReindexCounts> {
+        let safe = self.incremental_is_safe().await;
+        self.reindex_with(false, safe).await
+    }
+
+    /// Whether row-level skipping may be trusted for this store.
+    ///
+    /// Both stamps must match this binary. `migrate_schema_if_needed` normally
+    /// guarantees that on open, but the check is repeated here rather than
+    /// assumed: it is what makes "the bytes are unchanged" imply "the row is
+    /// correct", and that implication is the whole basis of the skip.
+    async fn incremental_is_safe(&self) -> bool {
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let Ok(manifest) = manifest::load_manifest(&manifest_path).await else {
+            // No readable manifest means no derivation stamp to trust.
+            return false;
+        };
+        let schema_current = manifest.schema_version == manifest::CURRENT_SCHEMA_VERSION;
+        let normalizer_current =
+            manifest.normalizer.as_deref() == Some(engram_types::NORMALIZER_STAMP);
+        if !schema_current || !normalizer_current {
+            tracing::info!(
+                "incremental reindex not applicable (schema {}, normalizer {:?}); \
+                 rebuilding every row",
+                manifest.schema_version,
+                manifest.normalizer
+            );
+        }
+        schema_current && normalizer_current
     }
 
     /// Rebuild the memories table from the on-disk `.md` files, preserving
@@ -1518,11 +1646,67 @@ impl MemoryStore {
     /// checkout's files even under a conflict. The other checkout's **vectors**
     /// are still preserved (the chunks table is never dropped and orphan-pruning
     /// stays skipped); its index rows are rebuilt when it runs its own migration.
-    async fn reindex_with(&self, force_schema_reset: bool) -> Result<usize> {
+    ///
+    /// `incremental` skips rewriting a row whose file still hashes to the
+    /// digest that row records. It implies upsert-only mode — clearing the
+    /// table would destroy precisely the rows it is about to decide to keep —
+    /// so deletions are reconciled explicitly instead, by removing rows for ids
+    /// no longer present on disk.
+    ///
+    /// **The lock only excludes other EngramDB processes.** A `git checkout` or
+    /// a hand edit landing between the hash in phase 3 and the upsert in phase 5
+    /// stamps a digest for bytes that are no longer on disk — which is exactly
+    /// the class of writer this feature exists to notice. It is self-correcting
+    /// (the next `doctor` or staleness check reports the drift) but it is not
+    /// excluded, and cannot be with an advisory lock.
+    async fn reindex_with(
+        &self,
+        force_schema_reset: bool,
+        incremental: bool,
+    ) -> Result<ReindexCounts> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
+        // What each row was built from, read before any file is touched. Empty
+        // in full-rebuild mode, which makes every file a miss and every row a
+        // rewrite — the same work the unconditional path always did.
+        // Two views of the same read, and they must stay separate.
+        //
+        // `recorded` drives the skip and holds only rows that HAVE a digest —
+        // a row without one records nothing about its file and can never
+        // match. `existing_ids` drives the deletion reconciliation and holds
+        // EVERY row: deriving deletions from `recorded` instead would leave a
+        // digest-less row whose file is gone in the index permanently, since
+        // it is absent from the map that decides what to remove.
+        let (recorded, existing_ids): (HashMap<String, RowIdentity>, Vec<String>) = if incremental {
+            let rows = self.lance_index.list_digests().await.map_err(|e| {
+                StorageError::Validation(format!("LanceDB list_digests failed: {}", e))
+            })?;
+            let ids = rows.iter().map(|r| r.memory_id.clone()).collect();
+            let map = rows
+                .into_iter()
+                .filter_map(|row| {
+                    let sha = row.content_sha256?;
+                    let len = row.content_len?;
+                    Some((
+                        row.memory_id,
+                        RowIdentity {
+                            sha256: sha,
+                            len,
+                            has_embedding: row.has_embedding,
+                        },
+                    ))
+                })
+                .collect();
+            (map, ids)
+        } else {
+            (HashMap::new(), Vec::new())
+        };
+
         let foreign_checkout = self.checkout_conflict().await;
-        if let Some(other) = &foreign_checkout {
+        if incremental {
+            // No clear: the surviving rows ARE the result. Deletions are
+            // reconciled after the dir passes below.
+        } else if let Some(other) = &foreign_checkout {
             if force_schema_reset {
                 // Order matters in the shared-table case: the OTHER checkout's
                 // rows rebuild on its next open only if it hasn't migrated yet
@@ -1575,28 +1759,57 @@ impl MemoryStore {
             .into_iter()
             .collect();
 
+        let mut skipped = 0;
+
         // Reindex shared memories
         let shared_dir = paths::memories_dir(&self.project_dir);
         if shared_dir.exists() {
-            self.reindex_dir(
-                &shared_dir,
-                Visibility::Shared,
-                &chunk_ids,
-                &mut indexed_ids,
-            )
-            .await?;
+            skipped += self
+                .reindex_dir(
+                    &shared_dir,
+                    Visibility::Shared,
+                    &chunk_ids,
+                    &mut indexed_ids,
+                    &recorded,
+                )
+                .await?;
         }
 
         // Reindex personal memories
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
         if personal_dir.exists() {
-            self.reindex_dir(
-                &personal_dir,
-                Visibility::Personal,
-                &chunk_ids,
-                &mut indexed_ids,
-            )
-            .await?;
+            skipped += self
+                .reindex_dir(
+                    &personal_dir,
+                    Visibility::Personal,
+                    &chunk_ids,
+                    &mut indexed_ids,
+                    &recorded,
+                )
+                .await?;
+        }
+
+        // Reconcile deletions. The unconditional path gets this free by
+        // clearing the table first; the incremental path never clears, so a row
+        // whose file is gone would survive forever and keep answering queries
+        // with a memory that no longer exists.
+        //
+        // Skipped under a checkout conflict for the same reason the orphan
+        // prune is: the other clone's files are not visible here, so all of its
+        // rows would look deleted.
+        if incremental && foreign_checkout.is_none() {
+            let on_disk: std::collections::HashSet<&str> =
+                indexed_ids.iter().map(|s| s.as_str()).collect();
+            let removed: Vec<String> = existing_ids
+                .iter()
+                .filter(|id| !on_disk.contains(id.as_str()))
+                .cloned()
+                .collect();
+            if !removed.is_empty() {
+                self.lance_index.delete_batch(&removed).await.map_err(|e| {
+                    StorageError::Validation(format!("LanceDB delete_batch failed: {}", e))
+                })?;
+            }
         }
 
         // Prune chunks for memories that no longer exist on disk, so the
@@ -1624,7 +1837,10 @@ impl MemoryStore {
         // Update manifest stats
         self.update_manifest_stats().await?;
 
-        Ok(indexed_ids.len())
+        Ok(ReindexCounts {
+            indexed: indexed_ids.len(),
+            skipped,
+        })
     }
 
     /// Drop and recreate the chunks (vectors) table.
@@ -1652,11 +1868,21 @@ impl MemoryStore {
             })
     }
 
-    /// Upsert embedding chunks for a memory.
+    /// Upsert embedding chunks for a memory, recording no provenance for them.
+    ///
+    /// The un-digested entry point: the vectors are stored with a null
+    /// `embed_sha256`, which every currency check reads as *unknown* and
+    /// therefore "re-embed when asked". That is the correct answer for its two
+    /// real callers — worktree consolidation, which **relocates** vectors it did
+    /// not compute (and cannot compute a digest for: the source store has its
+    /// own config, so its model, dimensions, composition and chunk size may all
+    /// differ), and tests. The digest-carrying paths are
+    /// [`Self::upsert_chunks_if_current`] and [`Self::upsert_chunks_batch`],
+    /// which the retrieval engine drives.
     pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         self.lance_index
-            .upsert_chunks(memory_id, chunks)
+            .upsert_chunks(memory_id, chunks, None)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e)))
     }
@@ -1674,11 +1900,16 @@ impl MemoryStore {
     /// variant re-reads the memory UNDER the write lock and skips the write
     /// when the memory is gone or its `updated_at` no longer equals
     /// `snapshot_updated_at`.
+    ///
+    /// `embed_sha256` describes the text `chunks` were computed from and is
+    /// written in the same `RecordBatch` as the vectors, so it can never end up
+    /// describing a different snapshot than the vectors beside it.
     pub async fn upsert_chunks_if_current(
         &self,
         memory_id: &str,
         chunks: Vec<Vec<f32>>,
         snapshot_updated_at: chrono::DateTime<chrono::Utc>,
+        embed_sha256: Option<String>,
     ) -> Result<bool> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         match self.get(memory_id).await {
@@ -1696,7 +1927,7 @@ impl MemoryStore {
             Err(e) => return Err(e),
         }
         self.lance_index
-            .upsert_chunks(memory_id, chunks)
+            .upsert_chunks(memory_id, chunks, embed_sha256.as_deref())
             .await
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e))
@@ -1719,20 +1950,22 @@ impl MemoryStore {
     /// Returns the ids actually written.
     pub async fn upsert_chunks_batch(
         &self,
-        entries: Vec<(String, chrono::DateTime<chrono::Utc>, Vec<Vec<f32>>)>,
+        entries: Vec<crate::lance_index::GuardedChunkWrite>,
     ) -> Result<Vec<String>> {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
-        let ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
+        let ids: Vec<&str> = entries.iter().map(|(id, _, _, _)| id.as_str()).collect();
         let current: HashMap<String, Memory> = self.get_batch(&ids).await?.into_iter().collect();
 
-        let mut fresh: Vec<(String, Vec<Vec<f32>>)> = Vec::with_capacity(entries.len());
-        for (id, snapshot_updated_at, chunks) in entries {
+        let mut fresh: Vec<crate::lance_index::ChunkWrite> = Vec::with_capacity(entries.len());
+        for (id, snapshot_updated_at, chunks, digest) in entries {
             match current.get(&id) {
-                Some(mem) if mem.updated_at == snapshot_updated_at => fresh.push((id, chunks)),
+                Some(mem) if mem.updated_at == snapshot_updated_at => {
+                    fresh.push((id, chunks, digest))
+                }
                 Some(_) => tracing::debug!(
                     "skipping stale chunk upsert for {id}: memory changed since snapshot"
                 ),
@@ -1749,7 +1982,118 @@ impl MemoryStore {
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB upsert_chunks_batch failed: {}", e))
             })?;
-        Ok(fresh.into_iter().map(|(id, _)| id).collect())
+        Ok(fresh.into_iter().map(|(id, _, _)| id).collect())
+    }
+
+    /// Whether the chunks table holds any row for `id`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn has_chunks_for(&self, id: &str) -> Result<bool> {
+        self.lance_index
+            .has_chunks(id)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB has_chunks failed: {}", e)))
+    }
+
+    /// Write an index row directly, bypassing the file write.
+    ///
+    /// Test-only: production always derives the row from the file it just
+    /// wrote, which is what keeps the content digest honest. Exposed for
+    /// fixtures that need to reproduce a row shape no current write path
+    /// produces (e.g. a pre-0.8.0 row with no digest).
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn upsert_index_entry_for_test(
+        &self,
+        entry: &crate::lance_index::IndexEntry,
+    ) -> Result<()> {
+        self.lance_index
+            .upsert(entry)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))
+    }
+
+    /// Every indexed row's content digest (schema v0.8.0).
+    ///
+    /// See [`crate::lance_index::LanceIndex::list_digests`].
+    pub async fn index_digests(&self) -> Result<Vec<crate::lance_index::IndexDigest>> {
+        self.lance_index
+            .list_digests()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB list_digests failed: {}", e)))
+    }
+
+    /// Every memory's on-disk digest, computed in **two directory scans total**
+    /// rather than two per memory.
+    ///
+    /// This is the batched form of [`Self::read_memory_bytes`] and exists
+    /// because the unbatched one is a trap at scale: it resolves each id with
+    /// `find_memory_files`, which is a full `read_dir` of both the shared and
+    /// personal directories. Calling it in a loop over every row — which is
+    /// exactly what a whole-store drift check does — makes the check quadratic
+    /// in dirent work. `stats` runs one on every invocation, so the cost is
+    /// paid by a command that used to do no file I/O at all.
+    ///
+    /// Returns `(digests, unreadable)`. A file that exists but cannot be read
+    /// lands in `unreadable`, never silently in the clean set: the whole point
+    /// of the distinction in [`Self::read_memory_bytes`].
+    pub async fn file_digests(&self) -> Result<(HashMap<String, FileDigest>, Vec<String>)> {
+        let shared = scan_dir_to_stats(&paths::memories_dir(&self.project_dir)).await;
+        let personal = scan_dir_to_stats(&paths::personal_memories_dir(&self.project_id)?).await;
+
+        let mut digests = HashMap::new();
+        let mut unreadable = Vec::new();
+        for (id, stat) in shared.by_id.into_iter().chain(personal.by_id) {
+            match async_fs::read(&stat.path).await {
+                Ok(bytes) => {
+                    digests.insert(id, FileDigest::of(&bytes));
+                }
+                Err(e) => {
+                    tracing::warn!("cannot read memory file {}: {e}", stat.path.display());
+                    unreadable.push(id);
+                }
+            }
+        }
+        unreadable.sort();
+        Ok((digests, unreadable))
+    }
+
+    /// The raw bytes of a memory's `.md` file: `Ok(None)` when no file exists,
+    /// `Err` when one exists but cannot be read.
+    ///
+    /// The distinction is the point. A currency check that folded an unreadable
+    /// file into "absent" would report it as clean — an assertion of health it
+    /// cannot support — while a missing file is a different finding that
+    /// `doctor` already reports as a stale index entry.
+    ///
+    /// **Do not call this in a loop over the store.** Each call is a full
+    /// `read_dir` of two directories; use [`Self::file_digests`] for a
+    /// whole-store pass.
+    pub async fn read_memory_bytes(&self, id: &str) -> Result<Option<Vec<u8>>> {
+        for visibility in [Visibility::Shared, Visibility::Personal] {
+            let dir = self.get_memories_dir(&visibility)?;
+            let mut paths = find_memory_files(&dir, id).await?;
+            // Newest wins, matching `get_from_dir`'s duplicate resolution: the
+            // row describes whichever file a reader would resolve to.
+            if paths.len() > 1 {
+                let mut with_mtime: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+                for p in paths {
+                    with_mtime.push((file_mtime(&p).await, p));
+                }
+                with_mtime.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
+                paths = with_mtime.into_iter().map(|(_, p)| p).collect();
+            }
+            if let Some(path) = paths.first() {
+                return async_fs::read(path).await.map(Some).map_err(Into::into);
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every embedded memory's `embed_sha256` (schema v0.8.0), keyed by memory
+    /// id. See [`crate::lance_index::LanceIndex::list_embed_digests`].
+    pub async fn embed_digests(&self) -> Result<HashMap<String, Option<String>>> {
+        self.lance_index.list_embed_digests().await.map_err(|e| {
+            StorageError::Validation(format!("LanceDB list_embed_digests failed: {}", e))
+        })
     }
 
     /// Delete all embedding chunks for a memory.
@@ -1878,16 +2222,24 @@ impl MemoryStore {
     /// update that crashed between writing the renamed file and removing the
     /// old one), the newest file wins and the stale one is deleted — reindex
     /// runs under the project write lock and is the documented repair path.
+    ///
+    /// `recorded` maps memory id → the content digest its current row was built
+    /// from. Non-empty only in incremental mode; a file whose hash matches its
+    /// entry has its row left untouched. Returns how many rows were skipped.
     async fn reindex_dir(
         &self,
         dir: &Path,
         visibility: Visibility,
         chunk_ids: &std::collections::HashSet<String>,
         indexed_ids: &mut Vec<String>,
-    ) -> Result<()> {
+        recorded: &HashMap<String, RowIdentity>,
+    ) -> Result<usize> {
         use rayon::prelude::*;
 
-        let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory)> = HashMap::new();
+        use crate::digest::FileDigest;
+
+        let mut by_id: HashMap<String, (PathBuf, std::time::SystemTime, Memory, FileDigest)> =
+            HashMap::new();
 
         // Phase 1 — enumerate. Cheap, and it has to be sequential anyway.
         let mut md_paths: Vec<PathBuf> = Vec::new();
@@ -1932,11 +2284,22 @@ impl MemoryStore {
         // latency-critical, so occupying the rayon pool here is free; the
         // calling tokio worker is blocked for a *shorter* time than before,
         // since the work used to run inline on it.
-        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory)> = read
+        // The content digest is computed HERE, not in phase 2 and not in phase
+        // 5. Phase 2's `content` strings are consumed by this very iterator, so
+        // by phase 5 they are gone — carrying them that far would hold every
+        // memory file's full text in memory across three phases, and re-reading
+        // the file afterwards would both cost a second I/O pass and race the
+        // writer we are not excluding (a foreign editor, not another EngramDB
+        // process). Hashing inside this closure rides the rayon pool that is
+        // already parallelising the parse, over bytes that are already hot.
+        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory, FileDigest)> = read
             .into_par_iter()
             .filter_map(
                 |(path, mtime, content)| match memory_file::parse_memory_file(&content) {
-                    Ok(memory) => Some((path, mtime, memory)),
+                    Ok(memory) => {
+                        let digest = FileDigest::of(content.as_bytes());
+                        Some((path, mtime, memory, digest))
+                    }
                     Err(e) => {
                         tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
                         None
@@ -1947,16 +2310,19 @@ impl MemoryStore {
 
         // Phase 4 — resolve duplicate IDs. Sequential by nature (it is a
         // fold over a shared map) and cheap: no I/O, no parsing.
-        for (path, mtime, memory) in parsed {
+        // The digest travels with its own file through this fold: when two
+        // files claim one id, the row must record the identity of the file that
+        // WON (the one left on disk), not the one about to be deleted.
+        for (path, mtime, memory, digest) in parsed {
             let stale = match by_id.entry(memory.id.clone()) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert((path, mtime, memory));
+                    slot.insert((path, mtime, memory, digest));
                     None
                 }
                 std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    let (ref slot_path, slot_mtime, _) = *slot.get();
+                    let (ref slot_path, slot_mtime, _, _) = *slot.get();
                     if prefers_newer((mtime, &path), (slot_mtime, slot_path)) {
-                        let (old_path, _, _) = slot.insert((path, mtime, memory));
+                        let (old_path, _, _, _) = slot.insert((path, mtime, memory, digest));
                         Some(old_path)
                     } else {
                         Some(path)
@@ -1978,7 +2344,7 @@ impl MemoryStore {
             }
         }
 
-        // Phase 5 — build the index rows, in parallel. `IndexEntry::from`
+        // Phase 5 — build the index rows, in parallel. `IndexEntry::for_file`
         // derives the memory's keyword stems (tokenize → stoplist → Snowball
         // stem → dedup for three fields), the second-largest CPU cost here at
         // ~16ms per 1,000 memories serially, ~5.7ms across four cores
@@ -1987,44 +2353,248 @@ impl MemoryStore {
         // One batched merge_insert instead of one commit (and one LanceDB
         // dataset version) per memory — reindexing a 1,000-memory store used
         // to perform 1,000 sequential commits that optimize() then compacted.
-        let owned: Vec<(String, Memory)> = by_id
+        let owned: Vec<(String, Memory, FileDigest)> = by_id
             .into_iter()
-            .map(|(id, (_path, _mtime, memory))| (id, memory))
+            .map(|(id, (_path, _mtime, memory, digest))| (id, memory, digest))
             .collect();
-        let entries_batch: Vec<IndexEntry> = owned
+
+        // Incremental mode drops the rows whose file still hashes to what the
+        // row was built from. This happens AFTER phase 4, never before: phase 4
+        // deletes the loser of a duplicate-id pair, so skipping enumeration or
+        // deduplication would leave stale files on disk forever. What is skipped
+        // is only the derivation and the write.
+        //
+        // `indexed_ids` gets every id either way, skipped ones included. It
+        // drives the orphan-chunk prune, so omitting a skipped memory would make
+        // its vectors look orphaned and delete them — turning a no-op reindex
+        // into silent vector loss.
+        // A row is skippable only when EVERY column a rebuild would write is
+        // already what the rebuild would write. Comparing the hash alone was
+        // not enough, because two of those columns are not determined by it:
+        //
+        // - `content_len` is the RAW on-disk length while `content_sha256` is
+        //   computed over CRLF-normalized bytes, deliberately (see
+        //   `digest.rs`). A `core.autocrlf` checkout therefore leaves a
+        //   matching hash and a stale length — and the default `size`
+        //   staleness tier compares exactly that length, so the store warned on
+        //   every read and the incremental reindex the warning names could
+        //   never clear it.
+        // - `has_embedding` mirrors the chunks table, not the file. Vectors
+        //   added or dropped since the last rebuild leave an unchanged file and
+        //   a stale flag, and the retrieval scorer reads that flag to decide
+        //   whether a memory has semantic evidence at all.
+        //
+        // `visibility` needs no check: it is serialized into the file's hidden
+        // metadata block, so changing it rewrites the bytes and moves the hash.
+        let mut skipped = 0;
+        let to_write: Vec<&(String, Memory, FileDigest)> = owned
+            .iter()
+            .filter(|(id, _, digest)| {
+                let current = recorded.get(id).is_some_and(|row| {
+                    row.sha256 == digest.sha256
+                        && row.len == digest.len
+                        && row.has_embedding == chunk_ids.contains(id.as_str())
+                });
+                if current {
+                    skipped += 1;
+                }
+                !current
+            })
+            .collect();
+
+        let entries_batch: Vec<IndexEntry> = to_write
             .par_iter()
-            .map(|(id, memory)| {
-                let mut index_entry = IndexEntry::from(memory);
+            .map(|(id, memory, digest)| {
+                let mut index_entry = IndexEntry::for_file(memory, digest);
                 index_entry.visibility = visibility;
                 // R3: stamp the embedding flag from the chunk-table snapshot so a
                 // reindex (including the on-open schema migration) leaves
                 // `has_embedding` authoritative.
-                index_entry.has_embedding = chunk_ids.contains(id);
+                index_entry.has_embedding = chunk_ids.contains(id.as_str());
                 index_entry
             })
             .collect();
-        indexed_ids.extend(owned.into_iter().map(|(id, _)| id));
-        self.lance_index
-            .upsert_batch(&entries_batch)
-            .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
-        Ok(())
+        indexed_ids.extend(owned.iter().map(|(id, _, _)| id.clone()));
+        if !entries_batch.is_empty() {
+            self.lance_index
+                .upsert_batch(&entries_batch)
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+        }
+        Ok(skipped)
     }
 
-    /// Check whether the LanceDB index is stale compared to memory files on disk.
+    /// Check whether the LanceDB index has fallen behind the memory files on
+    /// disk, at the tier `cfg` asks for.
     ///
-    /// Returns `Some(warning_message)` if the counts differ, `None` if in sync.
-    pub async fn check_staleness(&self) -> Result<Option<String>> {
+    /// Returns `Some(warning_message)` if drift was confirmed, `None` if the
+    /// store looks current. See [`crate::staleness`] for what each tier
+    /// compares, why the default is `size` rather than exact hashing, and why a
+    /// finding must be confirmed by a second pass.
+    ///
+    /// **A `None` here is not proof of currency** — only the `content` tier is
+    /// exact, and even it is budget-bounded. `doctor` and `reindex --dry-run`
+    /// are the unbudgeted authority; this runs on every read and is a
+    /// best-effort early warning.
+    ///
+    /// Never returns `Err` for a *tier* failure. The three callers all treat an
+    /// error as "no warning", so a tier that cannot complete degrades to the
+    /// strongest tier that can rather than silently reporting a clean store.
+    /// An error here means the index itself could not be counted.
+    pub async fn check_staleness(&self, cfg: &IndexConfig) -> Result<Option<String>> {
+        // A shared project id means two checkouts legitimately hold different
+        // bytes for the same ids, and the index holds the union. Every tier
+        // would fire, permanently and unrepairably: reindex degrades to a
+        // non-destructive upsert under conflict by design, so the warning would
+        // never clear.
+        if self.checkout_conflict().await.is_some() {
+            return Ok(None);
+        }
+
+        let first = self.staleness_pass(cfg).await?;
+        if first.is_clean() {
+            return Ok(None);
+        }
+        // Something was found — which on a lock-free read path is as likely to
+        // be a write committing across the pass as it is real drift. Pay for a
+        // second pass only here, and report only what both agree on.
+        let second = self.staleness_pass(cfg).await?;
+        Ok(first.confirmed_by(&second).message(cfg.staleness_check))
+    }
+
+    /// One tiered comparison of the files against the index.
+    ///
+    /// Ordering is load-bearing: the file enumeration happens **first** and the
+    /// index projection second. `create` writes the file before the row, so
+    /// reading the index first would make every concurrent create look like a
+    /// missing row; this ordering makes it look like an extra file instead,
+    /// which the second pass then clears. Neither ordering avoids the race —
+    /// that is what [`StalenessFindings::confirmed_by`] is for — but this one
+    /// keeps the transient state consistent between the two passes.
+    async fn staleness_pass(&self, cfg: &IndexConfig) -> Result<StalenessFindings> {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
-        let md_count = count_md_files(&shared_dir).await + count_md_files(&personal_dir).await;
-        let lance_count = self
-            .lance_index
+
+        // Tier A always runs: it is the cheapest signal and the only one that
+        // needs no per-file `statx`.
+        if cfg.staleness_check == StalenessCheck::Counts {
+            let md_count = count_md_files(&shared_dir).await + count_md_files(&personal_dir).await;
+            let lance_count = self.lance_count().await?;
+            return Ok(StalenessFindings {
+                md_count,
+                lance_count,
+                ..Default::default()
+            });
+        }
+
+        let mut on_disk = scan_dir_to_stats(&shared_dir).await;
+        let personal = scan_dir_to_stats(&personal_dir).await;
+        // A file count, not a distinct-id count: a stale duplicate left by a
+        // crashed rename is a real inconsistency, and tier A has always
+        // reported it.
+        let md_count = on_disk.file_count + personal.file_count;
+        on_disk.by_id.extend(personal.by_id);
+        let by_id = on_disk.by_id;
+
+        let rows = self.index_digests().await?;
+        let lance_count = rows.len();
+
+        let mut findings = StalenessFindings {
+            md_count,
+            lance_count,
+            ..Default::default()
+        };
+
+        // Tier B — id sets. Catches a delete paired with a create, which leaves
+        // the counts equal.
+        let mut indexed_ids = std::collections::HashSet::with_capacity(rows.len());
+        // Tier C candidates: rows whose length still matches, which only the
+        // content tier can rule on.
+        let mut len_matched = Vec::new();
+        for row in &rows {
+            indexed_ids.insert(row.memory_id.as_str());
+            let Some(stat) = by_id.get(&row.memory_id) else {
+                findings.missing_from_disk.insert(row.memory_id.clone());
+                continue;
+            };
+            match row.content_len {
+                // Tier C — length. A row that predates schema 0.8.0 records no
+                // length; it is *unknown*, not matching, and must not be
+                // reported as changed. Backfilling it is reindex's job.
+                None => {}
+                Some(len) if len != stat.len => {
+                    findings.changed.insert(row.memory_id.clone());
+                }
+                Some(_) => len_matched.push((row, stat)),
+            }
+        }
+        for id in by_id.keys() {
+            if !indexed_ids.contains(id.as_str()) {
+                findings.missing_from_index.insert(id.clone());
+            }
+        }
+
+        if cfg.staleness_check == StalenessCheck::Content {
+            self.hash_len_matched(&len_matched, cfg.staleness_max_bytes, &mut findings)
+                .await;
+        }
+        Ok(findings)
+    }
+
+    /// Tier D — hash the files whose length still matches, up to `max_bytes`.
+    ///
+    /// Sorted by id so the budget cuts at a deterministic place: an arbitrary
+    /// `read_dir` order would make a budget-limited check report a different
+    /// subset on every run, which reads as flapping drift.
+    ///
+    /// Stops at the budget and records that it did, rather than downgrading to
+    /// tier C silently — a partial exact check must never be reported as a
+    /// clean exact check.
+    async fn hash_len_matched(
+        &self,
+        candidates: &[(&IndexDigest, &FileStat)],
+        max_bytes: u64,
+        findings: &mut StalenessFindings,
+    ) {
+        let mut ordered: Vec<_> = candidates.iter().collect();
+        ordered.sort_by(|a, b| a.0.memory_id.cmp(&b.0.memory_id));
+
+        let mut spent: u64 = 0;
+        for (row, stat) in ordered {
+            let Some(recorded) = row.content_sha256.as_deref() else {
+                continue;
+            };
+            if spent.saturating_add(stat.len) > max_bytes {
+                findings.budget_exhausted = true;
+                break;
+            }
+            spent = spent.saturating_add(stat.len);
+            match async_fs::read(&stat.path).await {
+                Ok(bytes) => {
+                    if crate::digest::FileDigest::of(&bytes).sha256 != recorded {
+                        findings.changed.insert(row.memory_id.clone());
+                    }
+                }
+                // Unreadable is *undetermined*, not drifted. `doctor` reports
+                // it as its own category; on the read path, warning "changed"
+                // for a permissions problem would send the user to reindex,
+                // which cannot fix it either.
+                Err(e) => {
+                    tracing::debug!(
+                        "staleness: cannot hash memory {}: {e}",
+                        row.memory_id.as_str()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Row count, as an index error rather than a tier failure.
+    async fn lance_count(&self) -> Result<usize> {
+        self.lance_index
             .count()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))?;
-        let has_conflict = self.checkout_conflict().await.is_some();
-        Ok(staleness_message(md_count, lance_count, has_conflict))
+            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
     }
 
     /// Recompute and persist manifest stats (load-modify-save of
@@ -2293,35 +2863,6 @@ async fn newest_by_mtime(paths: &[PathBuf]) -> &PathBuf {
     best
 }
 
-/// Decide the staleness warning, if any. Pure so the checkout-conflict
-/// suppression rule is unit-testable without manipulating the global registry.
-///
-/// Under a shared-ID **checkout conflict** (two clones of the same git remote
-/// share one LanceDB index but keep separate `.engramdb/memories/` trees), the
-/// index legitimately holds the *other* checkout's rows, so `lance_count` is
-/// permanently greater than this checkout's on-disk `md_count`. Emitting a
-/// "run reindex" warning then is wrong: it never clears (reindex degrades to a
-/// non-destructive upsert under conflict, by design) and only confuses the
-/// user. So suppress the warning entirely when a conflict is present (finding
-/// #5).
-fn staleness_message(
-    md_count: usize,
-    lance_count: usize,
-    checkout_conflict: bool,
-) -> Option<String> {
-    if checkout_conflict {
-        return None;
-    }
-    if md_count != lance_count {
-        Some(format!(
-            "Index may be stale ({} memories on disk, {} indexed). Run 'engramdb reindex' to rebuild.",
-            md_count, lance_count
-        ))
-    } else {
-        None
-    }
-}
-
 /// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
 async fn count_md_files(dir: &Path) -> usize {
     if !dir.exists() {
@@ -2337,6 +2878,93 @@ async fn count_md_files(dir: &Path) -> usize {
         }
     }
     count
+}
+
+/// One `.md` file's identity on disk, as the staleness check needs it.
+pub(crate) struct FileStat {
+    pub path: PathBuf,
+    pub len: u64,
+}
+
+/// A directory's `.md` files, deduplicated by memory id.
+pub(crate) struct DirStats {
+    /// Winner per id, matching [`scan_dir_to_map`]'s newest-wins rule.
+    pub by_id: HashMap<String, FileStat>,
+    /// Every `.md` file, including duplicates that lost the id race — this is
+    /// what the count tier has always compared against the row count.
+    pub file_count: usize,
+}
+
+/// The columns an incremental rebuild must compare before it may skip a row.
+///
+/// Everything here is something a full rebuild would (re)write and that a
+/// matching content hash does **not** imply — see the skip predicate in
+/// `reindex_dir` for why each one is load-bearing.
+struct RowIdentity {
+    sha256: String,
+    len: u64,
+    has_embedding: bool,
+}
+
+/// What a metadata rebuild did.
+///
+/// `indexed` counts every memory now represented in the index — skipped rows
+/// included, since they are still correctly indexed. `skipped` is how many of
+/// those needed no rewrite, and is always 0 for a full rebuild.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReindexCounts {
+    pub indexed: usize,
+    pub skipped: usize,
+}
+
+/// Scan a directory for `.md` files, recording each one's path and length.
+///
+/// One `statx` per file (`DirEntry::metadata`, which on Linux is served from
+/// the `getdents` batch where possible) and no file reads — this is the whole
+/// cost of the `size` tier.
+///
+/// Duplicate ids resolve newest-wins, exactly as [`scan_dir_to_map`] does, so
+/// the file the staleness check compares is the same one the read path would
+/// serve. A file whose metadata cannot be read is skipped rather than counted
+/// with a length of zero, which would report as drift.
+async fn scan_dir_to_stats(dir: &Path) -> DirStats {
+    let mut by_id: HashMap<String, FileStat> = HashMap::new();
+    let mut file_count = 0;
+    if !dir.exists() {
+        return DirStats { by_id, file_count };
+    }
+    let Ok(mut entries) = async_fs::read_dir(dir).await else {
+        return DirStats { by_id, file_count };
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
+        file_count += 1;
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
+        let id = memory_file::extract_id_from_stem(stem).to_string();
+        let stat = FileStat {
+            path,
+            len: meta.len(),
+        };
+        match by_id.get(&id) {
+            Some(existing) => {
+                if file_mtime(&stat.path).await >= file_mtime(&existing.path).await {
+                    by_id.insert(id, stat);
+                }
+            }
+            None => {
+                by_id.insert(id, stat);
+            }
+        }
+    }
+    DirStats { by_id, file_count }
 }
 
 /// Scan a directory and build a `HashMap` mapping memory ID → path
@@ -2459,6 +3087,7 @@ mod tests {
                     m.id.clone(),
                     m.updated_at,
                     vec![vec![i as f32; 384], vec![(i + 100) as f32; 384]],
+                    None,
                 )
             })
             .collect();
@@ -2491,12 +3120,18 @@ mod tests {
         store.create(&stale).await.unwrap();
 
         let entries = vec![
-            (fresh.id.clone(), fresh.updated_at, vec![vec![1.0f32; 384]]),
+            (
+                fresh.id.clone(),
+                fresh.updated_at,
+                vec![vec![1.0f32; 384]],
+                None,
+            ),
             // A snapshot timestamp that no longer matches the stored memory.
             (
                 stale.id.clone(),
                 stale.updated_at - chrono::Duration::seconds(60),
                 vec![vec![2.0f32; 384]],
+                None,
             ),
         ];
         let written = store.upsert_chunks_batch(entries).await.unwrap();
@@ -2531,6 +3166,7 @@ mod tests {
                 rewritten.id.clone(),
                 rewritten.updated_at,
                 vec![vec![3.0f32; 384]],
+                None,
             )])
             .await
             .unwrap();
@@ -2557,13 +3193,19 @@ mod tests {
                 m.id.clone(),
                 m.updated_at,
                 vec![vec![1.0f32; 384], vec![2.0f32; 384], vec![3.0f32; 384]],
+                None,
             )])
             .await
             .unwrap();
         assert_eq!(store.export_chunks(&m.id).await.unwrap().len(), 3);
 
         store
-            .upsert_chunks_batch(vec![(m.id.clone(), m.updated_at, vec![vec![4.0f32; 384]])])
+            .upsert_chunks_batch(vec![(
+                m.id.clone(),
+                m.updated_at,
+                vec![vec![4.0f32; 384]],
+                None,
+            )])
             .await
             .unwrap();
         assert_eq!(
@@ -2949,6 +3591,82 @@ mod tests {
         assert!(!has_embedding_flag(&store, "he-1").await, "chunks deleted");
     }
 
+    /// REGRESSION: the BATCHED chunk delete must clear `has_embedding` too.
+    ///
+    /// `delete_chunks` cleared the flag but `delete_chunks_batch` did not,
+    /// while `upsert_chunks_batch` routes every entry whose text embedded to
+    /// nothing into the batched path. A memory edited down to empty content
+    /// therefore ended with zero chunk rows and `has_embedding = true`, and
+    /// stayed eligible for `has_embedding`-gated semantic ranking (R3) — with
+    /// no vectors to rank on — until the next reindex rebuilt the flag.
+    #[tokio::test]
+    async fn delete_chunks_batch_clears_has_embedding_flag() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for id in ["hb-1", "hb-2"] {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .upsert_chunks(id, vec![vec![0.2f32; 384]])
+                .await
+                .unwrap();
+            assert!(has_embedding_flag(&store, id).await);
+        }
+
+        store
+            .lance_index
+            .delete_chunks_batch(&["hb-1".to_string(), "hb-2".to_string()])
+            .await
+            .unwrap();
+
+        for id in ["hb-1", "hb-2"] {
+            assert!(
+                !has_embedding_flag(&store, id).await,
+                "{id}: batched chunk delete must clear has_embedding, \
+                 exactly as the per-memory delete does"
+            );
+        }
+    }
+
+    /// The empty-text path through `upsert_chunks_batch` (which delegates to
+    /// `delete_chunks_batch`) must leave the flag false — the end-to-end shape
+    /// of the regression above, driven through the public API.
+    #[tokio::test]
+    async fn upsert_chunks_batch_with_no_chunks_clears_has_embedding() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = create_test_memory("hb-empty", Visibility::Shared);
+        store.create(&mem).await.unwrap();
+        store
+            .upsert_chunks("hb-empty", vec![vec![0.2f32; 384]])
+            .await
+            .unwrap();
+        assert!(has_embedding_flag(&store, "hb-empty").await);
+
+        // Re-embedding a now-empty memory yields no chunks for it.
+        let current = store.get("hb-empty").await.unwrap();
+        store
+            .upsert_chunks_batch(vec![(
+                "hb-empty".to_string(),
+                current.updated_at,
+                Vec::new(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        assert!(
+            !has_embedding_flag(&store, "hb-empty").await,
+            "a memory re-embedded to zero chunks must not stay has_embedding=true"
+        );
+    }
+
     /// A store predating `keyword_stems` must gain populated stems on open,
     /// and they must equal what computing from the `.md` file would produce.
     /// Equality is the whole point: the stored value is only useful because
@@ -3042,17 +3760,486 @@ mod tests {
         );
     }
 
+    // ===================================================================
+    // Schema 0.8.0: content digests (index currency).
+    // ===================================================================
+
+    /// The row's recorded digest for `id`, or `None` when unknown.
+    async fn row_digest(store: &MemoryStore, id: &str) -> Option<crate::digest::FileDigest> {
+        let digests = store.lance_index.list_digests().await.unwrap();
+        let row = digests.into_iter().find(|d| d.memory_id == id)?;
+        Some(crate::digest::FileDigest {
+            sha256: row.content_sha256?,
+            len: row.content_len?,
+        })
+    }
+
+    /// The digest of whatever `id`'s file actually contains right now.
+    async fn disk_digest(store: &MemoryStore, id: &str) -> crate::digest::FileDigest {
+        let shared = paths::memories_dir(&store.project_dir);
+        let personal = paths::personal_memories_dir(&store.project_id).unwrap();
+        for dir in [shared, personal] {
+            if let Some(path) = find_memory_files(&dir, id)
+                .await
+                .unwrap()
+                .into_iter()
+                .next()
+            {
+                let bytes = async_fs::read(&path).await.unwrap();
+                return crate::digest::FileDigest::of(&bytes);
+            }
+        }
+        panic!("no file on disk for {id}");
+    }
+
+    /// `create` must stamp the identity of the bytes it wrote — not of a
+    /// re-serialization, and not nothing.
+    #[tokio::test]
+    async fn content_digest_stamped_on_create_matches_file_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-1", Visibility::Shared))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            row_digest(&store, "cd-1").await,
+            Some(disk_digest(&store, "cd-1").await),
+            "the row must record exactly what is on disk"
+        );
+    }
+
+    /// Every write path stamps: single update, batch update, and batch create.
+    #[tokio::test]
+    async fn content_digest_stamped_on_every_write_path() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+
+        // create_batch — the path where `content` is scoped to a different loop
+        // than the index rows, so the digest has to be carried forward.
+        store
+            .create_batch(&[
+                create_test_memory("cd-b1", Visibility::Shared),
+                create_test_memory("cd-b2", Visibility::Shared),
+            ])
+            .await
+            .unwrap();
+        for id in ["cd-b1", "cd-b2"] {
+            assert_eq!(
+                row_digest(&store, id).await,
+                Some(disk_digest(&store, id).await),
+                "{id}: create_batch must stamp each row from its own file"
+            );
+        }
+
+        // update_with — a content change must move the digest.
+        let before = row_digest(&store, "cd-b1").await.unwrap();
+        store
+            .update_with("cd-b1", |m| {
+                m.content = "materially different content".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let after = row_digest(&store, "cd-b1").await.unwrap();
+        assert_ne!(before.sha256, after.sha256, "update must restamp");
+        assert_eq!(after, disk_digest(&store, "cd-b1").await);
+
+        // update_batch_with — the separate batched path.
+        store
+            .update_batch_with(&["cd-b2".to_string()], |m| {
+                m.content = "batched rewrite".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            row_digest(&store, "cd-b2").await,
+            Some(disk_digest(&store, "cd-b2").await),
+            "update_batch_with must stamp too"
+        );
+    }
+
+    /// A title change renames the file. The row must record the digest of the
+    /// file that now exists, not of the one that was just deleted.
+    #[tokio::test]
+    async fn content_digest_survives_title_rename() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory(
+                "0190cdcd-bbbb-7ccc-8ddd-000000000001",
+                Visibility::Shared,
+            ))
+            .await
+            .unwrap();
+
+        store
+            .update_with("0190cdcd-bbbb-7ccc-8ddd-000000000001", |m| {
+                m.title = Some("a brand new title".to_string());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            row_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000001").await,
+            Some(disk_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000001").await),
+            "the surviving file's digest must be the one recorded"
+        );
+    }
+
+    /// `reindex` backfills digests from disk for rows that had none.
+    #[tokio::test]
+    async fn reindex_backfills_content_digest_from_disk() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-rx", Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Simulate a row that predates the column by clearing it in place.
+        let mut entry = IndexEntry::without_digest(&store.get("cd-rx").await.unwrap());
+        entry.has_embedding = false;
+        store.lance_index.upsert(&entry).await.unwrap();
+        assert_eq!(row_digest(&store, "cd-rx").await, None, "cleared");
+
+        store.reindex().await.unwrap();
+
+        assert_eq!(
+            row_digest(&store, "cd-rx").await,
+            Some(disk_digest(&store, "cd-rx").await),
+            "reindex must backfill the digest from the file it read"
+        );
+    }
+
+    /// When two files claim one ID, `reindex_dir` deletes the loser. The row
+    /// must carry the digest of the file left on disk — recording the deleted
+    /// one would report permanent drift against a file that no longer exists.
+    #[tokio::test]
+    async fn content_digest_follows_winner_of_duplicate_id_resolution() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut mem =
+            create_test_memory("0190cdcd-bbbb-7ccc-8ddd-000000000002", Visibility::Shared);
+        mem.title = Some("winner".to_string());
+        store.create(&mem).await.unwrap();
+
+        // A stale duplicate under a different slug, with an older mtime and
+        // materially different content.
+        let mut stale = mem.clone();
+        stale.title = Some("loser".to_string());
+        stale.content = "stale duplicate content".to_string();
+        let shared = paths::memories_dir(&store.project_dir);
+        let stale_path = shared.join(memory_file::memory_filename(&stale));
+        std::fs::write(&stale_path, memory_file::write_memory_file(&stale).unwrap()).unwrap();
+        age_file(&stale_path, 3600);
+
+        store.reindex().await.unwrap();
+
+        assert!(!stale_path.exists(), "the older duplicate is removed");
+        assert_eq!(
+            row_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000002").await,
+            Some(disk_digest(&store, "0190cdcd-bbbb-7ccc-8ddd-000000000002").await),
+            "the digest must be the surviving file's"
+        );
+    }
+
+    /// The 0.8.0 migration against a store whose Arrow schema genuinely lacks
+    /// the columns: they appear, are populated from the `.md` files, vectors
+    /// survive, and the stamp advances.
+    #[tokio::test]
+    async fn schema_migration_to_0_8_0_upgrades_a_real_0_7_0_store() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-mig", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("cd-mig", vec![vec![0.4f32; 384]])
+            .await
+            .unwrap();
+        drop(store);
+
+        downgrade_to_0_7_0(tmp.path()).await;
+
+        // Opening migrates.
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+
+        assert_eq!(
+            row_digest(&store, "cd-mig").await,
+            Some(disk_digest(&store, "cd-mig").await),
+            "migration must backfill the digest from the file"
+        );
+        assert_eq!(
+            store.export_chunks("cd-mig").await.unwrap(),
+            vec![vec![0.4f32; 384]],
+            "vectors must survive a metadata-only migration"
+        );
+        let m = manifest::load_manifest(&paths::project_dir(tmp.path()).join("manifest.toml"))
+            .await
+            .unwrap();
+        assert_eq!(m.schema_version, manifest::CURRENT_SCHEMA_VERSION);
+    }
+
+    /// A file edited behind the store's back must be visible as drift: the
+    /// recorded digest no longer matches the bytes on disk. This is the whole
+    /// point of the column — counts and id sets are both unchanged here.
+    #[tokio::test]
+    async fn hand_edited_file_diverges_from_its_recorded_digest() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("cd-edit", Visibility::Shared))
+            .await
+            .unwrap();
+        let recorded = row_digest(&store, "cd-edit").await.unwrap();
+
+        // Edit the file directly, exactly as a human or `git checkout` would.
+        let shared = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&shared, "cd-edit")
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Test content", "Edited behind the store's back");
+        std::fs::write(&path, &edited).unwrap();
+
+        assert_ne!(
+            recorded,
+            disk_digest(&store, "cd-edit").await,
+            "an in-place edit must diverge from the recorded digest"
+        );
+        // ...and the checks that exist today cannot see it.
+        assert_eq!(store.list_ids().await.unwrap().len(), 1);
+        assert!(
+            store
+                .check_staleness(&tier(StalenessCheck::Counts))
+                .await
+                .unwrap()
+                .is_none(),
+            "the count-based check is blind to this — which is why the digest exists"
+        );
+    }
+
+    /// The embed digest rides the same write as the vectors, and is readable
+    /// back per memory.
+    #[tokio::test]
+    async fn embed_digest_is_written_and_read_back_with_its_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = create_test_memory("ed-1", Visibility::Shared);
+        store.create(&m).await.unwrap();
+
+        store
+            .upsert_chunks_batch(vec![(
+                "ed-1".to_string(),
+                m.updated_at,
+                vec![vec![0.1f32; 384], vec![0.2f32; 384]],
+                Some("digest-abc".to_string()),
+            )])
+            .await
+            .unwrap();
+
+        let digests = store.embed_digests().await.unwrap();
+        assert_eq!(
+            digests.get("ed-1"),
+            Some(&Some("digest-abc".to_string())),
+            "the digest must be readable back for the memory it was written with"
+        );
+        // The vectors are unaffected by carrying the digest alongside them.
+        assert_eq!(store.export_chunks("ed-1").await.unwrap().len(), 2);
+    }
+
+    /// The un-digested entry point records `None`, which reads as *unknown* —
+    /// never as *current*. Worktree relocation and tests take this path.
+    #[tokio::test]
+    async fn upsert_chunks_without_digest_records_unknown() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("ed-2", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("ed-2", vec![vec![0.3f32; 384]])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.embed_digests().await.unwrap().get("ed-2"),
+            Some(&None),
+            "present but unknown — the memory has vectors, of unrecorded provenance"
+        );
+    }
+
+    /// Deleting a memory's chunks takes its digest with them: absent from the
+    /// map entirely, not left behind as a stale claim about vectors that are
+    /// gone.
+    #[tokio::test]
+    async fn deleting_chunks_removes_the_digest_too() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = create_test_memory("ed-3", Visibility::Shared);
+        store.create(&m).await.unwrap();
+        store
+            .upsert_chunks_batch(vec![(
+                "ed-3".to_string(),
+                m.updated_at,
+                vec![vec![0.4f32; 384]],
+                Some("digest-xyz".to_string()),
+            )])
+            .await
+            .unwrap();
+        assert!(store.embed_digests().await.unwrap().contains_key("ed-3"));
+
+        store.delete_chunks("ed-3").await.unwrap();
+
+        assert!(
+            !store.embed_digests().await.unwrap().contains_key("ed-3"),
+            "no vectors ⇒ no digest; the two are written and deleted together"
+        );
+    }
+
+    /// A chunks table written before 0.8.0 has no `embed_sha256` column at all.
+    /// The migration must add it in place — the vectors cannot be rebuilt from
+    /// anything, so recreating the table would destroy exactly what the
+    /// metadata-only migration exists to preserve.
+    #[tokio::test]
+    async fn schema_migration_adds_the_chunks_digest_column_in_place() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("ed-mig", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("ed-mig", vec![vec![0.7f32; 384]])
+            .await
+            .unwrap();
+        drop(store);
+
+        drop_chunks_column(tmp.path(), "embed_sha256").await;
+        downgrade_to_0_7_0(tmp.path()).await;
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+
+        // The column is back, the vectors survived, and their provenance reads
+        // as unknown (so they re-embed when asked, rather than being trusted).
+        assert_eq!(
+            store.export_chunks("ed-mig").await.unwrap(),
+            vec![vec![0.7f32; 384]],
+            "vectors must survive the in-place column add"
+        );
+        assert_eq!(
+            store.embed_digests().await.unwrap().get("ed-mig"),
+            Some(&None)
+        );
+
+        // Idempotent: opening again must not fail or duplicate the column.
+        drop(store);
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(store.export_chunks("ed-mig").await.unwrap().len(), 1);
+    }
+
+    /// Rewrite a store's `chunks` table without `col`, reproducing a table
+    /// written before that column existed.
+    async fn drop_chunks_column(dir: &Path, col: &str) {
+        use arrow_array::RecordBatchIterator;
+        use futures_util::stream::StreamExt;
+        use lancedb::query::ExecutableQuery;
+        use std::sync::Arc;
+
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id).unwrap();
+        let conn = lancedb::connect(lance_path.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let table = conn.open_table("chunks").execute().await.unwrap();
+
+        let mut stream = table.query().execute().await.unwrap();
+        let mut reduced = Vec::new();
+        let mut reduced_schema = None;
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            let keep: Vec<usize> = (0..schema.fields().len())
+                .filter(|i| schema.field(*i).name() != col)
+                .collect();
+            assert_eq!(
+                keep.len() + 1,
+                schema.fields().len(),
+                "fixture must actually remove {col}"
+            );
+            let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
+            let new_schema = Arc::new(arrow_schema::Schema::new(fields));
+            let columns: Vec<_> = keep.iter().map(|i| batch.column(*i).clone()).collect();
+            reduced.push(arrow_array::RecordBatch::try_new(new_schema.clone(), columns).unwrap());
+            reduced_schema = Some(new_schema);
+        }
+        let schema = reduced_schema.expect("fixture needs at least one chunk");
+
+        conn.drop_table("chunks", &[]).await.unwrap();
+        let batches: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
+            RecordBatchIterator::new(reduced.into_iter().map(Ok), schema),
+        );
+        conn.create_table("chunks", batches)
+            .execute()
+            .await
+            .unwrap();
+    }
+
     /// Rewrite a store's `memories` table without the `source_sessions`
     /// column, and stamp the manifest at 0.6.0.
+    async fn downgrade_to_0_6_0(dir: &Path) {
+        downgrade_dropping(dir, &["source_sessions"], "0.6.0").await
+    }
+
+    /// Rewrite a store's `memories` table without the 0.8.0 content-digest
+    /// columns, and stamp the manifest at 0.7.0.
+    async fn downgrade_to_0_7_0(dir: &Path) {
+        downgrade_dropping(dir, &["content_sha256", "content_len"], "0.7.0").await
+    }
+
+    /// Rewrite a store's `memories` table with `drop_cols` removed from the
+    /// Arrow schema, and stamp the manifest at `version`.
     ///
     /// The other migration tests here downgrade only the manifest stamp, which
     /// exercises the backfill but never the case that actually breaks: a table
     /// whose Arrow schema is genuinely missing the new column. This builds that
-    /// table by reading the current one, dropping the field and its array, and
-    /// recreating the table from the reduced batches — so the fixture is the
+    /// table by reading the current one, dropping the fields and their arrays,
+    /// and recreating the table from the reduced batches — so the fixture is the
     /// previous version's on-disk shape rather than a stand-in for it, and it
     /// stays honest if a later version adds another column.
-    async fn downgrade_to_0_6_0(dir: &Path) {
+    async fn downgrade_dropping(dir: &Path, drop_cols: &[&str], version: &str) {
         use arrow_array::RecordBatchIterator;
         use futures_util::stream::StreamExt;
         use lancedb::query::ExecutableQuery;
@@ -3073,12 +4260,12 @@ mod tests {
             let batch = batch.unwrap();
             let schema = batch.schema();
             let keep: Vec<usize> = (0..schema.fields().len())
-                .filter(|i| schema.field(*i).name() != "source_sessions")
+                .filter(|i| !drop_cols.contains(&schema.field(*i).name().as_str()))
                 .collect();
             assert_eq!(
-                keep.len() + 1,
+                keep.len() + drop_cols.len(),
                 schema.fields().len(),
-                "fixture must actually remove the new column"
+                "fixture must actually remove every named column"
             );
             let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
             let new_schema = Arc::new(arrow_schema::Schema::new(fields));
@@ -3099,7 +4286,7 @@ mod tests {
 
         let manifest_path = paths::project_dir(dir).join("manifest.toml");
         let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
-        m.schema_version = "0.6.0".to_string();
+        m.schema_version = version.to_string();
         // Only the schema axis may trigger: leaving the normalizer stale would
         // migrate for the wrong reason and the test would pass with the version
         // gate broken.
@@ -4382,7 +5569,12 @@ mod tests {
 
         // Current snapshot: written.
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.1f32; 384]], memory.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.1f32; 384]],
+                memory.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(written);
@@ -4396,14 +5588,24 @@ mod tests {
             .await
             .unwrap();
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.9f32; 384]], newer.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.9f32; 384]],
+                newer.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(written);
 
         // ...so the OLD snapshot's late-arriving vectors are refused.
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.1f32; 384]], memory.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.1f32; 384]],
+                memory.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(!written, "stale snapshot must not overwrite newer vectors");
@@ -4416,7 +5618,12 @@ mod tests {
         // Deleted memory: a late embed must not re-insert orphan chunks.
         store.delete("guarded-chunks").await.unwrap();
         let written = store
-            .upsert_chunks_if_current("guarded-chunks", vec![vec![0.5f32; 384]], newer.updated_at)
+            .upsert_chunks_if_current(
+                "guarded-chunks",
+                vec![vec![0.5f32; 384]],
+                newer.updated_at,
+                None,
+            )
             .await
             .unwrap();
         assert!(!written, "deleted memory must not get orphan chunks");
@@ -4462,7 +5669,10 @@ mod tests {
         let memory = create_test_memory("staleness-sync-1", Visibility::Shared);
         store.create(&memory).await.unwrap();
 
-        let result = store.check_staleness().await.unwrap();
+        let result = store
+            .check_staleness(&IndexConfig::default())
+            .await
+            .unwrap();
         assert!(
             result.is_none(),
             "Expected no staleness warning when in sync"
@@ -4483,14 +5693,20 @@ mod tests {
         // Delete LanceDB entry but leave the .md file
         store.lance_index.clear().await.unwrap();
 
-        let result = store.check_staleness().await.unwrap();
+        let result = store
+            .check_staleness(&IndexConfig::default())
+            .await
+            .unwrap();
         assert!(
             result.is_some(),
             "Expected staleness warning after clearing index"
         );
         let warning = result.unwrap();
-        assert!(warning.contains("1 memories on disk"));
-        assert!(warning.contains("0 indexed"));
+        // Id-level detail replaces the bare counts: naming the memory that is
+        // missing says strictly more than "1 on disk, 0 indexed", and saying
+        // both says one thing twice.
+        assert!(warning.contains("1 memory not indexed"), "{warning}");
+        assert!(warning.contains("engramdb reindex"), "{warning}");
     }
 
     // --- get_batch tests ---
@@ -5065,26 +6281,667 @@ mod tests {
     }
 
     // ===================================================================
+    // reindex_incremental — skipping rows whose file is unchanged
+    // ===================================================================
+
+    /// Nothing changed: every row is skipped, and the store is still complete.
+    #[tokio::test]
+    async fn incremental_reindex_skips_every_unchanged_row() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let id = format!("0190aaaa-bbbb-7ccc-8ddd-00000000in{:02}", i);
+            store
+                .create(&create_test_memory(&id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.indexed, 3, "every memory is still accounted for");
+        assert_eq!(counts.skipped, 3, "and none of them needed a rewrite");
+        assert_eq!(store.list_for_filtering().await.unwrap().len(), 3);
+    }
+
+    /// Only the edited memory is rewritten.
+    #[tokio::test]
+    async fn incremental_reindex_rewrites_only_the_changed_row() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let ids: Vec<String> = (0..3)
+            .map(|i| format!("0190aaaa-bbbb-7ccc-8ddd-00000000ch{:02}", i))
+            .collect();
+        for id in &ids {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        store.reindex_incremental().await.unwrap();
+
+        edit_file_behind_store(&store, &ids[1], "a rewritten body\n").await;
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.indexed, 3);
+        assert_eq!(counts.skipped, 2, "the two untouched files are skipped");
+
+        // The edited row now reflects the file: no drift remains.
+        let digests = store.index_digests().await.unwrap();
+        let row = digests.iter().find(|d| d.memory_id == ids[1]).unwrap();
+        let bytes = store.read_memory_bytes(&ids[1]).await.unwrap().unwrap();
+        assert_eq!(
+            row.content_sha256.as_deref(),
+            Some(crate::digest::FileDigest::of(&bytes).sha256.as_str()),
+            "the rewritten row must describe the edited file"
+        );
+    }
+
+    /// **The data-loss guard.** A skipped memory keeps its vectors.
+    ///
+    /// `indexed_ids` drives the orphan-chunk prune, so a skipped row that was
+    /// left out of it would have its vectors deleted — turning a no-op reindex
+    /// into silent, unrecoverable vector loss.
+    #[tokio::test]
+    async fn incremental_reindex_keeps_vectors_of_skipped_memories() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000vv";
+        let m = create_test_memory(id, Visibility::Shared);
+        store.create(&m).await.unwrap();
+        store
+            .upsert_chunks(id, vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+        assert!(!store.export_chunks(id).await.unwrap().is_empty());
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.skipped, 1, "fixture must actually skip");
+        assert!(
+            !store.export_chunks(id).await.unwrap().is_empty(),
+            "a skipped memory must keep its vectors"
+        );
+        // And its row still says it has them.
+        let digests = store.index_digests().await.unwrap();
+        assert!(
+            digests
+                .iter()
+                .find(|d| d.memory_id == id)
+                .unwrap()
+                .has_embedding
+        );
+    }
+
+    /// **The deletion guard.** Incremental never clears the table, so a row
+    /// whose file is gone has to be removed explicitly — otherwise it answers
+    /// queries forever with a memory that no longer exists.
+    #[tokio::test]
+    async fn incremental_reindex_removes_rows_whose_file_is_gone() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let keep = "0190aaaa-bbbb-7ccc-8ddd-0000000000k1";
+        let gone = "0190aaaa-bbbb-7ccc-8ddd-0000000000g1";
+        for id in [keep, gone] {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        store.reindex_incremental().await.unwrap();
+
+        // Remove the file behind the store's back, leaving the row.
+        let dir = paths::memories_dir(&store.project_dir);
+        for path in find_memory_files(&dir, gone).await.unwrap() {
+            async_fs::remove_file(&path).await.unwrap();
+        }
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.indexed, 1);
+        let ids: Vec<String> = store
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec![keep.to_string()], "the deleted row must be gone");
+    }
+
+    /// A row with no recorded digest whose file is gone must still be removed.
+    ///
+    /// The skip map holds only rows that *have* a digest, since a row without
+    /// one can never match a file. Deriving deletions from that same map would
+    /// leave such a row in the index permanently — it is absent from the very
+    /// structure that decides what to remove. Deletions come from the full row
+    /// set for exactly this case.
+    #[tokio::test]
+    async fn incremental_reindex_removes_a_digestless_row_whose_file_is_gone() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let keep = "0190aaaa-bbbb-7ccc-8ddd-0000000000d1";
+        let gone = "0190aaaa-bbbb-7ccc-8ddd-0000000000d2";
+        for id in [keep, gone] {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        // Strip every digest, so no row carries one (a pre-0.8.0 shape).
+        crate::test_support::clear_content_digests(&store)
+            .await
+            .unwrap();
+        let dir = paths::memories_dir(&store.project_dir);
+        for path in find_memory_files(&dir, gone).await.unwrap() {
+            async_fs::remove_file(&path).await.unwrap();
+        }
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.skipped, 0, "no digest means nothing can be skipped");
+        let ids: Vec<String> = store
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![keep.to_string()],
+            "the digest-less row whose file is gone must still be deleted"
+        );
+    }
+
+    /// **Review finding.** A skipped row must not keep a stale `has_embedding`.
+    ///
+    /// The flag mirrors the chunks table, not the file, so vectors added or
+    /// dropped since the last rebuild leave an unchanged file and a wrong flag.
+    /// The retrieval scorer reads it to decide whether a memory has semantic
+    /// evidence at all, and a full reindex is what used to reconcile it — so
+    /// "incremental produces what full produces" was false here.
+    #[tokio::test]
+    async fn incremental_reindex_refreshes_a_stale_has_embedding_flag() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000he";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        store.reindex().await.unwrap();
+
+        // Vectors appear without the file changing.
+        store
+            .upsert_chunks(id, vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+        // Force the mirror stale, as a half-committed chunk write would.
+        store
+            .lance_index
+            .set_has_embedding(id, false)
+            .await
+            .unwrap();
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.skipped, 0, "a stale flag is work, not a skip");
+        let digests = store.index_digests().await.unwrap();
+        assert!(
+            digests
+                .iter()
+                .find(|d| d.memory_id == id)
+                .unwrap()
+                .has_embedding,
+            "the flag must be reconciled from the chunks table"
+        );
+    }
+
+    /// **Review finding.** A skipped row must not keep a stale `content_len`.
+    ///
+    /// `content_sha256` is computed over CRLF-normalized bytes while
+    /// `content_len` is the raw on-disk length — deliberately different things.
+    /// A `core.autocrlf` checkout therefore leaves a matching hash and a stale
+    /// length, and the DEFAULT `size` staleness tier compares exactly that
+    /// length. Skipping on the hash alone made the read path warn on every
+    /// query with no reindex able to clear it.
+    #[tokio::test]
+    async fn incremental_reindex_refreshes_a_stale_content_len() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000cl";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        store.reindex().await.unwrap();
+
+        // Rewrite the file with CRLF terminators: same normalized hash, longer
+        // raw file. This is what a git line-ending filter produces.
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&dir, id).await.unwrap()[0].clone();
+        let lf = async_fs::read_to_string(&path).await.unwrap();
+        let crlf = lf.replace('\n', "\r\n");
+        assert!(crlf.len() > lf.len());
+        async_fs::write(&path, &crlf).await.unwrap();
+        assert_eq!(
+            crate::digest::FileDigest::of(crlf.as_bytes()).sha256,
+            crate::digest::FileDigest::of(lf.as_bytes()).sha256,
+            "fixture premise: normalization makes the hashes equal"
+        );
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.skipped, 0, "a stale length is work, not a skip");
+
+        // And the read path is quiet again at the default tier.
+        assert_eq!(
+            store
+                .check_staleness(&IndexConfig::default())
+                .await
+                .unwrap(),
+            None,
+            "the size tier must have nothing left to report"
+        );
+    }
+
+    /// **The equivalence gate.** An incremental rebuild must leave the same
+    /// index a full one would.
+    ///
+    /// Both arms run against the *same* store rather than two freshly built
+    /// ones: memory files carry creation timestamps, so two stores seeded a
+    /// moment apart hold genuinely different bytes and would differ for
+    /// reasons that have nothing to do with skipping. Rebuilding the same
+    /// store twice — incrementally, then fully — compares exactly the thing
+    /// under test, and is the stronger property anyway.
+    #[tokio::test]
+    async fn incremental_reindex_matches_full_reindex() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let ids: Vec<String> = (0..4)
+            .map(|i| format!("0190aaaa-bbbb-7ccc-8ddd-00000000eq{:02}", i))
+            .collect();
+        for id in &ids {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        // Vectors on one memory, so `has_embedding` is exercised in both arms.
+        store
+            .upsert_chunks(&ids[0], vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+        store.reindex().await.unwrap();
+
+        // Real work for both arms: one edit, one deletion.
+        edit_file_behind_store(&store, &ids[1], "changed body\n").await;
+        let dir = paths::memories_dir(&store.project_dir);
+        for path in find_memory_files(&dir, &ids[3]).await.unwrap() {
+            async_fs::remove_file(&path).await.unwrap();
+        }
+
+        async fn snapshot(store: &MemoryStore) -> Vec<(String, Option<String>, bool)> {
+            let mut rows: Vec<(String, Option<String>, bool)> = store
+                .index_digests()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|d| (d.memory_id, d.content_sha256, d.has_embedding))
+                .collect();
+            rows.sort();
+            rows
+        }
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.skipped, 2, "the two untouched memories are skipped");
+        let after_incremental = snapshot(&store).await;
+
+        store.reindex().await.unwrap();
+        let after_full = snapshot(&store).await;
+
+        assert_eq!(
+            after_incremental, after_full,
+            "an incremental rebuild must produce the index a full one would"
+        );
+        // And the vectors survived both.
+        assert!(!store.export_chunks(&ids[0]).await.unwrap().is_empty());
+    }
+
+    /// A stale normalizer stamp means the *derivation* changed even where the
+    /// bytes did not, so an unchanged file is exactly the case needing a
+    /// rebuild. Incremental must fall back to rebuilding everything.
+    #[tokio::test]
+    async fn incremental_reindex_falls_back_when_the_derivation_stamp_is_stale() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory(
+                "0190aaaa-bbbb-7ccc-8ddd-0000000000ns",
+                Visibility::Shared,
+            ))
+            .await
+            .unwrap();
+        store.reindex().await.unwrap();
+
+        // Foreign normalizer: same bytes, different stems.
+        let manifest_path = paths::project_dir(&store.project_dir).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.normalizer = Some("some-other-stemmer-v9".to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(
+            counts.skipped, 0,
+            "a foreign derivation stamp must rebuild every row, not skip it"
+        );
+        assert_eq!(counts.indexed, 1);
+    }
+
+    // ===================================================================
+    // check_staleness — the tiered index-currency check.
+    //
+    // The pure reconciliation and wording live in `crate::staleness`; these
+    // exercise the store-side scan, i.e. which tier notices what.
+    // ===================================================================
+
+    /// Overwrite a memory's file on disk, behind the store's back — a hand
+    /// edit, a `git checkout`, a restore. Returns the id.
+    async fn edit_file_behind_store(store: &MemoryStore, id: &str, new_body: &str) {
+        let dir = paths::memories_dir(&store.project_dir);
+        let files = find_memory_files(&dir, id).await.unwrap();
+        let path = files.first().expect("memory file on disk");
+        let text = async_fs::read_to_string(path).await.unwrap();
+        // Keep the frontmatter, replace the body — the file stays parseable.
+        let (fm, _) = text.split_once("\n---\n").expect("frontmatter delimiter");
+        async_fs::write(path, format!("{fm}\n---\n{new_body}"))
+            .await
+            .unwrap();
+    }
+
+    fn tier(check: StalenessCheck) -> IndexConfig {
+        IndexConfig {
+            staleness_check: check,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn staleness_in_sync_store_is_silent_at_every_tier() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for i in 0..3 {
+            let id = format!("0190aaaa-bbbb-7ccc-8ddd-00000000ss{:02}", i);
+            store
+                .create(&create_test_memory(&id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            assert_eq!(
+                store.check_staleness(&tier(check)).await.unwrap(),
+                None,
+                "a store in sync must not warn at the {} tier",
+                check.as_str()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn staleness_count_mismatch_warns_at_every_tier() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000c1";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        // Delete the file only — the row survives.
+        let dir = paths::memories_dir(&store.project_dir);
+        for path in find_memory_files(&dir, id).await.unwrap() {
+            async_fs::remove_file(&path).await.unwrap();
+        }
+
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            assert!(
+                store.check_staleness(&tier(check)).await.unwrap().is_some(),
+                "a missing file must warn at the {} tier",
+                check.as_str()
+            );
+        }
+    }
+
+    /// **Blind spot the `size` tier exists to close.** A hand edit leaves the
+    /// count identical, so the `counts` tier reports a clean store.
+    #[tokio::test]
+    async fn staleness_hand_edit_is_missed_by_counts_and_caught_by_size() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000e1";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        edit_file_behind_store(&store, id, "a substantially longer body than before\n").await;
+
+        assert_eq!(
+            store
+                .check_staleness(&tier(StalenessCheck::Counts))
+                .await
+                .unwrap(),
+            None,
+            "the count tier is invariant under in-place change — this is the blind spot"
+        );
+        let warning = store
+            .check_staleness(&tier(StalenessCheck::Size))
+            .await
+            .unwrap()
+            .expect("the size tier must notice a length change");
+        assert!(
+            warning.contains("1 memory changed since indexing (size check)"),
+            "{warning}"
+        );
+    }
+
+    /// **The `size`/`content` boundary.** An edit that preserves the file's
+    /// length exactly is invisible to `statx` and needs the hash.
+    #[tokio::test]
+    async fn staleness_same_length_edit_needs_the_content_tier() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000e2";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Read the body back and substitute one character for another, so the
+        // byte length is untouched.
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&dir, id).await.unwrap()[0].clone();
+        let before = async_fs::read(&path).await.unwrap();
+        let mutated: Vec<u8> = before
+            .iter()
+            .map(|b| if *b == b'e' { b'3' } else { *b })
+            .collect();
+        assert_ne!(mutated, before, "the fixture body must contain an 'e'");
+        assert_eq!(mutated.len(), before.len(), "the edit must preserve length");
+        async_fs::write(&path, &mutated).await.unwrap();
+
+        assert_eq!(
+            store
+                .check_staleness(&tier(StalenessCheck::Size))
+                .await
+                .unwrap(),
+            None,
+            "a length-preserving edit is invisible to the size tier, by construction"
+        );
+        let warning = store
+            .check_staleness(&tier(StalenessCheck::Content))
+            .await
+            .unwrap()
+            .expect("the content tier must notice a length-preserving edit");
+        assert!(
+            warning.contains("1 memory changed since indexing (content check)"),
+            "{warning}"
+        );
+    }
+
+    /// A row predating schema 0.8.0 records no length or hash. That is
+    /// *unknown*, not *changed* — reporting it as drift would make every
+    /// not-yet-reindexed store warn on every read, with a reindex the only way
+    /// to silence a warning about nothing.
+    #[tokio::test]
+    async fn staleness_rows_without_a_digest_are_not_reported_as_changed() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = "0190aaaa-bbbb-7ccc-8ddd-0000000000e3";
+        store
+            .create(&create_test_memory(id, Visibility::Shared))
+            .await
+            .unwrap();
+        crate::test_support::clear_content_digests(&store)
+            .await
+            .unwrap();
+
+        for check in [StalenessCheck::Size, StalenessCheck::Content] {
+            assert_eq!(
+                store.check_staleness(&tier(check)).await.unwrap(),
+                None,
+                "an undigested row must not read as changed at the {} tier",
+                check.as_str()
+            );
+        }
+    }
+
+    /// The content tier's budget bounds the work, and says so rather than
+    /// letting a partial exact check read as a clean one.
+    #[tokio::test]
+    async fn staleness_content_budget_is_reported_not_silently_downgraded() {
+        let temp = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        // Two memories; the drift is on the one that sorts *last*, so a budget
+        // that admits only the first cannot see it.
+        let first = "0190aaaa-bbbb-7ccc-8ddd-0000000000b1";
+        let second = "0190aaaa-bbbb-7ccc-8ddd-0000000000b2";
+        for id in [first, second] {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+        // A length-preserving edit, so only the content tier could catch it.
+        let dir = paths::memories_dir(&store.project_dir);
+        let path = find_memory_files(&dir, second).await.unwrap()[0].clone();
+        let bytes = async_fs::read(&path).await.unwrap();
+        let mutated: Vec<u8> = bytes
+            .iter()
+            .map(|b| if *b == b'e' { b'3' } else { *b })
+            .collect();
+        async_fs::write(&path, &mutated).await.unwrap();
+
+        let generous = IndexConfig {
+            staleness_check: StalenessCheck::Content,
+            staleness_max_bytes: 8 * 1024 * 1024,
+        };
+        assert!(
+            store
+                .check_staleness(&generous)
+                .await
+                .unwrap()
+                .is_some_and(|w| w.contains("content check")),
+            "with budget to spare, the edit is found"
+        );
+
+        // A budget of one byte admits nothing at all: the check finds no drift
+        // but must not therefore report a clean store.
+        let starved = IndexConfig {
+            staleness_check: StalenessCheck::Content,
+            staleness_max_bytes: 1,
+        };
+        assert_eq!(
+            store.check_staleness(&starved).await.unwrap(),
+            None,
+            "an exhausted budget with nothing found is not itself a warning — \
+             every read of a large store would otherwise warn"
+        );
+    }
+
+    // ===================================================================
     // Finding #5 (High): staleness warning must be suppressed under a
     // shared-ID checkout conflict (where lance_count > md_count is normal).
     // ===================================================================
 
-    #[test]
-    fn staleness_message_reports_real_drift_without_conflict() {
-        // POSITIVE: genuine drift (no conflict) still warns.
-        assert!(staleness_message(3, 5, false).is_some());
-        // POSITIVE: in-sync counts never warn.
-        assert!(staleness_message(5, 5, false).is_none());
-    }
+    /// Under a conflict the index legitimately holds the *other* checkout's
+    /// rows, so every tier would fire — permanently, since reindex degrades to
+    /// a non-destructive upsert under conflict by design.
+    #[tokio::test]
+    async fn staleness_suppressed_under_checkout_conflict_at_every_tier() {
+        let tmp = TempDir::new().unwrap();
+        let a = make_clone(tmp.path(), "clone-a", "staleness-conflict");
+        let b = make_clone(tmp.path(), "clone-b", "staleness-conflict");
+        let registry = crate::registry::FileRegistry::global().unwrap();
 
-    #[test]
-    fn staleness_message_suppressed_under_checkout_conflict() {
-        // NEGATIVE (red before fix): under a conflict, a count mismatch is
-        // expected (the index holds another checkout's rows) and must NOT warn.
+        let store_a = MemoryStore::init(&a, &registry).await.unwrap();
+        let store_b = MemoryStore::init(&b, &registry).await.unwrap();
+        // Rows in the shared index that clone B has no files for.
+        for i in 0..2 {
+            let id = format!("0190aaaa-bbbb-7ccc-8ddd-00000000cf{:02}", i);
+            store_a
+                .create(&create_test_memory(&id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
         assert!(
-            staleness_message(3, 5, true).is_none(),
-            "must not warn about staleness during a checkout conflict"
+            store_b.checkout_conflict().await.is_some(),
+            "fixture must actually produce a conflict"
         );
+
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            assert_eq!(
+                store_b.check_staleness(&tier(check)).await.unwrap(),
+                None,
+                "must not warn under a checkout conflict at the {} tier",
+                check.as_str()
+            );
+        }
     }
 
     // ===================================================================

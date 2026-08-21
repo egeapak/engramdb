@@ -12,12 +12,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, RecordBatch,
-    RecordBatchIterator, StringArray, UInt32Array,
+    RecordBatchIterator, StringArray, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
 use lancedb::expr::{col, is_in, lit};
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
 use lancedb::{connect, Connection, Table};
 
@@ -69,10 +69,10 @@ const VECTOR_SEARCH_NPROBES: usize = 48;
 /// (their stored vectors are already exact).
 const VECTOR_SEARCH_REFINE_FACTOR: u32 = 4;
 
-/// Full metadata entry stored in LanceDB (all 23 columns).
+/// Full metadata entry stored in LanceDB (all 28 columns).
 ///
 /// Used only for writing to LanceDB. For reads, prefer the narrower
-/// [`IndexSummary`] or [`IndexFilterable`] projections.
+/// [`IndexSummary`], [`IndexFilterable`] or [`IndexDigest`] projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub id: String,
@@ -138,6 +138,21 @@ pub struct IndexEntry {
     // every memory on the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_sessions: Vec<String>,
+    // Added in schema v0.8.0 (index currency). The identity of the `.md` bytes
+    // this row was derived from: SHA-256 of the line-ending-normalized content,
+    // plus the raw on-disk length.
+    //
+    // `None` means *unknown*, never *current* — a row written before 0.8.0, or
+    // by a path with no file behind it. Every currency check compares against
+    // `Some(..)`, so unknown falls through to "must rebuild" by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
+    /// Raw on-disk byte length, comparable directly with
+    /// `std::fs::Metadata::len` so a staleness check can screen candidates
+    /// without reading anything. See [`crate::digest::FileDigest`] for why this
+    /// is raw while the hash beside it is normalized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_len: Option<u64>,
 }
 
 /// One memory's evidence link (schema v0.7.0): the sessions it was extracted
@@ -251,9 +266,36 @@ pub struct IndexFilterable {
     pub invalidated_at: Option<DateTime<Utc>>,
 }
 
-impl From<&Memory> for IndexEntry {
-    fn from(memory: &Memory) -> Self {
+impl IndexEntry {
+    /// Build the row for a memory that is backed by a file on disk, recording
+    /// the identity of the bytes it was derived from.
+    ///
+    /// **This is the production constructor.** It takes the digest rather than
+    /// defaulting it because the alternative — an infallible `From<&Memory>` —
+    /// is exactly the shape that made `has_embedding` fragile: a field no
+    /// constructor can know, defaulted to a plausible value, and patched by hand
+    /// at every call site. A new write path that forgets the digest would
+    /// silently disable drift detection for those rows; requiring it here makes
+    /// the compiler ask the question.
+    pub fn for_file(memory: &Memory, digest: &crate::digest::FileDigest) -> Self {
         Self {
+            content_sha256: Some(digest.sha256.clone()),
+            content_len: Some(digest.len),
+            ..Self::without_digest(memory)
+        }
+    }
+
+    /// Build the row without a content identity, for memories with no file
+    /// behind them.
+    ///
+    /// Only benchmarks and fixtures should need this: a row built here is
+    /// permanently invisible to drift detection, because `None` reads as
+    /// *unknown*. Production write paths use [`Self::for_file`].
+    #[doc(hidden)]
+    pub fn without_digest(memory: &Memory) -> Self {
+        Self {
+            content_sha256: None,
+            content_len: None,
             id: memory.id.clone(),
             type_: memory.type_,
             summary: memory.summary.clone(),
@@ -302,6 +344,32 @@ impl From<&Memory> for IndexEntry {
             source_sessions: memory.source_sessions.clone(),
         }
     }
+}
+
+/// One memory's chunk write: its id, its vectors, and the identity of the text
+/// those vectors were computed from (`None` = unknown ⇒ must re-embed).
+///
+/// The digest travels in the same tuple as the vectors because it is written in
+/// the same `RecordBatch` — that adjacency is what makes it impossible for a
+/// row's digest to describe a different snapshot than the vectors beside it.
+pub type ChunkWrite = (String, Vec<Vec<f32>>, Option<String>);
+
+/// A [`ChunkWrite`] plus the `updated_at` its vectors were computed from, which
+/// the freshness guard re-checks under the write lock before committing.
+pub type GuardedChunkWrite = (String, DateTime<Utc>, Vec<Vec<f32>>, Option<String>);
+
+/// One memory's index-currency digest (schema v0.8.0).
+///
+/// Its own narrow projection rather than fields on [`IndexForFiltering`]: this
+/// is read by reindex, `doctor` and the staleness check, and never by a query —
+/// so widening the hot projection to serve a maintenance scan would cost every
+/// query two columns it does not use.
+#[derive(Debug, Clone)]
+pub struct IndexDigest {
+    pub memory_id: String,
+    pub content_sha256: Option<String>,
+    pub content_len: Option<u64>,
+    pub has_embedding: bool,
 }
 
 /// A vector search result with ID and similarity score.
@@ -422,6 +490,18 @@ impl LanceIndex {
             // exactly "pins nothing", so it follows the `watch_paths`
             // convention rather than `audience`'s nullable one.
             Field::new("source_sessions", DataType::Utf8, false),
+            // Added in schema v0.8.0 (index currency). The identity of the
+            // `.md` bytes this row was derived from. Nullable because null
+            // means *unknown* — a pre-0.8.0 row, or one written with no file
+            // behind it — which every check reads as "must rebuild".
+            //
+            // `content_len` is UInt64, matching this codebase's rule that an
+            // unsigned quantity gets an unsigned Arrow type (`chunk_index`,
+            // `user_turns`, `indexed_chars`); there is no Int64 column
+            // anywhere, and adding one would introduce the first `as i64` /
+            // `as u64` cast pair in the Arrow layer.
+            Field::new("content_sha256", DataType::Utf8, true),
+            Field::new("content_len", DataType::UInt64, true),
         ]))
     }
 
@@ -438,7 +518,79 @@ impl LanceIndex {
                 ),
                 false,
             ),
+            // Added in schema v0.8.0 (index currency). Identity of the text
+            // these vectors were computed from, salted with the embedding
+            // model, dimensions, composition and chunk size — see
+            // `retrieval::engine::embed_digest`.
+            //
+            // It lives HERE rather than on the memories row for a reason the
+            // memories table cannot satisfy: that table is rebuilt from the
+            // `.md` files by every schema migration and every `reindex`, and a
+            // `.md` file cannot know what text produced its vectors. On the
+            // chunks table the value survives by construction, and it is
+            // written in the SAME `RecordBatch` as the vectors it describes, so
+            // it can never end up describing a different snapshot.
+            //
+            // Nullable: null means *unknown* (a pre-0.8.0 row, or vectors
+            // relocated rather than embedded), which every check reads as
+            // "must re-embed".
+            Field::new("embed_sha256", DataType::Utf8, true),
         ]))
+    }
+
+    /// Build the chunks-table `RecordBatch` for a set of already-validated
+    /// `(memory_id, chunks, embed_sha256)` rows.
+    ///
+    /// **One builder for both write paths.** `upsert_chunks` and
+    /// `upsert_chunks_batch` used to construct this independently, so a column
+    /// added to [`Self::chunks_schema`] had to be remembered twice — and
+    /// `RecordBatch::try_new` validates array count against the schema at
+    /// *runtime*, so forgetting one fails every write through that path rather
+    /// than failing the build. On the `create` path the symptom is silence:
+    /// `embed_memory_with` errors, `spawn_ingest` only logs a warning, `create`
+    /// reports success, and the memory is simply never embedded.
+    fn chunks_batch<'a>(
+        &self,
+        rows: impl Iterator<Item = (&'a str, &'a [Vec<f32>], Option<&'a str>)>,
+    ) -> Result<RecordBatch> {
+        let mut memory_ids: Vec<&str> = Vec::new();
+        let mut chunk_indices: Vec<u32> = Vec::new();
+        let mut all_values: Vec<f32> = Vec::new();
+        let mut digests: Vec<Option<&str>> = Vec::new();
+        for (memory_id, chunks, digest) in rows {
+            for (i, chunk) in chunks.iter().enumerate() {
+                memory_ids.push(memory_id);
+                chunk_indices.push(i as u32);
+                all_values.extend_from_slice(chunk);
+                // Denormalized across the memory's chunk rows: the digest
+                // describes the memory's whole text, and every row of it is
+                // written and deleted together.
+                digests.push(digest);
+            }
+        }
+        let schema = self.chunks_schema();
+        let vector_array = FixedSizeListArray::new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            self.dimensions as i32,
+            Arc::new(Float32Array::from(all_values)) as ArrayRef,
+            None,
+        );
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(memory_ids)) as ArrayRef,
+                Arc::new(UInt32Array::from(chunk_indices)) as ArrayRef,
+                Arc::new(vector_array) as ArrayRef,
+                Arc::new(StringArray::from(digests)) as ArrayRef,
+            ],
+        )
+        .context("Failed to create chunks RecordBatch")?;
+        debug_assert_eq!(
+            batch.num_columns(),
+            schema.fields().len(),
+            "chunks_batch must supply exactly one array per chunks_schema() field"
+        );
+        Ok(batch)
     }
 
     async fn ensure_table_exists(&self) -> Result<()> {
@@ -791,6 +943,179 @@ impl LanceIndex {
         Ok(links)
     }
 
+    /// Every row's index-currency digest (schema v0.8.0), as a 4-column
+    /// projection.
+    ///
+    /// Read by reindex, `doctor`, and the staleness check to answer "is this
+    /// row still current with the file it came from?". Deliberately NOT part of
+    /// [`Self::list_for_filtering`]'s projection: no query reads these columns,
+    /// and this scan is a maintenance cost that must not be charged to every
+    /// retrieval.
+    ///
+    /// A row whose `content_sha256` is null is returned with `None` rather than
+    /// skipped: null means *unknown*, and a caller deciding what to rebuild
+    /// needs to see the row in order to rebuild it.
+    pub async fn list_digests(&self) -> Result<Vec<IndexDigest>> {
+        let table = self.open_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "content_sha256".into(),
+                "content_len".into(),
+                "has_embedding".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for content digests")?;
+
+        let mut digests = Vec::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read batch")?;
+            let id_col = batch
+                .column_by_name("id")
+                .context("Missing 'id' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'id'")?;
+            let sha_col = batch
+                .column_by_name("content_sha256")
+                .context("Missing 'content_sha256' column")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'content_sha256'")?;
+            let len_col = batch
+                .column_by_name("content_len")
+                .context("Missing 'content_len' column")?
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .context("Failed to cast 'content_len'")?;
+            let emb_col = batch
+                .column_by_name("has_embedding")
+                .context("Missing 'has_embedding' column")?
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .context("Failed to cast 'has_embedding'")?;
+            for i in 0..batch.num_rows() {
+                digests.push(IndexDigest {
+                    memory_id: id_col.value(i).to_string(),
+                    content_sha256: (!sha_col.is_null(i)).then(|| sha_col.value(i).to_string()),
+                    content_len: (!len_col.is_null(i)).then(|| len_col.value(i)),
+                    has_embedding: emb_col.value(i),
+                });
+            }
+        }
+        Ok(digests)
+    }
+
+    /// Every embedded memory's `embed_sha256`, deduped to one entry per memory.
+    ///
+    /// A memory absent from the result has no chunk rows at all, which is why
+    /// this is the whole answer to "are this memory's vectors current?" — the
+    /// memories-table `has_embedding` flag is a second commit that can lag,
+    /// while a missing digest here is atomic with missing vectors.
+    ///
+    /// `None` for a present memory means the vectors exist but their provenance
+    /// is unknown (written before 0.8.0, or relocated rather than embedded).
+    pub async fn list_embed_digests(&self) -> Result<HashMap<String, Option<String>>> {
+        let table = self.open_chunks_table().await?;
+
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "memory_id".into(),
+                "embed_sha256".into(),
+            ]))
+            .execute()
+            .await
+            .context("Failed to query chunks table for embed digests")?;
+
+        let mut out: HashMap<String, Option<String>> = HashMap::new();
+        while let Some(batch_result) = stream.next().await {
+            let batch = batch_result.context("Failed to read chunk digest batch")?;
+            let id_col = batch
+                .column_by_name("memory_id")
+                .context("Missing 'memory_id' column in chunks")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'memory_id'")?;
+            let sha_col = batch
+                .column_by_name("embed_sha256")
+                .context("Missing 'embed_sha256' column in chunks")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("Failed to cast 'embed_sha256'")?;
+            for i in 0..batch.num_rows() {
+                let digest = (!sha_col.is_null(i)).then(|| sha_col.value(i).to_string());
+                // Every chunk row of one memory carries the same digest, but a
+                // torn write could disagree. Take the pessimistic view: any
+                // unknown row makes the whole memory unknown, so it re-embeds
+                // rather than being skipped on a partial match.
+                out.entry(id_col.value(i).to_string())
+                    .and_modify(|existing| {
+                        if *existing != digest {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert(digest);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Add any chunks-table column this binary's [`Self::chunks_schema`]
+    /// declares but the on-disk table lacks, as all-nulls.
+    ///
+    /// The memories table is migrated by rebuilding it from the `.md` files;
+    /// the chunks table has no such source — you cannot recreate vectors
+    /// without re-embedding, which is the entire point of preserving them — so
+    /// its columns are added in place.
+    ///
+    /// **Callers must hold the per-project write lock.** `add_columns` commits
+    /// an `Operation::Merge`, which Lance treats as a retryable conflict against
+    /// any concurrent append/update/delete. Run unlocked from `LanceIndex::new`
+    /// (which `open`/`open_global`/`open_group` reach with no lock held), a
+    /// concurrent MCP session writing chunks would make the loser's store-open
+    /// fail — turning an ordinary read command into an error. This codebase
+    /// already fixed the identical hazard for table *creation* with the lock.
+    ///
+    /// Idempotent, and cheap: `AllNulls` is metadata-only — it clones fragment
+    /// metadata, writes no data files, and commits once. Indices survive
+    /// (only those whose field ids left the schema are dropped, and added
+    /// fields get fresh ids).
+    pub async fn add_missing_chunk_columns(&self) -> Result<()> {
+        use lancedb::table::NewColumnTransform;
+
+        let table = self.open_chunks_table().await?;
+        let live = table
+            .schema()
+            .await
+            .context("Failed to read chunks schema")?;
+        let missing: Vec<Field> = self
+            .chunks_schema()
+            .fields()
+            .iter()
+            .filter(|f| live.field_with_name(f.name()).is_err())
+            .map(|f| f.as_ref().clone())
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        tracing::info!(
+            "Adding chunks-table column(s) {:?} (all-null backfill; vectors untouched)",
+            missing.iter().map(|f| f.name()).collect::<Vec<_>>()
+        );
+        table
+            .add_columns(
+                NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))),
+                None,
+            )
+            .await
+            .context("Failed to add chunks-table columns")?;
+        Ok(())
+    }
+
     /// List entries with lightweight metadata (7 columns).
     ///
     /// Returns [`IndexSummary`] entries suitable for aggregation and stats.
@@ -914,7 +1239,17 @@ impl LanceIndex {
     /// Uses `merge_insert` for atomic upsert. The `when_not_matched_by_source_delete`
     /// filter scoped to the specific `memory_id` removes stale chunks when chunk
     /// count changes. Empty chunks case uses `delete_chunks` as a fast path.
-    pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
+    ///
+    /// `embed_sha256` is the identity of the text these vectors were computed
+    /// from (see [`Self::chunks_schema`]); `None` records *unknown*, which every
+    /// currency check reads as "must re-embed". Callers that relocate existing
+    /// vectors rather than embedding them pass `None`.
+    pub async fn upsert_chunks(
+        &self,
+        memory_id: &str,
+        chunks: Vec<Vec<f32>>,
+        embed_sha256: Option<&str>,
+    ) -> Result<()> {
         if chunks.is_empty() {
             self.delete_chunks(memory_id).await?;
             return Ok(());
@@ -948,33 +1283,11 @@ impl LanceIndex {
         let table = self.open_chunks_table().await?;
         let schema = self.chunks_schema();
 
-        let num_chunks = chunks.len();
-
-        // Build arrays
-        let memory_ids: Vec<&str> = vec![memory_id; num_chunks];
-        let memory_id_array = StringArray::from(memory_ids);
-        let chunk_indices: Vec<u32> = (0..num_chunks as u32).collect();
-        let chunk_index_array = UInt32Array::from(chunk_indices);
-
-        // Build the vector FixedSizeList array for all chunks
-        let all_values: Vec<f32> = chunks.into_iter().flatten().collect();
-        let values_array = Float32Array::from(all_values);
-        let vector_array = FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::Float32, true)),
-            self.dimensions as i32,
-            Arc::new(values_array) as ArrayRef,
-            None,
-        );
-
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(memory_id_array) as ArrayRef,
-                Arc::new(chunk_index_array) as ArrayRef,
-                Arc::new(vector_array) as ArrayRef,
-            ],
-        )
-        .context("Failed to create chunks RecordBatch")?;
+        let batch = self.chunks_batch(std::iter::once((
+            memory_id,
+            chunks.as_slice(),
+            embed_sha256,
+        )))?;
 
         let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
         let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
@@ -1009,7 +1322,7 @@ impl LanceIndex {
     ///
     /// Batched at the same 500 ids as `delete_chunks_batch` for the same
     /// reason: an unbounded `IN (...)` is one enormous predicate.
-    pub async fn upsert_chunks_batch(&self, entries: &[(String, Vec<Vec<f32>>)]) -> Result<()> {
+    pub async fn upsert_chunks_batch(&self, entries: &[ChunkWrite]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -1017,7 +1330,7 @@ impl LanceIndex {
         // Same pre-validation as the single-memory path, and for the same
         // reason: `FixedSizeListArray::new` PANICS on a width mismatch, which
         // in a batch would take down every memory in it, not just the bad one.
-        for (memory_id, chunks) in entries {
+        for (memory_id, chunks, _) in entries {
             for (i, chunk) in chunks.iter().enumerate() {
                 if chunk.len() != self.dimensions {
                     anyhow::bail!(
@@ -1038,9 +1351,9 @@ impl LanceIndex {
 
         // Memories whose new chunk list is empty are deletions, not upserts.
         let (empty, populated): (Vec<_>, Vec<_>) =
-            entries.iter().partition(|(_, chunks)| chunks.is_empty());
+            entries.iter().partition(|(_, chunks, _)| chunks.is_empty());
         if !empty.is_empty() {
-            let ids: Vec<String> = empty.iter().map(|(id, _)| id.clone()).collect();
+            let ids: Vec<String> = empty.iter().map(|(id, _, _)| id.clone()).collect();
             self.delete_chunks_batch(&ids).await?;
         }
         if populated.is_empty() {
@@ -1052,35 +1365,12 @@ impl LanceIndex {
 
         const UPSERT_BATCH_SIZE: usize = 500;
         for group in populated.chunks(UPSERT_BATCH_SIZE) {
-            let mut memory_ids: Vec<&str> = Vec::new();
-            let mut chunk_indices: Vec<u32> = Vec::new();
-            let mut all_values: Vec<f32> = Vec::new();
-            for (memory_id, chunks) in group {
-                for (i, chunk) in chunks.iter().enumerate() {
-                    memory_ids.push(memory_id.as_str());
-                    chunk_indices.push(i as u32);
-                    all_values.extend_from_slice(chunk);
-                }
-            }
-            let num_rows = memory_ids.len();
-            let vector_array = FixedSizeListArray::new(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                self.dimensions as i32,
-                Arc::new(Float32Array::from(all_values)) as ArrayRef,
-                None,
-            );
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(memory_ids)) as ArrayRef,
-                    Arc::new(UInt32Array::from(chunk_indices)) as ArrayRef,
-                    Arc::new(vector_array) as ArrayRef,
-                ],
-            )
-            .context("Failed to create batched chunks RecordBatch")?;
-            debug_assert_eq!(batch.num_rows(), num_rows);
+            let batch =
+                self.chunks_batch(group.iter().map(|(id, chunks, digest)| {
+                    (id.as_str(), chunks.as_slice(), digest.as_deref())
+                }))?;
 
-            let group_ids: Vec<_> = group.iter().map(|(id, _)| lit(id)).collect();
+            let group_ids: Vec<_> = group.iter().map(|(id, _, _)| lit(id)).collect();
             let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema.clone());
             let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
             op.when_matched_update_all(None);
@@ -1092,7 +1382,7 @@ impl LanceIndex {
                 .context("Failed to upsert chunk batch")?;
         }
 
-        let ids: Vec<String> = populated.iter().map(|(id, _)| id.clone()).collect();
+        let ids: Vec<String> = populated.iter().map(|(id, _, _)| id.clone()).collect();
         self.set_has_embedding_batch(&ids, true).await?;
         Ok(())
     }
@@ -1269,6 +1559,14 @@ impl LanceIndex {
 
     /// Delete the chunks of many memories in ONE delete commit
     /// (`memory_id IN (...)`), instead of one dataset version per ID.
+    ///
+    /// Clears the memories-table `has_embedding` flag for the same ids, exactly
+    /// as the per-memory [`Self::delete_chunks`] does. Without it the batched
+    /// path left the flag stale-true: `upsert_chunks_batch` routes an entry
+    /// whose text embedded to nothing here (see its empty-input handling), so a
+    /// memory edited down to empty content kept `has_embedding = true` with zero
+    /// chunk rows and stayed eligible for `has_embedding`-gated semantic ranking
+    /// (R3) until the next reindex rebuilt the flag from the chunk-id snapshot.
     pub async fn delete_chunks_batch(&self, memory_ids: &[String]) -> Result<()> {
         if memory_ids.is_empty() {
             return Ok(());
@@ -1287,6 +1585,7 @@ impl LanceIndex {
                 .await
                 .context("Failed to delete chunk batch")?;
         }
+        self.set_has_embedding_batch(memory_ids, false).await?;
         Ok(())
     }
 
@@ -1452,6 +1751,15 @@ impl LanceIndex {
         // changes which memories the search returns.
         let mut vector_query = table
             .vector_search(query)?
+            // Project only what the aggregation loop below reads. LanceDB's
+            // default is `Select::All`, which decodes the full FixedSizeList
+            // vector — and every future column — for up to `chunk_limit`
+            // (≤65,536) candidate rows on EVERY semantic query, none of which
+            // is ever looked at. `_distance` is unaffected: scoring columns are
+            // auto-projected independently of this list (see
+            // `disable_scoring_autoprojection`, which we leave at its `false`
+            // default).
+            .select(Select::Columns(vec!["memory_id".into()]))
             .limit(chunk_limit)
             .nprobes(VECTOR_SEARCH_NPROBES)
             .refine_factor(VECTOR_SEARCH_REFINE_FACTOR);
@@ -2029,6 +2337,8 @@ impl LanceIndex {
         let mut watch_paths_col = Vec::with_capacity(n);
         let mut audiences: Vec<Option<String>> = Vec::with_capacity(n);
         let mut source_sessions_col = Vec::with_capacity(n);
+        let mut content_sha256s: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut content_lens: Vec<Option<u64>> = Vec::with_capacity(n);
 
         for entry in entries {
             ids.push(entry.id.clone());
@@ -2076,6 +2386,8 @@ impl LanceIndex {
                 serde_json::to_string(&entry.source_sessions)
                     .context("Failed to serialize source_sessions")?,
             );
+            content_sha256s.push(entry.content_sha256.clone());
+            content_lens.push(entry.content_len);
         }
 
         let batch = RecordBatch::try_new(
@@ -2107,9 +2419,22 @@ impl LanceIndex {
                 Arc::new(StringArray::from(watch_paths_col)) as ArrayRef,
                 Arc::new(StringArray::from(audiences)) as ArrayRef,
                 Arc::new(StringArray::from(source_sessions_col)) as ArrayRef,
+                Arc::new(StringArray::from(content_sha256s)) as ArrayRef,
+                Arc::new(UInt64Array::from(content_lens)) as ArrayRef,
             ],
         )
         .context("Failed to create RecordBatch")?;
+
+        // `RecordBatch::try_new` validates the array count against the schema
+        // at RUNTIME, not compile time, so a column added to
+        // `memories_schema()` without a matching builder above fails every
+        // `create` rather than the build. Fail loudly in debug so a test — any
+        // test — catches it, instead of only the one that happens to write.
+        debug_assert_eq!(
+            batch.num_columns(),
+            self.memories_schema().fields().len(),
+            "entries_to_batch must supply exactly one array per memories_schema() field"
+        );
 
         Ok(batch)
     }
@@ -2690,7 +3015,7 @@ mod tests {
             accessed_at: Utc::now(),
             expires_at: None,
         };
-        IndexEntry::from(&memory)
+        IndexEntry::without_digest(&memory)
     }
 
     #[tokio::test]
@@ -2831,7 +3156,7 @@ mod tests {
             let entry = create_test_entry(&format!("opt-{i}"));
             lance.upsert(&entry).await.unwrap();
             lance
-                .upsert_chunks(&format!("opt-{i}"), vec![vec![0.1f32; 384]])
+                .upsert_chunks(&format!("opt-{i}"), vec![vec![0.1f32; 384]], None)
                 .await
                 .unwrap();
         }
@@ -2854,7 +3179,7 @@ mod tests {
         lance.upsert(&create_test_entry("a")).await.unwrap();
         lance.upsert(&create_test_entry("b")).await.unwrap();
         lance
-            .upsert_chunks("a", vec![vec![0.1f32; 384]])
+            .upsert_chunks("a", vec![vec![0.1f32; 384]], None)
             .await
             .unwrap();
 
@@ -2873,7 +3198,7 @@ mod tests {
 
         lance.upsert(&create_test_entry("a")).await.unwrap();
         lance
-            .upsert_chunks("a", vec![vec![0.1f32; 384], vec![0.2f32; 384]])
+            .upsert_chunks("a", vec![vec![0.1f32; 384], vec![0.2f32; 384]], None)
             .await
             .unwrap();
 
@@ -2900,7 +3225,7 @@ mod tests {
 
         lance.upsert(&create_test_entry("a")).await.unwrap();
         lance
-            .upsert_chunks("a", vec![vec![0.1f32; 384]])
+            .upsert_chunks("a", vec![vec![0.1f32; 384]], None)
             .await
             .unwrap();
 
@@ -2923,7 +3248,10 @@ mod tests {
 
         // Insert two chunks
         let chunks = vec![vec![0.1f32; 384], vec![0.2f32; 384]];
-        lance.upsert_chunks("chunk-test", chunks).await.unwrap();
+        lance
+            .upsert_chunks("chunk-test", chunks, None)
+            .await
+            .unwrap();
 
         // Should be searchable
         let matches = lance
@@ -2944,7 +3272,7 @@ mod tests {
         let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let err = lance
-            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 1024]])
+            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 1024]], None)
             .await
             .expect_err("wrong-width vector must return Err, not panic");
         let msg = format!("{err:#}");
@@ -2958,7 +3286,7 @@ mod tests {
         // The index must remain usable: a correct-width upsert for the same
         // memory still works after the rejected write.
         lance
-            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 384]])
+            .upsert_chunks("dim-mismatch-mem", vec![vec![0.1f32; 384]], None)
             .await
             .unwrap();
         let matches = lance
@@ -2977,7 +3305,11 @@ mod tests {
         let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
 
         let err = lance
-            .upsert_chunks("mixed-width-mem", vec![vec![0.1f32; 384], vec![0.2f32; 16]])
+            .upsert_chunks(
+                "mixed-width-mem",
+                vec![vec![0.1f32; 384], vec![0.2f32; 16]],
+                None,
+            )
             .await
             .expect_err("a batch containing a wrong-width chunk must be rejected");
         let msg = format!("{err:#}");
@@ -3000,7 +3332,7 @@ mod tests {
         let entry = create_test_entry("del-chunk");
         lance.upsert(&entry).await.unwrap();
         lance
-            .upsert_chunks("del-chunk", vec![vec![0.1f32; 384]])
+            .upsert_chunks("del-chunk", vec![vec![0.1f32; 384]], None)
             .await
             .unwrap();
 
@@ -3033,7 +3365,7 @@ mod tests {
         let chunk_close = vec![0.5f32; 384];
         let chunk_far = vec![-0.5f32; 384];
         lance
-            .upsert_chunks("mem-a", vec![chunk_close, chunk_far])
+            .upsert_chunks("mem-a", vec![chunk_close, chunk_far], None)
             .await
             .unwrap();
 
@@ -3041,7 +3373,10 @@ mod tests {
         let entry_b = create_test_entry("mem-b");
         lance.upsert(&entry_b).await.unwrap();
         let chunk_mid = vec![0.3f32; 384];
-        lance.upsert_chunks("mem-b", vec![chunk_mid]).await.unwrap();
+        lance
+            .upsert_chunks("mem-b", vec![chunk_mid], None)
+            .await
+            .unwrap();
 
         // Search for something close to chunk_close
         let query = vec![0.5f32; 384];
@@ -3065,12 +3400,12 @@ mod tests {
 
         lance.upsert(&create_test_entry("mem-a")).await.unwrap();
         lance
-            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]])
+            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]], None)
             .await
             .unwrap();
         lance.upsert(&create_test_entry("mem-b")).await.unwrap();
         lance
-            .upsert_chunks("mem-b", vec![vec![0.3f32; 384]])
+            .upsert_chunks("mem-b", vec![vec![0.3f32; 384]], None)
             .await
             .unwrap();
 
@@ -3094,7 +3429,10 @@ mod tests {
         // "near" is closest to the query, "mid" next, "far" farthest.
         for (id, val) in [("near", 0.5f32), ("mid", 0.3), ("far", -0.5)] {
             lance.upsert(&create_test_entry(id)).await.unwrap();
-            lance.upsert_chunks(id, vec![vec![val; 384]]).await.unwrap();
+            lance
+                .upsert_chunks(id, vec![vec![val; 384]], None)
+                .await
+                .unwrap();
         }
 
         let restrict = vec!["mid".to_string(), "far".to_string()];
@@ -3126,7 +3464,7 @@ mod tests {
 
         lance.upsert(&create_test_entry("mem-a")).await.unwrap();
         lance
-            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]])
+            .upsert_chunks("mem-a", vec![vec![0.5f32; 384]], None)
             .await
             .unwrap();
 
@@ -3149,7 +3487,7 @@ mod tests {
         for id in [quoted, "plain"] {
             lance.upsert(&create_test_entry(id)).await.unwrap();
             lance
-                .upsert_chunks(id, vec![vec![0.5f32; 384]])
+                .upsert_chunks(id, vec![vec![0.5f32; 384]], None)
                 .await
                 .unwrap();
         }
@@ -3179,7 +3517,7 @@ mod tests {
         for (id, count) in [("mem-a", 3usize), ("mem-b", 1), ("mem-c", 5)] {
             let mut chunks = seeded_vectors(id.len() as u64, count, 384);
             chunks.reverse();
-            lance.upsert_chunks(id, chunks).await.unwrap();
+            lance.upsert_chunks(id, chunks, None).await.unwrap();
         }
 
         let ids = ["mem-a", "mem-b", "mem-c", "mem-absent"];
@@ -3252,28 +3590,19 @@ mod tests {
         let vectors = seeded_vectors(seed, count, 384);
         let table = lance.open_chunks_table().await.unwrap();
         let schema = lance.chunks_schema();
-        let memory_id_array = StringArray::from(
-            (0..count)
-                .map(|i| format!("{prefix}-{i:04}"))
-                .collect::<Vec<_>>(),
-        );
-        let chunk_index_array = UInt32Array::from(vec![0u32; count]);
-        let all_values: Vec<f32> = vectors.iter().flatten().copied().collect();
-        let vector_array = FixedSizeListArray::new(
-            Arc::new(Field::new("item", DataType::Float32, true)),
-            384,
-            Arc::new(Float32Array::from(all_values)) as ArrayRef,
-            None,
-        );
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![
-                Arc::new(memory_id_array) as ArrayRef,
-                Arc::new(chunk_index_array) as ArrayRef,
-                Arc::new(vector_array) as ArrayRef,
-            ],
-        )
-        .unwrap();
+        // Built through the production helper, not by hand: a hand-rolled batch
+        // here is a second place that has to remember every chunks-table column,
+        // and `RecordBatch::try_new` only complains at RUNTIME — this fixture
+        // broke exactly that way when `embed_sha256` was added.
+        let ids: Vec<String> = (0..count).map(|i| format!("{prefix}-{i:04}")).collect();
+        let rows: Vec<(String, Vec<Vec<f32>>)> = ids
+            .into_iter()
+            .zip(vectors)
+            .map(|(id, v)| (id, vec![v]))
+            .collect();
+        let batch = lance
+            .chunks_batch(rows.iter().map(|(id, v)| (id.as_str(), v.as_slice(), None)))
+            .unwrap();
         let batches = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
         let mut op = table.merge_insert(&["memory_id", "chunk_index"]);
         op.when_not_matched_insert_all();
@@ -3378,7 +3707,7 @@ mod tests {
             "Test content",
             Provenance::human(),
         );
-        let entry = IndexEntry::from(&memory);
+        let entry = IndexEntry::without_digest(&memory);
 
         assert_eq!(entry.id, memory.id);
         assert_eq!(entry.type_, MemoryType::Decision);
@@ -3433,7 +3762,10 @@ mod tests {
         lance.upsert(&entry).await.unwrap();
 
         let v = vec![0.5f32; 384];
-        lance.upsert_chunks(quoted, vec![v.clone()]).await.unwrap();
+        lance
+            .upsert_chunks(quoted, vec![v.clone()], None)
+            .await
+            .unwrap();
 
         let read = lance.chunks_for_memory(quoted).await.unwrap();
         assert_eq!(
@@ -3520,7 +3852,7 @@ mod tests {
         for id in [quoted, plain] {
             lance.upsert(&create_test_entry(id)).await.unwrap();
             lance
-                .upsert_chunks(id, vec![vec![0.5f32; 384]])
+                .upsert_chunks(id, vec![vec![0.5f32; 384]], None)
                 .await
                 .unwrap();
         }
