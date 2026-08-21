@@ -36,6 +36,11 @@ use std::time::{Duration, SystemTime};
 /// Throttle marker file, stored under the global data dir.
 const MARKER_FILE: &str = ".last_maintenance";
 
+/// Filename prefix for the per-project compaction-pressure throttle marker.
+/// Per project, because fragmentation is a property of one store's tables
+/// while [`MARKER_FILE`] gates a machine-wide pass.
+const COMPACTION_MARKER_PREFIX: &str = ".last_compaction-";
+
 /// Outcome of an [`auto_maintain`] call.
 #[derive(Debug, Default)]
 pub struct MaintenanceReport {
@@ -129,6 +134,14 @@ fn marker_path() -> Option<PathBuf> {
     paths::global_data_dir().ok().map(|d| d.join(MARKER_FILE))
 }
 
+/// Throttle marker for the compaction-pressure pass, separate from the full
+/// maintenance marker so the two cadences do not reset each other.
+fn compaction_marker_path(project_id: &str) -> Option<PathBuf> {
+    paths::global_data_dir()
+        .ok()
+        .map(|d| d.join(format!("{COMPACTION_MARKER_PREFIX}{project_id}")))
+}
+
 /// Whether enough time has elapsed since the last pass to run again.
 async fn maintenance_due(interval: Duration) -> bool {
     let Some(path) = marker_path() else {
@@ -143,6 +156,116 @@ async fn maintenance_due(interval: Duration) -> bool {
         },
         // No marker yet (first run on this machine) → due.
         Err(_) => true,
+    }
+}
+
+/// Whether the compaction-pressure pass may fire for this project again yet.
+async fn compaction_throttle_expired(project_id: &str, min_interval: Duration) -> bool {
+    let Some(path) = compaction_marker_path(project_id) else {
+        return false;
+    };
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) => match meta.modified() {
+            Ok(modified) => modified
+                .elapsed()
+                .map(|e| e >= min_interval)
+                .unwrap_or(true),
+            Err(_) => true,
+        },
+        Err(_) => true,
+    }
+}
+
+/// Compact this store if it has accumulated enough uncompacted fragments,
+/// without waiting for the full maintenance window.
+///
+/// The full pass in [`auto_maintain`] is throttled to `interval_secs`
+/// (6 hours by default) because it does expensive work — a registry sweep and
+/// a store health scan. Fragmentation cannot wait that long: query latency
+/// tracks fragment count, not row count, and a session that writes ~100
+/// memories degrades every scan in the store several-fold for the rest of the
+/// window (`docs/contributors/query-latency-profile.md`).
+///
+/// So this is a *separate, much cheaper* trigger: read fragment metadata (no
+/// row data), and if it is over `compaction_fragment_threshold`, run
+/// `optimize()` and nothing else. Its own short throttle
+/// (`compaction_min_interval_secs`) keeps a write-heavy session from spinning
+/// compaction on every command.
+///
+/// Best-effort throughout, exactly like [`auto_maintain`]: every failure is
+/// logged and swallowed, because compaction is a latency optimization and
+/// never correctness.
+pub async fn auto_compact(
+    dir: &Path,
+    config: &MaintenanceConfig,
+    cli_skip: bool,
+) -> Option<crate::storage::IndexOptimizeStats> {
+    if !resolve_enabled(config, cli_skip) || config.compaction_fragment_threshold == 0 {
+        return None;
+    }
+    // Throttle first, on a plain file stat, so the overwhelmingly common case
+    // costs one stat and nothing else — no store open, no LanceDB call.
+    let project_id = crate::storage::project_id::compute_project_id(dir);
+    if !compaction_throttle_expired(
+        &project_id,
+        Duration::from_secs(config.compaction_min_interval_secs),
+    )
+    .await
+    {
+        return None;
+    }
+    let store = match MemoryStore::open(dir).await {
+        Ok(s) => s,
+        // No store at this path (or an unreadable one) is not this pass's
+        // problem — every caller is a best-effort hot-path invocation.
+        Err(e) => {
+            tracing::debug!("engramdb auto-compaction: could not open store: {e}");
+            return None;
+        }
+    };
+
+    let frag = match store.fragmentation().await {
+        Ok(f) => f,
+        // Unknown pressure is not an error: it only means we do not schedule
+        // compaction this time round.
+        Err(e) => {
+            tracing::debug!("engramdb auto-compaction: could not read fragmentation: {e}");
+            return None;
+        }
+    };
+
+    // Stamp as soon as the check completes, not only when it compacts, and
+    // before the work rather than after. Stamping only on the compacting path
+    // would leave a below-threshold store paying a store open and a LanceDB
+    // stats call on *every* invocation — the throttle has to cover the probe,
+    // which is the expensive half of the common case. Stamping up-front also
+    // stops a slow or failing compaction from becoming a hot retry loop across
+    // concurrent invocations.
+    if let Some(path) = compaction_marker_path(&project_id) {
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&path, chrono::Utc::now().to_rfc3339()).await;
+    }
+
+    if frag.small_fragments < config.compaction_fragment_threshold {
+        return None;
+    }
+
+    match store.optimize().await {
+        Ok(stats) => {
+            tracing::info!(
+                "engramdb auto-compaction: {} uncompacted fragment(s) over threshold {}, compacted {} fragment(s)",
+                frag.small_fragments,
+                config.compaction_fragment_threshold,
+                stats.fragments_removed,
+            );
+            Some(stats)
+        }
+        Err(e) => {
+            tracing::warn!("engramdb auto-compaction: optimize failed: {e}");
+            None
+        }
     }
 }
 
@@ -436,6 +559,7 @@ mod tests {
         MaintenanceConfig {
             enabled: true,
             interval_secs,
+            ..Default::default()
         }
     }
 
@@ -562,6 +686,7 @@ mod tests {
         let disabled = MaintenanceConfig {
             enabled: false,
             interval_secs: 0,
+            ..Default::default()
         };
         let report = auto_maintain(dir.path(), &registry, &disabled, false).await;
         assert!(!report.ran, "config.enabled=false must skip the pass");
@@ -698,5 +823,156 @@ mod tests {
         std::env::set_var("ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS", "0");
         let report = auto_maintain(dir.path(), &registry, &cfg(100_000), false).await;
         assert!(report.ran, "env interval override must win over config");
+    }
+
+    /// A store written one memory at a time accumulates uncompacted fragments,
+    /// and `auto_compact` is what clears them without waiting out the 6-hour
+    /// full-maintenance window. Fragment count — not row count — is what sets
+    /// scan latency, so this is the trigger that keeps a write-heavy session
+    /// from serving several-fold slower queries for the rest of the window.
+    #[tokio::test]
+    async fn auto_compact_clears_fragments_from_incremental_writes() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir.path(), &registry).await.unwrap();
+
+        for i in 0..12 {
+            let mut m = Memory::new(
+                MemoryType::Convention,
+                format!("content {i}"),
+                format!("summary {i}"),
+                Provenance::agent("test"),
+            );
+            m.tags = vec![format!("t{i}")];
+            store.create(&m).await.unwrap();
+        }
+        let before = store.fragmentation().await.unwrap();
+        assert!(
+            before.small_fragments > 1,
+            "12 separate creates should leave several uncompacted fragments, got {}",
+            before.small_fragments
+        );
+
+        // Threshold below what we just produced, and no throttle to wait on.
+        let config = MaintenanceConfig {
+            enabled: true,
+            interval_secs: 0,
+            compaction_fragment_threshold: 2,
+            compaction_min_interval_secs: 0,
+        };
+        let stats = auto_compact(dir.path(), &config, false).await;
+        assert!(stats.is_some(), "compaction should have run");
+
+        let after = store.fragmentation().await.unwrap();
+        assert!(
+            after.small_fragments < before.small_fragments,
+            "compaction should reduce uncompacted fragments: {} -> {}",
+            before.small_fragments,
+            after.small_fragments
+        );
+
+        // And the data is intact.
+        assert_eq!(store.count().await.unwrap(), 12);
+    }
+
+    /// Below the threshold the pass must not fire — otherwise every command on
+    /// a quiet store pays a compaction.
+    #[tokio::test]
+    async fn auto_compact_is_a_no_op_below_the_threshold() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+
+        let config = MaintenanceConfig {
+            enabled: true,
+            interval_secs: 0,
+            compaction_fragment_threshold: 10_000,
+            compaction_min_interval_secs: 0,
+        };
+        assert!(auto_compact(dir.path(), &config, false).await.is_none());
+    }
+
+    /// `compaction_fragment_threshold = 0` opts out entirely, leaving
+    /// compaction purely time-based as it was before this trigger existed.
+    #[tokio::test]
+    async fn auto_compact_threshold_zero_disables_the_trigger() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir.path(), &registry).await.unwrap();
+        for i in 0..12 {
+            store
+                .create(&Memory::new(
+                    MemoryType::Convention,
+                    format!("content {i}"),
+                    format!("summary {i}"),
+                    Provenance::agent("test"),
+                ))
+                .await
+                .unwrap();
+        }
+        let config = MaintenanceConfig {
+            enabled: true,
+            interval_secs: 0,
+            compaction_fragment_threshold: 0,
+            compaction_min_interval_secs: 0,
+        };
+        assert!(auto_compact(dir.path(), &config, false).await.is_none());
+    }
+
+    /// `--no-maintenance` / the env kill-switch must suppress compaction too.
+    #[tokio::test]
+    async fn auto_compact_respects_cli_skip() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(dir.path(), &registry).await.unwrap();
+        let config = MaintenanceConfig {
+            enabled: true,
+            interval_secs: 0,
+            compaction_fragment_threshold: 1,
+            compaction_min_interval_secs: 0,
+        };
+        assert!(auto_compact(dir.path(), &config, true).await.is_none());
+    }
+
+    /// The throttle must cover the *probe*, not just the compaction. Stamping
+    /// only when compaction fires would leave a quiet store opening itself and
+    /// asking LanceDB for statistics on every single command.
+    #[tokio::test]
+    async fn auto_compact_throttles_the_probe_not_just_the_work() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir.path(), &registry).await.unwrap();
+        for i in 0..12 {
+            store
+                .create(&Memory::new(
+                    MemoryType::Convention,
+                    format!("content {i}"),
+                    format!("summary {i}"),
+                    Provenance::agent("test"),
+                ))
+                .await
+                .unwrap();
+        }
+
+        // A threshold nothing can reach, so the first call checks and declines
+        // to compact — but must still stamp the marker.
+        let config = MaintenanceConfig {
+            enabled: true,
+            interval_secs: 0,
+            compaction_fragment_threshold: 10_000,
+            compaction_min_interval_secs: 3600,
+        };
+        assert!(auto_compact(dir.path(), &config, false).await.is_none());
+
+        // With the marker stamped, a threshold of 1 must still be refused:
+        // the throttle short-circuits before the probe runs.
+        let eager = MaintenanceConfig {
+            compaction_fragment_threshold: 1,
+            ..config
+        };
+        assert!(
+            auto_compact(dir.path(), &eager, false).await.is_none(),
+            "the throttle must gate the probe, so an immediate second call does nothing"
+        );
     }
 }

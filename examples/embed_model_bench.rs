@@ -26,8 +26,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
     chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
-    ONNX_ALL_MINILM_L12, ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q,
-    ONNX_ARCTIC_XS_Q, ONNX_BGE_SMALL_EN_Q,
+    ONNX_ALL_MINILM_L12, ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_Q,
+    ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS_Q, ONNX_BGE_LARGE_EN_Q, ONNX_BGE_SMALL_EN_Q,
+    ONNX_GTE_LARGE_EN_Q, ONNX_MXBAI_EMBED_LARGE_Q,
 };
 use serde::Deserialize;
 
@@ -72,6 +73,12 @@ const CANDIDATES: &[(&str, OnnxModelSpec, &str, &str)] = &[
         "model_quantized.onnx",
     ),
     (
+        "minilm-l12-u8",
+        ONNX_ALL_MINILM_L12_U8,
+        "Xenova/all-MiniLM-L12-v2",
+        "onnx/model_uint8.onnx",
+    ),
+    (
         "minilm-l12-fp32",
         ONNX_ALL_MINILM_L12,
         "Xenova/all-MiniLM-L12-v2",
@@ -81,6 +88,27 @@ const CANDIDATES: &[(&str, OnnxModelSpec, &str, &str)] = &[
         "bge-small-q",
         ONNX_BGE_SMALL_EN_Q,
         "Qdrant/bge-small-en-v1.5-onnx-Q",
+        "model_optimized.onnx",
+    ),
+    // The quantized 1024-dim family — the widest embeddings available locally
+    // (fastembed's catalogue tops out at 1024). Included to price the "raise
+    // the dimension" lever against the shipped 384-dim default.
+    (
+        "mxbai-large-q",
+        ONNX_MXBAI_EMBED_LARGE_Q,
+        "mixedbread-ai/mxbai-embed-large-v1",
+        "onnx/model_quantized.onnx",
+    ),
+    (
+        "gte-large-q",
+        ONNX_GTE_LARGE_EN_Q,
+        "Alibaba-NLP/gte-large-en-v1.5",
+        "onnx/model_quantized.onnx",
+    ),
+    (
+        "bge-large-q",
+        ONNX_BGE_LARGE_EN_Q,
+        "Qdrant/bge-large-en-v1.5-onnx-Q",
         "model_optimized.onnx",
     ),
 ];

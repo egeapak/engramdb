@@ -163,6 +163,41 @@ pub const ONNX_MXBAI_EMBED_LARGE: OnnxModelSpec = OnnxModelSpec {
     hf_override: None,
 };
 
+/// mxbai-embed-large-v1 int8-quantized (`onnx/model_quantized.onnx`, ~337 MB
+/// vs ~1337 MB fp32). 1024-dimensional, 512 token context.
+///
+/// The cheapest 1024-dim option, and still ~10x the default's 34 MB — a cost
+/// the daemon pays resident, machine-wide. Selectable, not a default; see
+/// `docs/contributors/embedding-model-alternatives.md` and the wide-model
+/// latency table in `docs/contributors/query-latency-profile.md`.
+pub const ONNX_MXBAI_EMBED_LARGE_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::MxbaiEmbedLargeV1Q,
+    dimensions: 1024,
+    name: "mxbai-embed-large-v1-q",
+    max_tokens: 512,
+    hf_override: None,
+};
+
+/// bge-large-en-v1.5 quantized (`Qdrant/bge-large-en-v1.5-onnx-Q`,
+/// `model_optimized.onnx`). 1024-dimensional, 512 token context.
+pub const ONNX_BGE_LARGE_EN_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::BGELargeENV15Q,
+    dimensions: 1024,
+    name: "bge-large-en-v1.5-q",
+    max_tokens: 512,
+    hf_override: None,
+};
+
+/// gte-large-en-v1.5 quantized (`Alibaba-NLP/gte-large-en-v1.5`,
+/// `onnx/model_quantized.onnx`). 1024-dimensional, 512 token context.
+pub const ONNX_GTE_LARGE_EN_Q: OnnxModelSpec = OnnxModelSpec {
+    fastembed_model: EmbeddingModel::GTELargeENV15Q,
+    dimensions: 1024,
+    name: "gte-large-en-v1.5-q",
+    max_tokens: 512,
+    hf_override: None,
+};
+
 /// all-MiniLM-L12-v2 **uint8**-quantized (`Xenova/all-MiniLM-L12-v2`,
 /// `onnx/model_uint8.onnx`, ~32 MB — same size as the int8 export).
 ///
@@ -266,6 +301,9 @@ pub const ALL_ONNX_EMBEDDING_SPECS: &[OnnxModelSpec] = &[
     ONNX_ARCTIC_XS_Q,
     ONNX_ARCTIC_S_Q,
     ONNX_MXBAI_EMBED_LARGE,
+    ONNX_MXBAI_EMBED_LARGE_Q,
+    ONNX_BGE_LARGE_EN_Q,
+    ONNX_GTE_LARGE_EN_Q,
 ];
 
 /// ONNX-based embedding provider using fastembed.
