@@ -2078,7 +2078,7 @@ impl MemoryStore {
                 for p in paths {
                     with_mtime.push((file_mtime(&p).await, p));
                 }
-                with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+                with_mtime.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
                 paths = with_mtime.into_iter().map(|(_, p)| p).collect();
             }
             if let Some(path) = paths.first() {
