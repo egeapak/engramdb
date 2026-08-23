@@ -248,9 +248,10 @@ fn cosine_f32_lanes8(a: &[f32], b: &[f32]) -> f64 {
     }
 }
 
-/// The shape the optimizer can actually unroll: `chunks_exact` + `try_into`
-/// gives LLVM a `&[f32; 8]` whose length is a compile-time constant, so the
-/// bounds checks vanish.
+/// The shape the optimizer can actually unroll: `as_chunks::<8>()` hands LLVM
+/// a `&[f32; 8]` whose length is a compile-time constant, so the bounds checks
+/// vanish. (This was `chunks_exact` + `try_into`, which needed a runtime
+/// length check to say the same thing.)
 ///
 /// Still computes all three quantities, so it still needs 24 live
 /// accumulators. Measured against [`dot_unit_f32`] this is the "unrollable
@@ -261,11 +262,9 @@ fn cosine_f32_arr8(a: &[f32], b: &[f32]) -> f64 {
     }
     const L: usize = 8;
     let (mut dot, mut na, mut nb) = ([0.0f32; L], [0.0f32; L], [0.0f32; L]);
-    let mut ai = a.chunks_exact(L);
-    let mut bi = b.chunks_exact(L);
-    for (ac, bc) in ai.by_ref().zip(bi.by_ref()) {
-        let ac: &[f32; L] = ac.try_into().expect("chunks_exact yields L elements");
-        let bc: &[f32; L] = bc.try_into().expect("chunks_exact yields L elements");
+    let (ac_chunks, ac_rem) = a.as_chunks::<L>();
+    let (bc_chunks, bc_rem) = b.as_chunks::<L>();
+    for (ac, bc) in ac_chunks.iter().zip(bc_chunks) {
         for l in 0..L {
             dot[l] += ac[l] * bc[l];
             na[l] += ac[l] * ac[l];
@@ -278,7 +277,7 @@ fn cosine_f32_arr8(a: &[f32], b: &[f32]) -> f64 {
         sa += na[l];
         sb += nb[l];
     }
-    for (x, y) in ai.remainder().iter().zip(bi.remainder()) {
+    for (x, y) in ac_rem.iter().zip(bc_rem) {
         d += x * y;
         sa += x * x;
         sb += y * y;
@@ -296,17 +295,15 @@ fn cosine_f32_arr8(a: &[f32], b: &[f32]) -> f64 {
 fn dot_unit_f32(a: &[f32], b: &[f32]) -> f64 {
     const L: usize = 8;
     let mut dot = [0.0f32; L];
-    let mut ai = a.chunks_exact(L);
-    let mut bi = b.chunks_exact(L);
-    for (ac, bc) in ai.by_ref().zip(bi.by_ref()) {
-        let ac: &[f32; L] = ac.try_into().expect("chunks_exact yields L elements");
-        let bc: &[f32; L] = bc.try_into().expect("chunks_exact yields L elements");
+    let (ac_chunks, ac_rem) = a.as_chunks::<L>();
+    let (bc_chunks, bc_rem) = b.as_chunks::<L>();
+    for (ac, bc) in ac_chunks.iter().zip(bc_chunks) {
         for l in 0..L {
             dot[l] += ac[l] * bc[l];
         }
     }
     let mut d: f32 = dot.iter().sum();
-    for (x, y) in ai.remainder().iter().zip(bi.remainder()) {
+    for (x, y) in ac_rem.iter().zip(bc_rem) {
         d += x * y;
     }
     d as f64

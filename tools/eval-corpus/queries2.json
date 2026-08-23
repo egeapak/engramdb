@@ -1,0 +1,20 @@
+[
+  {"id": "s2q01", "text": "why did the release profile move off opt-level z", "archetype": "natural", "relevant": {"d183ec6": 2, "cf2c6ae": 2, "d2b788f": 1}},
+  {"id": "s2q02", "text": "how do i add a new config field to engramdb", "archetype": "natural", "relevant": {"dc04c88": 2, "d9c7619": 1}},
+  {"id": "s2q03", "text": "why is my query slow after a session of heavy writes", "archetype": "natural", "relevant": {"d82f70d": 2, "cda8885": 2, "db29e78": 1}},
+  {"id": "s2q04", "text": "what keeps two agents from clobbering each other's writes", "archetype": "paraphrase", "relevant": {"dfcf9d0": 2, "c7a55fc": 1}},
+  {"id": "s2q05", "text": "what actually dominates the runtime when merging duplicate observations", "archetype": "paraphrase", "relevant": {"d377ae7": 2, "d2efc1f": 1}},
+  {"id": "s2q06", "text": "why does editing a deeply nested file surface no notes", "archetype": "paraphrase", "relevant": {"de1ec8c": 2, "dc633d5": 1}},
+  {"id": "s2q07", "text": "how many kilobytes did each cached glob pattern retain", "archetype": "buried_fact", "relevant": {"ceaa795": 2}},
+  {"id": "s2q08", "text": "which test runs the sse2 kernel against the scalar reference", "archetype": "buried_fact", "relevant": {"d2efc1f": 2, "da032e0": 1}},
+  {"id": "s2q09", "text": "what top_n did the reranker benchmark actually use", "archetype": "buried_fact", "relevant": {"d807873": 2, "d1c1d0c": 1}},
+  {"id": "s2q10", "text": "why does nli own the contradiction challenge flow instead of ops", "archetype": "distractor_trap", "relevant": {"dd7314c": 2}},
+  {"id": "s2q11", "text": "find projects on disk the registry does not know about", "archetype": "distractor_trap", "relevant": {"ce9e760": 2}},
+  {"id": "s2q12", "text": "memory silently gained its title as its summary", "archetype": "distractor_trap", "relevant": {"c9c9552": 2, "c7a55fc": 1}},
+  {"id": "s2q13", "text": "chunks_for_memory export_chunks quadratic scan", "archetype": "keyword", "relevant": {"db73a63": 2, "de32017": 1, "c984ab3": 1}},
+  {"id": "s2q14", "text": "metadata vector composition fingerprint", "archetype": "keyword", "relevant": {"c62903a": 2, "dc286c2": 1}},
+  {"id": "s2q15", "text": "recency based review trigger surfaced by mcp", "archetype": "title_echo", "relevant": {"ca38ab1": 2}},
+  {"id": "s2q16", "text": "end of task reflection nudge and the reflect command", "archetype": "title_echo", "relevant": {"c2008ff": 2}},
+  {"id": "s2q17", "text": "intermittent test_embed_consistency chasing nuisance", "archetype": "tag_only", "relevant": {"db08f25": 2, "d50d701": 1}},
+  {"id": "s2q18", "text": "provider rerank enabled backend_override", "archetype": "tag_only", "relevant": {"d9c7619": 2, "dc92137": 2}}
+]

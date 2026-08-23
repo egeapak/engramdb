@@ -1,0 +1,20 @@
+[
+{"id":"s3q01","text":"why does compaction run on the query path instead of create","archetype":"natural","relevant":{"c346e9a":2,"db29e78":2,"c7e3fd4":1}},
+{"id":"s3q02","text":"what happens when i run a memory command inside a git worktree","archetype":"natural","relevant":{"da93a90":2}},
+{"id":"s3q03","text":"do i need to run clippy before finishing a task","archetype":"natural","relevant":{"db27b9b":2}},
+{"id":"s3q04","text":"where do fetched neural weights get saved locally","archetype":"paraphrase","relevant":{"d6c4d78":2,"cf88516":1}},
+{"id":"s3q05","text":"why hand written cpu kernels beat the compiler in size optimized builds","archetype":"paraphrase","relevant":{"db887bf":2,"cf2c6ae":1}},
+{"id":"s3q06","text":"background embedding helper never comes up and logs nothing anywhere","archetype":"paraphrase","relevant":{"c0049ab":2}},
+{"id":"s3q07","text":"how much does one project conversation search cost at four rows","archetype":"buried_fact","relevant":{"c6b6a8a":2,"d9004e6":1}},
+{"id":"s3q08","text":"how long did building nextest from source take on a cache miss","archetype":"buried_fact","relevant":{"c8f8d61":2}},
+{"id":"s3q09","text":"how many distinct vectors did one text embed to under load","archetype":"buried_fact","relevant":{"c72377b":2,"db08f25":1}},
+{"id":"s3q10","text":"why did the bge reranker return exactly the baseline ranking","archetype":"distractor_trap","relevant":{"d1c1d0c":2}},
+{"id":"s3q11","text":"why won't a scalar index on chunks fix the per call cost","archetype":"distractor_trap","relevant":{"de7cb13":2}},
+{"id":"s3q12","text":"why does the intel mac path stay on the six layer model","archetype":"distractor_trap","relevant":{"d671006":2}},
+{"id":"s3q13","text":"reindex_dir parallel parse","archetype":"keyword","relevant":{"deddf18":2}},
+{"id":"s3q14","text":"spawn_blocking rayon tokio worker","archetype":"keyword","relevant":{"db87c88":2,"d8180ab":1}},
+{"id":"s3q15","text":"the layered design dependency direction","archetype":"title_echo","relevant":{"d23f237":2,"d2f94fe":1,"dd7314c":1}},
+{"id":"s3q16","text":"snapshot tests two tiers","archetype":"title_echo","relevant":{"dc7f3fe":2,"da33a23":1,"cf84b03":1}},
+{"id":"s3q17","text":"vectormatch squared_l2 cosine score","archetype":"tag_only","relevant":{"dca3fb8":2,"da4384b":1}},
+{"id":"s3q18","text":"epistemic memorytype orthogonal validity","archetype":"tag_only","relevant":{"dd5b07e":2,"c4ca3b0":2,"dcac035":1}}
+]

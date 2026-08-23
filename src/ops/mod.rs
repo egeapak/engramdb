@@ -72,8 +72,8 @@ pub use harvest_pin::{
 };
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{
-    auto_maintain, auto_maintain_with_engine, maintenance_status, maintenance_would_run,
-    MaintenanceReport, MaintenanceStatus,
+    auto_compact, auto_maintain, auto_maintain_with_engine, maintenance_status,
+    maintenance_would_run, MaintenanceReport, MaintenanceStatus,
 };
 pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_epistemic,
@@ -104,7 +104,8 @@ use crate::embeddings::{
 use crate::embeddings::{
     OnnxModelSpec, OnnxProvider, DEFAULT_ONNX_EMBEDDING, ONNX_ALL_MINILM_L12,
     ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_L6_U8, ONNX_ALL_MINILM_Q,
-    ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT,
+    ONNX_BGE_LARGE_EN_Q, ONNX_GTE_LARGE_EN_Q, ONNX_MXBAI_EMBED_LARGE, ONNX_MXBAI_EMBED_LARGE_Q,
+    ONNX_NOMIC_EMBED_TEXT,
 };
 use crate::nli::NliProvider;
 #[cfg(feature = "onnxruntime")]
@@ -276,6 +277,28 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
         "mxbai-embed-large" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_MXBAI_EMBED_LARGE,
+            #[cfg(feature = "ollama")]
+            ollama: MXBAI_EMBED_LARGE,
+        },
+        // The quantized 1024-dim family. Selectable, never a default: each is
+        // 4-13x the shipped model's 34 MB on disk and resident in the daemon,
+        // for a width EngramDB's scoring does not currently need. Measured in
+        // `docs/contributors/query-latency-profile.md`.
+        "mxbai-embed-large-q" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_MXBAI_EMBED_LARGE_Q,
+            #[cfg(feature = "ollama")]
+            ollama: MXBAI_EMBED_LARGE,
+        },
+        "bge-large-en-q" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_BGE_LARGE_EN_Q,
+            #[cfg(feature = "ollama")]
+            ollama: MXBAI_EMBED_LARGE,
+        },
+        "gte-large-en-q" => ProviderSpecs {
+            #[cfg(feature = "onnxruntime")]
+            onnx: ONNX_GTE_LARGE_EN_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
         },

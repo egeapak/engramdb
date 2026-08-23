@@ -1,0 +1,26 @@
+[
+  {"id": "s0q01", "text": "when should i save a memory to a group store instead", "archetype": "natural", "relevant": {"d3f10c5": 2, "cc511a5": 1}},
+  {"id": "s0q02", "text": "how does the store know the embedding model changed", "archetype": "natural", "relevant": {"dc286c2": 2, "d207bc4": 1}},
+  {"id": "s0q03", "text": "how do i write a test that loads a real model", "archetype": "natural", "relevant": {"d09486e": 2, "d7fe2f0": 1, "d074d7b": 1}},
+
+  {"id": "s0q04", "text": "why did we write our own vector math instead of reusing a library helper", "archetype": "paraphrase", "relevant": {"da4384b": 2, "db7b01a": 1}},
+  {"id": "s0q05", "text": "did turning up compiler optimization pay for the extra download size", "archetype": "paraphrase", "relevant": {"d80e3e1": 2, "d183ec6": 1}},
+  {"id": "s0q06", "text": "an old background process keeps serving the previous release's models", "archetype": "paraphrase", "relevant": {"c25850d": 2, "cc42060": 1}},
+
+  {"id": "s0q07", "text": "why does a 15 element tuple break the fuzz target build", "archetype": "buried_fact", "relevant": {"c3d7133": 2}},
+  {"id": "s0q08", "text": "how much does t5 titling add per created memory", "archetype": "buried_fact", "relevant": {"dcee0c6": 2, "deadd65": 1}},
+  {"id": "s0q09", "text": "how was apple silicon correctness verified without the hardware", "archetype": "buried_fact", "relevant": {"de45999": 2}},
+
+  {"id": "s0q10", "text": "cargo build --bin engramdb fails after the workspace split", "archetype": "distractor_trap", "relevant": {"cc09e28": 2}},
+  {"id": "s0q11", "text": "how to limit the embedding harness to one document variant", "archetype": "distractor_trap", "relevant": {"c43d9a6": 2}},
+  {"id": "s0q12", "text": "what sections does the doctor environment report have", "archetype": "distractor_trap", "relevant": {"ca80137": 2}},
+
+  {"id": "s0q13", "text": "lancedb fragment compaction threshold", "archetype": "keyword", "relevant": {"c7e3fd4": 2, "db29e78": 1, "cda8885": 1}},
+  {"id": "s0q14", "text": "windows named pipe transport", "archetype": "keyword", "relevant": {"c2dc08c": 2}},
+
+  {"id": "s0q15", "text": "the one big rule ops is shared", "archetype": "title_echo", "relevant": {"de9be99": 2, "d2f94fe": 1}},
+  {"id": "s0q16", "text": "what a 1024-dim model would cost", "archetype": "title_echo", "relevant": {"d0b245b": 2, "c6f8b4c": 1}},
+
+  {"id": "s0q17", "text": "parallel_parse_min parse_batch overlapped", "archetype": "tag_only", "relevant": {"d284766": 2}},
+  {"id": "s0q18", "text": "chunks_for_memories delete_chunks_batch predicate", "archetype": "tag_only", "relevant": {"de32017": 2, "db73a63": 1}}
+]
