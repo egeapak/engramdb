@@ -1446,6 +1446,19 @@ impl MemoryStore {
             })
     }
 
+    /// How many uncompacted fragments this store's tables carry.
+    ///
+    /// Cheap enough for a command hot path (fragment metadata only). Used to
+    /// decide whether compaction is due *before* the time-based maintenance
+    /// window expires — a write-heavy session degrades scans several-fold
+    /// within a single window, see `docs/contributors/query-latency-profile.md`.
+    pub async fn fragmentation(&self) -> Result<super::lance_index::Fragmentation> {
+        self.lance_index
+            .fragmentation()
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB stats failed: {}", e)))
+    }
+
     /// Compact fragments and prune old LanceDB dataset versions for the
     /// memories and chunks tables. See [`LanceIndex::optimize`].
     ///

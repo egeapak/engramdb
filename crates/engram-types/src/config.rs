@@ -1739,6 +1739,25 @@ pub struct MaintenanceConfig {
     /// `ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS` env > this config value.
     #[serde(default = "default_maintenance_interval_secs")]
     pub interval_secs: u64,
+
+    /// Uncompacted fragments (summed over the memories and chunks tables) that
+    /// make compaction due *before* `interval_secs` elapses. `0` disables the
+    /// pressure trigger, leaving compaction purely time-based.
+    ///
+    /// Query latency tracks fragment count, not row count: every mutating
+    /// commit appends a fragment and every scan pays per fragment. At a fixed
+    /// 400 rows, 100 uncompacted writes take the index projection from 5.9 ms
+    /// to 42.0 ms. Waiting out a 6-hour window after a write-heavy session
+    /// therefore means serving several-fold slower queries the whole time,
+    /// which is what this trigger exists to prevent.
+    /// See `docs/contributors/query-latency-profile.md`.
+    #[serde(default = "default_compaction_fragment_threshold")]
+    pub compaction_fragment_threshold: usize,
+
+    /// Floor on how often the pressure trigger may fire, so a write-heavy
+    /// session cannot spin compaction on every command.
+    #[serde(default = "default_compaction_min_interval_secs")]
+    pub compaction_min_interval_secs: u64,
 }
 
 fn default_maintenance_enabled() -> bool {
@@ -1749,11 +1768,21 @@ fn default_maintenance_interval_secs() -> u64 {
     6 * 60 * 60
 }
 
+fn default_compaction_fragment_threshold() -> usize {
+    32
+}
+
+fn default_compaction_min_interval_secs() -> u64 {
+    120
+}
+
 impl Default for MaintenanceConfig {
     fn default() -> Self {
         Self {
             enabled: default_maintenance_enabled(),
             interval_secs: default_maintenance_interval_secs(),
+            compaction_fragment_threshold: default_compaction_fragment_threshold(),
+            compaction_min_interval_secs: default_compaction_min_interval_secs(),
         }
     }
 }

@@ -35,7 +35,8 @@ pub use conversation_index::{ConversationHit, ConversationIndex, ConversationRow
 pub use digest::FileDigest;
 pub use error::{Result, StorageError};
 pub use lance_index::{
-    IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary, VectorMatch,
+    Fragmentation, IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary,
+    VectorMatch,
 };
 pub use manifest::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, Manifest};
 pub use project_id::detect_worktree_main;

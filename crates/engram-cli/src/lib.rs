@@ -255,6 +255,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         // actually runs.
         engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
             .await;
+
+        // Compaction rides a much shorter cadence than the full pass above,
+        // because query latency tracks LanceDB fragment count and a
+        // write-heavy session degrades every scan several-fold long before the
+        // 6-hour window expires. The common case is one file stat: the
+        // throttle is checked before the store is opened.
+        engramdb::ops::auto_compact(&dir, &config.maintenance, cli.no_maintenance).await;
     }
 
     // Compute the daemon policy once per process using the project config.

@@ -22,7 +22,8 @@
 //!
 //! Run: `cargo run --release --example embed_matrix`
 //! Env: `EMBED_EVAL_DATA` (dataset path), `EMBED_EVAL_OUT` (results JSON),
-//!      `EMBED_EVAL_MODELS` (comma filter, e.g. "minilm-q,bge-small-q").
+//!      `EMBED_EVAL_MODELS` (comma filter, e.g. "minilm-q,bge-small-q"),
+//!      `EMBED_EVAL_VARIANTS` (comma filter, e.g. "fieldvec_c256" = production).
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
@@ -30,8 +31,9 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use engramdb::embeddings::{
     chunk_text, EmbeddingProvider, OnnxModelSpec, OnnxProvider, ONNX_ALL_MINILM,
-    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q, ONNX_ARCTIC_XS, ONNX_ARCTIC_XS_Q,
-    ONNX_BGE_SMALL_EN_Q, ONNX_NOMIC_EMBED_TEXT_Q,
+    ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_L12_U8, ONNX_ALL_MINILM_Q, ONNX_ARCTIC_S_Q,
+    ONNX_ARCTIC_XS, ONNX_ARCTIC_XS_Q, ONNX_BGE_LARGE_EN_Q, ONNX_BGE_SMALL_EN_Q,
+    ONNX_GTE_LARGE_EN_Q, ONNX_MXBAI_EMBED_LARGE_Q, ONNX_NOMIC_EMBED_TEXT_Q,
 };
 use engramdb::onnx_ep::Backend;
 use serde::{Deserialize, Serialize};
@@ -456,6 +458,36 @@ const MODELS: &[ModelUnderTest] = &[
         query_prefix: None,
         doc_prefix: None,
     },
+    // The shipped default (uint8 L12). The baseline every wider model has to
+    // beat by enough to justify its cost.
+    ModelUnderTest {
+        key: "minilm-l12-u8",
+        spec: ONNX_ALL_MINILM_L12_U8,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    // The quantized 1024-dim family — the widest embeddings available locally
+    // (fastembed's catalogue stops at 1024). 2.7x the width of the default at
+    // ~8x its query-path latency and ~10x its disk, so the question these
+    // answer is whether the retrieval quality is worth that.
+    ModelUnderTest {
+        key: "mxbai-large-q",
+        spec: ONNX_MXBAI_EMBED_LARGE_Q,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    ModelUnderTest {
+        key: "gte-large-q",
+        spec: ONNX_GTE_LARGE_EN_Q,
+        query_prefix: None,
+        doc_prefix: None,
+    },
+    ModelUnderTest {
+        key: "bge-large-q",
+        spec: ONNX_BGE_LARGE_EN_Q,
+        query_prefix: None,
+        doc_prefix: None,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -757,6 +789,13 @@ async fn main() -> Result<()> {
         std::env::var("EMBED_EVAL_DATA").unwrap_or_else(|_| "examples/data/embed_eval.json".into());
     let out_path = std::env::var("EMBED_EVAL_OUT")
         .unwrap_or_else(|_| "target/embed_matrix_results.json".into());
+    // Variant filter: the full 16-variant sweep re-embeds the corpus once per
+    // variant, which a 1024-dim model turns into hours. A comparison between
+    // models only needs the production variant (`fieldvec_c256`, i.e.
+    // `metadata_vector = true` at the 256-token budget).
+    let variant_filter: Option<Vec<String>> = std::env::var("EMBED_EVAL_VARIANTS")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
     let model_filter: Option<Vec<String>> = std::env::var("EMBED_EVAL_MODELS")
         .ok()
         .map(|s| s.split(',').map(|m| m.trim().to_string()).collect());
@@ -839,6 +878,11 @@ async fn main() -> Result<()> {
         }
         let mut texts: HashMap<(&str, &str), Vec<Vec<String>>> = HashMap::new();
         for v in DOC_VARIANTS {
+            if let Some(f) = &variant_filter {
+                if !f.iter().any(|x| x == v.name) {
+                    continue;
+                }
+            }
             let budget = v.chunk_tokens.min(mut_.spec.max_tokens);
             for dm in &doc_modes {
                 let per_mem: Vec<Vec<String>> = ds
@@ -907,6 +951,11 @@ async fn main() -> Result<()> {
         let mut baseline_ranks: HashMap<&str, usize> = HashMap::new();
 
         for v in DOC_VARIANTS {
+            if let Some(f) = &variant_filter {
+                if !f.iter().any(|x| x == v.name) {
+                    continue;
+                }
+            }
             for qm in &query_modes {
                 let dm = if *qm == "prefixed" && mut_.doc_prefix.is_some() {
                     "prefixed"
@@ -990,6 +1039,11 @@ async fn main() -> Result<()> {
             "variant(max,raw)", "P@1", "R@5", "MRR", "nDCG", "win/loss", "chunks"
         );
         for v in DOC_VARIANTS {
+            if let Some(f) = &variant_filter {
+                if !f.iter().any(|x| x == v.name) {
+                    continue;
+                }
+            }
             if let Some(r) = results
                 .get(v.name)
                 .and_then(|a| a.get("max"))

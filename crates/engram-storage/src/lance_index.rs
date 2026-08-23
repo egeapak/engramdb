@@ -391,6 +391,20 @@ pub enum ScalarIndexKind {
     BTree,
 }
 
+/// How fragmented a store's tables are, from [`LanceIndex::fragmentation`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct Fragmentation {
+    /// Uncompacted ("small") fragments across the memories and chunks tables.
+    ///
+    /// This is the number that actually tracks query latency: every mutating
+    /// commit appends a fragment, and a scan pays per fragment regardless of
+    /// how few rows each holds. Row count barely matters by comparison — see
+    /// `docs/contributors/query-latency-profile.md`.
+    pub small_fragments: usize,
+    /// Total fragments across both tables, for diagnostics.
+    pub total_fragments: usize,
+}
+
 /// Aggregate result of [`LanceIndex::optimize`] across the memories and
 /// chunks tables. All counters are zero when there was nothing to reclaim.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1914,6 +1928,25 @@ impl LanceIndex {
             .context("Failed to reset has_embedding after chunk clear")?;
 
         Ok(())
+    }
+
+    /// Count uncompacted fragments across both tables.
+    ///
+    /// Cheap: LanceDB's `stats()` reads fragment metadata only, never row
+    /// data, so this is safe to call on a command hot path to decide whether
+    /// compaction is due. Callers should treat failures as "no pressure known"
+    /// rather than an error — this only ever schedules maintenance.
+    pub async fn fragmentation(&self) -> Result<Fragmentation> {
+        let mut out = Fragmentation::default();
+        for table in [self.open_table().await?, self.open_chunks_table().await?] {
+            let stats = table
+                .stats()
+                .await
+                .context("Failed to read LanceDB table statistics")?;
+            out.small_fragments += stats.fragment_stats.num_small_fragments;
+            out.total_fragments += stats.fragment_stats.num_fragments;
+        }
+        Ok(out)
     }
 
     /// Compact small fragments and prune old dataset versions for both the
