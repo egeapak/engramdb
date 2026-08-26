@@ -84,7 +84,7 @@ pub use query::{
     audience_allows, merge_scored_memories, query_memories, query_memories_with_extra_stores,
     query_memories_with_global, ExtraStoresResult,
 };
-pub use reindex::{reindex, ReindexResult};
+pub use reindex::{reindex, reindex_dry_run, ReindexOptions, ReindexPlan, ReindexResult};
 pub use resolve::{resolve_memory, ResolveAction, ResolveParams, ResolveResult};
 pub use review::{count_recency_stale, review_memories, ReviewParams};
 pub use stats::{compute_stats, StoreStats};

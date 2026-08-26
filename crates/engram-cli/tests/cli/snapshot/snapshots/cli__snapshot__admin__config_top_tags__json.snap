@@ -16,6 +16,10 @@ exit: 0
     "rerank_top_n": 10,
     "title_strategy": "keyword"
   },
+  "index": {
+    "staleness_check": "size",
+    "staleness_max_bytes": 8388608
+  },
   "limits": {
     "content_soft_token_target": 500,
     "embedding_chunk_tokens": 256,

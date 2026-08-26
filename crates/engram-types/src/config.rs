@@ -1172,6 +1172,10 @@ pub struct EngramConfig {
     /// Past-session harvesting (digest budgets, transcript archiving)
     #[serde(default)]
     pub harvest: HarvestConfig,
+
+    /// Index-currency checking (how hard the staleness check works)
+    #[serde(default)]
+    pub index: IndexConfig,
 }
 
 /// Settings for harvesting past Claude Code sessions (`[harvest]` section).
@@ -1363,6 +1367,114 @@ impl HarvestConfig {
     pub fn index_after(&self) -> chrono::Duration {
         chrono::Duration::try_hours(self.index_after_hours as i64)
             .unwrap_or_else(chrono::Duration::zero)
+    }
+}
+
+/// How hard the on-every-read staleness check works to notice that the index
+/// has fallen behind the files (`[index].staleness_check`).
+///
+/// The tiers are cumulative and ordered by cost. Each one runs on **every**
+/// `query` / `list` / `get`, which is what makes the default a budget decision
+/// rather than a correctness one: `doctor` and `reindex --dry-run` are the
+/// unbudgeted authority and always run the exact check.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StalenessCheck {
+    /// Compare row count to `.md` count. The historical behaviour, and the
+    /// cheapest: `Table::count_rows` reads per-fragment metadata only, and the
+    /// file side is one `read_dir`.
+    ///
+    /// Blind to any edit that leaves the count unchanged — including a hand
+    /// edit, a `git checkout`, and a delete paired with a create.
+    Counts,
+
+    /// Adds an id-set comparison and a per-file length comparison, for one
+    /// `statx` per file plus a narrow index projection.
+    ///
+    /// The default. It catches every practical drift (an edit that changes the
+    /// file's length) without reading a byte of file content. It cannot see an
+    /// edit that preserves length exactly — a one-character substitution — and
+    /// its clean result says so rather than claiming currency it did not check.
+    #[default]
+    Size,
+
+    /// Adds a SHA-256 over the files whose length still matches, making the
+    /// check exact.
+    ///
+    /// Opt-in because it reads and hashes every memory file on every read
+    /// operation. Bounded by [`IndexConfig::staleness_max_bytes`]; past that
+    /// budget the check reports what it managed to verify rather than silently
+    /// downgrading to `Size`.
+    Content,
+}
+
+impl StalenessCheck {
+    /// Human-readable tier name, used in the warning so a clean result never
+    /// reads as a stronger guarantee than it is.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Counts => "counts",
+            Self::Size => "size",
+            Self::Content => "content",
+        }
+    }
+}
+
+/// Index-currency checking (`[index]` section).
+///
+/// **Not part of [`provider_cache_key`](crate) inputs**, for the same reason
+/// `[harvest]` is not: index-currency checking loads no model, so folding these
+/// fields into the provider cache key would evict cached embedding/NLI/reranker
+/// bundles every time the tier was tweaked. `provider_cache_key` exhaustively
+/// destructures only the three model configs, so adding a top-level section
+/// here cannot break it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexConfig {
+    /// How much work the on-every-read staleness check does. See
+    /// [`StalenessCheck`].
+    #[serde(default)]
+    pub staleness_check: StalenessCheck,
+
+    /// Byte budget for the `content` tier's hashing, per check.
+    ///
+    /// Only consulted when `staleness_check = "content"`. Once the files
+    /// hashed exceed this, the check stops and reports the drift it found
+    /// *plus* the fact that it did not finish — a partial exact check must not
+    /// be reported as a clean exact check.
+    ///
+    /// Rejected at `0` by validation: that would disable the tier the user
+    /// explicitly asked for, silently and forever.
+    #[serde(default = "default_staleness_max_bytes")]
+    pub staleness_max_bytes: u64,
+}
+
+/// 8 MiB — roughly 4,000 memories at typical size, hashed in a few
+/// milliseconds. Large enough that the budget is invisible on a real store,
+/// small enough to bound a pathological one.
+fn default_staleness_max_bytes() -> u64 {
+    8 * 1024 * 1024
+}
+
+impl Default for IndexConfig {
+    fn default() -> Self {
+        Self {
+            staleness_check: StalenessCheck::default(),
+            staleness_max_bytes: default_staleness_max_bytes(),
+        }
+    }
+}
+
+impl IndexConfig {
+    /// Validate the staleness budget.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        if self.staleness_check == StalenessCheck::Content && self.staleness_max_bytes == 0 {
+            anyhow::bail!(
+                "index.staleness_max_bytes must be >= 1 when index.staleness_check = \"content\" \
+                 (0 would disable the exact tier you asked for). Omit the field for the default \
+                 (8388608), or set `staleness_check = \"size\"` to skip content hashing instead."
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1885,6 +1997,7 @@ impl EngramConfig {
         self.security.validate()?;
         self.review.validate()?;
         self.harvest.validate()?;
+        self.index.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -2568,6 +2681,72 @@ interval_secs = 60
         assert!(c.validate().is_ok());
         c.harvest.archive_retention_days = None;
         assert!(c.validate().is_ok(), "None is a legitimate disable");
+    }
+
+    // ===================================================================
+    // [index] — index-currency checking
+    // ===================================================================
+
+    /// The default tier is `size`: it closes the practical blind spot for one
+    /// `statx` per file, where `content` would read every memory on every
+    /// query. Pinned because changing it silently changes read latency for
+    /// every user.
+    #[test]
+    fn index_config_defaults_to_the_size_tier() {
+        let c = EngramConfig::default();
+        assert_eq!(c.index.staleness_check, StalenessCheck::Size);
+        assert_eq!(c.index.staleness_max_bytes, 8 * 1024 * 1024);
+    }
+
+    /// A config with no `[index]` section parses to the same defaults — the
+    /// section is additive, and an existing config.toml must not change
+    /// behaviour by omitting it.
+    #[test]
+    fn index_config_absent_section_parses_to_defaults() {
+        let parsed: EngramConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.index, IndexConfig::default());
+        // And a partial section fills the rest in, so naming one knob does not
+        // zero the other.
+        let partial: EngramConfig =
+            toml::from_str("[index]\nstaleness_check = \"content\"\n").unwrap();
+        assert_eq!(partial.index.staleness_check, StalenessCheck::Content);
+        assert_eq!(
+            partial.index.staleness_max_bytes,
+            IndexConfig::default().staleness_max_bytes
+        );
+    }
+
+    #[test]
+    fn index_config_tier_names_are_snake_case_in_toml() {
+        for (text, expected) in [
+            ("counts", StalenessCheck::Counts),
+            ("size", StalenessCheck::Size),
+            ("content", StalenessCheck::Content),
+        ] {
+            let parsed: EngramConfig =
+                toml::from_str(&format!("[index]\nstaleness_check = \"{text}\"\n")).unwrap();
+            assert_eq!(parsed.index.staleness_check, expected);
+            assert_eq!(expected.as_str(), text, "as_str must round-trip the name");
+        }
+    }
+
+    /// A zero budget would disable the exact tier the user explicitly asked
+    /// for — silently, and forever.
+    #[test]
+    fn index_config_rejects_a_zero_budget_only_when_content_is_asked_for() {
+        let mut c = EngramConfig::default();
+        c.index.staleness_check = StalenessCheck::Content;
+        c.index.staleness_max_bytes = 0;
+        assert!(c.validate().is_err(), "0 disables the content tier");
+
+        c.index.staleness_max_bytes = 1;
+        assert!(c.validate().is_ok());
+
+        // At a tier that never hashes, the budget is unused — rejecting it
+        // there would fail a config over a field with no effect.
+        c.index.staleness_check = StalenessCheck::Size;
+        c.index.staleness_max_bytes = 0;
+        assert!(c.validate().is_ok(), "the budget is inert below `content`");
     }
 
     #[test]

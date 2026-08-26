@@ -191,6 +191,10 @@ archive_max_transcript_bytes = 16777216  # skip archiving a transcript larger th
 index = true                        # build the `harvest search` conversation index during maintenance
 index_after_hours = 24              # index a session nobody reviewed once it is this old
 index_batch = 25                    # most conversations one automatic pass will embed
+
+[index]
+staleness_check = "size"            # index-currency tier on every read: counts | size | content
+staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hashing
 ```
 
 ## Notes on selected sections
@@ -207,6 +211,17 @@ index_batch = 25                    # most conversations one automatic pass will
 - **`[maintenance]`** — `interval_secs` (default **21600**, six hours) throttles the full housekeeping pass: an orphan/stale-project sweep plus a store health check. Compaction rides a **second, much shorter** trigger, because query latency tracks LanceDB fragment count rather than row count and a write-heavy session degrades every scan several-fold long before six hours elapse. `compaction_fragment_threshold` (default **32**) is the number of uncompacted fragments that makes compaction due early; `compaction_min_interval_secs` (default **120**) is the floor between firings so a burst of writes cannot compact on every command. Set the threshold to `0` to disable the pressure trigger and keep compaction purely time-based. The check itself costs one file stat unless it fires. Measured worth 4x on a full query — see `docs/contributors/query-latency-profile.md`.
 
   `index` (default **true**) builds the conversation index `harvest search` reads, during the throttled maintenance pass. A session settled with `harvest mark` is indexed on the next pass; one **nobody** reviewed is indexed once it is older than `index_after_hours` (default **24**) — that timeout is the point, since a search that only found what you had already read would only find what you no longer need. `index_batch` (default **25**) caps how many conversations one pass will embed, so a first run on a machine with years of history spreads over successive passes (newest first) instead of embedding thousands inside one MCP startup; it must be at least 1 when `index = true` (set `index = false` to turn indexing off instead). Indexing needs an embedding provider, so it runs where one is available — the MCP server's maintenance pass — and gracefully skips where none is, exactly like the consolidation pass. None of these fields affect the provider cache key: harvesting itself loads no model, and the index uses whatever provider the engine already resolved.
+- **`[index]`** — how hard the read path works to notice that the index has fallen behind the files on disk. A memory's index row and its vectors are *derived* from its `.md` file, so a file changed outside EngramDB — a hand edit, a `git checkout`, a merge, a restore from backup — leaves the index serving the old summary, the old keyword stems and the old vectors. `staleness_check` picks what `query` / `list` / `get` compare before answering:
+
+  | tier | compares | misses |
+  |------|----------|--------|
+  | `counts` | row count vs `.md` count | any in-place edit; a delete paired with a create |
+  | `size` (default) | plus id sets and per-file length | an edit that preserves the file's length exactly |
+  | `content` | plus SHA-256 of the length-matched files | nothing (but is budget-bounded) |
+
+  The default is `size`, not exact hashing, because the tiers differ enormously in cost: the count comparison reads per-fragment metadata and touches no data file, while `content` reads and hashes **every memory file on every read operation**. `size` costs one `stat` per file and catches every drift that changes a file's length, which in practice is all of them. Choose `content` when a length-preserving edit is a real risk and the latency is acceptable; `staleness_max_bytes` (default 8 MiB) bounds its hashing, and a check that hits the budget says so rather than reporting a clean store it did not finish verifying.
+
+  A warning from this check always names the tier that produced it, because a clean `size` result is not proof of currency. For the exact, unbudgeted answer use `engramdb doctor` (content drift) or `engramdb reindex --dry-run` (content drift **and** stale vectors). Neither of these fields affects the provider cache key — index-currency checking loads no model.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.

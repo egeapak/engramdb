@@ -1,5 +1,6 @@
 //! Unified memory query command.
 
+use super::staleness_config;
 use crate::engine::engine_for;
 use crate::output::OutputFormatter;
 use anyhow::Result;
@@ -55,7 +56,7 @@ pub async fn run_query(
     } else {
         MemoryStore::open(dir).await?
     };
-    if let Ok(Some(warning)) = store.check_staleness().await {
+    if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);
     }
 

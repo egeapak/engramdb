@@ -9,28 +9,71 @@ use engramdb::storage::MemoryStore;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Which reindex to run, and over what.
+///
+/// `run_reindex` carried ten positional arguments behind a
+/// `too_many_arguments` allow; the repo's convention for that is a
+/// `<Cmd>Params` struct (`AddParams`, `QueryParams`, `UpdateParams`,
+/// `DiscoverParams`), which also makes the five call sites read as named
+/// fields rather than a row of bare booleans.
+pub struct ReindexParams {
+    pub global: bool,
+    /// Only re-embed; skip the index rebuild.
+    pub embeddings_only: bool,
+    /// Only rebuild the index; skip embeddings.
+    pub index_only: bool,
+    /// Rebuild the conversation search rows instead of memories.
+    pub archive_only: bool,
+    /// Report what would change and write nothing.
+    pub dry_run: bool,
+    /// Re-embed everything, including vectors that are provably current.
+    pub force: bool,
+    /// Rebuild only the rows whose file changed since it was indexed.
+    pub incremental: bool,
+    pub embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+}
+
+impl ReindexParams {
+    /// A plain full reindex — the shape most callers want.
+    pub fn full(
+        global: bool,
+        embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+    ) -> Self {
+        Self {
+            global,
+            embeddings_only: false,
+            index_only: false,
+            archive_only: false,
+            dry_run: false,
+            force: false,
+            incremental: false,
+            embedding_backend,
+        }
+    }
+}
+
 /// Run reindex operation.
 ///
-/// Rebuilds the index and optionally re-embeds memories based on flags.
-///
-/// # Arguments
-/// * `dir` - The directory containing the EngramDB store
-/// * `embeddings_only` - If true, only re-embed memories (skip index rebuild)
-/// * `index_only` - If true, only rebuild index (skip embeddings)
-/// * `formatter` - Output formatter for success/error messages
-#[allow(clippy::too_many_arguments)]
+/// Rebuilds the index and optionally re-embeds memories based on `params`.
 pub async fn run_reindex(
     dir: &Path,
     registry: &dyn engramdb::storage::RegistryBackend,
-    global: bool,
-    embeddings_only: bool,
-    index_only: bool,
-    archive_only: bool,
-    embedding_backend: Option<engramdb::types::EmbeddingBackend>,
+    params: ReindexParams,
     formatter: &OutputFormatter,
     cell: &Arc<DaemonCell>,
     policy: DaemonPolicy,
 ) -> Result<()> {
+    let ReindexParams {
+        global,
+        embeddings_only,
+        index_only,
+        archive_only,
+        dry_run,
+        force,
+        incremental,
+        embedding_backend,
+    } = params;
+
     // A different index entirely: `--archive-only` rebuilds the conversation
     // search rows from the stored transcript copies and never touches a
     // memory, so it returns before the memories store is even opened.
@@ -47,11 +90,19 @@ pub async fn run_reindex(
     // Set up engine with embeddings if not index_only. `MemoryStore` is
     // `Clone` — a second `open` here paid a redundant config load + LanceDB
     // connection.
-    let engine = if !index_only {
+    //
+    // A dry run always wants one: the stale-vector half of the report is
+    // exactly what needs a live provider to compute, and `--index-only`
+    // narrows what a *rebuild* would touch, not what the report may look at.
+    let engine = if !index_only || dry_run {
         Some(engine_for(store.clone(), embedding_backend, cell, policy).await)
     } else {
         None
     };
+
+    if dry_run {
+        return report_dry_run(&store, engine.as_ref(), formatter).await;
+    }
 
     // Print progress before starting (human-only; raw println! would corrupt
     // the JSON document the formatter emits below — finding #7).
@@ -68,7 +119,16 @@ pub async fn run_reindex(
         }
     }
 
-    let result = reindex(&store, engine.as_ref(), embeddings_only).await?;
+    let result = reindex(
+        &store,
+        engine.as_ref(),
+        engramdb::ops::ReindexOptions {
+            embeddings_only,
+            incremental,
+            force,
+        },
+    )
+    .await?;
 
     // Print results
     if result.indexed > 0 {
@@ -77,8 +137,33 @@ pub async fn run_reindex(
             result.indexed
         ));
     }
+    if result.rows_skipped > 0 {
+        formatter.print_message(&format!(
+            "Reused {} unchanged index {}.",
+            result.rows_skipped,
+            if result.rows_skipped == 1 {
+                "row"
+            } else {
+                "rows"
+            }
+        ));
+    }
     if result.embedded > 0 {
         formatter.print_success(&format!("Embedded {} memories.", result.embedded));
+    }
+    // A skip that is not reported is a silent loss path: without this line,
+    // "Embedded 3 memories" on a 900-memory store is indistinguishable from a
+    // reindex that failed on the other 897.
+    if result.skipped > 0 {
+        formatter.print_message(&format!(
+            "Reused {} up-to-date {} (pass --force to re-embed everything).",
+            result.skipped,
+            if result.skipped == 1 {
+                "embedding"
+            } else {
+                "embeddings"
+            }
+        ));
     }
     for warning in &result.warnings {
         formatter.print_warning(warning);
@@ -91,6 +176,8 @@ pub async fn run_reindex(
     }
     if result.indexed == 0
         && result.embedded == 0
+        && result.skipped == 0
+        && result.rows_skipped == 0
         && result.errors.is_empty()
         && result.warnings.is_empty()
     {
@@ -99,6 +186,114 @@ pub async fn run_reindex(
 
     Ok(())
 }
+
+/// Render what a reindex would rebuild, having changed nothing.
+///
+/// Output goes through the formatter, never a bare print macro, and the human
+/// lines are gated on `wants_human_stdout` rather than `!is_json()` — the same
+/// rule the rebuild path documents, because `doctor --fix` reaches this module
+/// with a delegate formatter that is deliberately not JSON.
+async fn report_dry_run(
+    store: &MemoryStore,
+    engine: Option<&engramdb::retrieval::RetrievalEngine>,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let plan = engramdb::ops::reindex_dry_run(store, engine).await?;
+
+    if formatter.is_json() {
+        outln!(
+            formatter,
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dry_run": true,
+                "current": plan.is_current(),
+                "on_disk": plan.on_disk,
+                "indexed": plan.indexed,
+                "not_indexed": plan.not_indexed,
+                "drifted": plan.drifted,
+                "stale_vectors": plan.stale_vectors,
+                "not_embedded": plan.not_embedded,
+                "undetermined": plan.undetermined,
+                "without_digest": plan.without_digest,
+                "embeddings_unavailable": plan.embeddings_unavailable,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if formatter.wants_human_stdout() {
+        outln!(
+            formatter,
+            "Dry run — nothing was changed. {} memories on disk, {} indexed.",
+            plan.on_disk,
+            plan.indexed
+        );
+    }
+
+    // Each line names the ids, capped, because "3 drifted" without saying
+    // which is a report the user cannot act on without re-deriving it.
+    let sections: [(&str, &Vec<String>); 5] = [
+        ("not indexed", &plan.not_indexed),
+        ("changed since indexing", &plan.drifted),
+        ("vectors out of date", &plan.stale_vectors),
+        ("not embedded", &plan.not_embedded),
+        ("could not be checked", &plan.undetermined),
+    ];
+    // Header and ids go to the SAME stream, both stdout. Routing the header
+    // through `print_warning` put it on stderr while its ids stayed on stdout,
+    // so anyone reading stdout alone — a pipe, a redirect, a log — got a bare
+    // list of uuids with nothing saying what was wrong with them. This is a
+    // report the user asked for, not a diagnostic aside.
+    if formatter.wants_human_stdout() {
+        for (label, ids) in sections {
+            if ids.is_empty() {
+                continue;
+            }
+            outln!(formatter, "{} {}:", ids.len(), label);
+            for id in ids.iter().take(DRY_RUN_ID_LIMIT) {
+                outln!(formatter, "  {}", id);
+            }
+            if ids.len() > DRY_RUN_ID_LIMIT {
+                // Naming the cap rather than trailing off: a truncated list
+                // that does not say it is truncated reads as the whole answer.
+                outln!(formatter, "  ... and {} more", ids.len() - DRY_RUN_ID_LIMIT);
+            }
+        }
+    }
+
+    if plan.embeddings_unavailable {
+        formatter.print_warning(
+            "no embedding provider available — vector currency was not checked. \
+             Run `engramdb doctor` to fix the model cache.",
+        );
+    }
+    if plan.without_digest > 0 {
+        formatter.print_message(&format!(
+            "{} rows predate the content digest; a reindex backfills them.",
+            plan.without_digest
+        ));
+    }
+    if plan.is_current() {
+        formatter.print_success("Index is current with the files on disk.");
+    } else if plan.embeddings_unavailable
+        && plan.not_indexed.is_empty()
+        && plan.drifted.is_empty()
+        && plan.undetermined.is_empty()
+    {
+        // Content is current but the vector half could not be computed. Saying
+        // "current" here would be a clean bill of health for a check that did
+        // not run; the warning above already named the missing provider.
+        formatter.print_message("Content is current; vector currency was not checked.");
+    } else {
+        formatter.print_message("Run 'engramdb reindex' to rebuild.");
+    }
+    Ok(())
+}
+
+/// How many ids a dry run lists per category before summarizing the rest.
+/// Enough to act on directly; short enough that a badly drifted store does not
+/// scroll the terminal.
+const DRY_RUN_ID_LIMIT: usize = 20;
 
 /// Rebuild every conversation search row from the stored transcript copies.
 ///
@@ -234,11 +429,10 @@ mod tests {
         run_reindex(
             tmp.path(),
             &InMemoryRegistry::new(),
-            false,
-            false,
-            true,
-            false,
-            None,
+            ReindexParams {
+                index_only: true,
+                ..ReindexParams::full(false, None)
+            },
             &fmt(),
             &Arc::new(DaemonCell::new()),
             DaemonPolicy::InProcess,
@@ -270,11 +464,10 @@ mod tests {
         run_reindex(
             tmp.path(),
             &InMemoryRegistry::new(),
-            false,
-            false,
-            true,
-            false,
-            None,
+            ReindexParams {
+                index_only: true,
+                ..ReindexParams::full(false, None)
+            },
             &fmt(),
             &Arc::new(DaemonCell::new()),
             DaemonPolicy::InProcess,
@@ -293,11 +486,10 @@ mod tests {
         let result = run_reindex(
             tmp.path(),
             &InMemoryRegistry::new(),
-            false,
-            false,
-            true,
-            false,
-            None,
+            ReindexParams {
+                index_only: true,
+                ..ReindexParams::full(false, None)
+            },
             &fmt(),
             &Arc::new(DaemonCell::new()),
             DaemonPolicy::InProcess,

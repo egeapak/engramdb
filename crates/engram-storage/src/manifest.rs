@@ -29,16 +29,19 @@ use std::path::Path;
 /// new table appear in stores created before it. `0.7.0` added
 /// `source_sessions`, the harvest evidence link — the sessions a memory was
 /// extracted from, which is also what pins their transcript copies against
-/// budget eviction. A store whose manifest records an older version is
-/// transparently re-indexed once on open (seconds, no re-embed) and stamped up
-/// to this.
+/// budget eviction. `0.8.0` added `content_sha256` + `content_len`, the identity
+/// of the `.md` bytes each row was derived from, so an in-place edit — a hand
+/// edit, a `git checkout`, a restore — becomes visible to `doctor` instead of
+/// hiding behind a count that did not change. A store whose manifest records an
+/// older version is transparently re-indexed once on open (seconds, no
+/// re-embed) and stamped up to this.
 ///
 /// That column is also why the evidence link is a *field* rather than a join
 /// table: the migration rebuilds this table from the `.md` files, so a relation
 /// held only in LanceDB is destroyed by the very mechanism that adds the
 /// column. Unlike `keyword_stems` — a cache the rebuild recomputes — a citation
 /// cannot be recomputed from anything.
-pub const CURRENT_SCHEMA_VERSION: &str = "0.7.0";
+pub const CURRENT_SCHEMA_VERSION: &str = "0.8.0";
 
 /// The pre-migration baseline, used as the serde default so a manifest written
 /// before the field existed parses as "needs migration" rather than failing.

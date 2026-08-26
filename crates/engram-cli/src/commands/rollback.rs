@@ -123,6 +123,35 @@ pub async fn run_rollback(
         .await;
     }
 
+    // Same reasoning as `migrate`: the rewrite changed every file's bytes, so
+    // every index row's content digest is stale even though no memory's
+    // meaning changed. Rebuild the metadata (cheap, no provider needed) so the
+    // store is not reported as wholly drifted for a no-op rewrite. Vectors are
+    // untouched and stay correct. The write lock is dropped first because
+    // `MemoryStore::reindex` takes the same non-reentrant advisory lock.
+    drop(_write_lock);
+    if !dry_run && rolled_back > 0 {
+        let opened = if global {
+            engramdb::storage::MemoryStore::open_global().await
+        } else {
+            engramdb::storage::MemoryStore::open(dir).await
+        };
+        match opened {
+            Ok(store) => {
+                if let Err(e) = store.reindex().await {
+                    formatter.print_warning(&format!(
+                        "memories were rewritten but the index could not be refreshed ({e}) — run \
+                         `engramdb reindex` so queries stop matching the pre-rollback \
+                         text."
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::debug!("skipping post-rollback index refresh: {e}");
+            }
+        }
+    }
+
     if dry_run {
         formatter.print_message(&format!(
             "Dry run: {} memories would be rolled back to {target_label}, {} already at target.",

@@ -1606,6 +1606,8 @@ async fn reindex_basic() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: None,
             index_only: None,
+            dry_run: None,
+            force: None,
             project: None,
         }))
         .await;
@@ -1622,6 +1624,8 @@ async fn reindex_index_only() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: None,
             index_only: Some(true),
+            dry_run: None,
+            force: None,
             project: None,
         }))
         .await;
@@ -1641,8 +1645,29 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
     let (dir, server) = setup().await;
     let _ = create_and_get_id(&server, "decision", "To reindex", "Content").await;
 
-    // Force an unambiguous model mismatch.
     let store = server.open_store_for(None).await.unwrap();
+
+    // Let `create`'s detached ingest settle BEFORE corrupting the fingerprint.
+    //
+    // `embed_memory` stamps the store's fingerprint on a first embed — when it
+    // observes no fingerprint and no chunks — and `memory_create` returns
+    // before that runs. An ingest that read `None` early and completes late
+    // therefore writes the REAL model id straight over the bogus one set here,
+    // the gate below finds no mismatch, and the test fails claiming the gate is
+    // broken. Waiting until chunks exist makes `stamp_first_embed` false for
+    // anything still in flight, so the corruption sticks.
+    //
+    // Bounded, not asserted: when the ONNX model cannot load in this
+    // environment no chunks ever appear, which the model-load-race branch below
+    // handles on its own.
+    for _ in 0..250 {
+        if matches!(store.has_any_chunks().await, Ok(true)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Force an unambiguous model mismatch.
     store
         .set_embedding_fingerprint(engramdb::storage::EmbeddingFingerprint {
             model: "onnx/bogus-old-model".to_string(),
@@ -1661,6 +1686,20 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
     )
     .await
     .unwrap();
+
+    // Re-assert immediately before the check. If the wait above timed out —
+    // a heavily loaded machine where the embed had not landed within 5s — an
+    // ingest that computed `stamp_first_embed` before the corruption can still
+    // write the real model id over it. Once chunks exist no further stamp is
+    // possible, so this second write is the one that sticks.
+    store
+        .set_embedding_fingerprint(engramdb::storage::EmbeddingFingerprint {
+            model: "onnx/bogus-old-model".to_string(),
+            dimensions: 384,
+            composition: None,
+        })
+        .await
+        .unwrap();
 
     // The enforcing chokepoint must refuse on the mismatch. The gate can
     // only fire when a live embedding provider loaded (no live `model_id()`
@@ -1689,13 +1728,35 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: Some(true),
             index_only: None,
+            dry_run: None,
+            force: None,
             project: None,
         }))
         .await;
     let val = parse_ok(&result);
+    // Bug #2 is "reindex silently no-ops in error mode": the gate blocked the
+    // engine, `embed_memories` did nothing, and the caller was told
+    // `embedded: 0` with no explanation. What guards that is the memory being
+    // *accounted for*, not the specific bucket it lands in.
+    //
+    // It can legitimately land in either. This test corrupts only the store's
+    // fingerprint; the memory's own embed digest still honestly records the
+    // real model that produced its vectors, so reindex may find them current
+    // and skip — correctly, and explicitly. A genuine model change would
+    // change those digests too and force the re-embed. Asserting `embedded >=
+    // 1` pinned the mechanism rather than the contract, and became a race
+    // against the detached ingest from `create` finishing first.
+    //
+    // A regression of the gate itself is still caught: it would fail
+    // `assemble_engine_for` above, or leave the engine without embeddings, and
+    // `embeddings_only` with no provider is a hard error that `parse_ok` would
+    // reject.
+    let embedded = val["embedded"].as_u64().unwrap();
+    let skipped = val["skipped"].as_u64().unwrap();
     assert!(
-        val["embedded"].as_u64().unwrap() >= 1,
-        "reindex must re-embed in error mode (bug #2); got {val}"
+        embedded + skipped >= 1,
+        "reindex must account for the memory in error mode (bug #2), not silently \
+         no-op; got {val}"
     );
 
     // The store is consistent again (fingerprint re-stamped, not bogus).
@@ -3354,6 +3415,8 @@ async fn global_reindex() {
         .memory_reindex(Parameters(ReindexInput {
             embeddings_only: None,
             index_only: Some(true),
+            dry_run: None,
+            force: None,
             project: global_project(),
         }))
         .await;

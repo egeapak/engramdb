@@ -1,5 +1,6 @@
 //! List all memories with optional filtering.
 
+use super::staleness_config;
 use crate::output::OutputFormatter;
 use anyhow::Result;
 use engramdb::ops::{self, ListParams};
@@ -41,7 +42,7 @@ pub async fn run_list(
     } else {
         MemoryStore::open(dir).await?
     };
-    if let Ok(Some(warning)) = store.check_staleness().await {
+    if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);
     }
 

@@ -1,0 +1,17 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"--format\", \"plain\", \"stats\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain stats
+exit: 0
+--- stdout ---
+Total: 3
+Convention: 1
+Decision: 1
+Hazard: 1
+
+Embeddings: Not available (run 'engramdb init' to download model)
+
+Health Warnings:
+--- stderr ---
+Error:   1 memory changed since indexing (run 'engramdb reindex')

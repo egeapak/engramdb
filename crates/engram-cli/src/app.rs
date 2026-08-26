@@ -1265,6 +1265,42 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["embeddings_only", "index_only", "global"])]
         archive_only: bool,
 
+        /// Report what a reindex would rebuild, without changing anything
+        ///
+        /// The exact, unbudgeted currency check: every memory file is hashed
+        /// against the digest its index row was built from, and — when an
+        /// embedding provider is available — every memory's would-be
+        /// embedding input is hashed against the digest stored with its
+        /// vectors. This is the only surface that reports stale *vectors*;
+        /// `doctor` has no engine and so can only report content drift.
+        #[arg(long, conflicts_with = "archive_only")]
+        dry_run: bool,
+
+        /// Re-embed every memory, even ones whose vectors are provably current
+        ///
+        /// A plain reindex reuses vectors whose stored digest still matches
+        /// what the current text, model and chunk width would produce. That
+        /// makes it fast but leaves anything that damaged a chunk row without
+        /// disturbing its digest in place. `--force` is the repair: it embeds
+        /// everything unconditionally, which is what this command did before
+        /// skipping existed.
+        #[arg(long, conflicts_with_all = ["archive_only", "dry_run"])]
+        force: bool,
+
+        /// Rebuild only the index rows whose file changed since it was indexed
+        ///
+        /// Measured 56-72% faster than a full rebuild on a store where
+        /// nothing changed. The saving scales down with how many files
+        /// actually changed, and cannot reach 100%: deciding whether a file
+        /// changed means reading and hashing it, so both paths enumerate,
+        /// read and hash every file identically. What is skipped is the
+        /// parse, the keyword-stem derivation and the row write.
+        ///
+        /// Both paths produce the same index. Ignored under `--force`, which
+        /// rebuilds everything by definition.
+        #[arg(long, conflicts_with_all = ["archive_only", "dry_run", "embeddings_only"])]
+        incremental: bool,
+
         /// Reindex the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
