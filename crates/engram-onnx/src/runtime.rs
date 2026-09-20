@@ -131,9 +131,16 @@ pub fn dylib_file_name() -> &'static str {
 /// Deliberately includes the executable's own directory before any system
 /// location: a release archive may ship the library next to `engramdb`, and that
 /// copy is known-good for the binary it shipped with, so it should win over
-/// whatever else is installed. Package-manager prefixes come next because
-/// neither Homebrew's `/opt/homebrew/lib` nor `/usr/local/lib` is on the default
-/// macOS dyld search path, so relying on the bare file name would not find them.
+/// whatever else is installed. Package-manager prefixes come next because none
+/// of Homebrew's `/opt/homebrew/lib`, MacPorts' `/opt/local/lib` or
+/// `/usr/local/lib` is on the default macOS dyld search path, so relying on the
+/// bare file name would not find them.
+///
+/// The `<prefix>/lib` entry derived from the executable's own directory already
+/// covers a package-managed `engramdb` finding its package manager's runtime
+/// (`/opt/local/bin/engramdb` implies `/opt/local/lib`). The explicit prefixes
+/// are for the mixed case, which is the common one: a `cargo install`ed binary
+/// in `~/.cargo/bin` and a runtime installed by Homebrew or MacPorts.
 fn search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -149,8 +156,11 @@ fn search_dirs() -> Vec<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        // Homebrew: Apple Silicon prefix, then the Intel prefix.
+        // Homebrew's Apple Silicon prefix, then MacPorts' default prefix, then
+        // Homebrew's Intel prefix — which is plain `/usr/local`, so it doubles
+        // as the hand-installed location.
         dirs.push(PathBuf::from("/opt/homebrew/lib"));
+        dirs.push(PathBuf::from("/opt/local/lib"));
         dirs.push(PathBuf::from("/usr/local/lib"));
     }
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -323,6 +333,22 @@ mod tests {
             assert_eq!(name, "libonnxruntime.dylib");
         } else {
             assert_eq!(name, "libonnxruntime.so");
+        }
+    }
+
+    /// Every macOS package manager that ships an ONNX Runtime must be reachable
+    /// from a binary installed by a *different* one — a `cargo install`ed
+    /// `engramdb` plus a MacPorts or Homebrew runtime is the ordinary case, and
+    /// there the `<exe dir>/../lib` rule finds nothing.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn macos_searches_every_package_manager_prefix() {
+        let dirs = search_dirs();
+        for prefix in ["/opt/homebrew/lib", "/opt/local/lib", "/usr/local/lib"] {
+            assert!(
+                dirs.iter().any(|d| d == Path::new(prefix)),
+                "{prefix} is not searched; dirs = {dirs:?}"
+            );
         }
     }
 

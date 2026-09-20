@@ -22,9 +22,9 @@ your system at startup, in this order:
 1. `ORT_DYLIB_PATH`, if set — an explicit path to the library.
 2. The directory holding the `engramdb` binary — drop a `libonnxruntime`
    there and it wins over everything below it.
-3. Standard package-manager locations: `/opt/homebrew/lib` and `/usr/local/lib`
-   on macOS, `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch
-   directories on Linux.
+3. Standard package-manager locations: `/opt/homebrew/lib` (Homebrew),
+   `/opt/local/lib` (MacPorts) and `/usr/local/lib` on macOS; `/usr/local/lib`,
+   `/usr/lib`, `/usr/lib64` and the multiarch directories on Linux.
 4. The platform loader's own search path (`PATH` on Windows,
    `LD_LIBRARY_PATH`/`ld.so.conf` on Linux).
 
@@ -35,6 +35,12 @@ brew install onnxruntime          # macOS / Linuxbrew
 scoop install onnxruntime         # Windows (manifest ships with EngramDB)
 sudo apt-get install -y libonnxruntime   # where packaged
 ```
+
+MacPorts has no `onnxruntime` port, so a MacPorts install of EngramDB cannot
+pull one in. Supply the library yourself — install Homebrew's alongside
+MacPorts, copy a `libonnxruntime.dylib` into `/opt/local/lib`, or set
+`ORT_DYLIB_PATH`. Until you do, search is keyword-only. See
+[../../packaging/README.md](../../packaging/README.md) for the detail.
 
 This is deliberate. The prebuilt runtime that would otherwise be compiled in
 executes quantized models incorrectly on some AVX-512/AMX CPUs — under load the
@@ -81,6 +87,17 @@ Both packages depend on ONNX Runtime, so there is nothing else to install:
 ```bash
 brew install egeapak/tap/engramdb     # macOS / Linuxbrew
 scoop install engramdb                      # Windows
+```
+
+MacPorts is a third channel, with one difference: MacPorts has no
+`onnxruntime` port, so the EngramDB port cannot depend on one and you supply
+the runtime yourself (see [ONNX Runtime](#onnx-runtime) above). The Portfile
+lives in [packaging/macports/](../../packaging/macports/); it is not yet
+submitted to the MacPorts ports tree, so install it from a
+[local port repository](https://guide.macports.org/#development.local-repositories):
+
+```bash
+sudo port install engramdb
 ```
 
 ### Build from a local checkout

@@ -51,6 +51,27 @@ jobs:
           fi
           echo "OK: versions match ($plugin_ver)"
 
+  macports-crates:
+    name: MacPorts crate list matches Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # MacPorts builds Rust ports offline: the cargo PortGroup passes
+      # `--frozen` and replaces crates.io with a local directory, so the
+      # Portfile has to name every crate in Cargo.lock with its sha256. A
+      # single missing or stale entry fails the port build — and nothing in a
+      # normal build reads the Portfile, so the drift is invisible here until
+      # someone tries to package a release.
+      #
+      # Cheap enough to run on every PR: it is one pass over Cargo.lock in
+      # pure Python, no toolchain and no network.
+      - name: Portfile cargo.crates is current
+        run: |
+          if ! python3 packaging/macports/gen-crates.py --check packaging/macports/Portfile; then
+            echo "::error file=packaging/macports/Portfile::cargo.crates has drifted from Cargo.lock. Run: packaging/macports/gen-crates.py --update packaging/macports/Portfile"
+            exit 1
+          fi
+
   fuzz-lockfile-parity:
     name: Fuzz lockfile parity
     runs-on: ubuntu-latest
@@ -272,12 +293,22 @@ jobs:
       - name: Test platform-gated IPC and filesystem code
         # `daemon::transport` exercises the Unix-socket/named-pipe transports
         # (bind/yield/reclaim/permissions), `paths::tests` the platform dir
-        # resolution, `write_lock::tests` the fs4 advisory-lock semantics.
-        # All three use only temp dirs — no models, no network (see the job
-        # comment above before adding filters).
+        # resolution, `write_lock::tests` the fs4 advisory-lock semantics, and
+        # `runtime::tests` (engram-onnx) the ONNX Runtime *discovery* rules —
+        # the dylib's platform file name and, on macOS only, that every
+        # package-manager prefix a user might install it under (Homebrew's
+        # /opt/homebrew/lib, MacPorts' /opt/local/lib, /usr/local/lib) is
+        # searched. Those assertions are `#[cfg(target_os = "macos")]`, so this
+        # runner is the only place they execute at all.
+        #
+        # All four use only temp dirs — no models, no network (see the job
+        # comment above before adding filters). `runtime::tests` qualifies:
+        # every case probes a nonexistent or deliberately bogus file, and the
+        # one that calls `ensure()` asserts only that the host's answer is
+        # stable, never that a runtime is present.
         run: >-
           cargo nextest run --workspace --all-features --locked
-          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
+          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests) + test(runtime::tests)'
 
   test:
     name: Test
