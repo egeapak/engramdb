@@ -2142,46 +2142,65 @@ fn build_registry_checks(info: &RegistryInfo) -> Vec<EnvironmentCheck> {
     checks
 }
 
-/// Directory statistics from a single jwalk pass.
+/// Directory statistics from a single walk.
 struct DirStats {
     total_size: u64,
     file_count: usize,
 }
 
-/// Compute directory stats (total size and file count) using jwalk.
+/// Compute directory stats (total size and file count) over every regular
+/// file below `path`, hidden ones included.
 ///
 /// Optionally filters by file extension (e.g. `Some("md")`).
-/// Returns zeros if the directory doesn't exist or is unreadable.
+/// Returns zeros if the directory doesn't exist or is unreadable; an
+/// unreadable entry below it is skipped and the rest is still counted.
+///
+/// **Symlinks are never followed or counted.** `DirEntry::file_type` does not
+/// traverse them, so a symlink is neither a file nor a directory here. The
+/// model cache is a Hugging Face layout whose `snapshots/` entries are
+/// symlinks into `blobs/`: following them would count every model twice, and
+/// a directory symlink could point at an ancestor.
+///
+/// A plain sequential walk. This was `jwalk` (parallel), which is
+/// unmaintained as of 0.9; the directories `doctor` sizes hold at most a few
+/// thousand files, where the thread pool bought nothing measurable.
 fn dir_stats(path: &Path, extension: Option<&str>) -> DirStats {
-    if !path.exists() {
-        return DirStats {
-            total_size: 0,
-            file_count: 0,
+    let mut stats = DirStats {
+        total_size: 0,
+        file_count: 0,
+    };
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
         };
-    }
-    let mut total_size = 0u64;
-    let mut file_count = 0usize;
-    for entry in jwalk::WalkDir::new(path)
-        .skip_hidden(false)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        if let Some(ext) = extension {
-            if entry.path().extension().and_then(|e| e.to_str()) != Some(ext) {
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(entry.path());
                 continue;
             }
-        }
-        if let Ok(meta) = entry.metadata() {
-            total_size += meta.len();
-            file_count += 1;
+            if !file_type.is_file() {
+                continue;
+            }
+            if let Some(ext) = extension {
+                if Path::new(&entry.file_name())
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    != Some(ext)
+                {
+                    continue;
+                }
+            }
+            if let Ok(meta) = entry.metadata() {
+                stats.total_size += meta.len();
+                stats.file_count += 1;
+            }
         }
     }
-    DirStats {
-        total_size,
-        file_count,
-    }
+    stats
 }
 
 /// Compute total size of a directory. Convenience wrapper around `dir_stats`.
@@ -4477,6 +4496,75 @@ mod tests {
 
         // dir_size should match unfiltered total
         assert_eq!(dir_size(temp_dir.path()), expected_total_size);
+    }
+
+    /// Hidden files and hidden directories are counted: `.engramdb/` and the
+    /// model cache both live under dot-directories.
+    #[test]
+    fn test_dir_stats_counts_hidden_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let hidden = temp_dir.path().join(".hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join(".dotfile.md"), "12345").unwrap();
+        std::fs::write(temp_dir.path().join(".top"), "abc").unwrap();
+
+        let all = dir_stats(temp_dir.path(), None);
+        assert_eq!((all.total_size, all.file_count), (8, 2));
+        let md = dir_stats(temp_dir.path(), Some("md"));
+        assert_eq!((md.total_size, md.file_count), (5, 1));
+    }
+
+    /// Symlinks are never followed or counted. The model cache is a
+    /// Hugging Face layout whose `snapshots/` entries are symlinks into
+    /// `blobs/`, so following them would count every model twice; and a
+    /// symlinked directory could point anywhere, including at an ancestor.
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_stats_does_not_follow_symlinks() {
+        let temp_dir = TempDir::new().unwrap();
+        let blobs = temp_dir.path().join("blobs");
+        let snapshot = temp_dir.path().join("snapshots");
+        std::fs::create_dir(&blobs).unwrap();
+        std::fs::create_dir(&snapshot).unwrap();
+        std::fs::write(blobs.join("abc"), "0123456789").unwrap();
+        std::os::unix::fs::symlink(blobs.join("abc"), snapshot.join("model.onnx")).unwrap();
+        // A directory symlink back to the root: a walker that followed it
+        // would loop or double-count.
+        std::os::unix::fs::symlink(temp_dir.path(), snapshot.join("loop")).unwrap();
+        // A dangling symlink must not be an error either.
+        std::os::unix::fs::symlink(temp_dir.path().join("gone"), snapshot.join("dangling"))
+            .unwrap();
+
+        let all = dir_stats(temp_dir.path(), None);
+        assert_eq!((all.total_size, all.file_count), (10, 1));
+    }
+
+    /// An unreadable subdirectory is skipped, not fatal: the rest of the tree
+    /// is still counted.
+    #[cfg(unix)]
+    #[test]
+    fn test_dir_stats_skips_unreadable_subdirectory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = TempDir::new().unwrap();
+        let locked = temp_dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("secret"), "xxxxxxxx").unwrap();
+        std::fs::write(temp_dir.path().join("visible"), "abcd").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let all = dir_stats(temp_dir.path(), None);
+        // Root ignores permission bits and can still read `locked/`, so the
+        // expectation follows what this process can actually read.
+        let readable = std::fs::read_dir(&locked).is_ok();
+        // Restore before asserting so TempDir can clean up on failure.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        if readable {
+            assert_eq!((all.total_size, all.file_count), (12, 2));
+        } else {
+            assert_eq!((all.total_size, all.file_count), (4, 1));
+        }
     }
 
     #[tokio::test]

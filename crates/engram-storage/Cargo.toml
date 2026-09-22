@@ -32,13 +32,12 @@ toml = "1"
 uuid = { version = "1", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.11"
-zstd = "0.13"
-dirs = "6"
-jwalk = "0.8"
+zstd = "0.14"
+dirs = "7"
 # Data parallelism for the bulk CPU work on the read/reindex paths: parsing a
 # store's worth of `.md` frontmatter and deriving keyword stems are both pure
 # per-file transforms, and both were measurably the dominant cost of `reindex`
-# (see `benches/parallel_simd.rs`). Already in the tree via `jwalk`.
+# (see `benches/parallel_simd.rs`).
 rayon = "1"
 shell-words = "1"
 
