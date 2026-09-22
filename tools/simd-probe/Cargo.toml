@@ -10,7 +10,7 @@ publish = false
 [workspace]
 
 [dependencies]
-fearless_simd = "0.7.0"
+fearless_simd = "1.0.0"
 
 # Mirrors `[profile.release]` in the root `Cargo.toml` exactly, and that is the
 # entire point of this crate. `profile.bench` there matches the shipping

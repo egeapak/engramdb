@@ -329,16 +329,25 @@ so the body compiles for the baseline and you measure emulation. That route
 reported AVX2 ~12× slower than the same kernel through `dispatch!`. The
 supported knob is `--cfg disable_dispatch_*` at build time.
 
-### What v0.7.0 does not have
+### What v0.7.0 did not have, and what 1.0 changed
 
-- **No horizontal sum.** There is no `reduce_sum`, and `SimdSplit` is not among
-  `S::f32s`' trait bounds, so a log-depth lane fold cannot even be *written*
-  generically. Every kernel here ends in a scalar walk over N lanes. It runs
-  once per call rather than once per element, so it does not show up at 384
-  dims, but it would at 16.
-- **No runtime way down a level.** `dispatch!` normalises *up* to the best the
-  CPU has (`Level::__dispatch_target`). This has a real testing consequence,
-  below.
+- ~~**No horizontal sum.**~~ **Fixed in 1.0.** 0.7.0 had no `reduce_sum`, and
+  `SimdSplit` was not among `S::f32s`' trait bounds, so a log-depth lane fold
+  could not even be *written* generically, and every kernel ended in a scalar
+  walk over N lanes. 1.0 adds `reduce_sum`: an in-register halving fold in a
+  fixed order that is identical on every backend for a given lane count.
+  `dot_unit_kernel` uses it. Measured at 384 dims in the probe, interleaved
+  against the old lane walk before switching: equal to 1% faster on AVX2,
+  1–4% faster on SSE4.2. The fold runs
+  once per call, so the gain grows as the dimension shrinks.
+- **No runtime way down a level through `dispatch!`.** `dispatch!` normalises
+  *up* to the best the CPU has (`Level::__dispatch_target`). This is unchanged
+  in 1.0 and has a real testing consequence, below.
+
+1.0 also renamed `SimdBase::N` to `LEN` (matching `std::simd`), and fixed a
+possible `dispatch!` panic under custom x86 target-feature configurations
+(`adx` was missing from the AVX-512 checks). Neither the MSRV (1.89) nor the
+dependency count changed.
 
 ### The AVX-512 downgrade: offered, measured, not used
 
@@ -796,7 +805,7 @@ not show up. If a future path parallelizes something long, route it through
   `fearless_simd` went from 2.5× slower to 1.02× faster on the profile change
   alone, this verdict should be treated as untested against the current
   profile rather than settled.
-- ~~**The `fearless_simd` crate (v0.7.0)**~~ — **adopted; it is what
+- ~~**The `fearless_simd` crate (v0.7.0, now 1.0)**~~ — **adopted; it is what
   `dot_unit` is now.** Rejected on the first pass at 1.3–2.5× slower than the
   intrinsics, which was a true measurement of `-Oz` and a wrong conclusion
   about the crate. At `opt-level = 2` with four accumulators it is 1.02×

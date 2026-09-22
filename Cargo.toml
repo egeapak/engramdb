@@ -78,7 +78,7 @@ test-support = ["engram-storage/test-support"]
 # `std::arch` backends. Zero dependencies, sub-second build, and no `unsafe`
 # left in EngramDB's own logic. It needs an optimizer to earn its keep — see
 # `[profile.release]` below and `docs/contributors/parallelization-simd.md`.
-fearless_simd = "0.7.0"
+fearless_simd = "1.0.0"
 # Workspace sub-crates (extracted layers; re-exported from lib.rs so the
 # `engramdb::<module>` and `crate::<module>` paths stay stable in the core).
 engram-types = { path = "crates/engram-types" }

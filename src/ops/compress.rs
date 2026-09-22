@@ -1254,10 +1254,12 @@ pub fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
 /// iterators — from its own `sigmoid.rs` example. Hand-rolled `&a[i..i + w]`
 /// indexing was measured too and is slower here.
 ///
-/// There is no horizontal-sum in `fearless_simd` v0.7.0 (no `reduce_sum`, and
-/// `SimdSplit` is not among `S::f32s`' bounds, so a log-depth fold cannot even
-/// be written generically), hence the scalar walk over the lanes at the end.
-/// It runs once per call, not once per element.
+/// The four accumulators are folded with `reduce_sum` (added in `fearless_simd`
+/// 1.0): an in-register halving fold, log2(N) adds, in a fixed order that is
+/// identical on every backend for a given lane count. 0.7.0 had no horizontal
+/// sum, so this used to be a scalar walk over the lanes. It runs once per
+/// call, so the gain is small — measured equal-to-1% on AVX2 and 1-4% on
+/// SSE4.2 at 384 dims (`tools/simd-probe`, against the old lane walk).
 ///
 /// **The second loop is not redundant.** Four accumulators means the first one
 /// only consumes multiples of `4 * N` — 64 floats on AVX-512 — so without it
@@ -1269,7 +1271,7 @@ pub fn dot_unit(a: &[f32], b: &[f32]) -> f64 {
 /// before the scalar tail gets what is genuinely left.
 #[inline(always)]
 fn dot_unit_kernel<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let n = S::f32s::N;
+    let n = S::f32s::LEN;
     let mut acc = [S::f32s::splat(simd, 0.0); 4];
 
     // Four independent FMA chains, `4 * N` floats per iteration.
@@ -1290,10 +1292,7 @@ fn dot_unit_kernel<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
         acc[0] = S::f32s::from_slice(simd, x).mul_add(S::f32s::from_slice(simd, y), acc[0]);
     }
 
-    let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
-        .as_slice()
-        .iter()
-        .sum();
+    let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3])).reduce_sum();
     for (x, y) in tail_a.remainder().iter().zip(tail_b.remainder()) {
         dot += x * y;
     }
