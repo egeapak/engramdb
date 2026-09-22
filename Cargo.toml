@@ -91,7 +91,7 @@ engram-models = { path = "crates/engram-models", default-features = false }
 # Vector DB (the core's daemon metrics + LanceDB index). The embedding /
 # reranker / NLI models all live in the `engram-models` crate, so the core
 # no longer depends on `fastembed` directly.
-lancedb = { version = "0.31", default-features = false }
+lancedb = { version = "0.33", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 arrow-array = "58"
 arrow-schema = "58"
