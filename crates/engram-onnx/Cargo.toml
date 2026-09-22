@@ -61,7 +61,7 @@ ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray"
 # Used only by `runtime.rs`, to open and validate libonnxruntime *before* `ort`
 # touches it — `ort`'s own loader panics on a missing dylib and the release
 # profile is `panic = "abort"`, so that panic is not catchable.
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # `runtime.rs` tests write a bogus file and assert the probe rejects it.

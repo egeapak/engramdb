@@ -212,7 +212,8 @@ fn probe(path: &Path) -> Result<String, RuntimeError> {
 
     // SAFETY: loading a shared library can run initializers; this is the same
     // operation `ort` would perform, done earlier so we can report failure.
-    let lib = unsafe { libloading::Library::new(path) }.map_err(|e| unusable(e.to_string()))?;
+    let lib = unsafe { libloading::Library::new(path.as_os_str()) }
+        .map_err(|e| unusable(e.to_string()))?;
 
     // SAFETY: `OrtGetApiBase` is the runtime's documented entry point and has
     // this signature in every published version.
