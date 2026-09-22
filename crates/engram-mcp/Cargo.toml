@@ -25,7 +25,7 @@ ollama = ["engramdb/ollama"]
 chrono = { version = "0.4", features = ["serde"] }
 engramdb = { path = "../..", default-features = false }
 
-rmcp = { version = "2", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
+rmcp = { version = "3", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
 # `http1` is needed for `axum::serve` (streamable-HTTP transport); rmcp 0.15
 # enabled it transitively, rmcp 1.x no longer does, so request it explicitly.
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
@@ -48,6 +48,6 @@ engramdb = { path = "../..", default-features = false, features = ["test-support
 # the in-crate global-store tests don't race on the real global dir.
 engram-test-support = { path = "../engram-test-support" }
 ctor = "1"
-rmcp = { version = "2", features = ["client"] }
+rmcp = { version = "3", features = ["client"] }
 tempfile = "3"
 toml = "1"
