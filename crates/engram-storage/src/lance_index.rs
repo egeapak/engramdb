@@ -1121,10 +1121,9 @@ impl LanceIndex {
             missing.iter().map(|f| f.name()).collect::<Vec<_>>()
         );
         table
-            .add_columns(
-                NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))),
-                None,
-            )
+            .add_columns()
+            .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))))
+            .execute()
             .await
             .context("Failed to add chunks-table columns")?;
         Ok(())
