@@ -10,7 +10,7 @@ use fearless_simd::*;
 
 #[inline(always)]
 fn dot_inner<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let n = S::f32s::N;
+    let n = S::f32s::LEN;
     let mut acc = [S::f32s::splat(simd, 0.0); 4];
     let (mut wide_a, mut wide_b) = (a.chunks_exact(n * 4), b.chunks_exact(n * 4));
     for (x, y) in (&mut wide_a).zip(&mut wide_b) {
@@ -26,10 +26,7 @@ fn dot_inner<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
     for (x, y) in (&mut tail_a).zip(&mut tail_b) {
         acc[0] = S::f32s::from_slice(simd, x).mul_add(S::f32s::from_slice(simd, y), acc[0]);
     }
-    let mut d: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
-        .as_slice()
-        .iter()
-        .sum();
+    let mut d: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3])).reduce_sum();
     for (x, y) in tail_a.remainder().iter().zip(tail_b.remainder()) {
         d += x * y;
     }

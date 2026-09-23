@@ -20,21 +20,33 @@
 //! reports the runtime is unusable, so a missing or too-old runtime degrades on
 //! exactly the same path as a missing model file.
 //!
-//! Validation is not just "does the file open". `ort` 2.0.0-rc.12 requires C API
-//! version 24; an older runtime (Homebrew's 1.22, say) loads fine and then fails
-//! inside `ort` with "The requested API version [24] is not available". So the
-//! probe also calls `OrtGetApiBase()->GetApi(24)` and treats a null return as
-//! unusable, which converts that abort into a legible diagnostic.
+//! Validation is not just "does the file open". `ort` requires a minimum C API
+//! version ([`REQUIRED_API_VERSION`], 24); an older runtime (Homebrew's 1.22,
+//! say) loads fine and then fails inside `ort`. So the probe applies both of
+//! the checks `ort`'s own loader makes, and treats a failure of either as
+//! "too old", which converts that abort into a legible diagnostic:
+//!
+//! - the minor number in `GetVersionString()` must be at least 24. `ort`
+//!   2.0.0-rc.13 checks this string *before* asking for the API, and a failure
+//!   there is the same uncatchable panic; and
+//! - `OrtGetApiBase()->GetApi(24)` must not return null.
 
 use std::ffi::CStr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The C API version `ort` 2.0.0-rc.12 requires (its `api-24` feature).
+/// The C API version `ort` requires: the highest `api-N` feature enabled
+/// anywhere in the dependency graph (`api-24` today, from this crate and from
+/// `fastembed`).
 ///
-/// Kept in sync with the `ort` pin in this crate's `Cargo.toml`; [`ensure`]
-/// rejects any runtime that cannot vend this version.
-pub const REQUIRED_API_VERSION: u32 = 24;
+/// Read from `ort` rather than written down, so the probe can never demand
+/// less than `ort`'s own loader does. If some dependency ever turns on a
+/// higher `api-N`, the probe follows it and a too-old runtime still gets the
+/// legible [`RuntimeError::TooOld`] instead of an abort;
+/// `required_api_version_is_24` then fails, because the documented minimum
+/// runtime (1.24) would have changed. [`ensure`] rejects any runtime that
+/// cannot vend this version.
+pub const REQUIRED_API_VERSION: u32 = ort::MINOR_VERSION;
 
 /// Environment variable `ort` itself reads to locate the dylib. We resolve the
 /// library first and then set this, so `ort` loads the exact file we validated
@@ -95,9 +107,10 @@ impl std::fmt::Display for RuntimeError {
             Self::TooOld { path, version } => write!(
                 f,
                 "ONNX Runtime at {} is version {}, which does not provide C API version {}. \
-                 Upgrade to 1.24 or newer.",
+                 Upgrade to 1.{} or newer.",
                 path.display(),
                 version,
+                REQUIRED_API_VERSION,
                 REQUIRED_API_VERSION
             ),
             Self::Unusable { path, reason } => write!(
@@ -212,7 +225,8 @@ fn probe(path: &Path) -> Result<String, RuntimeError> {
 
     // SAFETY: loading a shared library can run initializers; this is the same
     // operation `ort` would perform, done earlier so we can report failure.
-    let lib = unsafe { libloading::Library::new(path) }.map_err(|e| unusable(e.to_string()))?;
+    let lib = unsafe { libloading::Library::new(path.as_os_str()) }
+        .map_err(|e| unusable(e.to_string()))?;
 
     // SAFETY: `OrtGetApiBase` is the runtime's documented entry point and has
     // this signature in every published version.
@@ -237,6 +251,16 @@ fn probe(path: &Path) -> Result<String, RuntimeError> {
         }
     };
 
+    // The version string first: it is `ort`'s own first check, and a runtime
+    // that fails it never reaches `GetApi`, which on an old runtime prints
+    // "The requested API version [24] is not available" to stderr itself.
+    if !version_meets_requirement(&version) {
+        return Err(RuntimeError::TooOld {
+            path: path.to_path_buf(),
+            version,
+        });
+    }
+
     // SAFETY: documented to return null for an unsupported version rather than
     // failing, which is exactly the case we want to detect.
     let api = unsafe { (base.get_api)(REQUIRED_API_VERSION) };
@@ -248,6 +272,21 @@ fn probe(path: &Path) -> Result<String, RuntimeError> {
     }
 
     Ok(version)
+}
+
+/// Whether a `GetVersionString()` value passes `ort`'s own version check.
+///
+/// Mirrors `ort::load_dynamic::init` exactly: take the second dot-separated
+/// field as the minor version, treat anything unparsable as `0`, and require
+/// at least [`REQUIRED_API_VERSION`]. `ort` panics when this fails, so the
+/// probe must refuse every runtime `ort` would refuse — including one whose
+/// version string is malformed even though `GetApi` succeeds.
+fn version_meets_requirement(version: &str) -> bool {
+    let minor = version
+        .split('.')
+        .nth(1)
+        .map_or(0, |m| m.parse::<u32>().unwrap_or(0));
+    minor >= REQUIRED_API_VERSION
 }
 
 /// Resolve, validate, and remember the ONNX Runtime for this process.
@@ -381,7 +420,36 @@ mod tests {
         };
         let text = too_old.to_string();
         assert!(text.contains("1.22.0"), "{text}");
-        assert!(text.contains("24"), "{text}");
+        assert!(text.contains("C API version 24"), "{text}");
+        assert!(text.contains("Upgrade to 1.24 or newer"), "{text}");
+    }
+
+    /// The documented minimum runtime is 1.24 (installation docs, release
+    /// notes, CI's `ONNXRUNTIME_VERSION`). `REQUIRED_API_VERSION` follows the
+    /// highest `api-N` feature in the graph, so a dependency that raises it
+    /// silently raises the minimum too. This makes that visible.
+    #[test]
+    fn required_api_version_is_24() {
+        assert_eq!(
+            REQUIRED_API_VERSION, 24,
+            "an `api-N` feature somewhere in the graph raised ort's C API level; \
+             update the documented minimum ONNX Runtime version everywhere"
+        );
+    }
+
+    /// Mirrors `ort`'s own version-string check, which panics on failure, so
+    /// every string `ort` would refuse must be refused here first.
+    #[test]
+    fn version_string_check_matches_ort() {
+        for ok in ["1.24.0", "1.24.2", "1.28.0", "1.24.2-dev", "2.30.1"] {
+            assert!(version_meets_requirement(ok), "{ok} should be accepted");
+        }
+        for too_old in ["1.23.1", "1.22.0", "1.9.0", "unknown", "", "1", "1.x.0"] {
+            assert!(
+                !version_meets_requirement(too_old),
+                "{too_old:?} should be refused (ort would panic on it)"
+            );
+        }
     }
 
     #[test]

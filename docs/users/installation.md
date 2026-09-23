@@ -116,7 +116,7 @@ cargo build --release --no-default-features \
 | `bundled-onnxruntime` | off | Download and statically link a prebuilt runtime — the historical default. **Not recommended**: that prebuilt mis-executes quantized models on AVX-512/AMX hosts. Kept for platforms with no packaged runtime and for hermetic builds. Needs `--no-default-features`. |
 | `ollama` | on | Adds the Ollama embedding backend (uses `reqwest`). Turn off for a pure-ONNX, offline-only build with no extra deps: `cargo install --git ... --no-default-features`. |
 | `coreml` | off | Apple Core ML execution provider for ONNX models (Neural Engine / GPU). macOS only. |
-| `xnnpack` | off | XNNPACK CPU execution provider for ONNX. Useful for A/B benchmarking. |
+| `xnnpack` | off | XNNPACK CPU execution provider for ONNX. Useful for A/B benchmarking. Needs a runtime built with XNNPACK; does not build together with `bundled-onnxruntime`. |
 
 ## Verify
 

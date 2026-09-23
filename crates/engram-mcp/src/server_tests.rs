@@ -4337,6 +4337,244 @@ async fn duplex_serve(
     (client, server_handle)
 }
 
+/// Send one raw HTTP/1.1 `initialize` POST and return the status code.
+async fn http_initialize_status(port: u16, origin: Option<&str>) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+    let origin_line = origin
+        .map(|o| format!("Origin: {o}\r\n"))
+        .unwrap_or_default();
+    let request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin_line}\
+         Content-Type: application/json\r\nAccept: application/json, text/event-stream\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    // The status line is all this needs; an SSE body may stay open.
+    let mut buf = [0u8; 64];
+    let mut read = 0;
+    while read < 12 {
+        let n = stream.read(&mut buf[read..]).await.unwrap();
+        assert!(n > 0, "connection closed before a status line");
+        read += n;
+    }
+    let head = String::from_utf8_lossy(&buf[..read]);
+    head.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// The HTTP transport refuses any request carrying an `Origin` header, which
+/// every cross-site browser request does, and still serves MCP clients, which
+/// send none. Uses the production `http_server_config()` and a real socket.
+#[tokio::test]
+async fn http_transport_refuses_browser_origins() {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpService,
+    };
+
+    let (dir, _server) = setup().await;
+    let root = dir.path().to_path_buf();
+    let config = http_server_config();
+    let ct = config.cancellation_token.clone();
+    let service = StreamableHttpService::new(
+        move || {
+            let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+            Ok(EngramDbServer::new_with_registry(
+                root.clone(),
+                Some(EmbeddingBackend::Onnx),
+                registry,
+            ))
+        },
+        Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    let router = axum::Router::new().nest_service("/mcp", service);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let serve = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move { ct.cancelled().await })
+            .await
+    });
+
+    assert_eq!(http_initialize_status(port, None).await, 200, "MCP client");
+    for origin in [
+        "https://evil.example",
+        "http://127.0.0.1:1234",
+        "http://localhost",
+        "null",
+    ] {
+        assert_eq!(
+            http_initialize_status(port, Some(origin)).await,
+            403,
+            "Origin: {origin}"
+        );
+    }
+
+    serve.abort();
+}
+
+/// `duplex_serve`, but the client uses the MCP 2026-07-28 lifecycle:
+/// `server/discover` instead of `initialize`, and every request carries its
+/// protocol version. rmcp 3 accepts this version by default, so it is a real
+/// client population, not a hypothetical one.
+async fn duplex_serve_2026(
+    server: EngramDbServer,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
+
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        let svc = server.serve(server_io).await?;
+        svc.waiting().await?;
+        Ok(())
+    });
+    let client = ()
+        .serve_with_lifecycle(
+            client_io,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await
+        .expect("a 2026-07-28 client must discover the in-process server");
+    (client, server_handle)
+}
+
+/// A 2026-07-28 client can do real work: discover, list, create, query,
+/// read a resource and get a prompt. Guards the whole new lifecycle, which
+/// rmcp 3 turned on for us without any opt-in.
+#[tokio::test]
+async fn protocol_2026_client_round_trips_tools_resources_and_prompts() {
+    let (_dir, server) = setup().await;
+    let (client, server_handle) = duplex_serve_2026(server).await;
+    let peer = client.peer();
+
+    let tools = peer.list_tools(None).await.expect("tools/list");
+    assert!(tools.tools.iter().any(|t| t.name == "create"));
+
+    let created = peer
+        .call_tool(
+            CallToolRequestParams::new("create").with_arguments(
+                json!({
+                    "type": "decision",
+                    "summary": "Writers take the project flock",
+                    "content": "Every mutating op takes the per-project flock first.",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("tools/call create");
+    assert_ne!(created.is_error, Some(true), "create failed: {created:?}");
+
+    let queried = peer
+        .call_tool(
+            CallToolRequestParams::new("query").with_arguments(
+                json!({ "mode": "filter", "query": "flock" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("tools/call query");
+    let text = format!("{queried:?}");
+    assert!(text.contains("Writers take the project flock"), "{text}");
+
+    let index = peer
+        .read_resource(ReadResourceRequestParams::new("memory://index"))
+        .await
+        .expect("resources/read");
+    assert_eq!(index.contents.len(), 1);
+
+    peer.get_prompt(GetPromptRequestParams::new("memory-session-end"))
+        .await
+        .expect("prompts/get");
+
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+/// SEP-2549: from 2026-07-28 on, list and read results must carry `ttlMs`
+/// and `cacheScope`. The static lists are `Public`; a resource read returns
+/// the user's memories and must be `Private`, or a shared cache could serve
+/// one user's memories to another.
+#[tokio::test]
+async fn protocol_2026_results_carry_cache_hints_with_private_reads() {
+    let (_dir, server) = setup().await;
+    let (client, server_handle) = duplex_serve_2026(server).await;
+    let peer = client.peer();
+
+    let tools = peer.list_tools(None).await.unwrap();
+    assert_eq!(
+        (tools.ttl_ms, tools.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    let resources = peer.list_resources(None).await.unwrap();
+    assert_eq!(
+        (resources.ttl_ms, resources.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    let templates = peer.list_resource_templates(None).await.unwrap();
+    assert_eq!(
+        (templates.ttl_ms, templates.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    let prompts = peer.list_prompts(None).await.unwrap();
+    assert_eq!(
+        (prompts.ttl_ms, prompts.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    for uri in ["memory://index", "memory://context/src/lib.rs"] {
+        let read = peer
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .unwrap();
+        assert_eq!(
+            (read.ttl_ms, read.cache_scope),
+            (Some(0), Some(CacheScope::Private)),
+            "{uri}"
+        );
+    }
+
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+/// Clients on 2025-11-25 and older never see the SEP-2549 fields: they do not
+/// exist in those schema versions.
+#[tokio::test]
+async fn legacy_protocol_results_have_no_cache_hints() {
+    let (_dir, server) = setup().await;
+    let (client, server_handle) = duplex_serve(server).await;
+    let peer = client.peer();
+
+    let resources = peer.list_resources(None).await.unwrap();
+    assert_eq!((resources.ttl_ms, resources.cache_scope), (None, None));
+    let templates = peer.list_resource_templates(None).await.unwrap();
+    assert_eq!((templates.ttl_ms, templates.cache_scope), (None, None));
+    let prompts = peer.list_prompts(None).await.unwrap();
+    assert_eq!((prompts.ttl_ms, prompts.cache_scope), (None, None));
+    let read = peer
+        .read_resource(ReadResourceRequestParams::new("memory://index"))
+        .await
+        .unwrap();
+    assert_eq!((read.ttl_ms, read.cache_scope), (None, None));
+
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
 /// `get_prompt("memory-session-start")` against an empty store →
 /// fallback "No relevant memories found." branch (server.rs:2342)
 /// + the standard prompt template.

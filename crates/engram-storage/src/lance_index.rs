@@ -1121,10 +1121,9 @@ impl LanceIndex {
             missing.iter().map(|f| f.name()).collect::<Vec<_>>()
         );
         table
-            .add_columns(
-                NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))),
-                None,
-            )
+            .add_columns()
+            .transform(NewColumnTransform::AllNulls(Arc::new(Schema::new(missing))))
+            .execute()
             .await
             .context("Failed to add chunks-table columns")?;
         Ok(())
@@ -1769,11 +1768,14 @@ impl LanceIndex {
             // default is `Select::All`, which decodes the full FixedSizeList
             // vector — and every future column — for up to `chunk_limit`
             // (≤65,536) candidate rows on EVERY semantic query, none of which
-            // is ever looked at. `_distance` is unaffected: scoring columns are
-            // auto-projected independently of this list (see
-            // `disable_scoring_autoprojection`, which we leave at its `false`
-            // default).
-            .select(Select::Columns(vec!["memory_id".into()]))
+            // is ever looked at. `_distance` is named explicitly: lance still
+            // adds it when an explicit projection omits it, but logs a
+            // deprecation warning on every semantic query and says it will
+            // stop doing so — and the loop below requires the column.
+            .select(Select::Columns(vec![
+                "memory_id".into(),
+                "_distance".into(),
+            ]))
             .limit(chunk_limit)
             .nprobes(VECTOR_SEARCH_NPROBES)
             .refine_factor(VECTOR_SEARCH_REFINE_FACTOR);

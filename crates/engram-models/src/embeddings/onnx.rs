@@ -3,7 +3,7 @@
 use super::{EmbeddingError, EmbeddingProvider};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use std::sync::{Arc, Mutex};
 
 /// An ONNX export that `fastembed`'s built-in registry doesn't point at, loaded
@@ -391,7 +391,7 @@ impl OnnxProvider {
         // truncation to 512, so without this a long-context model (nomic's
         // 8192) silently drops everything past token 512 — while the chunker
         // budgets chunks against `max_tokens()` and trusts the full window.
-        let mut options = InitOptions::new(spec.fastembed_model)
+        let mut options = TextInitOptions::new(spec.fastembed_model)
             .with_cache_dir(cache_dir)
             .with_max_length(spec.max_tokens);
         if let Some(n) = intra_threads {

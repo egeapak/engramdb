@@ -194,7 +194,7 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
 
      A full green sandbox run therefore needs BOTH: `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib` (build) and `ORT_DYLIB_PATH=…/libonnxruntime.so` (run).
 
-   Fetch + decode the prebuilt static lib via curl, then build with `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`. The version must match what the locked `ort` crate expects (`2.0.0-rc.12` → ONNX Runtime 1.24.x / API 24); a mismatch surfaces at *runtime* as "The requested API version [N] is not available". If you swap the lib after a build, also `rm -rf target/debug/build/ort-sys-* target/debug/.fingerprint/ort-sys-* target/debug/deps/*ort_sys*` — the objects are bundled into the ort-sys rlib at its build time, so relinking alone keeps the old runtime:
+   Fetch + decode the prebuilt static lib via curl, then build with `ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/ort-lib`. The version must provide the C API the locked `ort` crate is built for (`2.0.0-rc.13` with `api-24` → ONNX Runtime ≥ 1.24 / API 24); a mismatch surfaces at *runtime* as "The requested API version [N] is not available". If you swap the lib after a build, also `rm -rf target/debug/build/ort-sys-* target/debug/.fingerprint/ort-sys-* target/debug/deps/*ort_sys*` — the objects are bundled into the ort-sys rlib at its build time, so relinking alone keeps the old runtime:
    ```
    curl -sS -o /tmp/ort.tar.lzma2 "https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/x86_64-unknown-linux-gnu.tar.lzma2"
    python3 -c "import lzma; open('/tmp/ort.tar','wb').write(lzma.decompress(open('/tmp/ort.tar.lzma2','rb').read(), format=lzma.FORMAT_RAW, filters=[{'id':lzma.FILTER_LZMA2,'dict_size':1<<26}]))"
@@ -366,7 +366,7 @@ stdio MCP is one process per agent session, so without coordination every concur
 
 All ML model downloads (embeddings, reranker, NLI) MUST cache to the same directory: `dirs::cache_dir() / "engramdb" / "models"` (see `storage::paths::model_cache_dir`).
 
-- Fastembed models: use `InitOptions::new(model).with_cache_dir(cache_dir)`
+- Fastembed models: use `TextInitOptions::new(model).with_cache_dir(cache_dir)` (`InitOptions` is a deprecated alias since fastembed 7)
 - HuggingFace Hub models: use `ApiBuilder::new().with_cache_dir(cache_dir).build()`
 
 Never use default cache locations (e.g., `~/.cache/huggingface/hub/`). The web-sandbox workaround above relies on this exact path layout.

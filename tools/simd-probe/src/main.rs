@@ -147,10 +147,10 @@ fn dot_current(a: &[f32], b: &[f32]) -> f64 {
 // `chunks_exact` iterators, which is the documented idiom; `dot_idio*` are that
 // form. Both are kept so the difference is measurable rather than assumed.
 
-/// The documented idiom, one accumulator: zip two `chunks_exact(S::f32s::N)`.
+/// The documented idiom, one accumulator: zip two `chunks_exact(S::f32s::LEN)`.
 #[inline(always)]
 fn dot_idio1<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let n = S::f32s::N;
+    let n = S::f32s::LEN;
     let mut acc = S::f32s::splat(simd, 0.0);
     let (mut ca, mut cb) = (a.chunks_exact(n), b.chunks_exact(n));
     for (x, y) in (&mut ca).zip(&mut cb) {
@@ -167,7 +167,7 @@ fn dot_idio1<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
 /// hand-written backends use, so the comparison stays like-for-like.
 #[inline(always)]
 fn dot_idio2<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let n = S::f32s::N;
+    let n = S::f32s::LEN;
     let step = n * 2;
     let mut acc0 = S::f32s::splat(simd, 0.0);
     let mut acc1 = S::f32s::splat(simd, 0.0);
@@ -192,7 +192,7 @@ fn dot_idio2<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
 /// silently drifted from production twice already.
 #[inline(always)]
 fn dot_idio4<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let n = S::f32s::N;
+    let n = S::f32s::LEN;
     let mut acc = [S::f32s::splat(simd, 0.0); 4];
     let (mut wide_a, mut wide_b) = (a.chunks_exact(n * 4), b.chunks_exact(n * 4));
     for (x, y) in (&mut wide_a).zip(&mut wide_b) {
@@ -210,10 +210,7 @@ fn dot_idio4<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
     for (x, y) in (&mut tail_a).zip(&mut tail_b) {
         acc[0] = S::f32s::from_slice(simd, x).mul_add(S::f32s::from_slice(simd, y), acc[0]);
     }
-    let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3]))
-        .as_slice()
-        .iter()
-        .sum();
+    let mut dot: f32 = ((acc[0] + acc[1]) + (acc[2] + acc[3])).reduce_sum();
     for (x, y) in tail_a.remainder().iter().zip(tail_b.remainder()) {
         dot += x * y;
     }
@@ -243,7 +240,7 @@ fn dot_no512<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
 /// One accumulator at the CPU's native width.
 #[inline(always)]
 fn dot_fs1<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let w = S::f32s::N;
+    let w = S::f32s::LEN;
     let mut acc = S::f32s::splat(simd, 0.0);
     let n = a.len() / w * w;
     let mut i = 0;
@@ -265,7 +262,7 @@ fn dot_fs1<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
 /// backends use, so this is the like-for-like comparison.
 #[inline(always)]
 fn dot_fs2<S: Simd>(simd: S, a: &[f32], b: &[f32]) -> f64 {
-    let w = S::f32s::N;
+    let w = S::f32s::LEN;
     let step = w * 2;
     let mut acc0 = S::f32s::splat(simd, 0.0);
     let mut acc1 = S::f32s::splat(simd, 0.0);

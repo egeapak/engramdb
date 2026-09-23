@@ -41,11 +41,14 @@ bundled-onnxruntime = ["ort/download-binaries"]
 # happened to compile because `fastembed` pulls rustls into `ort` via
 # feature unification.
 #
-# Version is pinned to `2.0.0-rc.12` to match `fastembed`, which requires it
-# exactly (`ort = "=2.0.0-rc.12"`). rc.12 targets ONNX Runtime 1.24.x
-# (**ABI/API version 24**); a mismatched runtime fails at *startup* with
-# "The requested API version [24] is not available, only API versions [1, N]".
-# `download-binaries` ships prebuilt ORT 1.24 for Windows, Linux, and
+# Version is pinned to `2.0.0-rc.13` to match `fastembed` 7.1, which requires
+# it exactly (`ort = "=2.0.0-rc.13"`). rc.13 supports C API 17-28; the API
+# level is the highest `api-N` feature anywhere in the graph, and both this
+# crate and fastembed ask for `api-24`, so the minimum runtime stays ONNX
+# Runtime 1.24.x (**API version 24**). An older runtime is refused by
+# `runtime.rs`'s probe before `ort` can abort on it. rc.13's
+# `download-binaries` (the `bundled-onnxruntime` strategy only) now fetches
+# prebuilt ORT **1.28**. Under rc.12 it shipped 1.24 for Windows, Linux, and
 # **aarch64** macOS/iOS — but NOT `x86_64-apple-darwin` (Intel Mac), and no ORT
 # 1.24 Intel-Mac prebuilt exists anywhere (Microsoft dropped x86_64 macOS builds
 # after 1.23.x; ort-sys rc.12 has no compile strategy). On Intel Mac the build
@@ -57,11 +60,11 @@ bundled-onnxruntime = ["ort/download-binaries"]
 # version the generated `OrtApi` struct exposes, and it used to arrive only by
 # feature unification with `fastembed`. Building this crate on its own then
 # produced a reduced `OrtApi` and failed compiling `ort`'s own EP modules.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["ndarray", "std", "tls-rustls", "api-24"] }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "tls-rustls", "api-24"] }
 # Used only by `runtime.rs`, to open and validate libonnxruntime *before* `ort`
 # touches it — `ort`'s own loader panics on a missing dylib and the release
 # profile is `panic = "abort"`, so that panic is not catchable.
-libloading = { version = "0.8", optional = true }
+libloading = { version = "0.9", optional = true }
 
 [dev-dependencies]
 # `runtime.rs` tests write a bogus file and assert the probe rejects it.

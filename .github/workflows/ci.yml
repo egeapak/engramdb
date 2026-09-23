@@ -87,7 +87,11 @@ jobs:
           root = versions("Cargo.lock")
           fuzz = versions("fuzz/Cargo.lock")
           shared = sorted(set(root) & set(fuzz))
-          drift = [(n, sorted(root[n]), sorted(fuzz[n])) for n in shared if root[n] != fuzz[n]]
+          # A version only the root carries is fine: it comes from a root-only
+          # edge (e.g. `criterion`, a dev-dependency, pulls itertools 0.13) that
+          # fuzz/ cannot resolve. The defect is fuzz/ building a version the
+          # root does not, i.e. code CI never tests.
+          drift = [(n, sorted(root[n]), sorted(fuzz[n])) for n in shared if fuzz[n] - root[n]]
 
           print(f"shared crates: {len(shared)}")
           print(f"version disagreements: {len(drift)}")

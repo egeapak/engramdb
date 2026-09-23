@@ -29,7 +29,7 @@ use anyhow::{Context, Result};
 use engram_models::embeddings::{
     EmbeddingProvider, OnnxProvider, ONNX_ALL_MINILM, ONNX_ALL_MINILM_L12_Q, ONNX_ALL_MINILM_Q,
 };
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use ndarray::Array2;
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
@@ -124,7 +124,7 @@ async fn l1(case: &Case, iters: usize) -> Result<Option<Vec<Vec<f32>>>> {
 /// L2: fastembed directly — same thread, no tokio, no mutex.
 fn l2(case: &Case, iters: usize) -> Result<Option<Vec<Vec<f32>>>> {
     let cache_dir = engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let options = InitOptions::new(case.fastembed_model.clone())
+    let options = TextInitOptions::new(case.fastembed_model.clone())
         .with_cache_dir(cache_dir)
         .with_max_length(256);
     let Ok(mut model) = TextEmbedding::try_new(options) else {

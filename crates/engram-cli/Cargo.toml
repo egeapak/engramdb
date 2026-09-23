@@ -52,7 +52,7 @@ toml = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v7", "serde"] }
 shell-words = "1"
-dirs = "6"
+dirs = "7"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
 
