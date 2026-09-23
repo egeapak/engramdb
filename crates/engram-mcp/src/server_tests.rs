@@ -4337,6 +4337,163 @@ async fn duplex_serve(
     (client, server_handle)
 }
 
+/// `duplex_serve`, but the client uses the MCP 2026-07-28 lifecycle:
+/// `server/discover` instead of `initialize`, and every request carries its
+/// protocol version. rmcp 3 accepts this version by default, so it is a real
+/// client population, not a hypothetical one.
+async fn duplex_serve_2026(
+    server: EngramDbServer,
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, ()>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
+
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        let svc = server.serve(server_io).await?;
+        svc.waiting().await?;
+        Ok(())
+    });
+    let client = ()
+        .serve_with_lifecycle(
+            client_io,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await
+        .expect("a 2026-07-28 client must discover the in-process server");
+    (client, server_handle)
+}
+
+/// A 2026-07-28 client can do real work: discover, list, create, query,
+/// read a resource and get a prompt. Guards the whole new lifecycle, which
+/// rmcp 3 turned on for us without any opt-in.
+#[tokio::test]
+async fn protocol_2026_client_round_trips_tools_resources_and_prompts() {
+    let (_dir, server) = setup().await;
+    let (client, server_handle) = duplex_serve_2026(server).await;
+    let peer = client.peer();
+
+    let tools = peer.list_tools(None).await.expect("tools/list");
+    assert!(tools.tools.iter().any(|t| t.name == "create"));
+
+    let created = peer
+        .call_tool(
+            CallToolRequestParams::new("create").with_arguments(
+                json!({
+                    "type": "decision",
+                    "summary": "Writers take the project flock",
+                    "content": "Every mutating op takes the per-project flock first.",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("tools/call create");
+    assert_ne!(created.is_error, Some(true), "create failed: {created:?}");
+
+    let queried = peer
+        .call_tool(
+            CallToolRequestParams::new("query").with_arguments(
+                json!({ "mode": "filter", "query": "flock" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("tools/call query");
+    let text = format!("{queried:?}");
+    assert!(text.contains("Writers take the project flock"), "{text}");
+
+    let index = peer
+        .read_resource(ReadResourceRequestParams::new("memory://index"))
+        .await
+        .expect("resources/read");
+    assert_eq!(index.contents.len(), 1);
+
+    peer.get_prompt(GetPromptRequestParams::new("memory-session-end"))
+        .await
+        .expect("prompts/get");
+
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+/// SEP-2549: from 2026-07-28 on, list and read results must carry `ttlMs`
+/// and `cacheScope`. The static lists are `Public`; a resource read returns
+/// the user's memories and must be `Private`, or a shared cache could serve
+/// one user's memories to another.
+#[tokio::test]
+async fn protocol_2026_results_carry_cache_hints_with_private_reads() {
+    let (_dir, server) = setup().await;
+    let (client, server_handle) = duplex_serve_2026(server).await;
+    let peer = client.peer();
+
+    let tools = peer.list_tools(None).await.unwrap();
+    assert_eq!(
+        (tools.ttl_ms, tools.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    let resources = peer.list_resources(None).await.unwrap();
+    assert_eq!(
+        (resources.ttl_ms, resources.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    let templates = peer.list_resource_templates(None).await.unwrap();
+    assert_eq!(
+        (templates.ttl_ms, templates.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    let prompts = peer.list_prompts(None).await.unwrap();
+    assert_eq!(
+        (prompts.ttl_ms, prompts.cache_scope),
+        (Some(0), Some(CacheScope::Public))
+    );
+    for uri in ["memory://index", "memory://context/src/lib.rs"] {
+        let read = peer
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .unwrap();
+        assert_eq!(
+            (read.ttl_ms, read.cache_scope),
+            (Some(0), Some(CacheScope::Private)),
+            "{uri}"
+        );
+    }
+
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
+/// Clients on 2025-11-25 and older never see the SEP-2549 fields: they do not
+/// exist in those schema versions.
+#[tokio::test]
+async fn legacy_protocol_results_have_no_cache_hints() {
+    let (_dir, server) = setup().await;
+    let (client, server_handle) = duplex_serve(server).await;
+    let peer = client.peer();
+
+    let resources = peer.list_resources(None).await.unwrap();
+    assert_eq!((resources.ttl_ms, resources.cache_scope), (None, None));
+    let templates = peer.list_resource_templates(None).await.unwrap();
+    assert_eq!((templates.ttl_ms, templates.cache_scope), (None, None));
+    let prompts = peer.list_prompts(None).await.unwrap();
+    assert_eq!((prompts.ttl_ms, prompts.cache_scope), (None, None));
+    let read = peer
+        .read_resource(ReadResourceRequestParams::new("memory://index"))
+        .await
+        .unwrap();
+    assert_eq!((read.ttl_ms, read.cache_scope), (None, None));
+
+    client.cancel().await.ok();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), server_handle).await;
+}
+
 /// `get_prompt("memory-session-start")` against an empty store →
 /// fallback "No relevant memories found." branch (server.rs:2342)
 /// + the standard prompt template.

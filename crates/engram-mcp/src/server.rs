@@ -3941,6 +3941,32 @@ finds it and harvest_show digests it straight from the archive."
 // ServerHandler implementation
 // ---------------------------------------------------------------------------
 
+/// SEP-2549 cache hints for a hand-built result, as `(ttl_ms, cache_scope)`.
+///
+/// Protocol 2026-07-28 makes `ttlMs` and `cacheScope` required on list and
+/// read results; earlier versions do not have the fields, so they stay absent
+/// there. This is the rule rmcp's own `#[tool_handler]` applies to
+/// `tools/list`, which is why the tool list needs no call here.
+///
+/// The TTL is always 0 ("do not reuse"), as rmcp uses for tools. The lists are
+/// static for one server process, but a cached copy would outlive an
+/// `engramdb` upgrade, and resource reads change with every write. The scope is
+/// the caller's decision: a static list is `Public`, anything that returns the
+/// user's memories is `Private`.
+fn cache_hints(
+    context: &rmcp::service::RequestContext<rmcp::RoleServer>,
+    scope: CacheScope,
+) -> (Option<u64>, Option<CacheScope>) {
+    if context
+        .protocol_version()
+        .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28)
+    {
+        (Some(0), Some(scope))
+    } else {
+        (None, None)
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for EngramDbServer {
     fn get_info(&self) -> ServerConfig {
@@ -4001,39 +4027,52 @@ impl ServerHandler for EngramDbServer {
     fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::ErrorData>> + Send + '_
     {
-        std::future::ready(Ok(ListResourcesResult::with_all_items(vec![
-            Resource::new("memory://index", "EngramDB Store Index")
-                .with_description(
-                    "Lightweight index of all memories with summaries, scopes, tags, and scores.",
-                )
-                .with_mime_type("application/json"),
-        ])))
+        let mut result = ListResourcesResult::with_all_items(vec![Resource::new(
+            "memory://index",
+            "EngramDB Store Index",
+        )
+        .with_description(
+            "Lightweight index of all memories with summaries, scopes, tags, and scores.",
+        )
+        .with_mime_type("application/json")]);
+        (result.ttl_ms, result.cache_scope) = cache_hints(&context, CacheScope::Public);
+        std::future::ready(Ok(result))
     }
 
     fn list_resource_templates(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, rmcp::ErrorData>>
            + Send
            + '_ {
-        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
-            ResourceTemplate::new("memory://context/{path}", "Contextual Memories")
-                .with_description("Memories relevant to the given file path, scored and sorted.")
-                .with_mime_type("application/json"),
-        ])))
+        let mut result = ListResourceTemplatesResult::with_all_items(vec![ResourceTemplate::new(
+            "memory://context/{path}",
+            "Contextual Memories",
+        )
+        .with_description("Memories relevant to the given file path, scored and sorted.")
+        .with_mime_type("application/json")]);
+        (result.ttl_ms, result.cache_scope) = cache_hints(&context, CacheScope::Public);
+        std::future::ready(Ok(result))
     }
 
     fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ReadResourceResponse, rmcp::ErrorData>> + Send + '_
     {
         let uri = request.uri;
+        // Both resources return the user's memories: never shareable.
+        let (ttl_ms, cache_scope) = cache_hints(&context, CacheScope::Private);
+        let with_hints = move |mut result: ReadResourceResult| {
+            result.ttl_ms = ttl_ms;
+            result.cache_scope = cache_scope;
+            ReadResourceResponse::from(result)
+        };
         async move {
             if uri == "memory://index" {
                 let store = self
@@ -4063,10 +4102,9 @@ impl ServerHandler for EngramDbServer {
                 let json = serde_json::to_string(&index)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(
-                    ReadResourceResult::new(vec![ResourceContents::text(json, "memory://index")])
-                        .into(),
-                )
+                Ok(with_hints(ReadResourceResult::new(vec![
+                    ResourceContents::text(json, "memory://index"),
+                ])))
             } else if let Some(path) = uri.strip_prefix("memory://context/") {
                 let engine = self
                     .build_engine()
@@ -4101,7 +4139,9 @@ impl ServerHandler for EngramDbServer {
                 let json = serde_json::to_string(&memories)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(json, &uri)]).into())
+                Ok(with_hints(ReadResourceResult::new(vec![
+                    ResourceContents::text(json, &uri),
+                ])))
             } else {
                 Err(rmcp::ErrorData::invalid_params(
                     format!("Unknown resource URI: {}", uri),
@@ -4114,10 +4154,10 @@ impl ServerHandler for EngramDbServer {
     fn list_prompts(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::ErrorData>> + Send + '_
     {
-        std::future::ready(Ok(ListPromptsResult::with_all_items(vec![
+        let mut result = ListPromptsResult::with_all_items(vec![
             Prompt::new(
                 "memory-session-start",
                 Some("Orientation prompt for the start of a coding session."),
@@ -4130,7 +4170,9 @@ impl ServerHandler for EngramDbServer {
                 Some::<&str>("End-of-session prompt to review and persist learnings."),
                 None,
             ),
-        ])))
+        ]);
+        (result.ttl_ms, result.cache_scope) = cache_hints(&context, CacheScope::Public);
+        std::future::ready(Ok(result))
     }
 
     async fn get_prompt(
