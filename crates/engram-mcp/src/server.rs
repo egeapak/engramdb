@@ -4408,6 +4408,26 @@ pub async fn run_stdio(
     Ok(())
 }
 
+/// Configuration for the streamable-HTTP transport.
+///
+/// **Every request that carries an `Origin` header is refused** (403). The
+/// MCP specification requires servers to validate `Origin`, and this server
+/// has no authentication while serving the user's memories and conversation
+/// history. Browsers always send `Origin` on a cross-site request; MCP
+/// clients (Claude Code, other CLI and desktop clients) send none, so they are
+/// unaffected. rmcp leaves this check off by default for backward
+/// compatibility; `enforce_origin_validation` with no allowed origins turns it
+/// on. The `Host` check that rmcp does enable by default (loopback names only)
+/// stays in place and is the DNS-rebinding guard; this one also covers a page
+/// that reaches `127.0.0.1` directly.
+///
+/// To let a specific browser-based client in, list its origin with
+/// `with_allowed_origins` rather than removing the check.
+fn http_server_config() -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
+    rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+        .enforce_origin_validation()
+}
+
 /// Start the MCP server with streamable HTTP transport.
 pub async fn run_sse(
     dir: PathBuf,
@@ -4415,7 +4435,7 @@ pub async fn run_sse(
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        session::local::LocalSessionManager, StreamableHttpService,
     };
     use std::sync::Arc;
 
@@ -4489,7 +4509,7 @@ pub async fn run_sse(
         warmup.embedding_warning
     };
 
-    let config = StreamableHttpServerConfig::default();
+    let config = http_server_config();
     let ct = config.cancellation_token.clone();
     let service = StreamableHttpService::new(
         {

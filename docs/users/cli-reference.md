@@ -379,6 +379,11 @@ engramdb serve [--transport stdio|sse] [--port <N>]
 
 `stdio` (default) is what Claude Code uses. `sse` runs an HTTP streaming server on `--port`. The plugin's `mcpServers` entry runs `engramdb serve --dir .`.
 
+The HTTP server listens on `127.0.0.1` only and has no authentication. It refuses two kinds of request with `403`:
+
+- a request whose `Host` header is not `localhost`, `127.0.0.1` or `::1` (this blocks DNS-rebinding attacks);
+- a request that carries an `Origin` header. Browsers always send one on a cross-site request, so a web page you visit cannot read or change your memories. MCP clients such as Claude Code send no `Origin` header and are not affected. A browser-based MCP client therefore cannot connect to this server.
+
 ## `daemon` — shared embedding daemon
 
 ```bash
