@@ -37,8 +37,10 @@ ollama = ["reqwest", "engram-models/ollama"]
 # the model crates, which own the `ort` EP wiring.
 coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
-# the provider ships in the prebuilt `ort` binary so only this feature is
-# needed (no source build, same downloaded binary). For A/B benchmarking.
+# for A/B benchmarking. Under `load-dynamic` it needs a runtime built with the
+# XNNPACK EP. It does NOT combine with `bundled-onnxruntime`: ort 2.0.0-rc.13
+# publishes no prebuilt with XNNPACK (nor did rc.12), and rc.13's `ort-sys`
+# refuses that feature set, so the build fails at link time.
 xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 # --- ONNX Runtime linking strategy ---------------------------------------
 # EngramDB does not vendor an ONNX Runtime. Exactly one of the three strategies
@@ -147,10 +149,10 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # `tls-rustls` pairs with `download-binaries` (the `ort-sys` build script's
 # download path needs a TLS provider on `ureq`); see the note in
 # `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
-# Must match `engram-models`' pin (which tracks fastembed's `^0.22.2`) —
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+# Must match `engram-models`' pin (which tracks fastembed's `^0.23.2`) —
 # otherwise the examples pull a second, non-unifying `tokenizers` build.
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 toml = "1"
 

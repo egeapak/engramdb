@@ -133,7 +133,9 @@ engramdb daemon restart
 
 ## Version pinning
 
-`ort` 2.0.0-rc.12 requires ONNX Runtime C API version **24**, so any runtime
-from **1.24** onward works. `engram_onnx::runtime::REQUIRED_API_VERSION` is the
-single source of truth; a runtime that is too old is rejected with a message
-naming its version rather than failing inside `ort`.
+`ort` 2.0.0-rc.13, built with its `api-24` feature, requires ONNX Runtime C API
+version **24**, so any runtime from **1.24** onward works (1.28 is tested too).
+`engram_onnx::runtime::REQUIRED_API_VERSION` is the single source of truth: it
+is read from `ort` itself, and a test fails if anything raises it. A runtime
+that is too old is rejected with a message naming its version rather than
+failing inside `ort`.

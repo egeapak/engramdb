@@ -25,16 +25,18 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     ignore:
-      # Pinned to `=2.0.0-rc.12` by fastembed, and rc.12 is what targets ONNX
-      # Runtime 1.24.x (API 24). A bump here that fastembed hasn't made would
-      # fail to resolve; one it *has* made arrives via fastembed anyway.
+      # Pinned to `=2.0.0-rc.13` by fastembed 7.1. The C API level (24, so
+      # ONNX Runtime >= 1.24) comes from the `api-24` feature, not the ort
+      # version. A bump here that fastembed hasn't made would fail to resolve;
+      # one it *has* made arrives via fastembed anyway.
       - dependency-name: "ort"
-      # The arrow major must match what lancedb requires (`^58` as of 0.31).
+      # The arrow major must match what lancedb requires (`^58` as of 0.37,
+      # and still in 0.39).
       # Moving it independently forks the arrow types at the lancedb boundary
       # and does not compile — see docs/contributors/architecture.md.
       - dependency-name: "arrow*"
         update-types: ["version-update:semver-major"]
-      # Tracks fastembed's `^0.22.2`; a major bump here silently doubles the
+      # Tracks fastembed's `^0.23.2`; a major bump here silently doubles the
       # tokenizers + onig build instead of unifying. See the note in
       # crates/engram-models/Cargo.toml.
       - dependency-name: "tokenizers"

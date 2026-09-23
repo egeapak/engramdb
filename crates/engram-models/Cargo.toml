@@ -38,19 +38,19 @@ engram-storage = { path = "../engram-storage" }
 
 # ONNX Runtime stack, optional under `onnxruntime` (default). A pure-Rust
 # `--features tract` build excludes both.
-fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls"], optional = true }
+fastembed = { version = "7.1", default-features = false, features = ["hf-hub-rustls-tls"], optional = true }
 # `tls-rustls` is needed with `download-binaries` so this crate builds in
 # isolation: the `ort-sys` build script's download path calls `ureq`'s
 # `tls_config(..)`, which only exists when a TLS feature is on. See the longer
 # note in `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"], optional = true }
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"], optional = true }
 # `tokenizers` and `hf-hub` are mandatory: BOTH the ONNX and tract paths
 # tokenize and fetch models through them.
-# Kept in lockstep with what `fastembed` requires (`^0.22.2`). A newer major
+# Kept in lockstep with what `fastembed` requires (`^0.23.2` as of 7.1). A newer major
 # here does NOT unify, so the workspace would build `tokenizers` — and its
 # `onig`/`onig_sys` C dependency — twice for no gain. Bump this only when
 # fastembed does.
-tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
 ndarray = { version = "0.17", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
