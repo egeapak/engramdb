@@ -3943,7 +3943,7 @@ finds it and harvest_show digests it straight from the archive."
 
 #[tool_handler]
 impl ServerHandler for EngramDbServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -4004,15 +4004,13 @@ impl ServerHandler for EngramDbServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, rmcp::ErrorData>> + Send + '_
     {
-        std::future::ready(Ok(ListResourcesResult {
-            meta: None,
-            next_cursor: None,
-            resources: vec![Resource::new("memory://index", "EngramDB Store Index")
+        std::future::ready(Ok(ListResourcesResult::with_all_items(vec![
+            Resource::new("memory://index", "EngramDB Store Index")
                 .with_description(
                     "Lightweight index of all memories with summaries, scopes, tags, and scores.",
                 )
-                .with_mime_type("application/json")],
-        }))
+                .with_mime_type("application/json"),
+        ])))
     }
 
     fn list_resource_templates(
@@ -4022,23 +4020,18 @@ impl ServerHandler for EngramDbServer {
     ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, rmcp::ErrorData>>
            + Send
            + '_ {
-        std::future::ready(Ok(ListResourceTemplatesResult {
-            meta: None,
-            next_cursor: None,
-            resource_templates: vec![ResourceTemplate::new(
-                "memory://context/{path}",
-                "Contextual Memories",
-            )
-            .with_description("Memories relevant to the given file path, scored and sorted.")
-            .with_mime_type("application/json")],
-        }))
+        std::future::ready(Ok(ListResourceTemplatesResult::with_all_items(vec![
+            ResourceTemplate::new("memory://context/{path}", "Contextual Memories")
+                .with_description("Memories relevant to the given file path, scored and sorted.")
+                .with_mime_type("application/json"),
+        ])))
     }
 
     fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, rmcp::ErrorData>> + Send + '_
+    ) -> impl std::future::Future<Output = Result<ReadResourceResponse, rmcp::ErrorData>> + Send + '_
     {
         let uri = request.uri;
         async move {
@@ -4070,10 +4063,10 @@ impl ServerHandler for EngramDbServer {
                 let json = serde_json::to_string(&index)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    json,
-                    "memory://index",
-                )]))
+                Ok(
+                    ReadResourceResult::new(vec![ResourceContents::text(json, "memory://index")])
+                        .into(),
+                )
             } else if let Some(path) = uri.strip_prefix("memory://context/") {
                 let engine = self
                     .build_engine()
@@ -4108,9 +4101,7 @@ impl ServerHandler for EngramDbServer {
                 let json = serde_json::to_string(&memories)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
 
-                Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                    json, &uri,
-                )]))
+                Ok(ReadResourceResult::new(vec![ResourceContents::text(json, &uri)]).into())
             } else {
                 Err(rmcp::ErrorData::invalid_params(
                     format!("Unknown resource URI: {}", uri),
@@ -4126,31 +4117,27 @@ impl ServerHandler for EngramDbServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListPromptsResult, rmcp::ErrorData>> + Send + '_
     {
-        std::future::ready(Ok(ListPromptsResult {
-            meta: None,
-            next_cursor: None,
-            prompts: vec![
-                Prompt::new(
-                    "memory-session-start",
-                    Some("Orientation prompt for the start of a coding session."),
-                    Some(vec![PromptArgument::new("path")
-                        .with_description("The file or directory the agent will be working on.")
-                        .with_required(false)]),
-                ),
-                Prompt::new(
-                    "memory-session-end",
-                    Some::<&str>("End-of-session prompt to review and persist learnings."),
-                    None,
-                ),
-            ],
-        }))
+        std::future::ready(Ok(ListPromptsResult::with_all_items(vec![
+            Prompt::new(
+                "memory-session-start",
+                Some("Orientation prompt for the start of a coding session."),
+                Some(vec![PromptArgument::new("path")
+                    .with_description("The file or directory the agent will be working on.")
+                    .with_required(false)]),
+            ),
+            Prompt::new(
+                "memory-session-end",
+                Some::<&str>("End-of-session prompt to review and persist learnings."),
+                None,
+            ),
+        ])))
     }
 
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> Result<GetPromptResult, rmcp::ErrorData> {
+    ) -> Result<GetPromptResponse, rmcp::ErrorData> {
         match request.name.as_str() {
             "memory-session-start" => {
                 let path = request
@@ -4206,7 +4193,7 @@ impl ServerHandler for EngramDbServer {
                 let mut result =
                     GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)]);
                 result.description = Some("Session start briefing".to_string());
-                Ok(result)
+                Ok(result.into())
             }
             "memory-session-end" => {
                 let mut stats_text = String::new();
@@ -4283,7 +4270,7 @@ impl ServerHandler for EngramDbServer {
                 let mut result =
                     GetPromptResult::new(vec![PromptMessage::new_text(Role::User, prompt)]);
                 result.description = Some("Session end review".to_string());
-                Ok(result)
+                Ok(result.into())
             }
             _ => Err(rmcp::ErrorData::invalid_params(
                 format!("Unknown prompt: {}", request.name),
