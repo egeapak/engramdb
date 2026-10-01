@@ -129,6 +129,8 @@ A typical session-start injection looks like:
 
 Reads the event JSON from stdin, extracts `tool_input.file_path`, and runs a `rank`-mode query with that path as the context and the `file_edit` situation — so decisions binding on the file come first, with hazards leading the facts group. Output is capped at `[hooks].prompt_context_budget` characters. The agent sees this just before the tool call runs. If the file path can't be relativized to the project root, the absolute path is used.
 
+When the file is an EngramDB memory file (`.engramdb/memories/<slug>_<id>.md`), the hook instead says so and names the id: `get` returns the same content and `query` finds related memories, and changes should go through `update` or `challenge` so the index and its vectors stay current. The read is never blocked.
+
 ### `UserPromptSubmit`
 
 Runs a `filter`-mode query with your prompt text as the query. It also infers a situation from the prompt: debugging-flavored wording ("error", "failing", "panic", …) ranks observations higher; design-flavored wording ("should we", "approach", "architecture", …) ranks prior decisions higher. Output is capped at `[hooks].prompt_context_budget` characters.

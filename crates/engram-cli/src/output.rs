@@ -936,10 +936,20 @@ impl OutputFormatter {
                         if show_scores {
                             obj["breakdown"] = serde_json::json!(sm.score_breakdown);
                         }
+                        // Rank mode's fallback: a weak match returned because
+                        // nothing cleared the relevance threshold.
+                        if sm.score_breakdown.below_threshold {
+                            obj["below_threshold"] = serde_json::Value::Bool(true);
+                        }
                         obj
                     }).collect::<Vec<_>>(),
                     "total": result.total,
                 });
+                let mut json_output = json_output;
+                if result.dropped_below_threshold > 0 {
+                    json_output["dropped_below_threshold"] =
+                        serde_json::json!(result.dropped_below_threshold);
+                }
                 outln!(
                     self,
                     "{}",

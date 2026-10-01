@@ -89,6 +89,48 @@ pub fn merge_scored_memories(
     duplicates
 }
 
+/// What to tell the caller when a query found nothing it is confident in.
+///
+/// `None` when at least one result cleared the threshold. Otherwise one
+/// sentence naming what happened and what to try next: an empty answer with no
+/// explanation sent agents to read the store files directly.
+pub fn result_hint(
+    mode: RetrievalMode,
+    result: &RetrievalResult,
+    threshold: f64,
+) -> Option<String> {
+    let weak = !result.memories.is_empty()
+        && result
+            .memories
+            .iter()
+            .all(|sm| sm.score_breakdown.below_threshold);
+    match mode {
+        RetrievalMode::Rank if weak => Some(format!(
+            "No memory scored above the relevance threshold ({threshold}). These {} are the closest \
+             weak matches (below_threshold: true); {} more were dropped. Treat them as leads, not \
+             answers; retry with mode \"filter\" and literal terms to confirm.",
+            result.memories.len(),
+            result.dropped_below_threshold
+        )),
+        RetrievalMode::Rank if result.memories.is_empty() && result.dropped_below_threshold > 0 => {
+            Some(format!(
+                "0 of {} memories scored above the relevance threshold ({threshold}). Retry with \
+                 mode \"filter\" and literal terms, or with fewer words.",
+                result.dropped_below_threshold
+            ))
+        }
+        RetrievalMode::Rank if result.memories.is_empty() => {
+            Some("No memory in this store matches the filters.".to_string())
+        }
+        RetrievalMode::Filter if result.memories.is_empty() => Some(
+            "No memory matched these words. Filter mode needs a keyword, tag or scope match: \
+             retry with synonyms or the exact term, or with mode \"rank\" to browse by meaning."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 /// Rank mode across stores. Each store may have returned its own fallback:
 /// weak matches marked `below_threshold` because nothing in that store cleared
 /// the threshold. Once merged, a confident result from any store makes every

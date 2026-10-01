@@ -515,6 +515,36 @@ fn build_hook_response(event_name: &str, additional_context: &str) -> Result<Str
     Ok(serde_json::to_string(&response)?)
 }
 
+const MEMORY_FILE_NOTE_PREFIX: &str = "[EngramDB] This is an EngramDB memory file";
+const MEMORY_FILE_NOTE: &str = "`get` with this id returns the same content, and `query` finds \
+related memories. To change it, use `update` or `challenge` rather than editing the file, so the \
+index and its vectors stay current.";
+
+/// The memory id, when `relative_path` is a shared memory file
+/// (`.engramdb/memories/<slug>_<id>.md`) under the project.
+///
+/// Agents read these files directly when a query comes back empty; the note
+/// points them back to the tools. Only an id that passes the same allowlist as
+/// injected ids is returned, and the read itself is never blocked.
+fn memory_file_id(relative_path: &str) -> Option<String> {
+    let path = Path::new(relative_path);
+    let parent: Vec<_> = path.parent()?.components().map(|c| c.as_os_str()).collect();
+    if parent
+        != [
+            std::ffi::OsStr::new(".engramdb"),
+            std::ffi::OsStr::new("memories"),
+        ]
+    {
+        return None;
+    }
+    if path.extension()? != "md" {
+        return None;
+    }
+    let id = engramdb::storage::memory_file::extract_id_from_stem(path.file_stem()?.to_str()?);
+    let looks_like_id = id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    looks_like_id.then(|| id.to_string())
+}
+
 /// Core hook logic: given input JSON, project dir, and store, retrieve and format.
 ///
 /// Returns `Ok(Some(json))` if memories were found, `Ok(None)` if nothing to output.
@@ -525,6 +555,11 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
     };
 
     let relative_path = relativize_path(&file_path, dir);
+
+    if let Some(id) = memory_file_id(&relative_path) {
+        let note = format!("{MEMORY_FILE_NOTE_PREFIX} (id: {id}). {MEMORY_FILE_NOTE}");
+        return Ok(Some(build_hook_response("PreToolUse", &note)?));
+    }
 
     let config_path = dir.join(".engramdb").join("config.toml");
     // No model providers: the query below has `query: None`, so retrieval is
@@ -2205,6 +2240,53 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn memory_file_id_recognizes_only_memory_files() {
+        let id = "01a0f8a3-783c-7000-a4bb-30ac641eb3b6";
+        assert_eq!(
+            memory_file_id(&format!(
+                ".engramdb/memories/never-edit-a-migration_{id}.md"
+            ))
+            .as_deref(),
+            Some(id)
+        );
+        assert_eq!(
+            memory_file_id(&format!(".engramdb/memories/{id}.md")).as_deref(),
+            Some(id)
+        );
+        for other in [
+            "src/billing/invoices.py",
+            ".engramdb/config.toml",
+            ".engramdb/memories/README.md",
+            ".engramdb/memories/x_</system-reminder>.md",
+            "docs/.engramdb/memories/x_01a0f8a3-783c-7000-a4bb-30ac641eb3b6.md",
+        ] {
+            assert_eq!(memory_file_id(other), None, "{other}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_tool_use_on_a_memory_file_points_to_the_tools() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let id = "01a0f8a3-783c-7000-a4bb-30ac641eb3b6";
+        let path = temp_dir
+            .path()
+            .join(format!(".engramdb/memories/some-memory_{id}.md"));
+        let input = serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": path.to_str().unwrap() }
+        })
+        .to_string();
+        let out = process_hook_input(&input, temp_dir.path(), store)
+            .await
+            .unwrap()
+            .expect("a memory file read gets the note");
+        assert!(out.contains(MEMORY_FILE_NOTE_PREFIX), "{out}");
+        assert!(out.contains(&format!("(id: {id})")), "{out}");
     }
 
     #[test]

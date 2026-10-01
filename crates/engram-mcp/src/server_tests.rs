@@ -6693,3 +6693,58 @@ fn mcp_config_defaults_when_section_absent() {
         engramdb::types::McpConfig::DEFAULT_ALWAYS_LOAD.len()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Query responses: dropped_below_threshold, below_threshold, hint
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn query_filter_with_no_match_explains_itself() {
+    let (_dir, server) = setup().await;
+    let _ = create_and_get_id(&server, "convention", "Use snake_case", "Naming rule").await;
+    let result = server
+        .memory_query(Parameters(QueryInput {
+            query: Some("zebra quokka".to_string()),
+            ..query_input("filter")
+        }))
+        .await;
+    let val = parse_ok(&result);
+    assert_eq!(val["memories"].as_array().unwrap().len(), 0);
+    assert_eq!(val["dropped_below_threshold"], 0);
+    let hint = val["hint"]
+        .as_str()
+        .expect("an empty filter result carries a hint");
+    assert!(hint.contains("rank"), "{hint}");
+}
+
+#[tokio::test]
+async fn query_rank_marks_weak_matches_instead_of_returning_nothing() {
+    let (_dir, server) = setup().await;
+    // Criticality 0.2 keeps every score under the 0.45 threshold for an
+    // unrelated query, whatever the embedding model says.
+    for summary in ["Alpha note", "Beta note"] {
+        let mut input = create_input("context", summary, "body");
+        input.criticality = Some(0.2);
+        let _ = parse_ok(&server.memory_create(Parameters(input)).await);
+    }
+    let result = server
+        .memory_query(Parameters(QueryInput {
+            query: Some("zebra quokka".to_string()),
+            ..query_input("rank")
+        }))
+        .await;
+    let val = parse_ok(&result);
+    let memories = val["memories"].as_array().unwrap();
+    assert!(
+        !memories.is_empty(),
+        "rank must not answer with nothing: {val}"
+    );
+    assert!(
+        memories.iter().all(|m| m["below_threshold"] == true),
+        "{val}"
+    );
+    assert!(
+        val["hint"].as_str().unwrap().contains("weak matches"),
+        "{val}"
+    );
+}

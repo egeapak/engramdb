@@ -852,6 +852,10 @@ struct ScoredMemoryOutput {
     #[serde(flatten)]
     memory: MemoryOutput,
     score: f64,
+    /// Rank mode's fallback: a weak match returned because nothing cleared the
+    /// relevance threshold. Present only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    below_threshold: bool,
     score_breakdown: ScoreBreakdownOutput,
 }
 
@@ -2168,6 +2172,7 @@ impl EngramDbServer {
             .map(|sm| ScoredMemoryOutput {
                 memory: memory_to_output(&sm.memory, include_details),
                 score: sm.score,
+                below_threshold: sm.score_breakdown.below_threshold,
                 score_breakdown: ScoreBreakdownOutput {
                     final_score: sm.score_breakdown.final_score,
                     semantic: sm.score_breakdown.semantic,
@@ -2185,12 +2190,19 @@ impl EngramDbServer {
             })
             .collect();
 
-        let r = serde_json::to_string(&serde_json::json!({
+        let hint =
+            ops::query::result_hint(mode, &result, engine.config().retrieval.relevance_threshold);
+        let mut body = serde_json::json!({
             "memories": memories,
             "total": result.total,
             "retrieval_quality": result.retrieval_quality,
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            "dropped_below_threshold": result.dropped_below_threshold,
+        });
+        if let Some(hint) = hint {
+            body["hint"] = serde_json::Value::String(hint);
+        }
+        let r = serde_json::to_string(&body)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         // Compaction rides the *read* path, not the write path. Fragments are
         // produced by writes but only ever paid for by reads, so a query is
         // both where the cost lands and a point with nothing else in flight.

@@ -996,13 +996,15 @@ impl RetrievalEngine {
     /// Index-level filter → batch load → optional vector search (top-k,
     /// restricted to the filtered candidate set when the filters narrowed it
     /// to at most [`VECTOR_RESTRICT_MAX_IDS`] memories, whole-store
-    /// otherwise) → keyword search → composite scoring → threshold →
-    /// optional cross-encoder rerank. Per memory, the composite weights are
-    /// chosen from the query evidence:
+    /// otherwise) → keyword search → composite scoring → filter-mode
+    /// threshold → optional cross-encoder rerank → rank-mode threshold (on the
+    /// reranked score; when nothing clears it, the best `rank_fallback`
+    /// candidates are returned marked `below_threshold`). Per memory, the
+    /// composite weights are chosen from the query evidence:
     ///
     /// | keyword | semantic                  | weights (defaults)                  |
     /// |---------|---------------------------|-------------------------------------|
-    /// | yes     | yes (incl. missed top-k)  | `with_keyword`: 0.45kw 0.30sem 0.25rel |
+    /// | yes     | yes (incl. missed top-k)  | `with_keyword`: 0.45kw 0.30sem 0.25rel, never below `with_query` |
     /// | yes     | no chunks / no embeddings | `with_keyword`, sem weight renormalized away |
     /// | no      | yes (incl. missed top-k)  | `with_query`: 0.55sem 0.45rel       |
     /// | no      | no chunks / no embeddings | `degraded`: 1.0rel                  |
