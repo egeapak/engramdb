@@ -23,6 +23,15 @@ Regenerate the tables with `summarize.py`; re-grade with `regrade.py`.
 | v7 | Sonnet 5.5 | + ids and bodies in hooks (step 3) | 94% (116/123) | 94% (51/54) | 69% (37/54) | 100% (9/9) | 60% (9/15) | 67% (8/12) | 100% (87/87) | 100% (111/111) | 1 | 33 | 0.051 | 65k |
 | v13 | Sonnet 5.5 | + routing to EngramDB (step 4) | 94% (116/123) | 94% (51/54) | 46% (25/54) | 100% (9/9) | 87% (13/15) | 67% (8/12) | 100% (87/87) | 100% (111/111) | 0 | 18 | 0.053 | 66k |
 
+## Default fixture, step 5 onward (47 cases, fixed fixture)
+
+Step 5 also fixed the fixture (a `docker-compose.yml`, a postgres test, a working `make test-fast`) and added 6 contradiction cases (10 in total). Pass rates are not comparable with the table above. `revise` is split by whether the repository itself contradicts the memory (`repo disagrees`) or says nothing (`repo neutral`, so only the user's statement shows the memory is outdated).
+
+| Variant | Model | Change | pass | consulted | query first | explicit create | implicit capture | revise | no false create | no spurious revise | revise (repo neutral) | revise (repo disagrees) | store-read runs | get calls | $/case | input tokens |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| v14 | Opus 5.5 | rank fallback + store-read hint (step 5) | 95% (134/141) | 100% (54/54) | 33% (18/54) | 100% (9/9) | 100% (15/15) | 80% (24/30) | 100% (87/87) | 99% (110/111) | 100% (21/21) | 33% (3/9) | 1 | 3 | 0.112 | 87k |
+| v15 | Sonnet 5.5 | rank fallback + store-read hint (step 5) | 91% (129/141) | 94% (51/54) | 43% (23/54) | 100% (9/9) | 93% (14/15) | 70% (21/30) | 100% (87/87) | 100% (111/111) | 86% (18/21) | 33% (3/9) | 0 | 24 | 0.054 | 66k |
+
 ## Vague-title fixture (facts only in memory bodies)
 
 | Variant | Model | Change | pass | consulted | query first | explicit create | implicit capture | revise | no false create | no spurious revise | store-read runs | get calls | $/case | input tokens |
@@ -41,6 +50,7 @@ Regenerate the tables with `summarize.py`; re-grade with `regrade.py`.
 - **Step 2, pinned core tools** (`[mcp].always_load`; `_meta["anthropic/alwaysLoad"]` on query, get, create, update, challenge). Sonnet's ToolSearch calls fall from 74 to 0. Input tokens rise by 0.4% (Opus) and 3.6% (Sonnet).
 - **Step 3, ids and bodies in hooks** (and the `DetailLevel::Summary` bug fix). Pass is flat on both models and both fixtures. Behavior shifts: Claude answers from the injected body instead of querying (`query first` falls, `consulted` stays at or above step 2), uses the ids (`get` calls: Opus 0 → 9, Sonnet 0 → 33), and Opus reads the store files directly in fewer runs (11 → 7). The vague fixture did not separate the binaries: with pinned tools Claude already queried every time, and `query` returns the full body.
 - **Step 4, routing to EngramDB** (instructions, `create` description, nudge, PostToolUse auto-memory note, combined ENGRAM.md edit). Sonnet's implicit capture rises 60% → 87% and its auto-memory writes fall to 0 (from 2). Opus pass falls 95% → 90%, but its new misses are mostly valid: it challenged the test memory's `docker compose` claim (the fixture has no compose file) and saved real environment facts (`make test-fast` cannot run in the sandbox: no pytest/requests, `src` not importable). Those are fixture flaws, not regressions; fix before hill-climbing.
+- **Step 5, rank fallback and store-read hint** (plan 05). A rank query no longer returns nothing when no memory clears the threshold: it returns the best 3, marked `below_threshold`, with a hint. Keyword evidence can no longer lower a score. Reading a memory file triggers a hint that names its id. Measured on 149 real agent queries (`evals/retrieval-probe/`): rank recall 52% → 97%, target first 52% → 91%, empty results 45% → 0%; filter mode unchanged at 98%. In the eval, Opus's empty rank results fall from 9 of 13 to 0 of 14, and runs that read `.engramdb/` directly fall from 6 to 1. Revise is 21/21 (Opus) and 18/21 (Sonnet) when the repository is neutral, but 3/9 for both when the repository disagrees with the user: there Claude trusts the code. Analysis of Sonnet's `ed-discount` misses found a separate bug, fixed in step 7.
 - **Vague fixture caveat:** some of its memory bodies claim things the fixture does not back up (a docker compose file, per-environment flags). Opus correctly challenged them, which `no spurious revise` counts as a miss. Fix before hill-climbing.
 - `revise` has n = 12 per variant; differences under about 25 points are within noise.
 - "store-read runs" counts runs that read `.engramdb/` around the MCP tools; searches that *exclude* `.engramdb/` are not counted (the detector was fixed and all variants recomputed).
