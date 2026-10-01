@@ -8,6 +8,8 @@ These plans come from the eval in `evals/memory-tool-use/`. Results are in `.cla
 | 02 | [Memory bodies in hook output](02-hook-memory-body.md) | **Bug:** hooks request `DetailLevel::Summary`, so the content is cleared and an empty preview line is printed | direct reads of `.engramdb/` (21 Opus / 16 Sonnet runs) |
 | 03 | [Auto-memory competition](03-auto-memory-competition.md) | The system prompt says "save it immediately"; auto-memory needs only `Write`, while EngramDB tools are deferred | `explicit_create` (Sonnet 0/9) |
 | 04 | [ToolSearch deferral](04-toolsearch-deferral.md) | MCP tools are deferred; Sonnet rarely takes the extra load step | `query_before_act` (Sonnet 1/53) |
+| 05 | [Rank-mode empty results; direct store reads](05-rank-empty-and-store-reads.md) | **Bug:** the rank threshold (0.45) runs before the reranker, on a score scale it was not set for; 6 of 12 probe queries return nothing | rank empty rate (13/14 in v4), store-read runs |
+| 06 | [Revising contradicted memories](06-contradiction-revisions.md) | Claude defers when the repo still backs the memory; grader matches IDs on a timestamp prefix | `revise` on repo-neutral cases |
 
 The cold-start MCP bug (`engramdb serve` answers `initialize` after about 3 s, and Claude Code's discovery probe times out) is handled in a separate session.
 
