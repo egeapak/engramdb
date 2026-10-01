@@ -335,7 +335,9 @@ struct ChallengeInput {
     #[schemars(description = "Memory ID")]
     id: String,
 
-    #[schemars(description = "Evidence contradicting this memory")]
+    #[schemars(
+        description = "Why the memory is wrong or outdated. The user's own statement (\"we moved off structlog last week\") is enough evidence; code that still matches the old memory does not make it current."
+    )]
     evidence: String,
 
     #[schemars(description = "File where evidence was found")]
@@ -2405,7 +2407,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "challenge",
-        description = "Flag a memory as potentially incorrect and mark for review."
+        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as the user tells you a memory is out of date, with their statement as `evidence`, even when the code has not caught up yet: a challenge flags the memory, it does not rewrite it. When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
     )]
     async fn memory_challenge(
         &self,
@@ -4085,7 +4087,10 @@ impl ServerHandler for EngramDbServer {
                  Where to save: project facts, conventions, hazards and decisions go to this \
                  store with create, including when the user says \"remember\". Claude Code's \
                  file-based auto-memory is private to one machine and invisible to these \
-                 queries and to collaborators; keep it for personal collaboration preferences."
+                 queries and to collaborators; keep it for personal collaboration preferences. \
+                 When the user says a stored memory is outdated or wrong, challenge it right \
+                 away with their statement as evidence, even if the code still matches the old \
+                 memory; do not wait for the code to change."
                 .to_string();
             if let Some(w) = &self.embedding_warning {
                 s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
