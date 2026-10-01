@@ -6,6 +6,11 @@
    "kind": "binary"
   },
   {
+   "id": "consulted_before_act",
+   "label": "consulted",
+   "kind": "binary"
+  },
+  {
    "id": "query_before_act",
    "label": "query first",
    "kind": "binary"

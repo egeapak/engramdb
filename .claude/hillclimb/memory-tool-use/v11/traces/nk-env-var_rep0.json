@@ -1,0 +1,92 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8660a7f6-b23f-4590-8e4f-284302dd22ba\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f5ac638b-48c5-4ef7-826d-384a4a7b6be8\", \"session_id\": \"08f93433-2d31-4cb1-9a42-a89fa2e2df05\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8660a7f6-b23f-4590-8e4f-284302dd22ba\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0229dac7-d844-44d5-a458-5dbc60188727\", \"session_id\": \"08f93433-2d31-4cb1-9a42-a89fa2e2df05\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1ceb20e5-6910-411c-bf6c-9c2c1db3b225\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"fee91495-b5f7-4053-a8a8-21da65835e91\", \"session_id\": \"08f93433-2d31-4cb1-9a42-a89fa2e2df05\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1ceb20e5-6910-411c-bf6c-9c2c1db3b225\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"00146b33-36c6-4e25-b1aa-e851f99cea80\", \"session_id\": \"08f93433-2d31-4cb1-9a42-a89fa2e2df05\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I'll look at how the gateway gets chosen."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE|FakeGateway|fake.*gateway\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"path\": \"/tmp/mte-nk-env-var-1sap7_kr/ledgerline\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"gateway|payment|environ|getenv|process\\\\.env\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"path\": \"/tmp/mte-nk-env-var-1sap7_kr/ledgerline\",\n \"glob\": \"!.git/**\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\"\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\n.engramdb/memories/export-script-caution_01a0f84d-f52a-75c0-8f5c-348a7d8bb08e.md:15:scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.\n.engramdb/memories/feature-flag-usage_01a0f84d-ec28-71f2-bd1a-e8ed0dd5d90d.md:15:Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat tests/test_payments.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-error-format_01a0f84d-f92b-7330-b139-db49f94ea0a0.md\n.engramdb/memories/export-script-caution_01a0f84d-f52a-75c0-8f5c-348a7d8bb08e.md\n.engramdb/memories/feature-flag-usage_01a0f84d-ec28-71f2-bd1a-e8ed0dd5d90d.md\n.engramdb/memories/finalize-caveat_01a0f84d-db40-7e82-a617-1d2785092a49.md\n.engramdb/memories/logging-library-choice_01a0f84d-dfa2-7d12-b981-d9a964c4a209.md\n.engramdb/memories/migration-rules_01a0f84d-e7e3-7381-95e7-194d65a2470c.md\n.engramdb/memories/money-representation_01a0f84d-d5eb-7bd1-a6c5-d629d8864a2a.md\n.engramdb/memories/release-process_01a0f84d-fd4a-7d81-8482-e8d6e9b8c774.md\n.engramdb/memories/tax-rounding-rule_01a0f84d-f0e7-71f0-873d-cc4302e49e2d.md\n.engramdb/memories/test-command_01a0f84d-e36c-7523-ad57-f1d24b217e7e.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n@pytest.mark.integration\ndef test_charges_roundtrip():\n    for amount in (100, 250, 999, 1200):\n        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n        assert resp.status_code == 201"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/api/checkout.py flags.toml README.md; grep -rni \\\"live\\\\|fake\\\\|stub\\\\|mock\\\" src README.md Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n[flags]\ninvoice-pdf-v2 = false\n# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Per the user: the app silently falls back to a fake payment gateway unless the PAYMENTS_LIVE=1 environment variable is set. Nothing warns about it, and it cost the user two hours of debugging. If payments look like they succeed but never reach the real processor, check PAYMENTS_LIVE first. Reported by the user, not verified in this repo: as of 2026-10-01 no PAYMENTS_LIVE reference or gateway code exists in the checked-in source (src/api/checkout.py only computes totals), so the switch is probably in another service or deployment config.\",\n \"epistemic\": \"observation\",\n \"premise\": \"The user's report of the PAYMENTS_LIVE fallback is accurate and the behavior hasn't been changed\",\n \"invalidated_by\": [\n  \"src/api/checkout.py\"\n ],\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"gotcha\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f84e-3606-7671-9e53-61e3452b7ee1\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Two hours lost to a silent fallback is a bad way to find that out.\n\nI can't see the switch in this checkout, though. `PAYMENTS_LIVE` doesn't appear anywhere in the repo, and there's no gateway or fake-gateway code. `src/api/checkout.py` only sums the cart and returns `\"status\": \"pending\"`, and the only payments test (`tests/test_payments.py`) posts directly to a sandbox URL. The fallback must live in another service, a shared library, or deployment config.\n\nI saved a hazard memory in EngramDB so the gotcha surfaces next time. It's marked as your report, not verified in code.\n\nWhere does the gateway selection live? If you point me at it, I'd suggest these changes:\n- **Fail loudly:** raise at startup if `PAYMENTS_LIVE` is unset in a production-like environment, instead of defaulting to the fake.\n- **Log it:** write a prominent warning at startup when the fake gateway is active.\n- **Make it visible:** expose the active gateway in a health or version endpoint.\n- **Document it:** add `PAYMENTS_LIVE` to the README's Development section.\n\nI haven't changed any code."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing blocked me, but two things were awkward:\n\n1. **Invalidation by path only.** `invalidated_by` takes paths or globs. The real trigger for this hazard is \"the gateway selection or `PAYMENTS_LIVE` handling changes\", and I don't know where that code lives, since it isn't in this repo. I put `src/api/checkout.py` as a placeholder, which is a weak proxy. I would have wanted a content-based trigger, such as a pattern like `PAYMENTS_LIVE` that invalidates the memory when it shows up in a diff. A free-text condition would also have worked.\n\n2. **No provenance field.** I wanted to record \"user-reported, not verified in code\". The only places to put that were the `epistemic: observation` value and a sentence in the content. A `source` field (user-stated, code-verified or inferred) would have made it queryable. I also didn't lower `confidence` to reflect that the claim was unverified, which was my omission, not a tool gap.\n\nI also did only one narrow `query`, so I never looked at related memories such as `export-script-caution`, which is also an environment-variable hazard. That was my choice, not a limitation. A parameter to link related memories explicitly would have helped, though. I didn't need `verify`, `resolve` or `list` in this session."
+ }
+]

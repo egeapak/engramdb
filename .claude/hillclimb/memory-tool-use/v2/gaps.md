@@ -5,8 +5,8 @@
 | signal | runs with it | occurrences |
 |---|---|---|
 | mcp_errors | 0 | 0 |
-| bash_workarounds | 9 | 9 |
-| direct_store_access | 15 | 22 |
+| bash_workarounds | 2 | 2 |
+| direct_store_access | 14 | 19 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 29 | 29 |
 | debrief asks for something | 31 | - |
@@ -22,75 +22,12 @@
 }
 ```
 
-**ed-404 rep0**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' ; grep -rn \"import\" src tests 2>/dev/null | head -20",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nsrc/fl"
-}
-```
-
 **ed-flag rep1**
 
 ```
 {
  "command": "cat src/flags.py flags.toml src/api/errors.py src/api/invoices.py .engramdb/memories/feature-flags-go-through-flags-is-on_*.md .engramdb/memories/api-errors-use-problem-json_*.md Makefile",
  "result_head": "import tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\n[flags]\ninvoice-pdf-v2 = false\nfrom flask import jsonify\n\n\ndef problem(status, title, detail=None):\n    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n    if detail:\n        body[\"detail\"] = detail\n    resp = jsonify(body)\n    resp.status_code = status\n    resp.mimetype = \"application/problem+json\"\n    return resp\nfrom flask import Blueprint, js"
-}
-```
-
-**nk-env-var rep0**
-
-```
-{
- "command": "cat src/api/checkout.py tests/test_payments.py Makefile src/flags.py flags.toml; grep -rni \"environ\\|getenv\\|payment\\|live\" --include=*.py --include=*.toml --include=*.md --include=Makefile . | grep -v .engramdb",
- "result_head": "from flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n@pytest.mark.integration\ndef test_charges_roundtrip():\n    for amount in (100, 250, 999, 1200):\n        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n        assert resp.status_code == "
-}
-```
-
-**pq-migration rep1**
-
-```
-{
- "command": "cat Makefile README.md; cat migrations/0006_index_customer.sql; grep -rn \"migrat\\|customers\" --include=*.py --include=*.toml --include=Makefile . | grep -v .engramdb",
- "result_head": ".PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\nCREATE INDEX invoices_customer ON invoices(customer_id);"
-}
-```
-
-**pq-release rep1**
-
-```
-{
- "command": "git tag -l && git ls-files | grep -v '^.engramdb' | head -50",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-rounding rep0**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-rounding rep1**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50; grep -rniE 'tax|quantize|decimal' --exclude-dir=.engramdb --exclude-dir=.git . | head -30",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\n./src/"
-}
-```
-
-**pq-rounding rep2**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
 }
 ```
 
@@ -196,20 +133,6 @@
 }
 ```
 
-**pq-errors rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "problem|route|jsonify|abort",
-  "path": "/tmp/mte-pq-errors-z2y_4o61/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
 **pq-errors rep1**
 
 ```
@@ -309,20 +232,6 @@
 }
 ```
 
-**pq-money rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)cents|amount|numeric|decimal|float|money",
-  "path": "/tmp/mte-pq-money-_zcw9fcd/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
 **pq-release rep0**
 
 ```
@@ -330,20 +239,6 @@
  "tool": "Read",
  "input": {
   "file_path": "/tmp/mte-pq-release-m1tu685c/ledgerline/.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f786-d594-7073-89e4-464aebac963b.md"
- }
-}
-```
-
-**pq-rounding rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax|round|half",
-  "-i": true,
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
  }
 }
 ```

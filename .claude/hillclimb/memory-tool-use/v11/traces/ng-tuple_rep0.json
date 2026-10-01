@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"214191b7-d41d-4352-b0da-db4db3fc4369\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c5f77ae9-ec8f-469f-92ec-8bd39fe7c954\", \"session_id\": \"c49e81be-b29e-4d1f-b827-5ad9d088324f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"214191b7-d41d-4352-b0da-db4db3fc4369\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bd6fea79-b34d-40c6-9d71-8cfafb283e73\", \"session_id\": \"c49e81be-b29e-4d1f-b827-5ad9d088324f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e1a1f1dc-3b01-4714-8bef-89f357281130\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"09646405-1bd8-4929-a0b0-f946ba58cd7c\", \"session_id\": \"c49e81be-b29e-4d1f-b827-5ad9d088324f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e1a1f1dc-3b01-4714-8bef-89f357281130\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"750b41ca-2296-44b3-96ad-98f73978a1e3\", \"session_id\": \"c49e81be-b29e-4d1f-b827-5ad9d088324f\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**Lists** are mutable. **Tuples** are immutable.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` |\n| Mutable | Yes: you can append, remove, or assign to items | No: contents can't change after creation |\n| Hashable | No, so it can't be a dict key or set member | Yes, if all its elements are hashable |\n| Performance | Slightly more memory, slightly slower | Smaller and a bit faster |\n| Typical use | Homogeneous collections that change | Fixed records, such as `(x, y)` or `(name, age)`, and return values |\n\n```python\nlst = [1, 2, 3]\nlst[0] = 99          # ok\nlst.append(4)        # ok\n\ntup = (1, 2, 3)\ntup[0] = 99          # TypeError: 'tuple' object does not support item assignment\n```\n\n**Details:**\n- A single-element tuple needs a trailing comma: `(1,)`. Without it, `(1)` is just the integer 1.\n- Tuples are only shallowly immutable. If a tuple holds a list, that list can still change: `t = ([1], 2); t[0].append(5)` works.\n- Both are ordered, indexable, sliceable, and iterable.\n- Tuples support unpacking: `x, y = (1, 2)`.\n\n**Rule of thumb:** use a tuple for a fixed group of values, and a list for a collection that will grow, shrink, or be modified."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

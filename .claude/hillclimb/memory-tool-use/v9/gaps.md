@@ -6,27 +6,10 @@
 |---|---|---|
 | mcp_errors | 0 | 0 |
 | bash_workarounds | 0 | 0 |
-| direct_store_access | 1 | 1 |
+| direct_store_access | 0 | 0 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 15 | 15 |
 | debrief asks for something | 17 | - |
-
-## Direct reads of .engramdb/
-
-**nk-env-var rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)payment|live",
-  "output_mode": "content",
-  "-n": true,
-  "glob": "!.engramdb/**"
- }
-}
-```
-
 
 ## Queries that returned nothing
 

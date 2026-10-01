@@ -1,0 +1,18 @@
+diff --git a/README.md b/README.md
+index be5dee3..588716a 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # ledgerline
+ 
+-Ledgerline is the invoicing and billing servce for Acme. It creates invoices,
++Ledgerline is the invoicing and billing service for Acme. It creates invoices,
+ computes tax, posts finalized invoices to the external ledger, and exports
+ monthly reports.
+ 
+@@ -13,4 +13,4 @@ monthly reports.
+ 
+ ## Development
+ 
+-Install the dependancies with `pip install -e .[dev]`, then run the tests.
++Install the dependencies with `pip install -e .[dev]`, then run the tests.

@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6438d6ef-16f7-409d-9e67-b6e35b729296\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a7b95715-69bc-4e10-b936-a428d0ae72e4\", \"session_id\": \"d7313c3d-4687-441a-87e4-e9b1a0e40ac9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6438d6ef-16f7-409d-9e67-b6e35b729296\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bd5a6195-d425-4b6c-adab-85052d6bbf42\", \"session_id\": \"d7313c3d-4687-441a-87e4-e9b1a0e40ac9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"66e5e1bc-d775-4b0a-bade-ad0f53e08542\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"bd343118-3fe1-4278-ac9d-6382b1812940\", \"session_id\": \"d7313c3d-4687-441a-87e4-e9b1a0e40ac9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"66e5e1bc-d775-4b0a-bade-ad0f53e08542\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"cdcec994-1fde-4ecd-b158-740580ed9149\", \"session_id\": \"d7313c3d-4687-441a-87e4-e9b1a0e40ac9\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamps UTC timezone\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer.\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer, never in storage or lower layers.\",\n \"tags\": [\n  \"timestamps\",\n  \"utc\",\n  \"timezone\",\n  \"api\"\n ],\n \"epistemic\": \"decision\",\n \"premise\": \"Customers are in varying timezones and storage must stay timezone-neutral.\",\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f853-373c-7c51-9752-b3d9f2ca82b8\",\"created\":true,\"summary\":\"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer.\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've recorded it as a convention in EngramDB: all database timestamps are stored in UTC, and conversion to the customer's timezone happens only in the API layer. Nothing in the project had mentioned it before, so there was no existing memory to update or contradict."
+ }
+]

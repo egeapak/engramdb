@@ -1,0 +1,84 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e7db84d4-e176-4c2f-829f-8cb39d7550d2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"ad13790f-f3f2-4ec2-a24c-e2eb2a45a26f\", \"session_id\": \"c40d3511-18b6-4fa1-9503-35a78248d614\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e7db84d4-e176-4c2f-829f-8cb39d7550d2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"89ef8d57-433b-4fe7-877c-5a099a4c8a07\", \"session_id\": \"c40d3511-18b6-4fa1-9503-35a78248d614\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ce6618c6-a3ca-4925-80b1-5f36dc4906cc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"c3c7a058-03b6-4524-b00e-db03428ec3d7\", \"session_id\": \"c40d3511-18b6-4fa1-9503-35a78248d614\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ce6618c6-a3ca-4925-80b1-5f36dc4906cc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"933700d9-4436-4d15-835c-52075f10b5d5\", \"session_id\": \"c40d3511-18b6-4fa1-9503-35a78248d614\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me look at how that flag is handled in the code, and check for existing memories on it."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)gateway|fake|mock|stub|PAYMENTS\",\n \"output_mode\": \"content\",\n \"-n\": true,\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat tests/test_payments.py && grep -rn \\\"environ\\\\|getenv\\\" . --include=* -I 2>/dev/null | grep -v '^./.git/' | head\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-error-format_01a0f858-0982-72e1-ae64-710476a70a70.md\n.engramdb/memories/export-script-caution_01a0f858-04e3-7473-b04a-1e36ca0ded1b.md\n.engramdb/memories/feature-flag-usage_01a0f857-fbee-7721-8948-2b5ff0fe2d07.md\n.engramdb/memories/finalize-caveat_01a0f857-ea0c-7860-9cac-d18161190d4a.md\n.engramdb/memories/logging-library-choice_01a0f857-ef43-7130-b894-f74e822a5646.md\n.engramdb/memories/migration-rules_01a0f857-f75d-7de2-8675-9b9630d32875.md\n.engramdb/memories/money-representation_01a0f857-e5c4-7ae1-8279-fd2403bc5d10.md\n.engramdb/memories/release-process_01a0f858-0def-7841-a7af-6ceaa5cf2ae7.md\n.engramdb/memories/tax-rounding-rule_01a0f858-00ae-76e3-a5f2-6b1e7dca3359.md\n.engramdb/memories/test-command_01a0f857-f36a-7180-86ba-c7bd77aa41c4.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n@pytest.mark.integration\ndef test_charges_roundtrip():\n    for amount in (100, 250, 999, 1200):\n        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n        assert resp.status_code == 201\n./.engramdb/memories/feature-flag-usage_01a0f857-fbee-7721-8948-2b5ff0fe2d07.md:15:Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently.\n./.engramdb/memories/export-script-caution_01a0f858-04e3-7473-b04a-1e36ca0ded1b.md:15:scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.\n./scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat flags.toml src/flags.py src/api/checkout.py README.md Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "[flags]\ninvoice-pdf-v2 = false\nimport tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\nfrom flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"Payments silently use a fake gateway unless PAYMENTS_LIVE=1 is set (user-reported)\",\n \"content\": \"The user reports the app silently uses a fake payment gateway unless the environment variable PAYMENTS_LIVE=1 is set, with no warning or log. It cost them about two hours of debugging on 2026-10-01. When payments seem to \\\"succeed\\\" with no real gateway traffic, check PAYMENTS_LIVE first. Not verifiable in this checkout: grep finds no PAYMENTS_LIVE, gateway, or fake/mock code. src/api/checkout.py only returns a pending total, so the switch may live in another service, deploy config, or unmerged code.\",\n \"epistemic\": \"observation\",\n \"premise\": \"The user's report is accurate and the behavior still exists\",\n \"invalidated_by\": [\n  \"src/api/checkout.py\",\n  \"src/billing/**\"\n ],\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"gotcha\"\n ],\n \"criticality\": 0.7,\n \"confidence\": 0.6\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f858-449c-7733-861e-8e50b812c4d7\",\"created\":true,\"summary\":\"Payments silently use a fake gateway unless PAYMENTS_LIVE=1 is set (user-reported)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Two hours is a rough way to find that out. I searched this checkout and couldn't find the behavior, so I haven't changed any code.\n\n- **What I searched:** `PAYMENTS_LIVE`, \"gateway\", \"fake\", \"mock\" and \"stub\" return nothing in the source. `src/api/checkout.py` only returns a pending total and doesn't call a gateway.\n- **Where it might live:** The only payments reference is `tests/test_payments.py`, which hits a sandbox URL directly. The switch may be in another service, in deploy config, or on a branch that isn't checked out here.\n- **What I saved:** I recorded it as a hazard in the project memory (EngramDB), marked as user-reported and unverified, so it's flagged next session.\n\nIf you point me at where the gateway is chosen, I can make the failure loud instead of silent. Two options:\n- Log a warning, or fail at startup, when `PAYMENTS_LIVE` is unset outside dev and test.\n- Make the fake gateway opt-in, so the default is live or an error.\n\nI'd also add a line to the README's Development section either way."
+ }
+]

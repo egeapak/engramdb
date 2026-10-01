@@ -6,26 +6,12 @@
 |---|---|---|
 | mcp_errors | 0 | 0 |
 | bash_workarounds | 0 | 0 |
-| direct_store_access | 6 | 7 |
+| direct_store_access | 5 | 5 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 11 | 11 |
 | debrief asks for something | 18 | - |
 
 ## Direct reads of .engramdb/
-
-**pq-flags rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "checkout",
-  "-i": true,
-  "glob": "!.engramdb/**",
-  "output_mode": "files_with_matches"
- }
-}
-```
 
 **pq-migration rep0**
 
@@ -67,21 +53,6 @@
  "tool": "Read",
  "input": {
   "file_path": "/tmp/mte-pq-release-nazo761k/ledgerline/.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7a7-b6ed-7b43-8c28-d3863f770dc8.md"
- }
-}
-```
-
-**pq-rounding rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax",
-  "-i": true,
-  "glob": "!.engramdb/**",
-  "output_mode": "content",
-  "head_limit": 30
  }
 }
 ```

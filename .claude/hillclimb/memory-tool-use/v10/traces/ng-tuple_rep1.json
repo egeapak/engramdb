@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3d4c39a3-7c18-4d68-9d1e-1b6d4119f3bd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d6c4c07e-02f1-4dfc-9922-b3f24caaa396\", \"session_id\": \"5d43b3b5-f429-4f70-a5ff-b5f988ce6e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3d4c39a3-7c18-4d68-9d1e-1b6d4119f3bd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e0504d8b-2daa-47f5-a599-4d0628879274\", \"session_id\": \"5d43b3b5-f429-4f70-a5ff-b5f988ce6e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4fa1d997-f1ba-465a-bf4c-67e6786b6487\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a9b395d9-5a5a-4b34-b6ed-fa7bb9b7cbe8\", \"session_id\": \"5d43b3b5-f429-4f70-a5ff-b5f988ce6e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4fa1d997-f1ba-465a-bf4c-67e6786b6487\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8dfe0af1-6b55-483b-9504-e972a8ae83ac\", \"session_id\": \"5d43b3b5-f429-4f70-a5ff-b5f988ce6e1d\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "The main difference is that **lists are mutable and tuples are immutable**.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` or `1, 2, 3` |\n| Mutable? | Yes: you can append, remove, sort, or reassign elements | No: it's fixed once created |\n| Hashable? | No, so it can't be a dict key or set member | Yes, as long as every element is hashable |\n| Methods | Many (`append`, `extend`, `insert`, `pop`, `remove`, `sort`, `reverse`, \u2026) | Only `count` and `index` |\n| Memory/speed | A bit larger, because it keeps spare capacity to grow | Smaller and slightly faster to create |\n| Typical use | A collection of similar items whose size or contents change | A fixed record of related values, often of different types |\n\n```python\nnums = [1, 2, 3]\nnums.append(4)        # fine\nnums[0] = 99          # fine\n\npoint = (3, 4)\npoint[0] = 5          # TypeError: 'tuple' object does not support item assignment\n\nlocations = {(40.7, -74.0): \"NYC\"}   # tuple as dict key works\n# {[40.7, -74.0]: \"NYC\"}             # TypeError: unhashable type: 'list'\n```\n\n**Gotchas:**\n- A one-element tuple needs a trailing comma: `(5,)` is a tuple, but `(5)` is just the integer `5`.\n- Immutability only goes one level deep. In `t = ([1, 2], 3)`, `t[0].append(3)` works because the inner list can still change. A tuple like that also isn't hashable.\n\n**Rule of thumb:** Use a list when you'll be adding, removing or changing items. Use a tuple when the data is a fixed group of values, like coordinates, a function returning several values, or a database row, or when you need it to be hashable. If you want named fields, look at `collections.namedtuple` or `typing.NamedTuple`."
+ }
+]

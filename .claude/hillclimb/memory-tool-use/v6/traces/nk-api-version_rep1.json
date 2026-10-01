@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"066ed5d9-6551-471d-9664-3eaac2ea186a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"023f0566-8bd3-4996-8c9d-f88dd260a1a0\", \"session_id\": \"661f872d-d233-43f4-9246-843b080a2eda\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"066ed5d9-6551-471d-9664-3eaac2ea186a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"48e9f3af-9f75-4114-b126-192ce42b0967\", \"session_id\": \"661f872d-d233-43f4-9246-843b080a2eda\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1081a262-ef8f-42f3-8b24-b3147eb36810\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a4fd78ef-46cb-4b7f-a5e6-1e6189a6adcb\", \"session_id\": \"661f872d-d233-43f4-9246-843b080a2eda\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1081a262-ef8f-42f3-8b24-b3147eb36810\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1e86cc7d-5dff-4ed2-9df8-83f8299fd903\", \"session_id\": \"661f872d-d233-43f4-9246-843b080a2eda\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API version routes v1 v2\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f81d-f0eb-7c01-b388-5c407382ddf1\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.1615998125908043,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1615998125908043,\"keyword\":0.052145353357251054,\"relevance\":0.5,\"rerank\":-2.5160467624664307,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4053281813805884,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"/v[12]\\\\b\",\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\"\nsrc/billing/invoices.py:8:LEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"epistemic\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-01)\",\n \"content\": \"Decided at the 2026-10-01 design review: all new or changed public API routes go under /v2. /v1 is frozen, so don't add endpoints to it or change its behavior. The decision didn't say whether /v1 is deprecated or has a removal date, only that it's frozen. This applies to ledgerline's own public routes. It does not cover outbound URLs to other services, such as the payments sandbox /v1/charges or the internal ledger /v1/postings.\",\n \"premise\": \"Holds while /v2 is the current public API version and no newer version or /v1 sunset has been decided\",\n \"physical\": [\n  \"src/api/\"\n ],\n \"logical\": [\n  \"api.versioning\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"routes\"\n ],\n \"criticality\": 0.8,\n \"confidence\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f81e-2005-7361-93af-d92177fba2a9\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-01)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've saved this to the project's memory store, so it'll come up in future sessions here: new or changed public API routes go under `/v2`, and `/v1` is frozen. No existing memory contradicted it.\n\nI checked the code for `/v1` paths. The only two are outbound URLs to other services, not ledgerline's own routes, so I left them alone and noted in the memory that the rule doesn't cover them:\n- the payments sandbox `/v1/charges` in `tests/test_payments.py:4`\n- the internal ledger `/v1/postings` in `src/billing/invoices.py:8`\n\nIf the review also decided whether `/v1` is deprecated or has a removal date, tell me and I'll add it."
+ }
+]

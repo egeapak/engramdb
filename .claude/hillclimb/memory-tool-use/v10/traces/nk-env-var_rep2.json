@@ -1,0 +1,71 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4033eb0c-4cc7-4724-9aa5-b44675fe72ae\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"46570783-4809-4f6d-a6be-0ae4d7710094\", \"session_id\": \"f2b5f830-5546-46e9-bc91-1379c5e2a696\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4033eb0c-4cc7-4724-9aa5-b44675fe72ae\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6b3a544b-ae38-4405-8128-07bad5669494\", \"session_id\": \"f2b5f830-5546-46e9-bc91-1379c5e2a696\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"082d36aa-5bd2-4cb9-a710-093ca1735096\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"da70beca-7da7-48ce-8b75-5634b0c02b6b\", \"session_id\": \"f2b5f830-5546-46e9-bc91-1379c5e2a696\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"082d36aa-5bd2-4cb9-a710-093ca1735096\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ba8cbb54-302b-408c-bc8d-22b57fe78a81\", \"session_id\": \"f2b5f830-5546-46e9-bc91-1379c5e2a696\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payment|gateway|environ|getenv\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\"\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\n.engramdb/memories/export-script-caution_01a0f848-35e3-7b83-a1aa-34b52203bcf6.md:15:scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.\n.engramdb/memories/feature-flag-usage_01a0f848-2bf6-73c3-8128-c9022a3aba92.md:15:Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat tests/test_payments.py\",\n \"description\": \"List tracked files and show payments test\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-error-format_01a0f848-3b2b-7373-83e9-a21e45d9d68a.md\n.engramdb/memories/export-script-caution_01a0f848-35e3-7b83-a1aa-34b52203bcf6.md\n.engramdb/memories/feature-flag-usage_01a0f848-2bf6-73c3-8128-c9022a3aba92.md\n.engramdb/memories/finalize-caveat_01a0f848-1998-7ef2-a2c5-4caec5636f37.md\n.engramdb/memories/logging-library-choice_01a0f848-1e17-78a3-aea7-33da0234eb0c.md\n.engramdb/memories/migration-rules_01a0f848-26d4-7c61-a319-ec6157787d35.md\n.engramdb/memories/money-representation_01a0f848-150e-7ab2-9f29-f10fd332228e.md\n.engramdb/memories/release-process_01a0f848-3f87-7e73-9e11-4a29265d598a.md\n.engramdb/memories/tax-rounding-rule_01a0f848-309e-7d92-bcdb-50707ed4f2c4.md\n.engramdb/memories/test-command_01a0f848-225d-7002-922e-a274f64d598d.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n@pytest.mark.integration\ndef test_charges_roundtrip():\n    for amount in (100, 250, 999, 1200):\n        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n        assert resp.status_code == 201"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"epistemic\": \"observation\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set \\u2014 no warning or log\",\n \"content\": \"Unless the environment variable PAYMENTS_LIVE=1 is set, the app quietly uses a fake payment gateway. Nothing warns you or logs it. A user lost about two hours to this on 2026-10-01. If payments act strangely (charges never show up in the real or sandbox gateway, or always succeed), check PAYMENTS_LIVE first. Reported by the user. Not found in the tracked source as of commit 7b8989b: grep finds no PAYMENTS_LIVE in src/, scripts/, Makefile or config. The switch probably lives in a dependency, deploy config or untracked env setup. Find where it's read before you rely on the exact semantics.\",\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"gotcha\",\n  \"silent-fallback\"\n ],\n \"logical\": [\n  \"payments\",\n  \"config.env\"\n ],\n \"physical\": [\n  \"src/api/checkout.py\",\n  \"tests/test_payments.py\"\n ],\n \"criticality\": 0.8,\n \"confidence\": 0.7,\n \"premise\": \"while the payment gateway selection defaults to fake when PAYMENTS_LIVE is unset\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f848-7d73-7a83-8efc-00465e9591b3\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set \u2014 no warning or log\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry, two hours is a lot to lose to that. I've saved it as a hazard in the project's EngramDB memory. It's tagged to the payments area, so it'll come up for anyone working there next time.\n\nI couldn't find where this happens, though. `PAYMENTS_LIVE` doesn't appear anywhere in this repo: not in `src/`, `scripts/`, the `Makefile`, `flags.toml` or `pyproject.toml`. That means the switch is read somewhere else, probably in a dependency, the deploy config, or an env/bootstrap file that isn't tracked. The memory says this, so nobody treats the exact behaviour as checked.\n\nTwo ways to make sure nobody else hits this:\n1. **Add a note to the README** saying payments are fake unless `PAYMENTS_LIVE=1` is set. I can do this now.\n2. **Show a loud warning at startup** whenever the fake gateway is active. That has to go where the switch lives. If you know where that is, or roughly where (a package name, a deploy repo), point me at it and I'll add the warning there."
+ }
+]

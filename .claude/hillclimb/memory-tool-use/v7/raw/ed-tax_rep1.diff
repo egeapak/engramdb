@@ -1,0 +1,51 @@
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..30319b1
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..4272664
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/tax.cpython-311.pyc b/src/billing/__pycache__/tax.cpython-311.pyc
+new file mode 100644
+index 0000000..dc22e62
+Binary files /dev/null and b/src/billing/__pycache__/tax.cpython-311.pyc differ
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..d1a9d0e 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_EVEN, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,6 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    """Tax in integer cents for amount_cents at rate (e.g. "0.0825"), rounded half-even."""
++    tax = Decimal(amount_cents) * Decimal(str(rate))
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+diff --git a/tests/__pycache__/test_tax.cpython-311.pyc b/tests/__pycache__/test_tax.cpython-311.pyc
+new file mode 100644
+index 0000000..c4a8aa4
+Binary files /dev/null and b/tests/__pycache__/test_tax.cpython-311.pyc differ
+diff --git a/tests/test_tax.py b/tests/test_tax.py
+index 75e3de8..649c036 100644
+--- a/tests/test_tax.py
++++ b/tests/test_tax.py
+@@ -3,3 +3,12 @@ from src.billing.tax import line_total
+ 
+ def test_line_total():
+     assert line_total([{"quantity": 2, "unit_cents": 150}]) == 300
++
++
++def test_tax_for_half_even():
++    from src.billing.tax import tax_for
++
++    assert tax_for(1000, "0.0825") == 82  # 82.5 -> 82
++    assert tax_for(1020, "0.0825") == 84  # 84.15 -> 84
++    assert tax_for(1100, 0.0825) == 91  # 90.75 -> 91
++    assert tax_for(0, 0.1) == 0

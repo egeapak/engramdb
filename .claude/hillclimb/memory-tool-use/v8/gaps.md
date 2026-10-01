@@ -5,8 +5,8 @@
 | signal | runs with it | occurrences |
 |---|---|---|
 | mcp_errors | 0 | 0 |
-| bash_workarounds | 15 | 15 |
-| direct_store_access | 7 | 7 |
+| bash_workarounds | 7 | 7 |
+| direct_store_access | 3 | 3 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 21 | 21 |
 | debrief asks for something | 36 | - |
@@ -28,24 +28,6 @@
 {
  "command": "cat .engramdb/memories/finalize-caveat_*.md; ls -R | grep -v '^\\.' | head -50; git log --oneline -3; python -c \"import urllib3,requests;print(urllib3.__version__,requests.__version__)\"",
  "result_head": "---\nversion: 2\nid: 01a0f7e7-da66-7353-92c6-68d4be71c603\ntype: hazard\nstatus: Active\ntitle: finalize() caveat\n---\n\n# finalize() caveat\n\n**Summary:** finalize() caveat\n\n## Content\n\nInvoice finalization talks to the external ledger service and is the most sensitive call in src/billing/invoices.py. The ledger endpoint has no idempotency key, so calling finalize() twice double-posts the invoice to the ledger. Never wrap it in retries. Use finalize_once(), which checks invoice.ledger_ref first and returns early when the invoice was already posted.\n\n## Scope\n\n- **Files:** `src/billing/invoices.py`\n- "
-}
-```
-
-**ed-flag rep1**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' && grep -rn \"import\\|flags\" src tests 2>/dev/null | grep -v \"^src/flags.py\"",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nsrc/ap"
-}
-```
-
-**ed-flag rep2**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' && grep -rn \"error\" src tests 2>/dev/null | head -30",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
 }
 ```
 
@@ -94,60 +76,6 @@
 }
 ```
 
-**pq-release rep0**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50; git tag | tail -5",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-release rep1**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50; git tag",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-release rep2**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50; git tag",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-test-db rep0**
-
-```
-{
- "command": "cat Makefile pyproject.toml README.md; ls -a; grep -rn -i \"postgres\\|compose\\|DATABASE\" --exclude-dir=.git --exclude-dir=.engramdb .",
- "result_head": ".PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]\n# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL sch"
-}
-```
-
-**pq-tests rep0**
-
-```
-{
- "command": "ls -a; grep -rn \"postgres\" --include=*.py --include=*.toml --include=*.ini --include=*.cfg --include=*.md . | grep -v .engramdb",
- "result_head": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests"
-}
-```
-
-**pq-tests rep2**
-
-```
-{
- "command": "ls -R scripts tests; grep -rn -i \"postgres\\|compose\\|DATABASE\" --include=* -r . --exclude-dir=.git --exclude-dir=.engramdb | head -20",
- "result_head": "scripts:\nexport.py\n\ntests:\ntest_payments.py\ntest_tax.py\n./Makefile:4:\tpytest -m \"not postgres\" -q"
-}
-```
-
 
 ## Direct reads of .engramdb/
 
@@ -180,62 +108,6 @@
  "tool": "Read",
  "input": {
   "file_path": "/tmp/mte-pq-migration-kc2ijjjv/ledgerline/.engramdb/memories/migration-rules_01a0f7e6-f8c5-7433-9b71-71e76fcfc0c6.md"
- }
-}
-```
-
-**pq-money rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)_cents|float|Decimal|Money",
-  "path": "/tmp/mte-pq-money-tl498vx_/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-money rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)_cents|float|Decimal|amount|Money",
-  "path": "/tmp/mte-pq-money-hycloyx3/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-test-db rep1**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "postgres|docker|compose|DATABASE",
-  "-i": true,
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
- }
-}
-```
-
-**pq-test-db rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "postgres|docker|compose|DATABASE",
-  "-i": true,
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
  }
 }
 ```

@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"24308d86-7621-4156-881f-131784d1a548\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a579d805-d211-4fc9-b02f-6a4807e989fd\", \"session_id\": \"b7d1ee07-522c-4187-80f3-cfb45c55192a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"24308d86-7621-4156-881f-131784d1a548\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d1c86fd8-011c-466b-90c6-ac2be6544902\", \"session_id\": \"b7d1ee07-522c-4187-80f3-cfb45c55192a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"70d883ae-9644-4f32-9b4d-63e97d8a87ae\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"7b040dcb-27c5-4c6e-9ca8-ecd6764a4a1e\", \"session_id\": \"b7d1ee07-522c-4187-80f3-cfb45c55192a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"70d883ae-9644-4f32-9b4d-63e97d8a87ae\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"12c3bf4e-7ccd-4e8d-9d34-015005d259b0\", \"session_id\": \"b7d1ee07-522c-4187-80f3-cfb45c55192a\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamps UTC timezone\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer.\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer, never in storage or lower layers.\",\n \"tags\": [\n  \"timestamps\",\n  \"timezone\",\n  \"utc\",\n  \"api\",\n  \"database\"\n ],\n \"epistemic\": \"decision\",\n \"premise\": \"Customers may be in different timezones, so storage stays canonical (UTC) and presentation is localized at the API boundary.\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f834-1e9e-73e0-b242-f893c86e29ed\",\"created\":true,\"summary\":\"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer.\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've saved this to EngramDB as a convention. It says all database timestamps are stored in UTC, and conversion to the customer's timezone happens only in the API layer. There were no existing memories on the topic, so nothing needed updating or challenging."
+ }
+]

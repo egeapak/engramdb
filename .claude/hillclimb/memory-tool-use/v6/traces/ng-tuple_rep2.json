@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"971a5212-5286-424a-9db3-f1403cf81ca7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"334701f3-66ec-4eb0-879b-e1a9abb5006a\", \"session_id\": \"f1d07d2d-17d7-4fa1-b1fd-c555717eed99\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"971a5212-5286-424a-9db3-f1403cf81ca7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a987a937-cdf4-4f2f-b35a-5b7a52be3be2\", \"session_id\": \"f1d07d2d-17d7-4fa1-b1fd-c555717eed99\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2893c46f-0797-4239-aee9-5aefd06f27da\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"77e010b0-9ceb-40b8-99ed-89baf83e89f9\", \"session_id\": \"f1d07d2d-17d7-4fa1-b1fd-c555717eed99\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2893c46f-0797-4239-aee9-5aefd06f27da\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"24296b89-7563-4ecd-905d-dbb8e8f1416b\", \"session_id\": \"f1d07d2d-17d7-4fa1-b1fd-c555717eed99\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "The main difference is that **lists are mutable and tuples are immutable.**\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)`, or just `1, 2, 3` |\n| Mutable | Yes: you can append, remove and reassign items | No: fixed once created |\n| Hashable | No | Yes, if all its elements are hashable |\n| Usable as a dict key or set member | No | Yes |\n| Methods | Many (`append`, `extend`, `pop`, `sort`, \u2026) | Only `count` and `index` |\n| Memory and speed | Slightly larger and slower | Slightly smaller and faster to create |\n\n```python\nnums = [1, 2, 3]\nnums[0] = 99        # OK\nnums.append(4)      # OK\n\npoint = (1, 2)\npoint[0] = 99       # TypeError: 'tuple' object does not support item assignment\n\nlocations = {(40.7, -74.0): \"NYC\"}   # tuple as dict key works\n# {[40.7, -74.0]: \"NYC\"}             # TypeError: unhashable type: 'list'\n```\n\n**When to use which:**\n- **List:** a group of similar items whose size or contents will change, like a list of users or a queue of tasks.\n- **Tuple:** a fixed record where each position has its own meaning, like `(x, y)`, `(name, age)` or a function returning several values (`return a, b`). Tuples are also useful when you need a dict key or set member, or when you want to show that the data shouldn't change.\n\n**Things to watch out for:**\n- A one-element tuple needs a trailing comma: `(5,)` is a tuple, but `(5)` is just the integer 5.\n- A tuple's immutability is shallow. In `t = ([1], 2)`, you can still run `t[0].append(3)`, because the tuple only stops you from changing which objects it holds, not the objects themselves.\n- If you want named fields, look at `collections.namedtuple` or `typing.NamedTuple`."
+ }
+]

@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"73dcc98b-6bf0-4d51-a945-294675784660\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"cf7635dd-5045-46fb-a4d0-ed5c7c54e084\", \"session_id\": \"1cc1b23b-928f-416d-b578-88e7f3b188dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"73dcc98b-6bf0-4d51-a945-294675784660\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fe782b8f-39cc-40cd-a976-693ddecd5364\", \"session_id\": \"1cc1b23b-928f-416d-b578-88e7f3b188dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"699972c7-303b-4436-b182-5f52b45f9085\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"2bf409f2-2cff-4463-bb92-d2f3604083c7\", \"session_id\": \"1cc1b23b-928f-416d-b578-88e7f3b188dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"699972c7-303b-4436-b182-5f52b45f9085\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fcc23e15-e390-4b23-8a97-062b00ce0090\", \"session_id\": \"1cc1b23b-928f-416d-b578-88e7f3b188dc\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"celery background jobs enqueue\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"def enqueue|celery|\\\\.delay\\\\(|apply_async\",\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must be dispatched via jobs.enqueue(); never call Celery directly (.delay/.apply_async/send_task)\",\n \"content\": \"Convention (stated by user, 2026-10-01): every background job must go through `jobs.enqueue()`. Never call Celery directly \\u2014 no `task.delay()`, `task.apply_async()`, `celery_app.send_task()`, or similar. When writing or reviewing code that schedules async/background work, route it through `jobs.enqueue()`, and flag direct Celery calls as violations. Note: at the time this was recorded, neither `jobs.enqueue` nor any Celery usage existed in the repo yet.\",\n \"epistemic\": \"decision\",\n \"criticality\": 0.8,\n \"confidence\": 1,\n \"tags\": [\n  \"background-jobs\",\n  \"celery\",\n  \"jobs.enqueue\",\n  \"user-directive\"\n ],\n \"logical\": [\n  \"jobs\",\n  \"infrastructure.background_jobs\"\n ],\n \"premise\": \"User directive: jobs.enqueue() is the single sanctioned entry point for background work\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f823-4cde-7642-9386-2889da9d6de1\",\"created\":true,\"summary\":\"All background jobs must be dispatched via jobs.enqueue(); never call Celery directly (.delay/.apply_async/send_task)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project convention in EngramDB, so it will come up in future sessions: all background jobs go through `jobs.enqueue()`, never through Celery directly (`.delay()`, `.apply_async()`, `send_task()`, etc.). I'll also treat direct Celery calls as violations when I review code.\n\nRight now the repo has no `jobs.enqueue` and no Celery calls at all, so there's nothing to migrate yet. I noted that in the memory too."
+ }
+]

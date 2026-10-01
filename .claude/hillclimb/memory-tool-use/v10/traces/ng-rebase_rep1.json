@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"157c9664-c0cc-4b68-bd65-d217c12bd850\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c5f02619-ea3c-4001-96cc-b18a4454f46f\", \"session_id\": \"d031d966-4ffb-41b4-9f9d-85b3371c6a28\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"157c9664-c0cc-4b68-bd65-d217c12bd850\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"43156af7-071d-4af0-94f2-e0c86c342b7a\", \"session_id\": \"d031d966-4ffb-41b4-9f9d-85b3371c6a28\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"69c128f6-fe33-4590-9b59-a9e63ddb392f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d4bde3a8-80fe-42d0-acaa-d9ea9e4f7a9a\", \"session_id\": \"d031d966-4ffb-41b4-9f9d-85b3371c6a28\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"69c128f6-fe33-4590-9b59-a9e63ddb392f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"36862a26-eb9e-4685-a07d-24a5cbecc555\", \"session_id\": \"d031d966-4ffb-41b4-9f9d-85b3371c6a28\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto` lets you choose **where** commits get replayed separately from **which** commits get replayed.\n\n## Syntax\n\n```\ngit rebase --onto <newbase> <upstream> [<branch>]\n```\n\n- **`<upstream>`**: commits that are reachable from `<branch>` but not from `<upstream>` get selected. That means everything after `<upstream>`, up to the tip of `<branch>`.\n- **`<newbase>`**: the commit those selected commits are replayed on top of.\n- **`<branch>`**: optional. Git checks it out first. If you leave it out, it uses the current branch.\n\nA plain `git rebase main` is the same as `git rebase --onto main main`, where the new base and the cutoff point are the same commit. `--onto` lets them differ.\n\n## Example: move a branch off another feature branch\n\nYou branched `feature-b` from `feature-a`, but `feature-b` should really be based on `main`:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\nYou want only `E` and `F` on top of `main`, without `C` and `D`:\n\n```bash\ngit rebase --onto main feature-a feature-b\n```\n\nResult:\n\n```\nmain:       A---B\n                |\\\nfeature-a:      | C---D\n                 \\\nfeature-b:        E'---F'\n```\n\n`E'` and `F'` are new commits with the same changes as `E` and `F` but different hashes.\n\n## Another common use: drop commits from a branch\n\nTo remove commits `C` and `D` from the history `A---B---C---D---E`, run this on that branch:\n\n```bash\ngit rebase --onto B D\n```\n\nThis replays everything after `D` (here just `E`) onto `B`, giving `A---B---E'`.\n\n## Tips\n\n- It rewrites history. If the branch is already pushed, you'll need `git push --force-with-lease`.\n- If something goes wrong partway through, `git rebase --abort` puts things back. After it finishes, `git reflog` lets you recover the old tip."
+ }
+]

@@ -1,0 +1,48 @@
+[
+ {
+  "role": "user",
+  "content": "Got it working: the invoice PDF tests were failing because wkhtmltopdf needs the `--enable-local-file-access` flag in newer versions. I've already fixed it locally, thanks."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c1ba5e4f-e253-418e-8e80-eadd344b7e25\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f8d66cc4-6ab4-4d2d-a828-2671550f8caa\", \"session_id\": \"8c86c07d-1c48-4bb1-b8c1-004b7445f203\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c1ba5e4f-e253-418e-8e80-eadd344b7e25\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"53232ba5-cc58-472f-a0fa-bf816895f9ae\", \"session_id\": \"8c86c07d-1c48-4bb1-b8c1-004b7445f203\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e9085d7a-7e0d-4ac2-bb67-60048a486ea2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"7946934e-6f70-4d2b-82ab-ca001c39a9f0\", \"session_id\": \"8c86c07d-1c48-4bb1-b8c1-004b7445f203\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e9085d7a-7e0d-4ac2-bb67-60048a486ea2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"35159629-dcde-4546-a3fb-4c4239c6f42a\", \"session_id\": \"8c86c07d-1c48-4bb1-b8c1-004b7445f203\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"wkhtmltopdf invoice PDF\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Billing code moves amounts between invoices, refunds, tax and the ledger, and every one of those paths has been bitten by rounding drift in the past. The rule that came out of that: store and pass every monetary amount as integer cents using the Money type in src/billing/money.py. Never use float for money, not even for intermediate math. New fields that hold an amount end in _cents, for example discount_cents.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f841-d66d-7152-abe3-cbf3f434d38f\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.1744169661328618,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1744169661328618,\"keyword\":0.020984919643608522,\"relevance\":0.5,\"rerank\":-2.194969654083252,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3806253073526234,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money representation\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f841-fb1d-7be1-ad82-8d797eabe322\",\"logical\":[],\"physical\":[\"scripts/export.py\"],\"provenance\":\"human\",\"score\":0.17087197595535888,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.17087197595535888,\"keyword\":0.021283446561589977,\"relevance\":0.5,\"rerank\":-2.4271023273468018,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4201239406011444,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Export script caution\",\"tags\":[\"ops\",\"export\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f841-f715-77d1-bdc6-7090bcad98eb\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.16894882336233086,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.16894882336233086,\"keyword\":0.02249495043807142,\"relevance\":0.5,\"rerank\":-2.515770435333252,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.42671645546207837,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax rounding rule\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Invoice finalization talks to the external ledger service and is the most sensitive call in src/billing/invoices.py. The ledger endpoint has no idempotency key, so calling finalize() twice double-posts the invoice to the ledger. Never wrap it in retries. Use finalize_once(), which checks invoice.ledger_ref first and returns early when the invoice was already posted.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f841-dbc9-7b12-9a5a-bc69d2263db4\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.1675967914311274,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1675967914311274,\"keyword\":0.02412174011563149,\"relevance\":0.5,\"rerank\":-2.544814109802246,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4218771609704805,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"finalize() caveat\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":4}"
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing about this exists yet, so I'll save it so the next session doesn't hit the same failure."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"epistemic\": \"observation\",\n \"summary\": \"Invoice PDF tests fail on newer wkhtmltopdf unless --enable-local-file-access is passed\",\n \"content\": \"The invoice PDF tests fail with newer wkhtmltopdf versions because those versions block local file access by default (e.g. local CSS, images, fonts referenced by the invoice HTML). Passing the `--enable-local-file-access` flag to wkhtmltopdf fixes it. The user reported this on 2026-10-01 and fixed it in their local setup. Whether the flag has been committed to the repo hasn't been confirmed.\",\n \"premise\": \"while invoice PDFs are rendered with wkhtmltopdf from HTML that references local files\",\n \"tags\": [\n  \"billing\",\n  \"pdf\",\n  \"wkhtmltopdf\",\n  \"tests\",\n  \"environment\"\n ],\n \"confidence\": 0.85\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f842-2bf3-76d1-af09-7dadcafcdfc6\",\"created\":true,\"summary\":\"Invoice PDF tests fail on newer wkhtmltopdf unless --enable-local-file-access is passed\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Glad you got it working. I saved a note to the project's memory: newer wkhtmltopdf versions need `--enable-local-file-access` or the invoice PDF tests fail. That way the next session won't have to track down the same failure.\n\nYou said you fixed it locally. If that's only a local config change, consider adding the flag where the repo calls wkhtmltopdf too. Otherwise CI and other developers on newer versions will hit the same failure."
+ }
+]

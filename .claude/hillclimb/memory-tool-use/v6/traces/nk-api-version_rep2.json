@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9080abbd-401e-4e6e-b324-89a94d14c530\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0fea64a5-bee4-4245-ae11-db67dcb26bba\", \"session_id\": \"d4c689ef-9c99-46c1-a3ca-c2595c0be740\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9080abbd-401e-4e6e-b324-89a94d14c530\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d7ab68a9-3e5f-4445-ba30-636555e9f983\", \"session_id\": \"d4c689ef-9c99-46c1-a3ca-c2595c0be740\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b501c1a7-43e2-4836-9e8a-b31eb12efb16\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"eab43141-0865-42d1-ac7c-fb8538fff0d2\", \"session_id\": \"d4c689ef-9c99-46c1-a3ca-c2595c0be740\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b501c1a7-43e2-4836-9e8a-b31eb12efb16\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f9b93b6d-c17b-4d0a-b874-d25b5d0f5dda\", \"session_id\": \"d4c689ef-9c99-46c1-a3ca-c2595c0be740\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API version routes v1 v2\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f824-58cf-7211-a442-32f4f1f41109\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.1615998125908043,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1615998125908043,\"keyword\":0.052145353357251054,\"relevance\":0.5,\"rerank\":-2.5160467624664307,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4053281813805884,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"/v[12]\\\\b\",\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\"\nsrc/billing/invoices.py:8:LEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"route|prefix|APIRouter|Blueprint\",\n \"path\": \"src\",\n \"output_mode\": \"content\",\n \"head_limit\": 20\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/api/invoices.py:1:from flask import Blueprint, jsonify\nsrc/api/invoices.py:3:bp = Blueprint(\"invoices\", __name__)\nsrc/api/checkout.py:1:from flask import Blueprint, jsonify, request\nsrc/api/checkout.py:3:bp = Blueprint(\"checkout\", __name__)"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes go under /v2; /v1 is frozen (design review 2026-10-01)\",\n \"content\": \"Decided at the 2026-10-01 design review: all public API routes are versioned under /v2 from now on. /v1 is frozen, so don't add or change /v1 endpoints. New endpoints and behavior changes go in /v2. The Flask Blueprints in src/api/ (invoices.py, checkout.py) don't currently set a url_prefix. Note: the /v1 URLs in src/billing/invoices.py (internal ledger) and tests/test_payments.py (payments sandbox) belong to external services, so this decision doesn't apply to them.\",\n \"premise\": \"While the design-review decision to freeze /v1 and version public routes under /v2 stands\",\n \"invalidated_by\": [\n  \"src/api/**\"\n ],\n \"physical\": [\n  \"src/api/\"\n ],\n \"logical\": [\n  \"api.versioning\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"routes\"\n ],\n \"criticality\": 0.8,\n \"confidence\": 0.95,\n \"epistemic\": \"decision\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f824-9037-7260-b930-b0d83b25a434\",\"created\":true,\"summary\":\"Public API routes go under /v2; /v1 is frozen (design review 2026-10-01)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've saved this as a decision in the project's EngramDB memory, so it will come up in future sessions that touch API routes: public API routes go under `/v2`, and `/v1` is frozen, so no new or changed endpoints there.\n\nTwo things I found in the code while checking:\n- **The current routes have no version prefix.** The Flask Blueprints in `src/api/invoices.py` and `src/api/checkout.py` don't set a URL prefix at all. So moving to `/v2` will mean adding a prefix when the blueprints are registered.\n- **The existing `/v1` URLs aren't our routes.** They're external services: the internal ledger URL in `src/billing/invoices.py:8` and the payments sandbox in `tests/test_payments.py:4`. The freeze doesn't apply to them, and I've noted that in the memory too.\n\nNo existing memories conflicted with the decision."
+ }
+]

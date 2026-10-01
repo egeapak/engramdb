@@ -1,0 +1,96 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4e3e04f8-28ae-4321-b5d0-c4f00b6d5ca2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"e807f906-9a7a-4005-8d3f-88656211fbe3\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4e3e04f8-28ae-4321-b5d0-c4f00b6d5ca2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"11849582-480c-4adb-9e35-971bcf48f288\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4c605782-7ae5-40bb-aa0c-fd1e4da33305\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b77ca7c5-6f7b-4a19-8f9f-02332e653dcc\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4c605782-7ae5-40bb-aa0c-fd1e4da33305\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ab8681a6-4041-40aa-bdd6-df905f06f2bb\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ab45b63b-6d0c-4542-a054-a5f6a40c1336\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"4d4462fd-9ca2-4d86-b4c8-40fc70332ac5\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ab45b63b-6d0c-4542-a054-a5f6a40c1336\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f2fcfbc5-2c2a-48d8-b220-7bb3a888b798\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ca8962e8-8196-40b8-90eb-6c9b777d6728\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"2e56d70f-4f43-409e-86c9-278e5ab8bed1\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ca8962e8-8196-40b8-90eb-6c9b777d6728\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0fe94708-fbdc-4336-b1e5-c5ecbf66a167\", \"session_id\": \"e7077b04-bbfc-4328-a5ed-09143ca26d17\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"add column customers migration schema\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -100\",\n \"description\": \"List tracked files\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-error-format_01a0f83f-86b8-7e61-b851-4413eed9ee91.md\n.engramdb/memories/export-script-caution_01a0f83f-8266-76c2-b630-ebff1dfb4dc0.md\n.engramdb/memories/feature-flag-usage_01a0f83f-7992-7be1-b202-e323821ed8cc.md\n.engramdb/memories/finalize-caveat_01a0f83f-63e6-7901-b2c6-5bd0b838fa0d.md\n.engramdb/memories/logging-library-choice_01a0f83f-698c-74e3-8c7a-28aabd0dd1cb.md\n.engramdb/memories/migration-rules_01a0f83f-7469-72c1-9bb5-a09363d1d69c.md\n.engramdb/memories/money-representation_01a0f83f-5ecb-7650-b78c-ca079c900e0e.md\n.engramdb/memories/release-process_01a0f83f-8b0b-7b13-9e95-349ed75407d6.md\n.engramdb/memories/tax-rounding-rule_01a0f83f-7df5-7ed0-9f32-b6ea0aa873b4.md\n.engramdb/memories/test-command_01a0f83f-6f8b-7581-89eb-3281858d21f0.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-5mq11w4n/ledgerline/.engramdb/memories/migration-rules_01a0f83f-7469-72c1-9bb5-a09363d1d69c.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f83f-7469-72c1-9bb5-a09363d1d69c\n4\ttype: hazard\n5\tstatus: Active\n6\ttitle: Migration rules\n7\t---\n8\t\n9\t# Migration rules\n10\t\n11\t**Summary:** Migration rules\n12\t\n13\t## Content\n14\t\n15\tThe SQL files under migrations/ are applied in order by the deploy pipeline and every file that is merged has already run in production. Never edit an existing migration, even to fix a typo; production would never see the change. Instead add a new file with the next 4-digit number, for example 0008_fix_customers.sql, that makes the correction.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `migrations/`\n20\t- **Tags:** `database`, `migrations`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T16:15:03.273585790+00:00\n28\t- **Updated:** 2026-10-01T16:15:03.273585790+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T16:15:03.273585790Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.5\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-5mq11w4n/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tCREATE TABLE customers (\n2\t    id TEXT PRIMARY KEY,\n3\t    name TEXT NOT NULL,\n4\t    emial TEXT NOT NULL\n5\t);\n6\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat README.md Makefile; git log --stat --oneline -- migrations | head -30\",\n \"description\": \"Show README, Makefile, migration history\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n04d5b38 fixture\n migrations/0001_create_invoices.sql | 1 +\n migrations/0002_add_tax.sql         | 1 +\n migrations/0003_add_ledger_ref.sql  | 1 +\n migrations/0004_create_lines.sql    | 1 +\n migrations/0005_create_refunds.sql  | 1 +\n migrations/0006_index_customer.sql  | 1 +\n migrations/0007_add_customers.sql   | 5 +++++\n 7 files changed, 11 insertions(+)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"head migrations/000[2-6]*.sql\",\n \"description\": \"Show existing ALTER-style migrations\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "==> migrations/0002_add_tax.sql <==\nALTER TABLE invoices ADD COLUMN tax_cents BIGINT NOT NULL DEFAULT 0;\n\n==> migrations/0003_add_ledger_ref.sql <==\nALTER TABLE invoices ADD COLUMN ledger_ref TEXT;\n\n==> migrations/0004_create_lines.sql <==\nCREATE TABLE invoice_lines (invoice_id TEXT REFERENCES invoices(id), quantity INT, unit_cents BIGINT);\n\n==> migrations/0005_create_refunds.sql <==\nCREATE TABLE refunds (id TEXT PRIMARY KEY, invoice_id TEXT REFERENCES invoices(id), refunded_cents BIGINT);\n\n==> migrations/0006_index_customer.sql <==\nCREATE INDEX invoices_customer ON invoices(customer_id);"
+ },
+ {
+  "role": "assistant",
+  "content": "Put it in a new migration file, `migrations/0008_add_customer_phone.sql`. Don't edit `migrations/0007_add_customers.sql`, even though that's where the `customers` table is created.\n\nThe project's migration rules (stored in `.engramdb/memories/migration-rules_\u2026md`) say the deploy pipeline applies the files in `migrations/` in order, and any merged file has already run in production. If you edited 0007, production would never pick up the change. Each schema change gets its own file with the next 4-digit number.\n\nFollowing the style of `0002_add_tax.sql` and `0003_add_ledger_ref.sql`:\n\n```sql\n-- migrations/0008_add_customer_phone.sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made it nullable because existing customers have no phone number. If you want `NOT NULL`, you'll need a default (as `tax_cents` has) or a backfill first, or the migration will fail on rows that already exist.\n\nAlso, `0007` has a typo: the column is named `emial`, not `email`. Fixing it follows the same rule: a separate migration such as `0009_fix_customers_email.sql` with `ALTER TABLE customers RENAME COLUMN emial TO email;`. You'd also need to update any code that reads that column. I haven't changed any files; I can create either migration if you'd like."
+ }
+]

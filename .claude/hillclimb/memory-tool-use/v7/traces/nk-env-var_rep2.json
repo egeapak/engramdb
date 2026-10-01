@@ -1,0 +1,66 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0342d6db-1e4b-452a-b47a-49fcb65a2131\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"dc60cdeb-5fb8-437a-8b1f-9448d7f1a245\", \"session_id\": \"435a9de9-ef0a-4296-8ffc-ee6a7251d1ab\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0342d6db-1e4b-452a-b47a-49fcb65a2131\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0d818bf4-f035-4469-9094-51aeb2dd8b0c\", \"session_id\": \"435a9de9-ef0a-4296-8ffc-ee6a7251d1ab\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c04eb7ab-bc15-4242-95d2-16ab1a66cf3b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"e40ccfd6-9364-4a51-a62b-050f82590581\", \"session_id\": \"435a9de9-ef0a-4296-8ffc-ee6a7251d1ab\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c04eb7ab-bc15-4242-95d2-16ab1a66cf3b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fa5bae6d-af18-4952-bc89-8d14686aac2d\", \"session_id\": \"435a9de9-ef0a-4296-8ffc-ee6a7251d1ab\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me look at how that flag is used."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway PAYMENTS_LIVE\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)gateway|fake|mock|stub|process\\\\.env|os\\\\.environ|getenv\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"The app falls back to a fake payment gateway with no warning unless the env var PAYMENTS_LIVE=1 is set. Cost the user ~2 hours of debugging. When payments look like they \\\"succeed\\\" but nothing real happens, check this env var first. Reported by the user; the flag is not referenced anywhere in this repo's checked-in code (grep found no matches as of 2026-10-01), so it may live in another repo/service or deploy config.\",\n \"epistemic\": \"observation\",\n \"premise\": \"while the gateway selection still depends on PAYMENTS_LIVE\",\n \"tags\": [\n  \"env-var\",\n  \"payments\",\n  \"hazard\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f834-6f6f-7c73-ae34-e81c32f84e03\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Two hours on a silent fallback is a bad way to find that out.\n\nI searched the repo for `PAYMENTS_LIVE` and for gateway, fake, mock and stub, and found nothing. The only env var read anywhere is `EXPORT_BUCKET` in `scripts/export.py`. So the gateway switch must live somewhere this checkout doesn't contain, such as another repo, a service, or deploy config.\n\nI saved a hazard note to EngramDB so the gotcha comes up in future sessions. It says that without `PAYMENTS_LIVE=1` the app uses a fake gateway, and that you should check this first when payments seem to succeed but nothing real happens.\n\nIf you point me at where the gateway is chosen, I can make the fallback loud instead of silent. Options include:\n- Log a prominent warning at startup when the fake gateway is active.\n- Fail fast when `PAYMENTS_LIVE` is unset in production.\n- Flip the default so the fake gateway is opt-in."
+ }
+]

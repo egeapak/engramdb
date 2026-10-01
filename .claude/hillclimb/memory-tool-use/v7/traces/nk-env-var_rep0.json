@@ -1,0 +1,65 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a31c9443-e5cb-4c03-934b-69e80bb18475\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0207a0be-3737-4742-a5ac-5b30f61de7eb\", \"session_id\": \"44c53fb2-5c29-4659-b012-9678408b7019\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a31c9443-e5cb-4c03-934b-69e80bb18475\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9b72af51-6a86-49ca-ba9d-0bfc7048f514\", \"session_id\": \"44c53fb2-5c29-4659-b012-9678408b7019\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e31c859a-6aae-4a79-a009-45c1fb40380f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1d7977fb-bcb3-4001-81d2-823ce1ef9890\", \"session_id\": \"44c53fb2-5c29-4659-b012-9678408b7019\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e31c859a-6aae-4a79-a009-45c1fb40380f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"de007af1-8c81-4586-ad1a-141344752056\", \"session_id\": \"44c53fb2-5c29-4659-b012-9678408b7019\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry about the lost two hours. I'll look at how the gateway gets chosen and check memory for anything related."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-n\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway PAYMENTS_LIVE\",\n \"include_global\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock|stub|gateway|environ|getenv|process\\\\.env\",\n \"output_mode\": \"content\",\n \"-n\": true,\n \"head_limit\": 50\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "assistant",
+  "content": "I couldn't find `PAYMENTS_LIVE` anywhere in this repo, and there's no payment gateway code either. A search for fake, mock, stub, gateway and env-var lookups found only one hit, `EXPORT_BUCKET` in `scripts/export.py:10`. EngramDB has no memory on this either.\n\nSo the switch probably lives in another repo, a dependency, or a deploy config that isn't checked out here. I can't see the code that decides which gateway to use.\n\nIf you want to prevent a repeat, here are two options:\n\n- **Fail loudly:** point me at where the gateway is chosen. I can make it raise or log a warning when it falls back to the fake gateway, or require `PAYMENTS_LIVE` to be set explicitly to `0` or `1`.\n- **Record it:** I can save this to EngramDB as a hazard (fake gateway unless `PAYMENTS_LIVE=1`). It would be based only on what you told me, since I can't verify it in the code.\n\nWhich would you like?"
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing."
+ }
+]

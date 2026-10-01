@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f033c7cf-bb32-470a-b913-6cc5ab62b433\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"34c739d4-776c-4ea5-9b91-58a56109674c\", \"session_id\": \"5b41c4bc-424a-403e-8428-21f0aeb50252\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f033c7cf-bb32-470a-b913-6cc5ab62b433\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d87435ff-6482-49ea-b74f-b1e8ceb6cd33\", \"session_id\": \"5b41c4bc-424a-403e-8428-21f0aeb50252\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1db260b2-f7a5-42ee-b977-1d8d55544194\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"f6ff71f4-9f12-4ef0-9067-7b9f61311a63\", \"session_id\": \"5b41c4bc-424a-403e-8428-21f0aeb50252\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1db260b2-f7a5-42ee-b977-1d8d55544194\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"373e5828-8e39-4c1a-90de-cf77e6bbcab3\", \"session_id\": \"5b41c4bc-424a-403e-8428-21f0aeb50252\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto <newbase> <upstream> [<branch>]` replays the commits that are in `<branch>` but not in `<upstream>` on top of `<newbase>`. A plain `git rebase` forces the new base and the cut-off point to be the same commit. `--onto` lets you choose them separately.\n\n**Example**\n\nSay you branched `feature` off `topic`, and `topic` is itself a branch off `main`:\n\n```\nmain:   A---B---C\n                 \\\ntopic:            D---E\n                       \\\nfeature:                F---G\n```\n\nYou want `feature` to carry only its own commits (F, G) and sit directly on `main`, without D and E:\n\n```\ngit rebase --onto main topic feature\n```\n\nResult:\n\n```\nmain:    A---B---C\n                 |\\\ntopic:           | D---E\n                 \\\nfeature:          F'---G'\n```\n\n- `main` is the new base, which is where the commits will be placed.\n- `topic` is the old base. Commits reachable from `feature` but not from `topic` (F and G) are the ones that get moved.\n- `feature` is the branch to rebase. If you leave it out, the current branch is used.\n\nF' and G' are new commits with new hashes, because the parent changed.\n\n**Other common uses**\n\n- **Drop a range of commits.** `git rebase --onto A B` removes the commits after `A` up to and including `B`, and replays everything after `B` onto `A`.\n- **Move a branch to a different base.** For example, move a branch from `develop` to `release`: `git rebase --onto release develop my-branch`.\n\nIf conflicts come up, resolve them and run `git rebase --continue`. To back out, run `git rebase --abort`."
+ }
+]

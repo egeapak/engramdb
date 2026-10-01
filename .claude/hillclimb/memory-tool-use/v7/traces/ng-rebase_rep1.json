@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f7c071d7-fefd-4772-b8b5-f60a2f9bba82\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"75cf551c-9880-4dab-ae3f-bb94c6c8dfc9\", \"session_id\": \"5ec132fb-a7da-4f52-a336-77c9a7889ab6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f7c071d7-fefd-4772-b8b5-f60a2f9bba82\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8c3e748b-ecce-46c7-9f1d-112ef6c4fe6d\", \"session_id\": \"5ec132fb-a7da-4f52-a336-77c9a7889ab6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dd11310d-4b18-41e9-b310-697716022335\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b3497f2c-34b6-406d-891c-82c95f3be4fd\", \"session_id\": \"5ec132fb-a7da-4f52-a336-77c9a7889ab6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dd11310d-4b18-41e9-b310-697716022335\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"43292b34-b03a-4d30-9b17-1cbccb9ce6a3\", \"session_id\": \"5ec132fb-a7da-4f52-a336-77c9a7889ab6\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto <newbase> <upstream> [<branch>]` replays the commits that are on `<branch>` but not on `<upstream>` onto `<newbase>`. Plain `git rebase` forces the new base and the cut-off point to be the same commit. `--onto` lets you pick them separately.\n\n**Example**\n\nSay you branched `feature` off `topic`, and `topic` branched off `main`:\n\n```\nmain:    A---B---C\n              \\\ntopic:         D---E\n                    \\\nfeature:             F---G\n```\n\nYou want `feature` to sit directly on `main`, without `topic`'s commits D and E:\n\n```\ngit rebase --onto main topic feature\n```\n\nResult:\n\n```\nmain:    A---B---C\n              |   \\\n              |    F'---G'     (feature)\n               \\\n                D---E          (topic, untouched)\n```\n\nHere is how git reads the command:\n- `topic` is the upstream, so commits reachable from `feature` but not from `topic` (F and G) are selected.\n- `main` is the new base, so F and G are replayed on top of it as new commits F' and G'.\n- `feature` is the branch that gets moved. If you leave it out, the current branch is used.\n\n**Common uses**\n- Move a branch off another feature branch, as above.\n- Drop a range of commits. `git rebase --onto A B` removes the commits after `A` up to and including `B` from the current branch.\n- Transplant a branch after its parent was squash-merged. Run `git rebase --onto main <old-parent-tip> feature` so the old parent's commits aren't replayed.\n\nThe replayed commits get new hashes. If `feature` was already pushed, you'll need `--force-with-lease` to update it."
+ }
+]

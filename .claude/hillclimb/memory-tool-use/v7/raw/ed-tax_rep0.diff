@@ -1,0 +1,24 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..90270e4 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_EVEN, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,12 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    """Return tax in integer cents for amount_cents at rate (e.g. "0.0825").
++
++    Rounds with banker's rounding (ROUND_HALF_EVEN) per finance policy.
++    """
++    if isinstance(amount_cents, bool) or not isinstance(amount_cents, int):
++        raise TypeError("amount_cents must be an int")
++    # str() avoids binary float artifacts when rate is passed as a float.
++    exact = Decimal(amount_cents) * Decimal(str(rate))
++    return int(exact.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))

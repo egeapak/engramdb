@@ -1,0 +1,28 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..c5b94e6 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,4 +1,5 @@
+ import argparse
++import datetime
+ import os
+ 
+ 
+@@ -6,9 +7,16 @@ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+     parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument(
++        "--since",
++        type=datetime.date.fromisoformat,
++        metavar="YYYY-MM-DD",
++        help="only export reports on or after this date",
++    )
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    since = f" since {args.since.isoformat()}" if args.since else ""
++    print(f"exporting {args.env}{since} to {bucket} (dry_run={args.dry_run})")
+ 
+ 
+ if __name__ == "__main__":

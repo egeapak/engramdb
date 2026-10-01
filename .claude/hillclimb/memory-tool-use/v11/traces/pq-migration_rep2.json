@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"bf7fff0a-531f-4e2e-9f23-c0d0808e30a6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8854e535-8e43-4b43-8713-5d576c1e7db6\", \"session_id\": \"e771bfaf-8b4e-4a66-99cc-868f2c1aedd1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"bf7fff0a-531f-4e2e-9f23-c0d0808e30a6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2241b710-0716-46a4-98ac-ce8ad8300925\", \"session_id\": \"e771bfaf-8b4e-4a66-99cc-868f2c1aedd1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5376294a-3d60-4249-baaf-588fdc9cff7c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1502da22-0328-4b47-9b01-2f6555fe777c\", \"session_id\": \"e771bfaf-8b4e-4a66-99cc-868f2c1aedd1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5376294a-3d60-4249-baaf-588fdc9cff7c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"19e077e4-4eae-40d1-8a18-5c2f5957e6c3\", \"session_id\": \"e771bfaf-8b4e-4a66-99cc-868f2c1aedd1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"customers migration schema column\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"The SQL files under migrations/ are applied in order by the deploy pipeline and every file that is merged has already run in production. Never edit an existing migration, even to fix a typo; production would never see the change. Instead add a new file with the next 4-digit number, for example 0008_fix_customers.sql, that makes the correction.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f856-312c-7570-b739-cfcfdd37f817\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.2838799210120724,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2838799210120724,\"keyword\":0.08293537596816054,\"relevance\":0.5,\"rerank\":-1.0627297163009644,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.49550258265249986,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Migration rules\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f856-3d7f-7713-a30a-88803cbd8e36\",\"logical\":[],\"physical\":[\"scripts/export.py\"],\"provenance\":\"human\",\"score\":0.14977931204499004,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14977931204499004,\"keyword\":0.022317679575686967,\"relevance\":0.5,\"rerank\":-2.8806283473968506,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.37132048425038894,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Export script caution\",\"tags\":[\"ops\",\"export\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f856-3946-7b31-93b8-a82b266c0607\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.12824866808963192,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.12824866808963192,\"keyword\":0.022130183239677505,\"relevance\":0.5,\"rerank\":-4.077234745025635,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.34955708476853314,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax rounding rule\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":3}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/tax-rounding-rule_01a0f856-3946-7b31-93b8-a82b266c0607.md\n.engramdb/memories/migration-rules_01a0f856-312c-7570-b739-cfcfdd37f817.md\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls migrations; cat migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "0001_create_invoices.sql\n0002_add_tax.sql\n0003_add_ledger_ref.sql\n0004_create_lines.sql\n0005_create_refunds.sql\n0006_index_customer.sql\n0007_add_customers.sql\nCREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);"
+ },
+ {
+  "role": "assistant",
+  "content": "The change goes in a new migration file, `migrations/0008_add_customer_phone.sql`. Don't edit `0007_add_customers.sql`.\n\nThe project has a rule, recorded in memory, that every merged migration has already run in production. Editing an existing one means production never sees the change. The highest number so far is `0007`, so the next file is `0008`.\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made `phone` nullable because existing rows have no phone number. A `NOT NULL` column would need a default or a backfill. If you want it required, say so and I'll write that version.\n\n`0007` also has a typo: the column is named `emial`, not `email`. The same rule applies, so fixing it would take its own migration, something like `ALTER TABLE customers RENAME COLUMN emial TO email;`. That would break any code that reads `emial`, so I'd treat it as a separate change. I haven't touched it.\n\nI haven't created the file. Want me to add `0008`?"
+ }
+]

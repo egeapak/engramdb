@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Write a regex that matches an ISO 8601 date like 2026-10-01."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"589713f0-2746-4ad7-a349-7695591d326d\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"6981be5c-0e2f-4611-bf12-3e442d4fe940\", \"session_id\": \"88e1700f-ba08-4c06-b84c-f00e56745849\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"589713f0-2746-4ad7-a349-7695591d326d\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f2ca0035-ad0c-48ba-8a1b-1dd3a5b881c5\", \"session_id\": \"88e1700f-ba08-4c06-b84c-f00e56745849\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e8c6220b-e205-40ff-9f44-5f340911319c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"751e7253-9354-40d8-a223-59065ca7db7c\", \"session_id\": \"88e1700f-ba08-4c06-b84c-f00e56745849\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e8c6220b-e205-40ff-9f44-5f340911319c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b169d269-16d6-4eac-8476-0e2672f2b547\", \"session_id\": \"88e1700f-ba08-4c06-b84c-f00e56745849\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Here's a regex for ISO 8601 calendar dates (`YYYY-MM-DD`):\n\n```regex\n^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\n```\n\n**How it works**\n- `\\d{4}` matches the four-digit year.\n- `(0[1-9]|1[0-2])` matches the month, 01\u201312.\n- `(0[1-9]|[12]\\d|3[01])` matches the day, 01\u201331.\n- `^` and `$` anchor the match to the whole string. To find dates inside longer text, replace them with `\\b`.\n\nIt matches `2026-10-01`. It rejects `2026-13-01` and `2026-10-32`.\n\n**Limitation:** the regex doesn't check that the day is valid for the month. `2026-02-31` still matches. If you need that check, parse the string with a date library after the regex match. The alternative is a much longer regex that handles month lengths and leap years."
+ }
+]

@@ -1,0 +1,35 @@
+[
+ {
+  "role": "user",
+  "content": "Write a regex that matches an ISO 8601 date like 2026-10-01."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"136224f0-36a7-4f81-9d5c-0a0ca50ce76a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"1a1ce438-1f78-40ce-b005-c67c31298929\", \"session_id\": \"555972db-932c-4919-849b-9fe9a0d18c05\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"136224f0-36a7-4f81-9d5c-0a0ca50ce76a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2305dfb5-3a75-4c33-9ae2-c9eaf0b15cd0\", \"session_id\": \"555972db-932c-4919-849b-9fe9a0d18c05\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"76ae958b-4fae-4eb4-87a4-3e8834d14e70\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d2c2ba27-870b-4d24-889a-cec7a022ec5c\", \"session_id\": \"555972db-932c-4919-849b-9fe9a0d18c05\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"76ae958b-4fae-4eb4-87a4-3e8834d14e70\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d235c150-eaf5-402f-ab82-e4733780d3eb\", \"session_id\": \"555972db-932c-4919-849b-9fe9a0d18c05\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"date regex ISO 8601 format\",\n \"max_results\": 5\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f849-617e-7300-84a0-bb7828bbaa55\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.1548918951087742,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1548918951087742,\"keyword\":0.030922093239232527,\"relevance\":0.5,\"rerank\":-2.9804766178131104,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.40851046588537154,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API error format\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "Here's a regex for ISO 8601 calendar dates in `YYYY-MM-DD` form:\n\n```regex\n^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\n```\n\n**How it works:**\n- `\\d{4}` is a four-digit year.\n- `(0[1-9]|1[0-2])` is a month from `01` to `12`.\n- `(0[1-9]|[12]\\d|3[01])` is a day from `01` to `31`.\n- `^` and `$` stop it matching inside a longer string. To find dates inside text instead, replace them with `\\b`.\n\n**What it matches:**\n- `2026-10-01` matches.\n- `2026-13-01` doesn't match (there's no month 13).\n- `2026-1-1` doesn't match (month and day need two digits).\n- `2026-02-31` **does** match, even though February 31 doesn't exist.\n\nA regex can't easily check how many days each month has, or leap years. If you need that, parse the string after the regex matches, for example in Python:\n\n```python\nimport re\nfrom datetime import date\n\nISO_DATE = re.compile(r\"^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\")\n\ndef is_iso_date(s: str) -> bool:\n    if not ISO_DATE.match(s):\n        return False\n    try:\n        date.fromisoformat(s)\n        return True\n    except ValueError:\n        return False\n```\n\nIf you only care about the shape and not valid ranges, `^\\d{4}-\\d{2}-\\d{2}$` is enough."
+ }
+]

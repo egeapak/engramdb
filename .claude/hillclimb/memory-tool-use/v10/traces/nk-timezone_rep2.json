@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a8bdbc10-9c51-40a8-a25c-5bf7a8d15390\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"6fa20b21-7e4b-45f0-807f-528ddc048bae\", \"session_id\": \"2a2d66f3-5198-4c2c-8d7f-aea5bb0179b1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a8bdbc10-9c51-40a8-a25c-5bf7a8d15390\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d36d5df2-f650-448f-aab3-c35cfaff9047\", \"session_id\": \"2a2d66f3-5198-4c2c-8d7f-aea5bb0179b1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"39e3a58d-6838-4b5c-b02c-56c81dcce8ad\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"271f076e-a149-47d0-9ccf-6b924b534646\", \"session_id\": \"2a2d66f3-5198-4c2c-8d7f-aea5bb0179b1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"39e3a58d-6838-4b5c-b02c-56c81dcce8ad\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6fb50954-56cb-49e0-9406-c887fcc45728\", \"session_id\": \"2a2d66f3-5198-4c2c-8d7f-aea5bb0179b1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamp timezone UTC\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"DB timestamps are stored in UTC; conversion to the customer's timezone happens only in the API layer\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer. Don't convert timezones in the persistence or service layers, and don't store local or offset-adjusted times in the DB.\",\n \"tags\": [\n  \"timezone\",\n  \"timestamps\",\n  \"utc\",\n  \"database\",\n  \"api\"\n ],\n \"logical\": [\n  \"data.timestamps\",\n  \"api.serialization\"\n ],\n \"criticality\": 0.8,\n \"confidence\": 0.95\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f848-490a-7fb3-a5af-fc431ee44401\",\"created\":true,\"summary\":\"DB timestamps are stored in UTC; conversion to the customer's timezone happens only in the API layer\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project convention in EngramDB, the project's memory store: **all database timestamps are stored in UTC, and conversion to the customer's timezone happens only in the API layer.**\n\nIt's marked as high-importance, so it should come up whenever someone is working on timestamps or API serialization. There was no earlier memory about timezones that it could conflict with."
+ }
+]

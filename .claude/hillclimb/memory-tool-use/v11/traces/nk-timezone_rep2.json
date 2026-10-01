@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"bee27aff-2d5f-43ee-92a9-730bdc1fb3a0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8b6933ea-101a-4293-82ea-d14a4171f89a\", \"session_id\": \"5cc361a7-a843-4800-b86d-35cf4c329f63\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"bee27aff-2d5f-43ee-92a9-730bdc1fb3a0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e332ccfe-99fc-4f0a-abdf-6733991e4d1e\", \"session_id\": \"5cc361a7-a843-4800-b86d-35cf4c329f63\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"49bae025-2821-4231-9527-59ea95d123f5\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"2409b5e1-b6b6-4a9d-a8c6-acf0b8bc250c\", \"session_id\": \"5cc361a7-a843-4800-b86d-35cf4c329f63\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"49bae025-2821-4231-9527-59ea95d123f5\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"002e27c6-55e2-4abd-a4f7-df5e1c7f58b8\", \"session_id\": \"5cc361a7-a843-4800-b86d-35cf4c329f63\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamps UTC timezone\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer, never in storage or business/data logic.\",\n \"tags\": [\n  \"timestamps\",\n  \"timezone\",\n  \"utc\",\n  \"api\"\n ],\n \"epistemic\": \"decision\",\n \"premise\": \"Customers span multiple timezones and the API layer is the single place for presentation-time conversion\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f857-ec97-7c81-9ae6-3e5a966d8481\",\"created\":true,\"summary\":\"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've saved that to EngramDB as a convention: all database timestamps are stored in UTC, and conversion to the customer's timezone happens only in the API layer. A query for existing timestamp or timezone memories came back empty, so nothing was duplicated or contradicted.\n\nI recorded a premise with it: customers span multiple timezones, and the API layer is the one place that converts. I didn't set an `invalidated_by` condition."
+ }
+]

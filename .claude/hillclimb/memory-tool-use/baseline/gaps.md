@@ -6,7 +6,7 @@
 |---|---|---|
 | mcp_errors | 0 | 0 |
 | bash_workarounds | 12 | 12 |
-| direct_store_access | 9 | 9 |
+| direct_store_access | 0 | 0 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 9 | 9 |
 | debrief asks for something | 25 | - |
@@ -118,133 +118,6 @@
 {
  "command": "cat .engramdb/memories/*.md Makefile README.md pyproject.toml; ls scripts",
  "result_head": "---\nversion: 2\nid: 01a0f6c5-a8f5-7281-b3c3-764384258259\ntype: convention\nstatus: Active\ntitle: API errors use problem+json\n---\n\n# API errors use problem+json\n\n**Summary:** API errors use problem+json\n\n## Content\n\nHTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\n\n## Scope\n\n- **Files:** `src/api/`\n- **Tags:** `api`, `errors`\n- **Criticality:** 0.5\n- **Confidence:** 0.8\n\n## Provenance\n\n- **Source:** human\n- **Created:** 2026-10-01T09:22:24.117008924+00:00\n- **Updated:** 2026-10-01T09:22:24.1170089"
-}
-```
-
-
-## Direct reads of .engramdb/
-
-**ct-rounding rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax_for|rate",
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
- }
-}
-```
-
-**ed-migration-typo rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "customers|email",
-  "path": "/tmp/mte-ed-migration-typo-uywslsc0/ledgerline",
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
- }
-}
-```
-
-**pq-migration rep1**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "customers|emial",
-  "path": "/tmp/mte-pq-migration-yzzmke9l/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-money rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)float|Decimal|_cents|Money\\(|amount",
-  "path": "/tmp/mte-pq-money-mpgrypfc/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-money rep1**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)float|Decimal|_cents|Money|amount",
-  "path": "/tmp/mte-pq-money-o1i4bz91/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-money rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)cents|float|Decimal|Money|amount",
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
- }
-}
-```
-
-**pq-rounding rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax|quantize|Decimal",
-  "-i": true,
-  "output_mode": "content",
-  "glob": "!.engramdb/**"
- }
-}
-```
-
-**pq-rounding rep1**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax|quantize|decimal",
-  "-i": true,
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-rounding rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax|quantize|round",
-  "output_mode": "content",
-  "-i": true,
-  "glob": "!.engramdb/**"
- }
 }
 ```
 

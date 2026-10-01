@@ -1,0 +1,93 @@
+[
+ {
+  "role": "user",
+  "content": "Note for later: Priya owns the ledger integration; any change to src/billing/invoices.py needs her review."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0e6ebff4-f331-474c-b4b5-fca8bba3ca45\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"b7a7a8ef-008d-4a6e-85fa-96944860dfbe\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0e6ebff4-f331-474c-b4b5-fca8bba3ca45\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"55d4c263-1fb4-48d0-8606-8fce62f5fc20\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"19ecc4be-5227-4cf8-944d-4654a6496af0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"16309d18-aac3-41ba-8f99-622c994be51e\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"19ecc4be-5227-4cf8-944d-4654a6496af0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bd97a127-859b-4bdf-81f5-d9cff1cef3a9\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5684551f-c54e-4ae6-8588-ff44702d83af\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"6e76f957-57a3-4901-a034-0025de355cb9\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5684551f-c54e-4ae6-8588-ff44702d83af\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ad787372-e984-4b29-a8e1-ecbc4eded279\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c283ad98-b4f1-4e64-a986-add9d36bc6e8\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"b760f34f-799c-449f-a243-7c62e8a17c3c\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c283ad98-b4f1-4e64-a986-add9d36bc6e8\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"979260aa-ffbd-4bd2-9f50-d59ff0e71795\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f00a7d49-53b7-45df-a657-58233a1366f0\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"acee7778-5c74-498b-90d0-6991d490f5df\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f00a7d49-53b7-45df-a657-58233a1366f0\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"45603813-284f-43a7-8eaf-12460f1f47c7\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"56808ba9-08fc-4b0e-801e-be2a9a577144\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"2f41a2dd-c273-44dc-a46a-0a29a8041a67\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"56808ba9-08fc-4b0e-801e-be2a9a577144\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"640379f6-990b-4322-86be-a300ec57f3e8\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"97c86f6f-b4da-4f2e-8e4c-2e00e2270190\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"4904e13b-c254-43ed-8d66-2f3dd0bd0e2f\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"97c86f6f-b4da-4f2e-8e4c-2e00e2270190\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f1412e61-24b4-462d-9a3a-a93139677d4c\", \"session_id\": \"4ce5983f-c816-4075-9d15-39ed354331c2\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-owner-euw6qvcd/claude-config/projects/-tmp-mte-nk-owner-euw6qvcd-ledgerline/memory/MEMORY.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File does not exist. Note: your current working directory is /tmp/mte-nk-owner-euw6qvcd/ledgerline."
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-owner-euw6qvcd/claude-config/projects/-tmp-mte-nk-owner-euw6qvcd-ledgerline/memory/invoices-review-priya.md\",\n \"content\": \"---\\nname: invoices-review-priya\\ndescription: Priya owns the ledger integration; changes to src/billing/invoices.py need her review\\nmetadata:\\n  type: project\\n---\\n\\nPriya owns the ledger integration. Any change to `src/billing/invoices.py` needs her review.\\n\\n**Why:** She owns the ledger integration that this file touches (stated by the user on 2026-10-01).\\n**How to apply:** When editing that file, or preparing a commit or PR that touches it, flag that Priya must review it. Add her as a reviewer if a PR is created.\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-owner-euw6qvcd/claude-config/projects/-tmp-mte-nk-owner-euw6qvcd-ledgerline/memory/invoices-review-priya.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-owner-euw6qvcd/claude-config/projects/-tmp-mte-nk-owner-euw6qvcd-ledgerline/memory/MEMORY.md\",\n \"content\": \"- [Invoices need Priya's review](invoices-review-priya.md) \\u2014 Priya owns ledger integration; src/billing/invoices.py changes need her review\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-owner-euw6qvcd/claude-config/projects/-tmp-mte-nk-owner-euw6qvcd-ledgerline/memory/MEMORY.md (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "I've saved a note that Priya owns the ledger integration and must review any change to `src/billing/invoices.py`. I'll flag it whenever work touches that file, and I'll add Priya as a reviewer on any PR I create for it."
+ }
+]

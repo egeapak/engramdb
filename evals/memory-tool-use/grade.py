@@ -12,8 +12,10 @@ metric so one score cannot hide another:
     no_false_create      no new memory appeared where none was expected
     revise               challenge/update targeted the contradicted memory
     no_spurious_revise   no challenge/update where nothing was contradicted
+    consulted_before_act query_before_act, or a hook injected the target
+                         memory's title and body
     pass                 every applicable metric above passed, except
-                         implicit_capture
+                         implicit_capture and query_before_act
 
 A metric is omitted from a row when it does not apply to the case.
 """
@@ -32,6 +34,7 @@ MEMORY_TOOL = re.compile(r"^mcp__(?P<server>[^_].*?)__(?P<op>[a-z_]+)$")
 
 METRICS = [
     {"id": "pass", "label": "pass", "kind": "binary"},
+    {"id": "consulted_before_act", "label": "consulted", "kind": "binary"},
     {"id": "query_before_act", "label": "query first", "kind": "binary"},
     {"id": "fact_used", "label": "fact used", "kind": "binary"},
     {"id": "explicit_create", "label": "expl. create", "kind": "binary"},
@@ -164,6 +167,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
 
     if exp["query"] is True:
         g["query_before_act"] = int(any(op in CONSULT and (first_edit is None or i < first_edit) for i, op, _ in mem))
+        g["consulted_before_act"] = int(g["query_before_act"] or hook_delivered_body(case, hooks))
     if exp["facts"]:
         ok = _contains_any(answer + "\n" + diff, exp["facts"])
         if case["id"] == "ed-migration-typo":  # the applied migration must stay untouched
@@ -188,7 +192,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     elif exp["revise"] is False:
         g["no_spurious_revise"] = int(not revise_calls)
 
-    graded = [v for k, v in g.items() if k != "implicit_capture"]
+    graded = [v for k, v in g.items() if k not in NOT_IN_PASS]
     g["pass"] = int(all(graded)) if graded else 1
 
     usage = final.get("usage", {}) or {}
@@ -219,6 +223,37 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     return row, to_trace(steps, hooks, case["prompt"])
 
 
+# Reported, never gating. implicit_capture is the agent's importance call;
+# query_before_act is one way to consult memory, and a hook that already
+# injected the memory's body is another (consulted_before_act counts both).
+NOT_IN_PASS = {"implicit_capture", "query_before_act"}
+
+
+def hook_texts(hooks):
+    """The additionalContext strings the hooks injected."""
+    out = []
+    for h in hooks:
+        raw = h.get("output") or h.get("stdout") or ""
+        try:
+            out.append(json.loads(raw)["hookSpecificOutput"]["additionalContext"])
+        except (ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def hook_delivered_body(case, hooks):
+    """True when a hook injected the target memory's title AND part of its body.
+
+    A title alone does not count: before the hooks showed bodies, a title was
+    all the agent got, and that is not the memory's content.
+    """
+    target = _target_seed(case)
+    if not target:
+        return False
+    probe = " ".join(target["content"].split()[:6])
+    return any(target["title"] in t and probe in " ".join(t.split()) for t in hook_texts(hooks))
+
+
 def _ids_match(target, tool_input):
     blob = json.dumps(tool_input)
     return any(tok in blob for tok in {target, target[:8], target[:12]} if len(tok) >= 8)
@@ -234,11 +269,16 @@ def set_seed_file(path):
     _SEED_FILE, _TITLES = Path(path), None
 
 
-def _target_title(case):
+def _target_seed(case):
     global _TITLES
     if _TITLES is None:
-        _TITLES = {m["key"]: m["title"] for m in json.loads(_SEED_FILE.read_text())}
+        _TITLES = {m["key"]: m for m in json.loads(_SEED_FILE.read_text())}
     return _TITLES.get(case.get("target"))
+
+
+def _target_title(case):
+    seed = _target_seed(case)
+    return seed["title"] if seed else None
 
 
 def _served_model(events, init):
@@ -251,6 +291,19 @@ def _served_model(events, init):
 # ---------------------------------------------------------------- tool gaps
 
 EMPTY_RESULT = re.compile(r'"(results|memories)"\s*:\s*\[\s*\]|no (matching )?memories|0 results', re.I)
+
+
+# Patterns that keep .engramdb/ OUT of a search: excluding the store is the
+# opposite of reading it around the MCP tools, so it is not a gap signal.
+_EXCLUSION = re.compile(
+    r"""!\.?/?\.engramdb[^\s"',]*"""           # glob "!.engramdb/**"
+    r"""|--exclude-dir[= ]\S*engramdb\S*"""     # grep --exclude-dir=.engramdb
+    r"""|grep\s+-v\s+\S*engramdb\S*"""          # grep -v '^.engramdb/'
+    r"""|-not\s+-path\s+\S*engramdb\S*""")      # find -not -path '*/.engramdb/*'
+
+
+def _without_exclusions(text):
+    return _EXCLUSION.sub("", text)
 
 
 def gap_signals(tools, init, hooks):
@@ -280,9 +333,9 @@ def gap_signals(tools, init, hooks):
                 sig["mcp_errors"].append({"op": op, "input": s["input"], "error": res["text"][:1000]})
             elif op in CONSULT and EMPTY_RESULT.search(res["text"][:2000]):
                 sig["empty_queries"].append({"op": op, "input": s["input"]})
-        elif s["name"] == "Bash" and re.search(r"engramdb|\.engramdb", s["input"].get("command", "")):
+        elif s["name"] == "Bash" and re.search(r"\bengramdb\b|\.engramdb", _without_exclusions(s["input"].get("command", ""))):
             sig["bash_workarounds"].append({"command": s["input"].get("command", ""), "result_head": res["text"][:600]})
-        elif s["name"] in {"Read", "Grep", "Glob"} and ".engramdb" in json.dumps(s["input"]):
+        elif s["name"] in {"Read", "Grep", "Glob"} and ".engramdb" in _without_exclusions(json.dumps(s["input"])):
             sig["direct_store_access"].append({"tool": s["name"], "input": s["input"]})
         if available and s["name"] not in available:
             sig["unknown_tools"].append(s["name"])

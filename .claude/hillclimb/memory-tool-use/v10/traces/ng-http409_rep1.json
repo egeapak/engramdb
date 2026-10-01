@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5922a53e-c98a-4cf9-842c-f9a45a001d1f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"23d289d7-f051-453a-9484-e6654775e5b0\", \"session_id\": \"83b7f62c-dafa-415b-bd13-56c24a0ce152\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5922a53e-c98a-4cf9-842c-f9a45a001d1f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2fbe02fd-a473-409c-9aba-678c387910ba\", \"session_id\": \"83b7f62c-dafa-415b-bd13-56c24a0ce152\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fbf6e661-530c-49f2-88f2-5ee7279eb230\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d37e7e90-45a9-4862-bb0f-084eb534137f\", \"session_id\": \"83b7f62c-dafa-415b-bd13-56c24a0ce152\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fbf6e661-530c-49f2-88f2-5ee7279eb230\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a49e690e-3075-4810-92c4-6ea0e8c6c327\", \"session_id\": \"83b7f62c-dafa-415b-bd13-56c24a0ce152\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource on the server.\n\n**Common causes:**\n- **Concurrent edits / optimistic locking:** a client tries to update a resource with a stale version, for example when an `If-Match` ETag or version number no longer matches. (Strictly, a failed `If-Match` precondition is usually reported as **412**, while version fields in the request body usually get a 409.)\n- **Uniqueness violations:** creating something that already exists, such as a duplicate username, email or ID.\n- **Invalid state transitions:** for example, trying to ship an order that has been cancelled, or deleting a resource that other resources still depend on.\n- **Version control systems:** a push or merge that conflicts with existing content.\n\n**Key points:**\n- It's a 4xx client error, so retrying the same request unchanged will usually fail again. The client normally has to fetch the current state, resolve the conflict and resubmit.\n- The response body should explain the conflict well enough for the client (or user) to fix it.\n- It's defined in RFC 9110 \u00a715.5.10.\n\n**How it differs from similar codes:**\n- **400 Bad Request:** the request itself is malformed. With 409, the request is valid but clashes with the current state.\n- **412 Precondition Failed:** a conditional header (`If-Match`, `If-Unmodified-Since`) evaluated to false.\n- **422 Unprocessable Content:** the request is well formed but its content is semantically invalid, regardless of server state."
+ }
+]

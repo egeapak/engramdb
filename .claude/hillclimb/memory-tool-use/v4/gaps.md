@@ -5,8 +5,8 @@
 | signal | runs with it | occurrences |
 |---|---|---|
 | mcp_errors | 0 | 0 |
-| bash_workarounds | 10 | 10 |
-| direct_store_access | 8 | 11 |
+| bash_workarounds | 5 | 5 |
+| direct_store_access | 6 | 8 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 28 | 28 |
 | debrief asks for something | 25 | - |
@@ -40,15 +40,6 @@
 }
 ```
 
-**pq-migration rep0**
-
-```
-{
- "command": "cat README.md Makefile; grep -rn \"customer\" --include=*.py --include=*.sql . | grep -v .engramdb",
- "result_head": "# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n./src/billing/invoices.py:14:    customer_id: str\n./migrat"
-}
-```
-
 **pq-migration rep1**
 
 ```
@@ -64,42 +55,6 @@
 {
  "command": "cat .engramdb/memories/never-edit-an-applied-migration_*.md; echo ----; for f in migrations/*.sql; do echo \"== $f\"; cat \"$f\"; done; echo ----; cat README.md Makefile; git log --stat --oneline | head -40",
  "result_head": "---\nversion: 2\nid: 01a0f7c4-af1b-7df1-a1c1-6454ec60c159\ntype: hazard\nstatus: Active\ntitle: Never edit an applied migration\n---\n\n# Never edit an applied migration\n\n**Summary:** Never edit an applied migration\n\n## Content\n\nFiles in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\n\n## Scope\n\n- **Files:** `migrations/`\n- **Tags:** `database`, `migrations`\n- **Criticality:** 0.5\n- **Confidence:** 0.8\n\n## Provenance\n\n- **Source:** human\n- **Created:** 2026-10-01T14:00:57.371256362+00:00\n- **Updated:** 2026-10-01T14:00:"
-}
-```
-
-**pq-release rep0**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' ; git tag",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-release rep1**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' ; git tag",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-release rep2**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' ; git tag -l",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
-}
-```
-
-**pq-rounding rep1**
-
-```
-{
- "command": "git ls-files | grep -v '^.engramdb' | head -50; grep -rniE 'tax|decimal|quantize' --exclude-dir=.engramdb --exclude-dir=.git . | head -30",
- "result_head": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\n./src/"
 }
 ```
 
@@ -139,33 +94,6 @@
 }
 ```
 
-**pq-finalize rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "finalize|ledger_ref",
-  "path": "/tmp/mte-pq-finalize-v787my38/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
-**pq-finalize rep2**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "finalize|ledger_ref|retry|tenacity|backoff",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
 **pq-migration rep0**
 
 ```
@@ -195,20 +123,6 @@
  "tool": "Read",
  "input": {
   "file_path": "/tmp/mte-pq-money-2yp21y8j/ledgerline/.engramdb/memories/tax-uses-round-half-even_01a0f7bd-9c7b-7682-8762-a8060b684ec4.md"
- }
-}
-```
-
-**pq-money rep1**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "(?i)money|_cents|amount|float|Decimal|ROUND_",
-  "path": "/tmp/mte-pq-money-2yp21y8j/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
  }
 }
 ```

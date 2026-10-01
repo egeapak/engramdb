@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"85bc8f24-632b-49b9-b4fa-db4e8b55c59d\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"cd995799-78f0-4ac0-9249-2a4dc5482080\", \"session_id\": \"775c5ff8-3f78-45fe-ad87-0c97fcac9e40\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"85bc8f24-632b-49b9-b4fa-db4e8b55c59d\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0214f98f-7d54-412a-bd35-22535652ee0c\", \"session_id\": \"775c5ff8-3f78-45fe-ad87-0c97fcac9e40\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"975bf382-51eb-44d5-b2cb-855f9c0fd8d8\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"97b68cb2-0bae-4308-8244-5489b7c0bedb\", \"session_id\": \"775c5ff8-3f78-45fe-ad87-0c97fcac9e40\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"975bf382-51eb-44d5-b2cb-855f9c0fd8d8\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1a4f8dbe-fe5a-4190-a3e1-67888daff678\", \"session_id\": \"775c5ff8-3f78-45fe-ad87-0c97fcac9e40\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Lists and tuples are both ordered sequences that can hold any mix of types, but they differ in a few ways:\n\n**1. Mutability (the main difference)**\n- **List**: mutable. You can add, remove or change elements after you create it.\n- **Tuple**: immutable. Once you create it, its contents can't change.\n\n```python\nlst = [1, 2, 3]\nlst[0] = 99        # fine \u2192 [99, 2, 3]\nlst.append(4)      # fine\n\ntup = (1, 2, 3)\ntup[0] = 99        # TypeError: 'tuple' object does not support item assignment\n```\n\nImmutability is shallow. A tuple that holds a list still lets you change that list: `t = ([1], 2); t[0].append(5)` works.\n\n**2. Syntax**\n```python\n[1, 2, 3]    # list\n(1, 2, 3)    # tuple\n1, 2, 3      # also a tuple (the commas make it a tuple, not the parentheses)\n(1,)         # single-element tuple; the trailing comma is required\n(1)          # just the int 1\n```\n\n**3. Hashability**\nA tuple can be a dict key or a set member if all of its elements are hashable. A list never can.\n```python\nlocations = {(40.7, -74.0): \"NYC\"}   # ok\n{[40.7, -74.0]: \"NYC\"}               # TypeError: unhashable type: 'list'\n```\n\n**4. Methods**\n- Lists have many methods: `append`, `extend`, `insert`, `remove`, `pop`, `sort`, `reverse`, `clear`, and others.\n- Tuples have only `count` and `index`.\n\n**5. Performance and memory**\nTuples are a little smaller in memory and a little faster to create. CPython can also constant-fold tuple literals. The difference rarely matters, so it shouldn't drive your choice.\n\n**6. Conventional use**\n- **List**: a collection of similar items whose length can change, like a list of users or the lines of a file.\n- **Tuple**: a fixed-size record where each position means something, like `(x, y)`, `(name, age)` or a function returning several values (`return total, count`). Unpacking fits tuples naturally: `x, y = point`.\n\n**Rule of thumb:** use a list if the collection will change, and a tuple for a fixed group of related values, especially if you need it as a dict key. For records with named fields, consider `collections.namedtuple` or `typing.NamedTuple`, which keep tuple behavior and let you access fields like `p.x`."
+ }
+]

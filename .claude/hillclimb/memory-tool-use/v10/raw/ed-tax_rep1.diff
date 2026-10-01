@@ -1,0 +1,65 @@
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..9d10a8e
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..191e196
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/tax.cpython-311.pyc b/src/billing/__pycache__/tax.cpython-311.pyc
+new file mode 100644
+index 0000000..3eb80ea
+Binary files /dev/null and b/src/billing/__pycache__/tax.cpython-311.pyc differ
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..7c5d3e6 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_EVEN, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,8 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    # Per-line tax in integer cents, banker's rounding. Callers sum the
++    # rounded per-line results; never round an invoice total.
++    # str() keeps a float rate like 0.0825 from carrying binary error.
++    tax = Decimal(amount_cents) * Decimal(str(rate))
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+diff --git a/tests/__pycache__/test_tax.cpython-311.pyc b/tests/__pycache__/test_tax.cpython-311.pyc
+new file mode 100644
+index 0000000..4f5789b
+Binary files /dev/null and b/tests/__pycache__/test_tax.cpython-311.pyc differ
+diff --git a/tests/test_tax.py b/tests/test_tax.py
+index 75e3de8..ae568fd 100644
+--- a/tests/test_tax.py
++++ b/tests/test_tax.py
+@@ -1,5 +1,23 @@
+-from src.billing.tax import line_total
++from decimal import Decimal
++
++from src.billing.tax import line_total, tax_for
+ 
+ 
+ def test_line_total():
+     assert line_total([{"quantity": 2, "unit_cents": 150}]) == 300
++
++
++def test_tax_for_returns_int_cents():
++    assert tax_for(1000, Decimal("0.0825")) == 82
++    assert isinstance(tax_for(1000, Decimal("0.0825")), int)
++
++
++def test_tax_for_rounds_half_even():
++    # 50 * 0.05 = 2.5 -> 2; 70 * 0.05 = 3.5 -> 4
++    assert tax_for(50, Decimal("0.05")) == 2
++    assert tax_for(70, Decimal("0.05")) == 4
++
++
++def test_tax_for_accepts_float_rate_without_drift():
++    assert tax_for(50, 0.05) == 2
++    assert tax_for(1000, 0.0825) == 82

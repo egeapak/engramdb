@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f2f0b169-ac7c-43f9-bf91-08d83c1759b4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"541dc388-515e-408b-851f-9f176fa01d97\", \"session_id\": \"c2c0fcb5-b4aa-436e-af10-8f02148351a1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f2f0b169-ac7c-43f9-bf91-08d83c1759b4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"05188e68-39c5-466e-b6bb-dc42e2de454a\", \"session_id\": \"c2c0fcb5-b4aa-436e-af10-8f02148351a1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c1b4e35e-37a6-4055-9684-ef3d66f89c6e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"f809554e-a1fc-427d-85ba-8f99910b1ad3\", \"session_id\": \"c2c0fcb5-b4aa-436e-af10-8f02148351a1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c1b4e35e-37a6-4055-9684-ef3d66f89c6e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"22d77c66-50ae-4868-8e12-18c05462bb29\", \"session_id\": \"c2c0fcb5-b4aa-436e-af10-8f02148351a1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"celery background jobs enqueue\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"def enqueue|celery\",\n \"output_mode\": \"content\",\n \"head_limit\": 20\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must be dispatched via jobs.enqueue(); never call celery directly\",\n \"content\": \"User directive (2026-10-01): every background job must go through `jobs.enqueue()`. Never call celery directly (no `.delay()`, `.apply_async()`, `send_task`, or direct celery app usage). As of this date, neither `jobs.enqueue` nor any celery usage exists in the repo yet, so new background-job code should introduce/use the `jobs.enqueue()` entry point rather than celery APIs.\",\n \"epistemic\": \"decision\",\n \"premise\": \"User-mandated convention for background job dispatch\",\n \"criticality\": 0.8,\n \"tags\": [\n  \"background-jobs\",\n  \"celery\",\n  \"jobs\",\n  \"convention\",\n  \"user-directive\"\n ],\n \"logical\": [\n  \"jobs\",\n  \"background_jobs\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f839-d07c-7440-80e9-7e748ad44163\",\"created\":true,\"summary\":\"All background jobs must be dispatched via jobs.enqueue(); never call celery directly\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this in the project's EngramDB memory as a convention, so future sessions will see it: all background jobs go through `jobs.enqueue()`, and celery is never called directly.\n\nThe repo doesn't contain `jobs.enqueue()` or any celery code yet, and I noted that in the memory too. When background-job code gets written, it will need to create or use the `jobs.enqueue()` entry point."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things were missing or awkward:\n\n1. **No way to mark a memory as coming from the user (`create`).** This rule came straight from the user, but the hook now shows the memory as `source: shared/agent`. I had to write \"User directive\" into the content text to keep that information. I'd have wanted a `source: \"user\"` parameter (or something like `stated_by`). With it, future sessions could tell a direct instruction apart from something an agent inferred, and give it the right weight. It would also stop a later agent from challenging or invalidating it as if it were just an observation.\n\n2. **No trigger based on code content (`create`).** The `physical` parameter only takes file paths, and the rule applies to code that doesn't exist yet: any file that imports or calls celery. I left `physical` at its default `/`, so the memory is scoped to the whole repo, which is noisy. I'd have wanted a `triggers` parameter, for example `[\"import celery\", \".delay(\", \".apply_async(\", \"send_task\"]`. Then the memory would surface when an agent edits or writes code matching those patterns, which is exactly when the rule matters."
+ }
+]

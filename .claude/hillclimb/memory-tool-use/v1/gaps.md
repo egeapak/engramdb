@@ -6,7 +6,7 @@
 |---|---|---|
 | mcp_errors | 0 | 0 |
 | bash_workarounds | 3 | 3 |
-| direct_store_access | 13 | 13 |
+| direct_store_access | 10 | 10 |
 | unknown_tools | 0 | 0 |
 | empty_queries | 0 | 0 |
 | debrief asks for something | 12 | - |
@@ -87,20 +87,6 @@
 }
 ```
 
-**pq-finalize rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "finalize(_once)?\\(|retry|ledger_ref",
-  "path": "/tmp/mte-pq-finalize-dt0x0vhy/ledgerline",
-  "glob": "!.engramdb/**",
-  "output_mode": "content"
- }
-}
-```
-
 **pq-migration rep0**
 
 ```
@@ -163,36 +149,6 @@
  "tool": "Read",
  "input": {
   "file_path": "/tmp/mte-pq-release-wvoy1_5u/ledgerline/.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f6dc-4c8f-7963-8f99-6334e887b7a3.md"
- }
-}
-```
-
-**pq-rounding rep0**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax|quantize|Decimal",
-  "-i": true,
-  "glob": "!.engramdb/**",
-  "output_mode": "content",
-  "head_limit": 30
- }
-}
-```
-
-**pq-rounding rep1**
-
-```
-{
- "tool": "Grep",
- "input": {
-  "pattern": "tax",
-  "-i": true,
-  "glob": "!.engramdb/**",
-  "output_mode": "content",
-  "head_limit": 30
  }
 }
 ```

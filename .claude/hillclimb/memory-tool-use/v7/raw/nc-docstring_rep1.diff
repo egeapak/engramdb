@@ -1,0 +1,15 @@
+diff --git a/src/flags.py b/src/flags.py
+index 6fa3aef..7a084f2 100644
+--- a/src/flags.py
++++ b/src/flags.py
+@@ -5,8 +5,10 @@ _FLAGS = tomllib.loads((Path(__file__).parent.parent / "flags.toml").read_text()
+ 
+ 
+ def is_on(name):
++    """Return True if the named feature flag is enabled, False otherwise."""
+     return bool(_FLAGS.get(name, False))
+ 
+ 
+ def all_flags():
++    """Return a copy of all declared feature flags as a dict."""
+     return dict(_FLAGS)

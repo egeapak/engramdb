@@ -1,0 +1,29 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..7d00a29 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import Decimal, ROUND_HALF_EVEN
+ 
+ 
+ def line_total(lines):
+@@ -10,3 +10,18 @@ def line_total(lines):
+ 
+ def tax_for(amount_cents, rate):
+     raise NotImplementedError
++
++
++def invoice_tax(lines, rate):
++    """Total tax in cents; `rate` is a fraction (e.g. 0.0825).
++
++    Per the finance rule, each line's tax is rounded separately with
++    banker's rounding (ROUND_HALF_EVEN) and the rounded taxes are summed.
++    """
++    rate = Decimal(str(rate))
++    total = 0
++    for line in lines:
++        amount = line["quantity"] * line["unit_cents"]
++        tax = (Decimal(amount) * rate).quantize(Decimal("1"), rounding=ROUND_HALF_EVEN)
++        total += int(tax)
++    return total

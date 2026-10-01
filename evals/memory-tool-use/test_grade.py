@@ -35,7 +35,8 @@ def run(case_id, ev, diff="", before=None, after=None):
 class Oracle(unittest.TestCase):
     def test_project_question(self):
         g, _ = run("pq-tests", events([(MEM + "query", {"mode": "filter", "query": "tests"})], "Run make test-fast."))
-        self.assertEqual(g, {"query_before_act": 1, "fact_used": 1, "no_false_create": 1, "no_spurious_revise": 1, "pass": 1})
+        self.assertEqual(g, {"query_before_act": 1, "consulted_before_act": 1, "fact_used": 1,
+                             "no_false_create": 1, "no_spurious_revise": 1, "pass": 1})
 
     def test_edit_after_query(self):
         ev = events([(MEM + "query", {"mode": "rank", "path": "src/billing/refunds.py"}), ("Edit", {})], "done")
@@ -89,6 +90,31 @@ class Signals(unittest.TestCase):
         self.assertFalse(ts[0]["followed_by_memory_call"])
         self.assertEqual(row["wrote_auto_memory"], 1)
         self.assertEqual(row["grade"]["explicit_create"], 0)
+
+
+def hook_event(context):
+    out = json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
+    return {"type": "system", "subtype": "hook_response", "output": out}
+
+
+class HookDelivery(unittest.TestCase):
+    TITLE = "Run tests with make test-fast"
+    BODY = "Run `make test-fast` for the unit suite (skips Postgres tests)."
+
+    def test_hook_with_body_counts_as_consulted(self):
+        ev = events([], "Run make test-fast.")
+        ev.insert(1, hook_event(f"- [convention] {self.TITLE} (id: x; source: shared/human)\n  {self.BODY}"))
+        g, _ = run("pq-tests", ev)
+        self.assertEqual(g["query_before_act"], 0)
+        self.assertEqual(g["consulted_before_act"], 1)
+        self.assertEqual(g["pass"], 1, "query_before_act no longer gates pass")
+
+    def test_title_alone_does_not_count(self):
+        ev = events([], "Run make test-fast.")
+        ev.insert(1, hook_event(f"- [convention] {self.TITLE} (source: shared/human)\n  "))
+        g, _ = run("pq-tests", ev)
+        self.assertEqual(g["consulted_before_act"], 0)
+        self.assertEqual(g["pass"], 0)
 
 
 class Null(unittest.TestCase):

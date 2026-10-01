@@ -1,0 +1,35 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ab72a523-e083-43d9-b04a-a1dd4d2dff36\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8799eefb-0919-4346-afb1-31459560a76d\", \"session_id\": \"79db57bd-6e1d-491f-b5ee-a92211c6c219\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ab72a523-e083-43d9-b04a-a1dd4d2dff36\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"aca96992-fb9c-468b-a180-13cbbff93efa\", \"session_id\": \"79db57bd-6e1d-491f-b5ee-a92211c6c219\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"71194e32-8038-401b-a914-de0fb695d55a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"dc1500c3-2115-409b-b515-2015c27a111d\", \"session_id\": \"79db57bd-6e1d-491f-b5ee-a92211c6c219\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"71194e32-8038-401b-a914-de0fb695d55a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6a8d66d5-69f6-469a-a82a-c7dcf60f8300\", \"session_id\": \"79db57bd-6e1d-491f-b5ee-a92211c6c219\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2 going forward; /v1 is frozen\",\n \"content\": \"Design review decision (2026-10-01): all new/changed public API routes go under /v2. /v1 is frozen \\u2014 no new features or changes there.\",\n \"epistemic\": \"decision\",\n \"premise\": \"Design review on 2026-10-01 chose /v2 as the active public API version and froze /v1.\",\n \"invalidated_by\": [\n  \"a later design review superseding the API versioning policy\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"routes\"\n ],\n \"criticality\": 0.8\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f834-81ac-73c1-8b5c-0240cfefb868\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2 going forward; /v1 is frozen\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Understood. From now on I'll put public API routes under `/v2` and leave `/v1` unchanged. I've also saved this decision to project memory so it carries over to later sessions."
+ }
+]
