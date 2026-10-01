@@ -1,0 +1,1 @@
+Step 5: rank threshold after rerank + marked fallback, keyword-never-lowers scoring, result hints, memory-file note; fixed fixture and grader (step 6 eval side); claude-sonnet-5-5. New fixture: compare with v17 and later, not with v13.
