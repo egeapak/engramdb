@@ -66,6 +66,14 @@ PASSTHROUGH_ENV = {
 # Grants every tool of the plugin's MCP server. A bare `mcp__*` does not.
 MEMORY_SERVER_TOOLS = "mcp__plugin_engram_memory"
 
+# Fixture variants: the same project with different seeded memories. "vague"
+# gives every memory a vague title and puts the key fact in the body.
+FIXTURES = {
+    "default": {"seeds": "seed_memories.json", "cases": "cases.jsonl"},
+    "vague": {"seeds": "seed_memories_vague.json", "cases": "cases_vague.jsonl"},
+}
+FIXTURE = {"name": "default"}
+
 _write_lock = threading.Lock()
 
 
@@ -147,7 +155,7 @@ def setup_workspace(tmp, env, engram_md=False):
     git("-c", "user.name=eval", "-c", "user.email=eval@example.com", "commit", "-qm", "fixture")
     sh(["engramdb", "init"], ws, env)
     ids = {}
-    for m in json.loads((HERE / "seed_memories.json").read_text()):
+    for m in json.loads((HERE / FIXTURES[FIXTURE["name"]]["seeds"]).read_text()):
         ids[m["key"]] = seed_memory(ws, env, m)
     warm_daemon(ws, env)
     # Commit the seeded store so the end-state diff shows only what the run changed.
@@ -288,7 +296,7 @@ def run_one(case, rep, args, out_dir):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def take_snapshot(root, out_dir):
+def take_snapshot(root, out_dir, settings):
     """Copy the binary and plugin files once per variant; reuse them on resume."""
     root.mkdir(parents=True, exist_ok=True)
     if not (root / "bin" / "engramdb").exists():
@@ -303,7 +311,7 @@ def take_snapshot(root, out_dir):
     git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
     build = {"git_head_at_snapshot": git, "engramdb_sha256": sha(root / "bin" / "engramdb"),
              "plugin_json_sha256": sha(root / "plugin" / ".claude-plugin" / "plugin.json"),
-             "engram_md_sha256": sha(root / "ENGRAM.md")}
+             "engram_md_sha256": sha(root / "ENGRAM.md"), **settings}
     path = out_dir / "build.json"
     if path.exists() and json.loads(path.read_text()) != build:
         sys.exit(f"{path} differs from the snapshot in {root}; refusing to mix builds in one variant")
@@ -327,6 +335,8 @@ def main():
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--snapshot-root", default=os.path.join(tempfile.gettempdir(), "mte-snapshots"),
                     help="where per-variant copies of the binary and plugin live")
+    ap.add_argument("--fixture", choices=sorted(FIXTURES), default="default",
+                    help="seeded memories and case set (vague: facts only in memory bodies)")
     ap.add_argument("--engram-md", action="store_true",
                     help="add .claude/ENGRAM.md + @ENGRAM.md, as `engramdb setup` does (the README's recommended install)")
     ap.add_argument("--ort-dylib", default=os.environ.get("ORT_DYLIB_PATH", "/tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so"))
@@ -334,14 +344,17 @@ def main():
 
     if not (ENGRAMDB_BIN / "engramdb").exists():
         sys.exit(f"missing {ENGRAMDB_BIN / 'engramdb'}: run `cargo build --release -p engram-cli`")
-    cases = [json.loads(l) for l in (HERE / "cases.jsonl").read_text().splitlines() if l.strip()]
+    FIXTURE["name"] = args.fixture
+    grade.set_seed_file(HERE / FIXTURES[args.fixture]["seeds"])
+    cases = [json.loads(l) for l in (HERE / FIXTURES[args.fixture]["cases"]).read_text().splitlines() if l.strip()]
     if args.cases:
         want = set(args.cases.split(","))
         cases = [c for c in cases if c["id"] in want]
 
     out_dir = FLOW_DIR / args.variant
     out_dir.mkdir(parents=True, exist_ok=True)
-    take_snapshot(Path(args.snapshot_root) / args.variant, out_dir)
+    take_snapshot(Path(args.snapshot_root) / args.variant, out_dir,
+                  {"model": args.model, "fixture": args.fixture, "engram_md": args.engram_md})
     (out_dir / "traces").mkdir(parents=True, exist_ok=True)
     (out_dir / "raw").mkdir(exist_ok=True)
     grade.write_state(FLOW_DIR)

@@ -224,14 +224,20 @@ def _ids_match(target, tool_input):
     return any(tok in blob for tok in {target, target[:8], target[:12]} if len(tok) >= 8)
 
 
+_SEED_FILE = Path(__file__).parent / "seed_memories.json"
 _TITLES = None
+
+
+def set_seed_file(path):
+    """Use the titles of this fixture's seeded memories for hook_hit."""
+    global _SEED_FILE, _TITLES
+    _SEED_FILE, _TITLES = Path(path), None
 
 
 def _target_title(case):
     global _TITLES
     if _TITLES is None:
-        seeds = json.loads((Path(__file__).parent / "seed_memories.json").read_text())
-        _TITLES = {m["key"]: m["title"] for m in seeds}
+        _TITLES = {m["key"]: m["title"] for m in json.loads(_SEED_FILE.read_text())}
     return _TITLES.get(case.get("target"))
 
 

@@ -1,0 +1,127 @@
+[
+ {
+  "key": "money",
+  "type": "convention",
+  "title": "Money representation",
+  "content": "Billing code moves amounts between invoices, refunds, tax and the ledger, and every one of those paths has been bitten by rounding drift in the past. The rule that came out of that: store and pass every monetary amount as integer cents using the Money type in src/billing/money.py. Never use float for money, not even for intermediate math. New fields that hold an amount end in _cents, for example discount_cents.",
+  "paths": [
+   "src/billing/"
+  ],
+  "tags": [
+   "billing",
+   "money"
+  ]
+ },
+ {
+  "key": "finalize",
+  "type": "hazard",
+  "title": "finalize() caveat",
+  "content": "Invoice finalization talks to the external ledger service and is the most sensitive call in src/billing/invoices.py. The ledger endpoint has no idempotency key, so calling finalize() twice double-posts the invoice to the ledger. Never wrap it in retries. Use finalize_once(), which checks invoice.ledger_ref first and returns early when the invoice was already posted.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "billing",
+   "ledger"
+  ]
+ },
+ {
+  "key": "logging",
+  "type": "decision",
+  "title": "Logging library choice",
+  "content": "We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.",
+  "paths": [
+   "src/"
+  ],
+  "tags": [
+   "logging"
+  ]
+ },
+ {
+  "key": "tests",
+  "type": "convention",
+  "title": "Test command",
+  "content": "The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.",
+  "paths": [],
+  "tags": [
+   "testing",
+   "workflow"
+  ]
+ },
+ {
+  "key": "migrations",
+  "type": "hazard",
+  "title": "Migration rules",
+  "content": "The SQL files under migrations/ are applied in order by the deploy pipeline and every file that is merged has already run in production. Never edit an existing migration, even to fix a typo; production would never see the change. Instead add a new file with the next 4-digit number, for example 0008_fix_customers.sql, that makes the correction.",
+  "paths": [
+   "migrations/"
+  ],
+  "tags": [
+   "database",
+   "migrations"
+  ]
+ },
+ {
+  "key": "flags",
+  "type": "convention",
+  "title": "Feature flag usage",
+  "content": "Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently.",
+  "paths": [
+   "src/flags.py",
+   "flags.toml"
+  ],
+  "tags": [
+   "flags"
+  ]
+ },
+ {
+  "key": "rounding",
+  "type": "decision",
+  "title": "Tax rounding rule",
+  "content": "Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.",
+  "paths": [
+   "src/billing/tax.py"
+  ],
+  "tags": [
+   "billing",
+   "tax"
+  ]
+ },
+ {
+  "key": "export",
+  "type": "hazard",
+  "title": "Export script caution",
+  "content": "scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.",
+  "paths": [
+   "scripts/export.py"
+  ],
+  "tags": [
+   "ops",
+   "export"
+  ]
+ },
+ {
+  "key": "errors",
+  "type": "convention",
+  "title": "API error format",
+  "content": "Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "errors"
+  ]
+ },
+ {
+  "key": "release",
+  "type": "convention",
+  "title": "Release process",
+  "content": "Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.",
+  "paths": [],
+  "tags": [
+   "release",
+   "workflow"
+  ]
+ }
+]
