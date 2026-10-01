@@ -533,6 +533,8 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
 
     let query = RetrievalQuery {
         mode: RetrievalMode::Rank,
+        // Hooks inject "relevant memories": never a weak fallback match.
+        rank_fallback: Some(0),
         path: Some(relative_path),
         logical: vec![],
         query: None,
@@ -645,6 +647,8 @@ async fn process_session_start(
 
     let query = RetrievalQuery {
         mode: RetrievalMode::Rank,
+        // Hooks inject "relevant memories": never a weak fallback match.
+        rank_fallback: Some(0),
         path: None,
         logical: vec![],
         query: None,

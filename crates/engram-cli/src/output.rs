@@ -1966,6 +1966,7 @@ mod tests {
 
     fn test_score_breakdown() -> ScoreBreakdown {
         ScoreBreakdown {
+            below_threshold: false,
             final_score: 0.75,
             semantic: Some(0.8),
             keyword: None,
@@ -2188,6 +2189,8 @@ mod tests {
             }],
             total: 1,
             retrieval_quality: "full".to_string(),
+
+            dropped_below_threshold: 0,
         };
 
         let (formatter, cap) = OutputFormatter::capturing(OutputFormat::Json);
@@ -2211,6 +2214,8 @@ mod tests {
             memories: vec![],
             total: 0,
             retrieval_quality: "scope_only".to_string(),
+
+            dropped_below_threshold: 0,
         };
 
         for format in [
@@ -3086,6 +3091,8 @@ mod tests {
             ],
             total: 7,
             retrieval_quality: "full".to_string(),
+
+            dropped_below_threshold: 0,
         }
     }
 
@@ -3109,6 +3116,8 @@ mod tests {
             memories: vec![],
             total: 0,
             retrieval_quality: "scope_only".to_string(),
+
+            dropped_below_threshold: 0,
         };
         snap_formats("retrieval_empty", |f| {
             f.print_retrieval_result(&empty, true)

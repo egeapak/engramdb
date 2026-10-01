@@ -123,7 +123,12 @@ impl Default for ScoringWeights {
 }
 
 /// Scoring configuration for different retrieval modes
+///
+/// `#[serde(default)]`: a partial `[retrieval.scoring]` section keeps every
+/// field it does not name at its default, instead of failing to parse (which
+/// made the whole config file fall back to defaults).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScoringConfig {
     /// Weights when both query and scope are provided
     pub with_query: ScoringWeights,
@@ -684,10 +689,24 @@ impl ReviewConfig {
 }
 
 /// Retrieval configuration
+///
+/// `#[serde(default)]`: a partial `[retrieval]` section (for example only
+/// `relevance_threshold = 0.3`) keeps the other fields at their defaults.
+/// Without it the section failed to parse and the whole config file was
+/// ignored, so the threshold could not be tuned at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetrievalConfig {
-    /// Minimum relevance score threshold
+    /// Minimum relevance score threshold. In rank mode with query text it is
+    /// applied to the reranked score when a reranker ran.
     pub relevance_threshold: f64,
+
+    /// Rank mode: when no candidate clears `relevance_threshold`, return this
+    /// many of the best-scoring candidates, each marked `below_threshold`,
+    /// instead of an empty result. `0` keeps the empty result. Rank mode is
+    /// "browse by relevance"; an empty answer sent agents to read the store
+    /// files directly instead.
+    pub rank_fallback: usize,
 
     /// Maximum number of results to return
     pub max_results: usize,
@@ -703,6 +722,7 @@ impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
             relevance_threshold: 0.45,
+            rank_fallback: 3,
             max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
@@ -2596,6 +2616,34 @@ mod tests {
             loaded.retrieval.scoring.challenge_penalty,
             original.retrieval.scoring.challenge_penalty
         );
+    }
+
+    #[test]
+    fn test_retrieval_section_with_one_field_keeps_other_defaults() {
+        // Before #[serde(default)], this section failed to parse ("missing
+        // field max_results"), and the whole config file fell back to defaults,
+        // so the threshold could not be tuned at all.
+        let config: EngramConfig =
+            toml::from_str("[retrieval]\nrelevance_threshold = 0.3\n").unwrap();
+        let defaults = RetrievalConfig::default();
+        assert_eq!(config.retrieval.relevance_threshold, 0.3);
+        assert_eq!(config.retrieval.max_results, defaults.max_results);
+        assert_eq!(config.retrieval.rank_fallback, 3);
+        assert_eq!(
+            config.retrieval.scoring.with_query.semantic,
+            defaults.scoring.with_query.semantic
+        );
+
+        let config: EngramConfig =
+            toml::from_str("[retrieval.scoring]\nscope_multiplier_floor = 0.4\n").unwrap();
+        assert_eq!(config.retrieval.scoring.scope_multiplier_floor, 0.4);
+        assert_eq!(
+            config.retrieval.scoring.with_keyword.keyword,
+            defaults.scoring.with_keyword.keyword
+        );
+
+        let config: EngramConfig = toml::from_str("[retrieval]\nrank_fallback = 0\n").unwrap();
+        assert_eq!(config.retrieval.rank_fallback, 0);
     }
 
     #[test]

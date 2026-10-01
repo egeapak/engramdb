@@ -2086,6 +2086,9 @@ impl EngramDbServer {
             epistemic: epistemic_filter,
             include_invalidated: input.include_invalidated,
             situation,
+            // `[retrieval].rank_fallback` from config: an agent browsing by
+            // rank gets marked weak matches rather than an empty answer.
+            rank_fallback: None,
         };
 
         // Cross-store read fan-in (ops::query_memories_with_extra_stores). When
@@ -4176,6 +4179,8 @@ impl ServerHandler for EngramDbServer {
                     mode: RetrievalMode::Rank,
                     path: Some(path.to_string()),
                     max_results: Some(10),
+                    // Presented as the file's relevant memories: no weak fallback.
+                    rank_fallback: Some(0),
                     ..RetrievalQuery::default()
                 };
                 let result = ops::query_memories(&engine, &query)
@@ -4257,6 +4262,8 @@ impl ServerHandler for EngramDbServer {
                         mode: RetrievalMode::Rank,
                         path,
                         max_results: Some(10),
+                        // Presented as the file's relevant memories: no weak fallback.
+                        rank_fallback: Some(0),
                         ..RetrievalQuery::default()
                     };
                     if let Ok(result) = ops::query_memories(&engine, &query).await {

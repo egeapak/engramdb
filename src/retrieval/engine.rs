@@ -137,6 +137,12 @@ pub struct RetrievalQuery {
 
     /// Detail level for results
     pub detail_level: DetailLevel,
+
+    /// Rank mode only: overrides `retrieval.rank_fallback` (how many weak
+    /// matches to return, marked `below_threshold`, when nothing clears the
+    /// threshold). Hooks pass `Some(0)`: they inject "relevant memories" and
+    /// must never present a weak match as one.
+    pub rank_fallback: Option<usize>,
 }
 
 /// A memory with its computed relevance score.
@@ -179,6 +185,12 @@ pub struct RetrievalResult {
     /// - `"no_query_signals"` — query text provided but nothing matched
     /// - `"scope_only"`     — no query text; scope / filter-only ranking
     pub retrieval_quality: String,
+
+    /// Rank mode: candidates removed by the relevance threshold. Always
+    /// reported, so the cut is a declared loss, never a silent one. When it
+    /// equals every candidate, `memories` holds the rank fallback instead
+    /// (each marked `below_threshold`).
+    pub dropped_below_threshold: usize,
 }
 
 /// Main retrieval engine for EngramDB.
@@ -1487,12 +1499,14 @@ impl RetrievalEngine {
         // Step 6: Threshold. Rank mode uses retrieval.relevance_threshold;
         // Filter mode uses the stricter search.threshold when set, since the
         // flow is "find specific memories" rather than "browse context".
-        let threshold = match query.mode {
-            RetrievalMode::Rank => self.config.retrieval.relevance_threshold,
-            RetrievalMode::Filter => filter_threshold(self.config.search.threshold),
-        };
-        if threshold > 0.0 {
-            candidates.retain(|c| c.score >= threshold);
+        // Rank mode applies its threshold after the rerank (Step 8.5): the
+        // cut belongs on the blended score, and the pre-rerank composite is
+        // not on the scale `relevance_threshold` was set for.
+        if query.mode == RetrievalMode::Filter {
+            let threshold = filter_threshold(self.config.search.threshold);
+            if threshold > 0.0 {
+                candidates.retain(|c| c.score >= threshold);
+            }
         }
 
         // Step 7: Sort by score descending.
@@ -1524,6 +1538,13 @@ impl RetrievalEngine {
                 tracing::warn!("Reranking failed, using original scores: {}", e);
             }
         }
+
+        // Step 8.5: Rank threshold, on the reranked (sorted) candidates.
+        let dropped_below_threshold = if query.mode == RetrievalMode::Rank {
+            self.apply_rank_threshold(&mut candidates, query)
+        } else {
+            0
+        };
 
         let total = candidates.len();
 
@@ -1566,6 +1587,7 @@ impl RetrievalEngine {
             memories: scored_memories,
             total,
             retrieval_quality: retrieval_quality.to_string(),
+            dropped_below_threshold,
         };
 
         self.record_stage(
@@ -1588,6 +1610,38 @@ impl RetrievalEngine {
     /// again here from `query.path` once dropped the empty-string collapse, so
     /// the no-query Rank shape (the SessionStart hook) with `path: ""` zeroed
     /// every scope multiplier and returned nothing.
+    /// Rank mode's relevance cut, on candidates already sorted by score.
+    ///
+    /// Keeps every candidate at or above `retrieval.relevance_threshold`.
+    /// When none clears it, keeps the best `rank_fallback` (the query's
+    /// override, else the config) and marks each `below_threshold`, instead of
+    /// returning nothing: rank mode is "browse by relevance", and an empty
+    /// answer sent agents to read the store files directly. Returns how many
+    /// candidates were removed, so the caller can report the loss.
+    fn apply_rank_threshold(
+        &self,
+        candidates: &mut Vec<ScoredCandidate>,
+        query: &RetrievalQuery,
+    ) -> usize {
+        let threshold = self.config.retrieval.relevance_threshold;
+        if threshold <= 0.0 {
+            return 0;
+        }
+        let before = candidates.len();
+        let fallback = query
+            .rank_fallback
+            .unwrap_or(self.config.retrieval.rank_fallback);
+        if fallback == 0 || candidates.iter().any(|c| c.score >= threshold) {
+            candidates.retain(|c| c.score >= threshold);
+        } else {
+            candidates.truncate(fallback);
+            for c in candidates.iter_mut() {
+                c.breakdown.below_threshold = true;
+            }
+        }
+        before - candidates.len()
+    }
+
     async fn rank_scope_only_from_index(
         &self,
         query: &RetrievalQuery,
@@ -1642,15 +1696,12 @@ impl RetrievalEngine {
         };
         self.record_stage("score", t_score.elapsed().as_secs_f64() * 1000.0);
 
-        let threshold = self.config.retrieval.relevance_threshold;
-        if threshold > 0.0 {
-            candidates.retain(|c| c.score >= threshold);
-        }
         candidates.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        let dropped_below_threshold = self.apply_rank_threshold(&mut candidates, query);
 
         let total = candidates.len();
         let max_results = query
@@ -1694,6 +1745,7 @@ impl RetrievalEngine {
             memories: scored_memories,
             total,
             retrieval_quality: "scope_only".to_string(),
+            dropped_below_threshold,
         };
         self.record_stage(
             "query.total",
@@ -5004,6 +5056,178 @@ mod tests {
         }
     }
 
+    // ─── Rank threshold: after rerank, with a marked fallback ───────────────
+
+    /// Rank-mode engine over memories whose degraded score is their
+    /// criticality (no embeddings, a query no memory's text matches), so the
+    /// threshold arithmetic below is exact.
+    async fn rank_threshold_fixture(
+        criticalities: &[(&str, f64)],
+        tweak: impl FnOnce(&mut crate::types::EngramConfig),
+    ) -> (tempfile::TempDir, RetrievalEngine) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for (summary, c) in criticalities {
+            store.create(&stub_memory(summary, *c)).await.unwrap();
+        }
+        let mut config = crate::types::EngramConfig::default();
+        tweak(&mut config);
+        (temp_dir, RetrievalEngine::new(store, config))
+    }
+
+    fn rank(query: &str) -> RetrievalQuery {
+        RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            query: Some(query.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn rank_returns_marked_fallback_instead_of_empty() {
+        let (_d, engine) = rank_threshold_fixture(
+            &[
+                ("alpha", 0.30),
+                ("beta", 0.20),
+                ("gamma", 0.10),
+                ("delta", 0.05),
+            ],
+            |_| {},
+        )
+        .await;
+        let result = engine.query(&rank("unrelated words")).await.unwrap();
+        // Nothing clears 0.45: the best 3 (rank_fallback default) come back, marked.
+        let got: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|m| m.memory.summary.as_str())
+            .collect();
+        assert_eq!(got, vec!["alpha", "beta", "gamma"]);
+        assert!(result
+            .memories
+            .iter()
+            .all(|m| m.score_breakdown.below_threshold));
+        assert_eq!(result.dropped_below_threshold, 1);
+        assert_eq!(result.total, 3);
+    }
+
+    #[tokio::test]
+    async fn rank_fallback_zero_keeps_the_empty_result() {
+        let (_d, engine) = rank_threshold_fixture(&[("alpha", 0.30), ("beta", 0.20)], |_| {}).await;
+        let mut q = rank("unrelated words");
+        q.rank_fallback = Some(0);
+        let result = engine.query(&q).await.unwrap();
+        assert!(result.memories.is_empty());
+        assert_eq!(
+            result.dropped_below_threshold, 2,
+            "the cut is still reported"
+        );
+
+        let (_d, engine) = rank_threshold_fixture(&[("alpha", 0.30), ("beta", 0.20)], |c| {
+            c.retrieval.rank_fallback = 1
+        })
+        .await;
+        let result = engine.query(&rank("unrelated words")).await.unwrap();
+        assert_eq!(
+            result.memories.len(),
+            1,
+            "config rank_fallback applies when the query has none"
+        );
+    }
+
+    #[tokio::test]
+    async fn rank_with_a_confident_match_returns_no_weak_ones() {
+        let (_d, engine) =
+            rank_threshold_fixture(&[("alpha", 0.90), ("beta", 0.30), ("gamma", 0.20)], |_| {})
+                .await;
+        let result = engine.query(&rank("unrelated words")).await.unwrap();
+        assert_eq!(result.memories.len(), 1);
+        assert!(!result.memories[0].score_breakdown.below_threshold);
+        assert_eq!(result.dropped_below_threshold, 2);
+    }
+
+    #[tokio::test]
+    async fn filter_mode_has_no_rank_fallback() {
+        let (_d, engine) = rank_threshold_fixture(&[("alpha", 0.30)], |_| {}).await;
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                query: Some("unrelated words".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(result.memories.is_empty());
+        assert_eq!(result.dropped_below_threshold, 0);
+    }
+
+    #[tokio::test]
+    async fn scope_only_rank_uses_the_same_fallback() {
+        let (_d, engine) = rank_threshold_fixture(&[("alpha", 0.30), ("beta", 0.20)], |_| {}).await;
+        let result = engine
+            .query(&RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.retrieval_quality, "scope_only");
+        assert_eq!(result.memories.len(), 2);
+        assert!(result
+            .memories
+            .iter()
+            .all(|m| m.score_breakdown.below_threshold));
+    }
+
+    #[tokio::test]
+    async fn rank_threshold_applies_to_the_reranked_score() {
+        use crate::retrieval::reranker::RerankScore;
+        // Scores any document containing "RESCUE" far above the rest.
+        struct RescueReranker;
+        #[async_trait::async_trait]
+        impl Reranker for RescueReranker {
+            async fn rerank(
+                &self,
+                _query: &str,
+                documents: &[String],
+            ) -> anyhow::Result<Vec<RerankScore>> {
+                Ok(documents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, d)| RerankScore {
+                        index,
+                        score: if d.contains("RESCUE") { 12.0 } else { -12.0 },
+                    })
+                    .collect())
+            }
+        }
+        let (_d, engine) =
+            rank_threshold_fixture(&[("RESCUE the right memory", 0.20), ("noise", 0.40)], |c| {
+                c.rerank.enabled = true;
+                c.rerank.weight = 0.5;
+            })
+            .await;
+        let engine = engine.with_reranker(Arc::new(RescueReranker));
+        let result = engine.query(&rank("unrelated words")).await.unwrap();
+        // Pre-rerank 0.20 < 0.45 would have been cut before the cross-encoder
+        // saw it; blended 0.5*0.20 + 0.5*sigmoid(12) ≈ 0.60 clears the threshold.
+        assert_eq!(
+            result.memories.len(),
+            1,
+            "{:?}",
+            result
+                .memories
+                .iter()
+                .map(|m| (&m.memory.summary, m.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(result.memories[0].memory.summary, "RESCUE the right memory");
+        assert!(!result.memories[0].score_breakdown.below_threshold);
+        assert_eq!(result.dropped_below_threshold, 1);
+    }
+
     fn stub_memory(summary: &str, criticality: f64) -> crate::types::Memory {
         use crate::types::{Memory, MemoryType, Provenance, Visibility};
         let mut m = Memory::new(MemoryType::Context, summary, "body", Provenance::human());
@@ -5255,16 +5479,21 @@ mod tests {
         assert!(kw > 0.0);
         assert!(sem > 0.9, "identical vectors should give sem ~1.0: {sem}");
 
-        // The final score must follow the combined with_keyword formula
-        // (scope and trust multipliers are 1.0 here: no scope context, human
-        // provenance), proving both signals actually moved the score.
+        // The final score is the combined with_keyword formula, or the
+        // semantic-only formula when that is higher: a keyword hit never
+        // lowers a score (scope and trust multipliers are 1.0 here: no scope
+        // context, human provenance).
         let w = &config.retrieval.scoring.with_keyword;
-        let expected = w.keyword.unwrap() * kw
+        let with_keyword = w.keyword.unwrap() * kw
             + w.semantic.unwrap() * sem
             + w.relevance * combined.score_breakdown.relevance;
+        let q = &config.retrieval.scoring.with_query;
+        let semantic_only =
+            q.semantic.unwrap() * sem + q.relevance * combined.score_breakdown.relevance;
+        let expected = with_keyword.max(semantic_only);
         assert!(
             (combined.score - expected).abs() < 0.01,
-            "combined score {} should match 0.45*kw + 0.30*sem + 0.25*rel = {}",
+            "combined score {} should be max(0.45*kw + 0.30*sem + 0.25*rel, 0.55*sem + 0.45*rel) = {}",
             combined.score,
             expected
         );
@@ -5273,10 +5502,10 @@ mod tests {
         let semantic_only = by_id(&sem_only.id);
         assert!(semantic_only.score_breakdown.keyword.is_none());
         assert!(semantic_only.score_breakdown.semantic.unwrap() > 0.9);
-        // And the two regimes produce different scores for the same sem/crit.
+        // Keyword evidence never lowers the score for the same sem/crit.
         assert!(
-            (combined.score - semantic_only.score).abs() > 0.05,
-            "keyword evidence must change the score: combined={} sem_only={}",
+            combined.score >= semantic_only.score - 1e-9,
+            "keyword evidence must not lower the score: combined={} sem_only={}",
             combined.score,
             semantic_only.score
         );

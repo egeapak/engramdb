@@ -3,7 +3,9 @@
 //! Thin wrapper delegating to [`RetrievalEngine::query`]. See there for the
 //! semantics of [`RetrievalMode::Rank`] vs [`RetrievalMode::Filter`].
 
-use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery, RetrievalResult, ScoredMemory};
+use crate::retrieval::engine::{
+    RetrievalEngine, RetrievalMode, RetrievalQuery, RetrievalResult, ScoredMemory,
+};
 use anyhow::Result;
 use std::collections::HashSet;
 
@@ -85,6 +87,25 @@ pub fn merge_scored_memories(
     });
     project.truncate(max);
     duplicates
+}
+
+/// Rank mode across stores. Each store may have returned its own fallback:
+/// weak matches marked `below_threshold` because nothing in that store cleared
+/// the threshold. Once merged, a confident result from any store makes every
+/// weak one noise, so they are dropped; when none is confident, only the best
+/// `fallback` weak ones are kept. `memories` must be sorted by score. Returns
+/// how many were removed, for `dropped_below_threshold`.
+pub fn reconcile_rank_fallback(memories: &mut Vec<ScoredMemory>, fallback: usize) -> usize {
+    let before = memories.len();
+    if memories
+        .iter()
+        .any(|sm| !sm.score_breakdown.below_threshold)
+    {
+        memories.retain(|sm| !sm.score_breakdown.below_threshold);
+    } else {
+        memories.truncate(fallback);
+    }
+    before - memories.len()
 }
 
 /// Whether a memory from a shared (group or everyone/global) store is visible
@@ -246,6 +267,7 @@ where
     for ((label, _), extra_result) in extras.iter().zip(extra_results) {
         match extra_result {
             Ok(extra_result) => {
+                result.dropped_below_threshold += extra_result.dropped_below_threshold;
                 let visible: Vec<ScoredMemory> = extra_result
                     .memories
                     .into_iter()
@@ -267,6 +289,17 @@ where
                 unreadable.push(label.clone());
             }
         }
+    }
+
+    // Each store applied rank mode's fallback on its own. Merged, a confident
+    // result from any store makes every weak one noise.
+    if query.mode == RetrievalMode::Rank {
+        let fallback = query
+            .rank_fallback
+            .unwrap_or(engine.config().retrieval.rank_fallback);
+        let removed = reconcile_rank_fallback(&mut result.memories, fallback);
+        result.dropped_below_threshold += removed;
+        result.total = result.total.saturating_sub(removed);
     }
 
     // P2: cross-store rerank equalization. Memories merged from stores embedded
@@ -354,6 +387,43 @@ mod tests {
             score,
             score_breakdown: ScoreBreakdown::default(),
         }
+    }
+
+    fn weak(id: &str, score: f64) -> ScoredMemory {
+        let mut sm = scored(id, score);
+        sm.score_breakdown.below_threshold = true;
+        sm
+    }
+
+    #[test]
+    fn reconcile_drops_weak_matches_when_any_store_is_confident() {
+        let mut merged = vec![weak("a", 0.40), scored("b", 0.39), weak("c", 0.30)];
+        let removed = reconcile_rank_fallback(&mut merged, 3);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|m| m.memory.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_the_best_fallback_when_nothing_is_confident() {
+        let mut merged = vec![
+            weak("a", 0.40),
+            weak("b", 0.35),
+            weak("c", 0.30),
+            weak("d", 0.20),
+        ];
+        let removed = reconcile_rank_fallback(&mut merged, 3);
+        assert_eq!(removed, 1);
+        assert_eq!(merged.len(), 3);
+        assert!(merged.iter().all(|m| m.score_breakdown.below_threshold));
+
+        let mut empty: Vec<ScoredMemory> = vec![];
+        assert_eq!(reconcile_rank_fallback(&mut empty, 3), 0);
     }
 
     #[test]

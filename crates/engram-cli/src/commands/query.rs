@@ -155,6 +155,7 @@ async fn compute_query_result(
             .map(engramdb::ops::parse_situation)
             .transpose()?,
         include_invalidated: Some(params.include_invalidated),
+        rank_fallback: None,
     };
 
     // When querying a shared store directly (`--global`/`--group`), there is no
