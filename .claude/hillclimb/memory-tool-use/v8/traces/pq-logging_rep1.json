@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "Which logging library should I use when I add log lines here?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2a13dddd-063a-4201-a9df-3170584570ed\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"e1c76c95-0be7-4120-91e5-4dcc24e20594\", \"session_id\": \"17d365f6-d910-4b3e-932c-daaba83ebba1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2a13dddd-063a-4201-a9df-3170584570ed\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f6327da5-df74-4b85-854a-7caf1bb5ba82\", \"session_id\": \"17d365f6-d910-4b3e-932c-daaba83ebba1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2a47b6ee-4d0a-43a2-96e3-1b2710176fc7\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"29169b3a-f9b6-42b6-8bba-4ce5fa0de8d7\", \"session_id\": \"17d365f6-d910-4b3e-932c-daaba83ebba1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2a47b6ee-4d0a-43a2-96e3-1b2710176fc7\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Logging library choice (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Logging library choice (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"28cc3a6d-f4f9-4baf-8148-5ebd42d1026e\", \"session_id\": \"17d365f6-d910-4b3e-932c-daaba83ebba1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"653a15f2-2344-4d0c-b505-1f47977a3952\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"ee611702-2ff7-410c-b78b-84aa121ba7fa\", \"session_id\": \"17d365f6-d910-4b3e-932c-daaba83ebba1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"653a15f2-2344-4d0c-b505-1f47977a3952\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0199da27-3549-4e6e-bde7-f9122d2404ec\", \"session_id\": \"17d365f6-d910-4b3e-932c-daaba83ebba1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"logging library\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7e5-f154-78b3-98eb-af16405c2363\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.7892998374677412,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7892998374677412,\"keyword\":0.9589191473890548,\"relevance\":0.5,\"rerank\":1.5633742809295654,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6508301711626012,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Logging library choice\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"import (logging|structlog|loguru)|from (structlog|loguru)|require\\\\(.*(winston|pino|log)|log/slog|tracing::|zap\\\\.|logrus\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/invoices.py:4:import structlog"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-logging-3c5_z84n/ledgerline/src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass, field\n2\t\n3\timport requests\n4\timport structlog\n5\t\n6\tlog = structlog.get_logger()\n7\t\n8\tLEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\"\n9\t\n10\t\n11\t@dataclass\n12\tclass Invoice:\n13\t    id: str\n14\t    customer_id: str\n15\t    subtotal_cents: int\n16\t    tax_cents: int = 0\n17\t    ledger_ref: str | None = None\n18\t    lines: list = field(default_factory=list)\n19\t\n20\t\n21\tdef finalize(invoice):\n22\t    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n23\t    resp.raise_for_status()\n24\t    invoice.ledger_ref = resp.json()[\"ref\"]\n25\t    log.info(\"invoice_finalized\", invoice_id=invoice.id)\n26\t    return invoice\n27\t\n28\t\n29\tdef finalize_once(invoice):\n30\t    if invoice.ledger_ref:\n31\t        return invoice\n32\t    return finalize(invoice)\n33\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Use **structlog**, not the standard library's `logging` module.\n\nA team decision recorded in the project's memory store (from the 2026 observability work) says to use structlog in every module under `src/`, so logs are processed the same way in production. The code already follows it: `src/billing/invoices.py:4-6` sets up the logger exactly that way.\n\nHow to write log lines:\n\n- Get the logger once per module: `log = structlog.get_logger()`\n- Make the event name a snake_case key, not a sentence: `\"invoice_finalized\"`\n- Put identifiers and other details in keyword arguments, not in the message string\n\nFor example, from `src/billing/invoices.py:25`:\n\n```python\nlog.info(\"invoice_finalized\", invoice_id=invoice.id)\n```\n\nDon't write `log.info(f\"Finalized invoice {invoice.id}\")`."
+ }
+]

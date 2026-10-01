@@ -1,0 +1,69 @@
+[
+ {
+  "role": "user",
+  "content": "Which logging library should I use when I add log lines here?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"37b74d17-7de6-4bc4-bd94-10623d5c2eb8\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0f8443bc-f82c-463c-af5d-a29a254926e5\", \"session_id\": \"6773c0dd-cdc3-43fd-9723-7565ada08fc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"37b74d17-7de6-4bc4-bd94-10623d5c2eb8\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"73198176-29fd-4ce7-b7ba-79a94e5240e2\", \"session_id\": \"6773c0dd-cdc3-43fd-9723-7565ada08fc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"af054898-dbe2-4ba7-9f49-04a08eb86a3c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"499c4192-ed79-4f23-828c-d524e97ec3cc\", \"session_id\": \"6773c0dd-cdc3-43fd-9723-7565ada08fc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"af054898-dbe2-4ba7-9f49-04a08eb86a3c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Logging library choice (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Logging library choice (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0fa36fc1-d60d-416c-bde1-74772aa65e0c\", \"session_id\": \"6773c0dd-cdc3-43fd-9723-7565ada08fc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"33ace724-e374-4884-a23e-643f9b93368d\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"a387c613-92cb-4a95-b692-0a996750fc3d\", \"session_id\": \"6773c0dd-cdc3-43fd-9723-7565ada08fc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"33ace724-e374-4884-a23e-643f9b93368d\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e602ccd8-2916-450f-87d1-39699479be0c\", \"session_id\": \"6773c0dd-cdc3-43fd-9723-7565ada08fc7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"logging\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7dc-d205-7212-a7f5-481183e7455f\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.6550426047660887,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.6550426047660887,\"keyword\":0.9929058551131678,\"relevance\":0.5,\"rerank\":0.2752036154270172,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5663587949692782,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Logging library choice\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"import (logging|structlog|loguru)|from (structlog|loguru)|getLogger|zap|zerolog|slog|logrus|winston|pino|log4j|slf4j|tracing::\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/invoices.py:4:import structlog"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-logging-3o_4b8nc/ledgerline/src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass, field\n2\t\n3\timport requests\n4\timport structlog\n5\t\n6\tlog = structlog.get_logger()\n7\t\n8\tLEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\"\n9\t\n10\t\n11\t@dataclass\n12\tclass Invoice:\n13\t    id: str\n14\t    customer_id: str\n15\t    subtotal_cents: int\n16\t    tax_cents: int = 0\n17\t    ledger_ref: str | None = None\n18\t    lines: list = field(default_factory=list)\n19\t\n20\t\n21\tdef finalize(invoice):\n22\t    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n23\t    resp.raise_for_status()\n24\t    invoice.ledger_ref = resp.json()[\"ref\"]\n25\t    log.info(\"invoice_finalized\", invoice_id=invoice.id)\n26\t    return invoice\n27\t\n28\t\n29\tdef finalize_once(invoice):\n30\t    if invoice.ledger_ref:\n31\t        return invoice\n32\t    return finalize(invoice)\n33\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Use **structlog**, not the stdlib `logging` module.\n\nThis is a recorded team decision in the project's memory store. It came out of the 2026 observability work, and the goal was one logging library in every module so production log processing stays uniform. The code follows it: `src/billing/invoices.py` is the only module that logs today, and it uses structlog.\n\nThe conventions:\n\n```python\nimport structlog\n\nlog = structlog.get_logger()\n\n# snake_case event name; identifiers go in keyword fields, not the message string\nlog.info(\"invoice_finalized\", invoice_id=invoice.id)\n```\n\n- Create one module-level logger with `structlog.get_logger()`.\n- Use snake_case event keys, such as `\"ledger_post_failed\"`, not `\"Ledger post failed\"`.\n- Pass IDs and values as keyword fields (`customer_id=..., amount_cents=...`). Don't format them into the message with f-strings.\n\nIf you're adding lines to `invoices.py`, the `log` object at `src/billing/invoices.py:6` is already set up, so you can just use it."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One minor friction point, and no capability was missing.\n\n- **Hook's injected context (UserPromptSubmit):** The hook showed only the memory's title, \"Logging library choice,\" with no ID and no content. To learn what the decision said, I had to make a separate `query` call (`mode: \"filter\"`, `query: \"logging\"`, `detail_level: \"full\"`). I would have wanted the hook to include the memory ID and a one-line gist, such as \"structlog everywhere, never stdlib logging.\" For a question this direct, that could have saved the round-trip, or at least let me call `get` by ID instead of searching by keyword again.\n\nEverything else I wanted was available. I checked the memory against `src/billing/invoices.py`, and `verify` was reachable through ToolSearch to record that check. I didn't call it, but that was my choice, not a gap in the tools."
+ }
+]

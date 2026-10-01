@@ -1,0 +1,99 @@
+[
+ {
+  "role": "user",
+  "content": "How should I represent a currency amount in new billing code?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d72b1a2d-dfa3-4bae-a89e-9303e8347544\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"2740d00f-1832-4eaa-a481-32abeba0ec3c\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d72b1a2d-dfa3-4bae-a89e-9303e8347544\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"29e95e6b-255f-4a59-9926-caa43a56701e\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8d9fc090-cd7a-46a2-b04c-33ef0f431915\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"f2f9ad6f-4479-426b-ab4e-d2a0cc25c7eb\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8d9fc090-cd7a-46a2-b04c-33ef0f431915\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Money representation (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Money representation (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"639baad9-42ec-4d6b-9af0-39cdbe3051b5\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c38d628c-2716-4769-a2a2-3917b84e9155\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"0b1f487e-2dc9-4296-8e48-31fbfab5d352\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c38d628c-2716-4769-a2a2-3917b84e9155\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2cc8197d-5a5b-449d-8022-7051cea08664\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5924a83f-16d6-4701-919d-49dd2d213964\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"1ad2fcb2-4015-46ca-bc9f-2d0edb5dde3c\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5924a83f-16d6-4701-919d-49dd2d213964\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"311d5696-46b0-464b-9068-23f20675320e\", \"session_id\": \"c11ee183-30a9-4c67-9061-fc2f095d650b\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"money currency amount representation\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Billing code moves amounts between invoices, refunds, tax and the ledger, and every one of those paths has been bitten by rounding drift in the past. The rule that came out of that: store and pass every monetary amount as integer cents using the Money type in src/billing/money.py. Never use float for money, not even for intermediate math. New fields that hold an amount end in _cents, for example discount_cents.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7dc-c131-7651-8a0f-5a4b5303761c\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.6075669747741004,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.6075669747741004,\"keyword\":0.33260779024611903,\"relevance\":0.5,\"rerank\":1.2301965951919556,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5553582092121344,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money representation\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7dc-e8ea-7122-a0f2-556c63f3ab0e\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.16278591724491276,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.16278591724491276,\"keyword\":0.022446850255329682,\"relevance\":0.5,\"rerank\":-2.6374268531799316,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.41234187211073164,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax rounding rule\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)money|cents|decimal|currency\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 14 files\n.engramdb/memories/tax-rounding-rule_01a0f7dc-e8ea-7122-a0f2-556c63f3ab0e.md\n.engramdb/memories/money-representation_01a0f7dc-c131-7651-8a0f-5a4b5303761c.md\ntests/test_tax.py\ntests/test_payments.py\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nsrc/api/checkout.py\nsrc/billing/tax.py\nsrc/billing/refunds.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nREADME.md"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me verify the memory against the actual code."
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-money-tl498vx_/ledgerline/src/billing/money.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass\n2\t\n3\t\n4\t@dataclass(frozen=True)\n5\tclass Money:\n6\t    cents: int\n7\t    currency: str = \"USD\"\n8\t\n9\t    def __add__(self, other):\n10\t        assert self.currency == other.currency\n11\t        return Money(self.cents + other.cents, self.currency)\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)_cents|float|Decimal|Money\",\n \"path\": \"/tmp/mte-pq-money-tl498vx_/ledgerline\",\n \"glob\": \"!.engramdb/**\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:10:        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\ntests/test_tax.py:5:    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300\nmigrations/0001_create_invoices.sql:1:CREATE TABLE invoices (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, subtotal_cents BIGINT NOT NULL);\nmigrations/0002_add_tax.sql:1:ALTER TABLE invoices ADD COLUMN tax_cents BIGINT NOT NULL DEFAULT 0;\nmigrations/0004_create_lines.sql:1:CREATE TABLE invoice_lines (invoice_id TEXT REFERENCES invoices(id), quantity INT, unit_cents BIGINT);\nmigrations/0005_create_refunds.sql:1:CREATE TABLE refunds (id TEXT PRIMARY KEY, invoice_id TEXT REFERENCES invoices(id), refunded_cents BIGINT);\nREADME.md:9:- `src/billing/` - money, invoices, refunds, and tax logic\nsrc/billing/refunds.py:4:def refund(invoice: Invoice, amount_cents: int):\nsrc/billing/refunds.py:5:    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/refunds.py:7:    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\nsrc/billing/invoices.py:15:    subtotal_cents: int\nsrc/billing/invoices.py:16:    tax_cents: int = 0\nsrc/billing/invoices.py:22:    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\nsrc/billing/money.py:5:class Money:\nsrc/billing/money.py:11:        return Money(self.cents + other.cents, self.currency)\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/billing/tax.py:7:        x += line[\"quantity\"] * line[\"unit_cents\"]\nsrc/billing/tax.py:11:def tax_for(amount_cents, rate):\nsrc/api/checkout.py:9:    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\nsrc/api/checkout.py:10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-money-tl498vx_/ledgerline/src/billing/tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom decimal import Decimal\n2\t\n3\t\n4\tdef line_total(lines):\n5\t    x = 0\n6\t    for line in lines:\n7\t        x += line[\"quantity\"] * line[\"unit_cents\"]\n8\t    return x\n9\t\n10\t\n11\tdef tax_for(amount_cents, rate):\n12\t    raise NotImplementedError\n13\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Use integer cents, and wrap them in the `Money` type when you can. This is a recorded project convention, and the code follows it.\n\n**The rule**\n- Store and pass every money amount as an `int` number of cents, using `Money` from `src/billing/money.py:5`:\n  ```python\n  @dataclass(frozen=True)\n  class Money:\n      cents: int\n      currency: str = \"USD\"\n  ```\n- Never use `float` for money, including for in-between calculations. Billing has had rounding errors before in invoices, refunds, tax and the ledger, which is why this rule exists.\n- Name any new field that holds an amount with a `_cents` ending, such as `discount_cents`.\n- In the database, use `BIGINT` columns named `*_cents`, like the existing migrations (`subtotal_cents`, `tax_cents`, `unit_cents`, `refunded_cents`).\n\n**What the code does now**\nMost existing code passes plain `int` cents with `_cents` names, for example `Invoice.subtotal_cents`, `refund(invoice, amount_cents)` and `checkout`'s `total_cents`. `Money` itself is small: it only supports `+`, and that checks the two currencies match. If your new code mixes currencies or needs to carry the currency with the amount, use `Money` and add the operations you need to it. For a single-currency field on a record, an `int` with a `_cents` name matches the code around it.\n\n**Tax (if your code touches it)**\nThere's a second recorded decision for `src/billing/tax.py`:\n- Use banker's rounding (`decimal.ROUND_HALF_EVEN`), never `ROUND_HALF_UP`.\n- Round each line item's tax separately, then add up the rounded line taxes. Never round the invoice total.\n- Use `Decimal` for the rate math and turn the result back into whole cents.\n\n`tax_for` isn't written yet; it raises `NotImplementedError`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One thing was awkward, and nothing was actually missing.\n\n**The hook's injected context.** The UserPromptSubmit hook named the matching memory only by its title, \"Money representation\". It gave no content and no memory ID. To read the rule I had to run a separate `query` (filter mode, `detail_level: \"full\"`). I wanted the hook to include the memory's ID and either its first line of content or its full text. With the ID I could have called `get` on it directly. With the content inline, I wouldn't have needed an extra call to answer at all. The PreToolUse hook on `tax.py` had the same problem: it named \"Tax rounding rule\" but didn't show it.\n\n**Things I could have done but didn't:**\n- **`verify`**: after reading `money.py` and the migrations, I could have marked the money memory as checked against the code. It was only available after loading it through ToolSearch, and I skipped it.\n- **`challenge` or `update`**: the memory says to pass every amount using the `Money` type, but most of the code passes plain `int` values with `_cents` names. I could have recorded that partial mismatch, and I didn't.\n\nIn both cases the tool existed. I just didn't use it."
+ }
+]

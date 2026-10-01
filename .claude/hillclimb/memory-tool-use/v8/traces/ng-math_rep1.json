@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What is 17 * 23?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0d84fd5f-24be-4f71-9b17-25ce58897e3a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f658c310-d759-459b-828a-e3fd0ae59be5\", \"session_id\": \"c7dc0e31-fafc-4980-988f-76c47ea075f8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0d84fd5f-24be-4f71-9b17-25ce58897e3a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6197a68b-1b0a-4f20-91a7-c071aaad5a81\", \"session_id\": \"c7dc0e31-fafc-4980-988f-76c47ea075f8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1b4972a5-99e5-4422-89e1-3f854a9af760\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"52c05049-49be-48f8-af0c-d259b71fde95\", \"session_id\": \"c7dc0e31-fafc-4980-988f-76c47ea075f8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1b4972a5-99e5-4422-89e1-3f854a9af760\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"52db6f9c-595b-4938-80eb-11b2634656be\", \"session_id\": \"c7dc0e31-fafc-4980-988f-76c47ea075f8\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "17 \u00d7 23 = **391**"
+ }
+]

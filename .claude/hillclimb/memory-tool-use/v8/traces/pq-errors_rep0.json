@@ -1,0 +1,90 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ec101aef-0092-4222-83f2-ffdd10dab0bd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"009f274e-a1a7-4970-b8f7-1b090fd5daf3\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ec101aef-0092-4222-83f2-ffdd10dab0bd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6dfa84cf-7d3b-46f5-8585-c8e94d077d60\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b576f460-9957-40ee-b73a-726ca7383a00\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"fe2bea2c-52f5-46fc-83c5-80c65d79d791\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b576f460-9957-40ee-b73a-726ca7383a00\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"131432c9-36bf-4ef1-8071-af0eecd82915\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e18ab849-2ab0-4344-8a1d-054967f32f35\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"be576c6e-337c-4e59-8849-aa53fe7c3fd3\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e18ab849-2ab0-4344-8a1d-054967f32f35\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fd6f0cfa-b6e5-4113-be5e-70c8730a2894\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a4004273-b90c-4458-ad1a-c4a1f6cfce3a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"7da7fd80-9c57-46b2-9af8-7aa724606ee1\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a4004273-b90c-4458-ad1a-c4a1f6cfce3a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"56aaa9a2-b93b-4853-ac98-a469e9b867f6\", \"session_id\": \"bd61ef28-b1ef-4408-9dbc-e12b33044b3b\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"error\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7de-467d-71c0-8253-235ad4094a1a\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.4581667117847892,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.4581667117847892,\"keyword\":0.993620835684111,\"relevance\":0.5,\"rerank\":-1.2704910039901733,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4167694520793092,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API error format\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7de-2325-7350-b241-2a1a649f1b3d\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.19445137544269073,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.19445137544269073,\"keyword\":0.06409324079203436,\"relevance\":0.5,\"rerank\":-1.880672574043274,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.342497177093646,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"error|Error|status\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 16 files\n.engramdb/memories/release-process_01a0f7de-4c75-7e80-a0fb-f70dc8f73321.md\n.engramdb/memories/api-error-format_01a0f7de-467d-71c0-8253-235ad4094a1a.md\n.engramdb/memories/export-script-caution_01a0f7de-4086-7fe0-82be-0d8ae0b21542.md\n.engramdb/memories/tax-rounding-rule_01a0f7de-38b0-7903-82cc-f17e952b024b.md\n.engramdb/memories/feature-flag-usage_01a0f7de-3153-7431-a900-ea224dc58733.md\n.engramdb/memories/migration-rules_01a0f7de-291c-7f10-bc72-fcb770c44141.md\n.engramdb/memories/test-command_01a0f7de-2325-7350-b241-2a1a649f1b3d.md\n.engramdb/memories/logging-library-choice_01a0f7de-1dcf-7e02-9b22-4a116aca1c1e.md\n.engramdb/memories/finalize-caveat_01a0f7de-185b-70e3-8370-cfe16be68973.md\n.engramdb/memories/money-representation_01a0f7de-12a7-75e2-9281-8a6913c35854.md\ntests/test_payments.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/billing/tax.py\nsrc/billing/refunds.py\nsrc/billing/invoices.py"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me check the code against the memory."
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-pp2i2b0q/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-pp2i2b0q/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Return an RFC 7807 `application/problem+json` response using the `problem()` helper in `src/api/errors.py`. Don't return an ad-hoc dict or a plain string with an error status code. Clients of the public API parse error bodies automatically, so every endpoint needs to use the same error shape. This rule comes from a project memory, and the helper's code matches it.\n\n```python\nfrom .errors import problem\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json(silent=True)\n    if not cart or \"items\" not in cart:\n        return problem(400, \"Invalid cart\", \"Request body must include an 'items' list.\")\n    ...\n```\n\n`problem(status, title, detail=None)` (`src/api/errors.py:4`) does the following:\n- It builds the body `{\"type\": \"about:blank\", \"title\": ..., \"status\": ...}` and adds `\"detail\"` only if you pass one.\n- It sets the HTTP status code on the response.\n- It sets the content type to `application/problem+json`.\n\nUse `title` for a short summary that's the same for every instance of that error. Put the details specific to the request in `detail`.\n\n**Current gap:** `src/api/checkout.py` doesn't handle errors yet. A missing `items` key or a body that isn't JSON raises an exception, and the client gets Flask's default 500 page instead of a problem+json body. If you add validation there, use the pattern above."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "1. **Hook-injected context: the memory ID and content were missing.** The UserPromptSubmit hook only gave me the summary line \"[convention] API error format\". It didn't include the memory's ID or body. I wanted to `get` that memory directly, as ENGRAM.md tells me to do with surfaced memories, but I had no ID to pass. I had to run a `query` with `mode: \"filter\"` and `query: \"error\"` to find it again. That search also returned an unrelated memory about the test command. If the hook had included the ID, or the `content` text for short memories, I could have skipped that step.\n\n2. **`verify` wasn't loaded up front.** I checked the memory against `src/api/errors.py` and it was accurate, so I would have liked to mark it verified. But `verify` was a deferred tool, so I'd first have needed a ToolSearch call to load its schema. That's possible, just awkward for a step this small. Having `verify` loaded alongside `query`/`get`, or a `verify: true` option on `get`, would have made it a single call."
+ }
+]

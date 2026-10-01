@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e185257e-b2a8-40ba-a463-8049fc9f45b7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a57820d0-bb09-4e7a-98d3-15cd6ecfb217\", \"session_id\": \"e5df3dc2-f750-476d-8e08-23b1e133765a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e185257e-b2a8-40ba-a463-8049fc9f45b7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e7cf4001-636b-4b5e-9ac2-ce194d13bd94\", \"session_id\": \"e5df3dc2-f750-476d-8e08-23b1e133765a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7d7c5e47-ec21-4582-b067-2af75d02557b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b58ce11b-5211-4c2e-843b-9c7b03d2bb9f\", \"session_id\": \"e5df3dc2-f750-476d-8e08-23b1e133765a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7d7c5e47-ec21-4582-b067-2af75d02557b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"772defec-c8b2-4568-a95d-22f661c9cc5d\", \"session_id\": \"e5df3dc2-f750-476d-8e08-23b1e133765a\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API version routes v1 v2\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7e2-1ee2-7351-add2-323c9b1308c1\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.17013244608869343,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.17013244608869343,\"keyword\":0.056412988250308535,\"relevance\":0.5,\"rerank\":-2.3873682022094727,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4266988956634552,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API error format\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"/v[12]\\\\b\",\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\"\nsrc/billing/invoices.py:8:LEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-01)\",\n \"content\": \"Decided at the 2026-10-01 design review: all new or changed public API routes go under /v2. /v1 is frozen, so don't add endpoints to it or change its behavior. If a /v1 endpoint needs to change, add the new behavior as a /v2 route. This covers only this project's public API routes. Outbound URLs to other services that happen to contain /v1 (e.g. the payments sandbox in tests/test_payments.py, LEDGER_URL in src/billing/invoices.py) are not affected.\",\n \"epistemic\": \"decision\",\n \"premise\": \"Holds while the 2026-10-01 design review decision on API versioning stands\",\n \"physical\": [\n  \"src/api/\"\n ],\n \"logical\": [\n  \"api.versioning\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"routes\"\n ],\n \"criticality\": 0.8,\n \"confidence\": 0.95\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7e2-5544-7832-9906-e1a704f7844e\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-01)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Saved to the project memory as a decision. From now on, public API routes go under `/v2`, and `/v1` stays frozen: no new endpoints and no behavior changes. If a `/v1` endpoint needs to change, the new behavior goes in as a `/v2` route.\n\nIt didn't conflict with anything already stored. The only memory on API conventions is the RFC 7807 error format, and that still applies to `/v2` routes.\n\nThe only `/v1` strings in the repo are URLs for outside services, not our own routes: the payments sandbox in `tests/test_payments.py:4` and `LEDGER_URL` in `src/billing/invoices.py:8`. The memory says those aren't affected, so nobody tries to \"migrate\" them by mistake."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things were missing or awkward:\n\n1. **No way to set provenance on `create`.** The `/v2`-only, `/v1`-frozen rule was the user's decision from a design review. The store recorded it as agent-authored, and the hook now shows it as \"(source: shared/agent)\". The earlier error-format memory came back with `\"provenance\":\"human\"`, so the store does track this field. `create` just doesn't let me set it. I wanted a `provenance` parameter (for example `\"human\"` or `\"user_stated\"`), plus maybe a `source_ref` such as \"design review 2026-10-01\". I'd have used them to mark this memory as a human decision rather than something I inferred, so it gets the right trust weight and later agents don't treat it as a guess they can override.\n\n2. **The `premise` text renders badly in the injected context.** The `premise` description gives \"while we pin ort rc.12\" as its example, so I wrote my premise as a condition. The hook puts \"because\" in front of it, which produced \"because Holds while the 2026-10-01 design review decision\u2026 stands\". That doesn't read as a reason. I'd want either separate fields for the reason and the validity condition (say `rationale` alongside `premise`), or a hook template that labels the premise as something like \"valid while:\". I'd have used that to record why the decision was made (it came from the design review) separately from what keeps it valid."
+ }
+]

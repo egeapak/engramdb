@@ -1,0 +1,168 @@
+[
+ {
+  "role": "user",
+  "content": "Make GET /invoices/<id> in src/api/invoices.py return a 404 when the invoice doesn't exist."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c8507f05-df99-44cf-a912-f09fcbde24ab\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"ec50c531-6af8-42a1-9923-462f42c4e402\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c8507f05-df99-44cf-a912-f09fcbde24ab\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"300fdd77-f26c-402e-8d78-480e0706d2c8\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e0e6f5e4-d27a-493f-a06f-8ebb696fbb5d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"da9f40c1-cb38-4d5c-9901-d321cbca1c9e\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e0e6f5e4-d27a-493f-a06f-8ebb696fbb5d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9df813ed-120f-4a2a-8912-83fd4fabcbeb\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d8a76a6c-50a9-4a42-b24d-81106145e939\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"cb6f0d5e-9bc7-4644-a421-b4efa954ceb4\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d8a76a6c-50a9-4a42-b24d-81106145e939\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ffbdfb5c-2a35-40f1-8c5c-56473515a1d1\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"85e81e0c-9b7c-418c-a6ec-d7cd26fa8d8d\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"174aa30d-775f-4664-a01c-59e7bd749ed2\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"85e81e0c-9b7c-418c-a6ec-d7cd26fa8d8d\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"92cc9635-a996-409e-b290-72a3f94afe36\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"98ce884e-b0a3-435e-ae81-10e6da799a35\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"065a0026-d62b-49b9-a341-2a09aed8ac20\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"98ce884e-b0a3-435e-ae81-10e6da799a35\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e84eda4d-6b46-42ec-ae9d-f7c8afed83e9\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2f1d641d-8f36-4d78-9142-a88847e477cb\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"d87bf95c-e672-470e-9b30-784cb6be8b40\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2f1d641d-8f36-4d78-9142-a88847e477cb\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5f08b8b7-4a74-4968-8065-2824bb72d574\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a30a4dea-59cb-43a4-ac42-1c6c5a8fb468\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"e24f3988-89e0-4bff-be38-08e78b6a9f1f\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a30a4dea-59cb-43a4-ac42-1c6c5a8fb468\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4d60d144-12fa-4b73-b12f-699cdad8b74a\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"abd148b9-a92c-46ec-9124-8f76bc3f22e7\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"92098ed1-098a-4d8a-928f-227c3043f0bc\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"abd148b9-a92c-46ec-9124-8f76bc3f22e7\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4653f6c7-d6f7-481d-a8e6-abe14ece2bce\", \"session_id\": \"8f7ab3a4-186f-4715-a21b-5fb96eefc4f6\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-404-dkde40br/ledgerline/src/api/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify\n2\t\n3\tbp = Blueprint(\"invoices\", __name__)\n4\t\n5\t_INVOICES = {}\n6\t\n7\t\n8\t@bp.get(\"/invoices/<invoice_id>\")\n9\tdef get_invoice(invoice_id):\n10\t    invoice = _INVOICES.get(invoice_id)\n11\t    return jsonify(invoice.__dict__)\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API error format\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7e8-952a-7973-9532-b4d109ca7685\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.855644592292589,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.855644592292589,\"keyword\":0.9533491038179176,\"relevance\":0.5,\"rerank\":2.688570976257324,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.7364440748444399,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API error format\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7e8-7425-7ab1-b138-030127012c1e\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.14505896754266895,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14505896754266895,\"keyword\":0.02551724075060132,\"relevance\":0.5,\"rerank\":-2.961543083190918,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3481379889416513,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-404-dkde40br/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"tests/**/*.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"grep -rn \\\"import\\\" src/api/*.py | head -20; ls src src/api\",\n \"description\": \"Check import style in api modules\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/api/checkout.py:1:from flask import Blueprint, jsonify, request\nsrc/api/errors.py:1:from flask import jsonify\nsrc/api/invoices.py:1:from flask import Blueprint, jsonify\nsrc:\n__init__.py\napi\nbilling\nflags.py\n\nsrc/api:\n__init__.py\ncheckout.py\nerrors.py\ninvoices.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-404-dkde40br/ledgerline/src/api/invoices.py\",\n \"old_string\": \"from flask import Blueprint, jsonify\\n\\nbp\",\n \"new_string\": \"from flask import Blueprint, jsonify\\n\\nfrom src.api import errors\\n\\nbp\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-404-dkde40br/ledgerline/src/api/invoices.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-404-dkde40br/ledgerline/src/api/invoices.py\",\n \"old_string\": \"    invoice = _INVOICES.get(invoice_id)\\n\",\n \"new_string\": \"    invoice = _INVOICES.get(invoice_id)\\n    if invoice is None:\\n        return errors.problem(404, \\\"Invoice not found\\\", f\\\"No invoice with id {invoice_id}\\\")\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-404-dkde40br/ledgerline/src/api/invoices.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me verify the import path works and the behavior is right."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -c \\\"\\nfrom flask import Flask\\nfrom src.api.invoices import bp\\napp = Flask(__name__); app.register_blueprint(bp)\\nr = app.test_client().get('/invoices/nope')\\nprint(r.status_code, r.mimetype, r.get_json())\\n\\\"\",\n \"description\": \"Smoke-test the 404 response\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 2, in <module>\nModuleNotFoundError: No module named 'flask'"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a; head -5 tests/*.py; ls -d .venv venv 2>/dev/null\",\n \"description\": \"Check for virtualenv and test import style\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 2\n.\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n==> tests/test_payments.py <==\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n==> tests/test_tax.py <==\nfrom src.billing.tax import line_total\n\n\ndef test_line_total():\n    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -m py_compile src/api/invoices.py && git diff\",\n \"description\": \"Syntax-check and show diff\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "diff --git a/src/api/invoices.py b/src/api/invoices.py\nindex 543713d..b2361e9 100644\n--- a/src/api/invoices.py\n+++ b/src/api/invoices.py\n@@ -1,5 +1,7 @@\n from flask import Blueprint, jsonify\n \n+from src.api import errors\n+\n bp = Blueprint(\"invoices\", __name__)\n \n _INVOICES = {}\n@@ -8,4 +10,6 @@ _INVOICES = {}\n @bp.get(\"/invoices/<invoice_id>\")\n def get_invoice(invoice_id):\n     invoice = _INVOICES.get(invoice_id)\n+    if invoice is None:\n+        return errors.problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n     return jsonify(invoice.__dict__)"
+ },
+ {
+  "role": "assistant",
+  "content": "`GET /invoices/<id>` now returns a 404 when the invoice doesn't exist. Before this change, a missing ID made the handler crash on `None.__dict__`, which came back as a 500.\n\n```python\ninvoice = _INVOICES.get(invoice_id)\nif invoice is None:\n    return errors.problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n```\n\nThe 404 uses `errors.problem()` from `src/api/errors.py`, so the body is in the standard `application/problem+json` format. A project memory says all API endpoints must use that shared error format, because clients parse error bodies automatically. I imported it as `from src.api import errors`, the same `src.`-prefixed style the tests use.\n\nI haven't run the endpoint: Flask isn't installed in this environment, so my smoke test failed on the import. The file does compile. There are no existing tests for the invoices API, and I didn't add one."
+ }
+]

@@ -1,0 +1,159 @@
+[
+ {
+  "role": "user",
+  "content": "Finance changed their mind: tax now rounds half-up. Please update src/billing/tax.py accordingly."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"22310133-fd3b-4b36-8311-ab0c01475581\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"eed32085-d28d-4938-98b1-22bda41262d7\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"22310133-fd3b-4b36-8311-ab0c01475581\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a299b7a8-3b89-4176-abb4-010ce9bbdf82\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"285f00b4-0760-4f4a-9aac-40ff207e17da\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"fd2d7bf3-7b71-45fd-9ef2-aae2667836b2\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"285f00b4-0760-4f4a-9aac-40ff207e17da\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8f962eda-bea2-4d2b-8254-e26edf1aed93\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"25a803a6-131a-4ca3-8091-39f2b04fe70f\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"0f1a0ce7-458b-4bc4-be09-07730d03d4cc\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"25a803a6-131a-4ca3-8091-39f2b04fe70f\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f99555b8-8275-44ef-8ece-1cfcb9735c77\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8c10b825-9b50-458e-bd87-3bb0cb58c8d0\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"84d3e6ae-fb7d-4bfb-a7aa-462bc339b58b\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8c10b825-9b50-458e-bd87-3bb0cb58c8d0\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bfff39b3-85ee-47e5-8457-9f3e7cfe920c\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a6c4dd91-8cc1-41d2-9929-f5827090d580\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"c3e80fa3-5470-4096-b732-2916929cf99d\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a6c4dd91-8cc1-41d2-9929-f5827090d580\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a7439c60-7d06-4bf4-907a-387b09bca55a\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a3a12063-d4ee-4b6d-8036-2ef585863009\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"9a02d56d-b056-4a4d-be6c-63495e184e0e\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a3a12063-d4ee-4b6d-8036-2ef585863009\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5d8b78a3-1f5f-4cab-a5d6-d6af153e8c6a\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9056faad-9d93-46e9-b441-36ea766e9035\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"1c757ec3-4a2d-4db0-984f-135e4ceadd53\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9056faad-9d93-46e9-b441-36ea766e9035\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6e38b985-49f8-4e77-bef9-b49364ca2383\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f2d02e7c-a3a4-4d50-8572-60c24c8edf15\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"78a4dff2-3b37-4d97-8614-0076af9551bb\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f2d02e7c-a3a4-4d50-8572-60c24c8edf15\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"655bf273-b274-48f3-b2eb-b19e8c85bc8a\", \"session_id\": \"06e4cdfb-5e4c-46b6-bc24-551d162aa674\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ct-rounding-ykchrbw8/ledgerline/src/billing/tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom decimal import Decimal\n2\t\n3\t\n4\tdef line_total(lines):\n5\t    x = 0\n6\t    for line in lines:\n7\t        x += line[\"quantity\"] * line[\"unit_cents\"]\n8\t    return x\n9\t\n10\t\n11\tdef tax_for(amount_cents, rate):\n12\t    raise NotImplementedError\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"tax rounding\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7eb-0bd5-70c3-b1aa-b212465d2d6e\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.7831239832213148,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7831239832213148,\"keyword\":0.9750600661427731,\"relevance\":0.5,\"rerank\":1.3785202503204346,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6790589862010976,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax rounding rule\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Billing code moves amounts between invoices, refunds, tax and the ledger, and every one of those paths has been bitten by rounding drift in the past. The rule that came out of that: store and pass every monetary amount as integer cents using the Money type in src/billing/money.py. Never use float for money, not even for intermediate math. New fields that hold an amount end in _cents, for example discount_cents.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ea-dcca-7893-8976-612ce7530165\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.3330553313183382,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3330553313183382,\"keyword\":0.059800620432964566,\"relevance\":0.5,\"rerank\":-0.652671754360199,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5727088901217334,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money representation\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"src/billing/**\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/__init__.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ct-rounding-ykchrbw8/ledgerline/src/billing/money.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass\n2\t\n3\t\n4\t@dataclass(frozen=True)\n5\tclass Money:\n6\t    cents: int\n7\t    currency: str = \"USD\"\n8\t\n9\t    def __add__(self, other):\n10\t        assert self.currency == other.currency\n11\t        return Money(self.cents + other.cents, self.currency)\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"tax_for|ROUND_\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/tax-rounding-rule_01a0f7eb-0bd5-70c3-b1aa-b212465d2d6e.md:15:Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\nsrc/billing/tax.py:11:def tax_for(amount_cents, rate):"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ct-rounding-ykchrbw8/ledgerline/src/billing/tax.py\",\n \"old_string\": \"from decimal import Decimal\\n\",\n \"new_string\": \"from decimal import ROUND_HALF_UP, Decimal\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ct-rounding-ykchrbw8/ledgerline/src/billing/tax.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ct-rounding-ykchrbw8/ledgerline/src/billing/tax.py\",\n \"old_string\": \"    raise NotImplementedError\",\n \"new_string\": \"    tax = Decimal(amount_cents) * Decimal(str(rate))\\n    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_UP))\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ct-rounding-ykchrbw8/ledgerline/src/billing/tax.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python3 -c \\\"\\nfrom src.billing.tax import tax_for\\nprint(tax_for(250, 0.01), tax_for(350, 0.01), tax_for(1000, 0.0825), tax_for(1006, 0.0825))\\\"\",\n \"description\": \"Sanity-check half-up rounding\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "3 4 83 83"
+ },
+ {
+  "role": "assistant",
+  "content": "The half-up tax rounding works. Next I'll update the stored team decision, which still says banker's rounding."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__update",
+  "content": "{\n \"id\": \"01a0f7eb-0bd5-70c3-b1aa-b212465d2d6e\",\n \"content\": \"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. In October 2026 finance reversed the rounding mode: tax amounts now round half-up (decimal.ROUND_HALF_UP), replacing the earlier banker's rounding (ROUND_HALF_EVEN). Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total. Implemented in tax_for in src/billing/tax.py.\",\n \"premise\": \"Holds while finance keeps the half-up decision (changed 2026-10-01 per user request)\",\n \"invalidated_by\": [\n  \"src/billing/tax.py\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7eb-0bd5-70c3-b1aa-b212465d2d6e\",\"updated\":true}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've written `tax_for` in `src/billing/tax.py` so it now rounds half-up. Before this change it wasn't implemented at all; it just raised `NotImplementedError`.\n\n```python\ntax = Decimal(amount_cents) * Decimal(str(rate))\nreturn int(tax.quantize(Decimal(1), rounding=ROUND_HALF_UP))\n```\n\nIt does all the math in `Decimal` on integer cents, so floats never touch the amount. I ran a quick check: `tax_for(250, 0.01)` returns `3` and `tax_for(350, 0.01)` returns `4`. Banker's rounding would have given `2` for the first one.\n\nI also updated the team's stored memory of the tax rules. It still said banker's rounding and \"never ROUND_HALF_UP\", so it now records that finance switched to half-up in October 2026. The other rule in that memory is unchanged: tax is rounded per line item and the rounded amounts are added up, never rounding the invoice total. `tax_for` works on one amount, so whatever calls it should still call it once per line. Let me know if finance changed that part too."
+ }
+]

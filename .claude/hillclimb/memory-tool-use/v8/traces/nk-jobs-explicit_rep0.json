@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f41de110-1049-4df0-9d68-e4a7ee25a732\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"3051225b-9506-48a2-bef6-68304972d1c0\", \"session_id\": \"0788a1e0-dacd-47a1-839d-22339be131a1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f41de110-1049-4df0-9d68-e4a7ee25a732\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c87c240e-aed3-41f5-a385-775dc06bc28a\", \"session_id\": \"0788a1e0-dacd-47a1-839d-22339be131a1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"15889480-7470-46a0-bee6-12e003957e5e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"c7c57ceb-236d-473d-87e8-1fe95249a949\", \"session_id\": \"0788a1e0-dacd-47a1-839d-22339be131a1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"15889480-7470-46a0-bee6-12e003957e5e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"33c51a15-91ab-44d3-b00c-4ff1628745e8\", \"session_id\": \"0788a1e0-dacd-47a1-839d-22339be131a1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"background jobs celery enqueue\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"def enqueue|celery\",\n \"output_mode\": \"content\",\n \"head_limit\": 20\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must go through jobs.enqueue(); never call celery directly\",\n \"content\": \"Convention (stated by the user on 2026-10-01): every background job must be dispatched through `jobs.enqueue()`. Never call celery directly (no `task.delay()`, `apply_async()`, `send_task()`, etc.). When adding or modifying code that schedules async/background work, route it through `jobs.enqueue()`.\",\n \"epistemic\": \"decision\",\n \"criticality\": 0.8,\n \"confidence\": 0.95,\n \"tags\": [\n  \"background-jobs\",\n  \"celery\",\n  \"jobs\",\n  \"convention\"\n ],\n \"logical\": [\n  \"jobs\",\n  \"infrastructure.background_jobs\"\n ],\n \"premise\": \"Per user directive; holds until the user changes the job-dispatch policy\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7e0-e53c-7b13-84e3-ad1790a0ef35\",\"created\":true,\"summary\":\"All background jobs must go through jobs.enqueue(); never call celery directly\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved it to the project's EngramDB memory as a convention: all background jobs must go through `jobs.enqueue()` and celery is never called directly. That means no `.delay()`, `apply_async()` or `send_task()`. Future sessions in this project will see it.\n\nI searched the repo and found no `jobs.enqueue` definition and no celery usage yet. So right now this is a rule for code we write later."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things were awkward:\n\n1. **No way to mark a memory as coming from the user.** The `create` tool has no `source`/`provenance` parameter (something like `source: \"user\"` or `\"user_directive\"`). This memory is a direct instruction from the user, but it now shows up as \"(source: shared/agent)\". That makes it look like something I inferred, when it should carry the user's authority. I'd have used that parameter to label it as a user directive. Future sessions could then rank it above agent-derived notes and not override it.\n\n2. **`premise` didn't fit a plain user rule.** The rule has no technical premise; it holds until the user changes it. I had to fill in \"Per user directive; holds until the user changes the job-dispatch policy\". The hook then shows it as \"because Per user directive\u2026\", which reads badly. I'd have wanted a separate `rationale` field, or a `premise` value like `\"user_policy\"`, so I could say \"this is policy\" without inventing a premise."
+ }
+]
