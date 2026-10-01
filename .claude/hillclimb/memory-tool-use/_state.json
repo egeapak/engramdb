@@ -71,6 +71,10 @@
   {
    "id": "out_tokens",
    "label": "out tok"
+  },
+  {
+   "id": "wrote_auto_memory",
+   "label": "auto-mem write"
   }
  ]
 }

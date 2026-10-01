@@ -1,0 +1,96 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a336b9a4-e12d-4446-9445-abf0fd4440a3\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"974a77c7-25f0-4866-a5a4-6b46a3ff27fa\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a336b9a4-e12d-4446-9445-abf0fd4440a3\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"97b6d0ad-79c3-41ad-9435-dd46c0b119bf\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b6cb57ad-377c-40ca-9c59-8ac13ae41cf9\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3f9d0034-5411-4b7d-8108-4228752ea112\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b6cb57ad-377c-40ca-9c59-8ac13ae41cf9\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6853e626-f83a-4b16-a5bc-019ac5c7e67d\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6f212f1b-710a-49cd-8d6b-412120890183\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"18f919ca-4f85-46a1-8a39-7a0e5c20d7db\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6f212f1b-710a-49cd-8d6b-412120890183\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c9eef6ca-77dc-44b1-8a30-4dcb01bbeb17\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4c727d30-5bb1-4c81-81f5-148f2df87080\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"fe58b6b6-0e30-422b-8f47-86a02499904b\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4c727d30-5bb1-4c81-81f5-148f2df87080\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"60d30726-7534-40ef-908d-e6abe13581f2\", \"session_id\": \"268b422b-b726-4f9a-a67f-390a316c3be5\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -100\",\n \"description\": \"List tracked files\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f78f-3237-7e02-9476-f736f55cd83e.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f78f-2324-7e20-be67-e39779c4ae76.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f78f-1291-7723-be83-279107ee3083.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f78f-0d30-73b0-8c78-0ac95b37d790.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f78f-1eee-76a3-af39-bfec1b2d6e0e.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f78f-36cc-7db0-959c-2dcda6174363.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f78f-1b05-7370-8eb0-8a6523ff1eab.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f78f-2d34-7842-8027-885124840e72.md\n.engramdb/memories/tax-uses-round-half-even_01a0f78f-281a-78e1-acdc-fa0363cd6e21.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f78f-16ef-7982-ba3f-0ee165aaf917.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"migration customers schema column\",\n \"path\": \"migrations/0007_add_customers.sql\",\n \"max_results\": 5\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-8x6zsq3w/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tCREATE TABLE customers (\n2\t    id TEXT PRIMARY KEY,\n3\t    name TEXT NOT NULL,\n4\t    emial TEXT NOT NULL\n5\t);\n6\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat Makefile README.md; cat migrations/0006_index_customer.sql; grep -rn \\\"migrat\\\\|customers\\\" --include=*.py --include=*.toml --include=Makefile . | grep -v .engramdb\",\n \"description\": \"Inspect migration tooling and references\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\nCREATE INDEX invoices_customer ON invoices(customer_id);"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-8x6zsq3w/ledgerline/.engramdb/memories/never-edit-an-applied-migration_01a0f78f-1eee-76a3-af39-bfec1b2d6e0e.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f78f-1eee-76a3-af39-bfec1b2d6e0e\n4\ttype: hazard\n5\tstatus: Active\n6\ttitle: Never edit an applied migration\n7\t---\n8\t\n9\t# Never edit an applied migration\n10\t\n11\t**Summary:** Never edit an applied migration\n12\t\n13\t## Content\n14\t\n15\tFiles in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `migrations/`\n20\t- **Tags:** `database`, `migrations`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T13:02:27.054797882+00:00\n28\t- **Updated:** 2026-10-01T13:02:27.054797882+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T13:02:27.054797882Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.5\n36\t-->\n37\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Put it in a **new migration file**, `migrations/0008_add_customer_phone.sql`. Don't add it to `0007_add_customers.sql`:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\n- **Why not edit 0007:** The project's EngramDB has a \"never edit an applied migration\" note. Files in `migrations/` have already been applied in production, so a change to 0007 would never run there. Every schema change goes in a new file with the next 4-digit number. The latest is `0007`, so this one is `0008`.\n- **Allow nulls:** Customers already in the table have no phone number. A `NOT NULL` column with no default would fail on them. If you need it required later, backfill the data first, then add the constraint in another migration.\n- **Nothing else to change:** No Python code in `src/` or `scripts/` uses the `customers` table yet, so there's no model or query to update.\n\nWhile you're in there: the email column in 0007 is misspelled as `emial`. For the same reason, don't fix it in 0007. If you want it fixed, add another migration with `ALTER TABLE customers RENAME COLUMN emial TO email;`. It's your call whether to do that now, since anything that reads the column would need to change too.\n\nI haven't created the file. Want me to?\n\nSide note: EngramDB's relevance search returned nothing for this question, even though that migration note exists in `.engramdb/memories/`. I found it by reading the file directly. The search index may need a `reindex`."
+ }
+]

@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "How do I run the tests in this repo?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5bec4a34-0695-4dc2-ba78-d96cd218026d\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"9c985b9f-7e2a-4c42-84e1-7a92badc6cd8\", \"session_id\": \"84f8c6aa-3ccf-45d1-b9b8-823be90a14c7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5bec4a34-0695-4dc2-ba78-d96cd218026d\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a7b9e9eb-8109-4a0d-8091-85418ddca439\", \"session_id\": \"84f8c6aa-3ccf-45d1-b9b8-823be90a14c7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fedb0fb2-8085-4400-afcf-8d789a2d8d65\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3fced8ce-c423-4161-83c9-ae428b8c2eaf\", \"session_id\": \"84f8c6aa-3ccf-45d1-b9b8-823be90a14c7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fedb0fb2-8085-4400-afcf-8d789a2d8d65\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8c5963d9-03d9-44a7-8341-a350ceed9845\", \"session_id\": \"84f8c6aa-3ccf-45d1-b9b8-823be90a14c7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a && cat Makefile 2>/dev/null; cat package.json pyproject.toml 2>/dev/null | head -50\",\n \"description\": \"List repo files and show build/test config\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"grep -n -i -A3 test README.md; grep -rn \\\"postgres\\\" tests pyproject.toml | head\",\n \"description\": \"Check README and tests for test instructions\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "16:Install the dependancies with `pip install -e .[dev]`, then run the tests."
+ },
+ {
+  "role": "assistant",
+  "content": "The `Makefile` has two test targets:\n\n```bash\npip install -e .[dev]   # one-time: installs the project plus pytest (per README)\n\nmake test-fast          # pytest -m \"not postgres\" -q  \u2014 skips Postgres-marked tests\nmake test               # pytest -q                    \u2014 runs the full suite\n```\n\nYou can also call pytest directly, for example `pytest tests/ -q`, or pass `-k <name>` to run a subset.\n\nA project memory says to use `make test-fast` by default, and that matches the Makefile. No tests in `tests/` have the `postgres` marker yet, so right now both targets run the same tests. That will change once Postgres-dependent tests are added. I didn't run the suite myself."
+ }
+]

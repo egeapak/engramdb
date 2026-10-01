@@ -1,0 +1,78 @@
+[
+ {
+  "role": "user",
+  "content": "I want to put a new checkout flow behind a feature flag. How do we do flags in this project?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"65ec6501-993e-41a3-b1a3-ba1ea3c4419e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d35ab4e7-8d4c-44ca-8039-ad20a0784df0\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"65ec6501-993e-41a3-b1a3-ba1ea3c4419e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"977d50d3-c312-429c-8bd9-f482c7ebf9d2\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2a93361f-f83d-44e8-84fd-7a0d467ac5e9\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"7afc4d2e-4f57-4d21-9bd4-d7c251248f8c\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2a93361f-f83d-44e8-84fd-7a0d467ac5e9\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"eae29507-938a-4589-9e6a-acc8c008e1ac\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4bd69b7b-eed2-4be4-96e7-9c44409e614b\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"f46877c4-0d72-44ed-ad8f-b25f37044c16\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4bd69b7b-eed2-4be4-96e7-9c44409e614b\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5591a5ee-fcee-4d52-a836-c45626fa33ec\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"43c9620e-a44a-44fb-b624-cb9652337bef\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"e9653734-3362-4d53-83a0-1a95d5d7bc0e\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"43c9620e-a44a-44fb-b624-cb9652337bef\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3124c840-367a-4125-bf83-19fb316b42d6\", \"session_id\": \"1ffbc365-4593-4249-b31b-9a0e98247afa\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__get\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"flag|is_on\",\n \"-i\": true,\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "flags.toml:1:[flags]\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-3b52-75a1-9fd3-4fef7ab28904.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-3b52-75a1-9fd3-4fef7ab28904.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-3b52-75a1-9fd3-4fef7ab28904.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-3b52-75a1-9fd3-4fef7ab28904.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-3b52-75a1-9fd3-4fef7ab28904.md:19:- **Files:** `src/flags.py`, `flags.toml`\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-3b52-75a1-9fd3-4fef7ab28904.md:20:- **Tags:** `flags`\nsrc/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\nsrc/flags.py:7:def is_on(name):\nsrc/flags.py:8:    return bool(_FLAGS.get(name, False))\nsrc/flags.py:11:def all_flags():\nsrc/flags.py:12:    return dict(_FLAGS)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-25gr2to9/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-25gr2to9/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Flags here are simple: you declare them in a TOML file, and code reads them through one helper.\n\n**1. Declare the flag in `flags.toml`** at the repo root. Names are kebab-case:\n\n```toml\n[flags]\ninvoice-pdf-v2 = false\nnew-checkout-flow = false\n```\n\n**2. Check it in code with `flags.is_on()`** from `src/flags.py`:\n\n```python\nfrom src import flags  # adjust to however the module imports flags\n\nif flags.is_on(\"new-checkout-flow\"):\n    return new_checkout(...)\nreturn legacy_checkout(...)\n```\n\nThings to know, from `src/flags.py`:\n- **Flags load once, at import time.** `flags.toml` is parsed when the module loads (`src/flags.py:4`), so changing a value needs a process restart. There's no runtime toggle, per-user targeting or environment override.\n- **Unknown names count as off.** `is_on()` returns `False` for any name not in the file (`src/flags.py:8`). A typo in the flag name won't raise an error; it just leaves the feature off. That's why the convention is to declare every flag in `flags.toml`.\n- **`flags.all_flags()`** returns a copy of all flag values, which helps with debugging or showing the current state.\n\nThe project's memory store records the same convention: read flags only through `flags.is_on(\"name\")`, use kebab-case names, and declare them in `flags.toml`. That matches what the code does. If you need per-user rollout or runtime toggling for the checkout flow, `src/flags.py` would need extending; right now flags are global on/off only."
+ }
+]

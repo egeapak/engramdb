@@ -1,0 +1,57 @@
+[
+ {
+  "role": "user",
+  "content": "Note for later: Priya owns the ledger integration; any change to src/billing/invoices.py needs her review."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d4a8c870-82e7-4456-8d9a-66ccacfa5f96\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d6f925f9-c0cf-41c5-98cc-8a0dbb5fcb3a\", \"session_id\": \"68b349a8-8d43-4f55-840c-3053eb24d6b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d4a8c870-82e7-4456-8d9a-66ccacfa5f96\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f3faee0e-5113-4d3f-83a4-8258c9039e74\", \"session_id\": \"68b349a8-8d43-4f55-840c-3053eb24d6b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a09a0fe2-3eb0-4024-91a7-84d508e26766\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"378c158e-994f-40f9-8327-de9fa34c3657\", \"session_id\": \"68b349a8-8d43-4f55-840c-3053eb24d6b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a09a0fe2-3eb0-4024-91a7-84d508e26766\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5a67ac82-16a3-49cf-8bfe-f7bc3eab346f\", \"session_id\": \"68b349a8-8d43-4f55-840c-3053eb24d6b7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"Priya ledger invoices review owner\",\n \"path\": \"src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f791-6b46-7432-b6ea-edb517d7ebf5\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.23552316789465064,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.23552316789465064,\"keyword\":0.11960347817013119,\"relevance\":0.5,\"rerank\":-1.8538693189620972,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5226851207416058,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"invoices.finalize() is not idempotent\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f791-8cda-7d32-a9a4-c153ad96af9b\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.23137439573738072,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.23137439573738072,\"relevance\":0.5,\"rerank\":-3.86397647857666,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3949012658332726,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax uses ROUND_HALF_EVEN\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"All monetary amounts are stored and passed as integer cents using the `Money` type in src/billing/money.py. Never use float for money. Field names end in `_cents`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f791-6417-7ef3-86c6-d28cba50d0c2\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.2257605805064224,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2257605805064224,\"relevance\":0.5,\"rerank\":-3.8379604816436768,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.37352320306861714,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money is integer cents, never float\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f791-722e-79d3-8a2a-f1c35baefaec\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.22279492394171524,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.22279492394171524,\"relevance\":0.5,\"rerank\":-3.6273460388183594,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.35398498365111325,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Use structlog, not stdlib logging\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Run `make test-fast` for the unit suite (skips Postgres tests). `make test` runs everything but needs `docker compose up db` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f791-79d4-7273-bb3b-84d8c827ed26\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.21951555685507926,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.21951555685507926,\"relevance\":0.5,\"rerank\":-3.9057462215423584,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.35327680921006915,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Run tests with make test-fast\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f791-9d0b-7541-ab89-a09ea26a9a04\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.21946927864355908,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.21946927864355908,\"relevance\":0.5,\"rerank\":-3.8609821796417236,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3515001785028887,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release by tagging vYYYY.MM.N\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":6}"
+ },
+ {
+  "role": "assistant",
+  "content": "No existing ownership memory; creating one."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"relationship\",\n \"summary\": \"Priya owns the ledger integration; changes to src/billing/invoices.py need her review\",\n \"content\": \"Priya owns the ledger integration. Any change to src/billing/invoices.py must be reviewed by Priya before it merges. Mention this when proposing or opening a PR that touches this file.\",\n \"physical\": [\n  \"src/billing/invoices.py\"\n ],\n \"tags\": [\n  \"billing\",\n  \"ledger\",\n  \"ownership\",\n  \"review\"\n ],\n \"epistemic\": \"fact\",\n \"criticality\": 0.7,\n \"premise\": \"while Priya owns the ledger integration\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f791-cd72-78b3-9372-7055f1272c63\",\"created\":true,\"summary\":\"Priya owns the ledger integration; changes to src/billing/invoices.py need her review\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this to the project's EngramDB memory: Priya owns the ledger integration, and any change to `src/billing/invoices.py` needs her review. The memory is linked to that file, so it will come up whenever someone works on it. I'll point it out whenever a change I propose or open as a PR touches that file."
+ }
+]

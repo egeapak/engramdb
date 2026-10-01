@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "hi! quick sanity check, are you there?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2006dd6e-17a8-489f-be28-c64193f09e2e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"448852a2-1c8f-4ab3-8a16-40ac19d36a19\", \"session_id\": \"898a05fd-d9ca-4790-a2d9-14379c8768d5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2006dd6e-17a8-489f-be28-c64193f09e2e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"255b1efa-dfce-4132-8088-fa9b5aba122b\", \"session_id\": \"898a05fd-d9ca-4790-a2d9-14379c8768d5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e9411b45-d755-45ac-b8c2-d9c357c75c1e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"71dfc0c1-06cc-49c6-a33f-f08192d05aa3\", \"session_id\": \"898a05fd-d9ca-4790-a2d9-14379c8768d5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e9411b45-d755-45ac-b8c2-d9c357c75c1e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2d791c2f-b930-43bd-a443-15f67116fbc4\", \"session_id\": \"898a05fd-d9ca-4790-a2d9-14379c8768d5\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Yes, I'm here. I'm in the `ledgerline` repo on `main`, and the working tree is clean. What would you like to work on?"
+ }
+]

@@ -1,0 +1,86 @@
+[
+ {
+  "role": "user",
+  "content": "I want to put a new checkout flow behind a feature flag. How do we do flags in this project?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"52331eed-07cb-4d6a-b4f9-51d5b244f322\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"b0e95b74-35d0-49c2-b9a3-4880f71c714a\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"52331eed-07cb-4d6a-b4f9-51d5b244f322\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"cd54e428-dbd2-43c0-8157-ba902fb70eda\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"25692147-ba35-4d16-9689-b909c9f020ae\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a0a71678-d71a-41ec-b970-675968e3d0d1\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"25692147-ba35-4d16-9689-b909c9f020ae\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1bfa8b90-5667-4cdf-90bf-cbde739b4af1\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7256a416-d9ff-45d6-a356-50472b8b739f\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"7692d397-a299-4a20-8e99-3511d6c82c9f\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7256a416-d9ff-45d6-a356-50472b8b739f\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ff167fd6-3d8c-4521-a8c4-81d8c870646c\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"59476dd8-386a-4fa3-876c-7eae924857d1\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"d987f7d0-286b-4664-97ed-f351dba0b581\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"59476dd8-386a-4fa3-876c-7eae924857d1\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f6ac653a-5d62-493f-b975-9c79263a7b7e\", \"session_id\": \"5009fe11-d908-4ade-860e-6b63f5d4cd8c\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__get\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"flag\",\n \"-i\": true,\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "flags.toml:1:[flags]\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f786-829e-7f60-94b3-187e62fb756f.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f786-829e-7f60-94b3-187e62fb756f.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f786-829e-7f60-94b3-187e62fb756f.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f786-829e-7f60-94b3-187e62fb756f.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f786-829e-7f60-94b3-187e62fb756f.md:19:- **Files:** `src/flags.py`, `flags.toml`\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f786-829e-7f60-94b3-187e62fb756f.md:20:- **Tags:** `flags`\nsrc/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\nsrc/flags.py:8:    return bool(_FLAGS.get(name, False))\nsrc/flags.py:11:def all_flags():\nsrc/flags.py:12:    return dict(_FLAGS)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-r3rwl4r1/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-r3rwl4r1/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Flags here are a simple file-based system. The project memory says the same thing, and I checked it against the code: it matches.\n\n**How it works**\n- You declare each flag in `flags.toml` at the repo root, under `[flags]`, with a boolean default:\n  ```toml\n  [flags]\n  invoice-pdf-v2 = false\n  ```\n- You read flags only through `flags.is_on(\"name\")` from `src/flags.py`. There's also `flags.all_flags()` if you need all of them as a dict.\n- Flag names are kebab-case.\n\n**For your checkout flow**\n1. Add the flag to `flags.toml`:\n   ```toml\n   new-checkout-flow = false\n   ```\n2. Check it where the flows split:\n   ```python\n   from src import flags  # match however the module is imported elsewhere\n\n   if flags.is_on(\"new-checkout-flow\"):\n       return new_checkout(...)\n   return legacy_checkout(...)\n   ```\n\n**Things to watch for**\n- **Typos fail silently.** `is_on` calls `_FLAGS.get(name, False)` (`src/flags.py:8`), so a misspelled or undeclared name returns `False` with no error. Copy the name exactly from `flags.toml`.\n- **Changes need a restart.** `flags.toml` is read once when the module is imported (`src/flags.py:4`), so editing it doesn't affect a running process.\n- **No per-user or per-environment targeting.** Each flag is one global on/off value. If you want a gradual rollout or a toggle per environment, you'd have to extend `src/flags.py`.\n\nDo you want me to add the flag and wire it into the checkout code?"
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things got in the way. Neither stopped the task, but both made the memory workflow clumsier than it needed to be.\n\n1. **The memory the hook injected didn't include its ID.** The prompt hook showed \"[convention] Feature flags go through flags.is_on()\" but left out the memory ID. To read the full memory with `get` (which requires `id`), I would first have had to run `query` just to find the ID. In the end I skipped both and grepped `.engramdb/memories/` directly. I'd want the hook to list the ID next to each memory, so I could call `get`, and later `verify`, on it directly.\n\n2. **The injected context didn't say whether the memory was still accurate.** It showed the source (\"shared/human\") but not when the memory was last verified, or whether its linked files (`src/flags.py`, `flags.toml`) had changed since. I wanted that to decide whether I could trust it or had to check the code first. I would have used a last-verified date in the hook output, or a staleness field returned by `query`/`get`. Without it, I re-read both files to confirm the memory was still true.\n\nThere were also things I didn't do that the tools did allow, so these were my choices, not gaps. After confirming the memory against the code, I didn't call `verify`. I also didn't use `create` to record what I found: undeclared flag names silently return `False`, and the flags are read once at import, so changes need a restart."
+ }
+]

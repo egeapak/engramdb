@@ -1,0 +1,97 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1bbec3b1-e647-4f4b-9530-8982d9a6c9fd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"694e4ee8-bd43-4914-9133-642f5d18872b\", \"session_id\": \"e9ebadd0-e18d-4c4c-a648-f13b08cb81c1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1bbec3b1-e647-4f4b-9530-8982d9a6c9fd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4b3584c9-f5a4-4764-80c1-5f5114848206\", \"session_id\": \"e9ebadd0-e18d-4c4c-a648-f13b08cb81c1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"09f561ec-2af6-4baa-9b49-52635f06c0dc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"bbd1783c-5c52-4b98-9781-c3bbe598fec2\", \"session_id\": \"e9ebadd0-e18d-4c4c-a648-f13b08cb81c1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"09f561ec-2af6-4baa-9b49-52635f06c0dc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6f8d2b96-63cb-4258-ac7d-7094aa493a7f\", \"session_id\": \"e9ebadd0-e18d-4c4c-a648-f13b08cb81c1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create,mcp__plugin_engram_memory__challenge\",\n \"max_results\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payments?_?live|fake.?gateway|mock.?gateway|gateway\",\n \"output_mode\": \"content\",\n \"-n\": true,\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway PAYMENTS_LIVE fake\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -50\",\n \"description\": \"List tracked files in repo\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f78a-d9ee-79d0-bf1d-86761c4880cc.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f78a-c9b6-7ea0-8029-ddfeb99dfc83.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f78a-b829-7b63-882d-5869dad1781a.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f78a-b27a-7fe3-9a48-dc11fa3385e5.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f78a-c4cd-7b13-8be8-1b86a31dc402.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f78a-dfd2-7b60-9325-66654eaaca1a.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f78a-c0ad-76e3-b477-ac13a7556a75.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f78a-d46c-7e91-874f-42e5c90334e2.md\n.engramdb/memories/tax-uses-round-half-even_01a0f78a-cf69-72f3-aa52-2af129cb034c.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f78a-bc81-7112-942c-6c8facbfa23e.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/api/checkout.py tests/test_payments.py Makefile src/flags.py flags.toml; grep -rni \\\"environ\\\\|getenv\\\\|payment\\\\|live\\\" --include=*.py --include=*.toml --include=*.md --include=Makefile . | grep -v .engramdb\",\n \"description\": \"Inspect checkout, payment tests, and env usage\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n@pytest.mark.integration\ndef test_charges_roundtrip():\n    for amount in (100, 250, 999, 1200):\n        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n        assert resp.status_code == 201\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\nimport tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\n[flags]\ninvoice-pdf-v2 = false\n./scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\n./tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set \\u2014 no error or warning\",\n \"content\": \"If PAYMENTS_LIVE=1 is not set in the environment, the app quietly falls back to a fake/stub payment gateway. Nothing logs a warning or fails, so payments look like they work but nothing reaches the real gateway. A developer lost about 2 hours debugging this (reported 2026-10-01). When payment behavior looks wrong (charges missing, responses look canned), check PAYMENTS_LIVE first. Note: on 2026-10-01 nothing in this repo mentions PAYMENTS_LIVE or a gateway switch (src/api/checkout.py only computes totals), so the switch is probably in deploy config, an external package, or the runtime environment. It is not in this codebase.\",\n \"epistemic\": \"observation\",\n \"criticality\": 0.85,\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"silent-failure\"\n ],\n \"logical\": [\n  \"payments.gateway\"\n ],\n \"physical\": [\n  \"src/api/checkout.py\",\n  \"tests/test_payments.py\"\n ],\n \"premise\": \"Reported by the user from experience. Not verified in repo code because the gateway selection logic isn't in this repo.\",\n \"invalidated_by\": [\n  \"src/api/checkout.py\",\n  \"src/billing/**\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f78b-30d3-7670-8ee5-a87316ec8730\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set \u2014 no error or warning\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry that cost you two hours. I've saved it to the project's EngramDB memory as a high-priority hazard. When anyone looks into payment behavior here, the first thing that comes up will be \"check `PAYMENTS_LIVE=1`\".\n\nWhen I went looking for the switch, it isn't in this repo. Nothing here mentions `PAYMENTS_LIVE`, a fake gateway, or a gateway at all:\n- `src/api/checkout.py` only adds up the cart total and returns `\"status\": \"pending\"`. It never calls a payment provider.\n- The only payment code is `tests/test_payments.py`, which hits a hardcoded sandbox URL directly.\n- The only environment variable read anywhere is `EXPORT_BUCKET` in `scripts/export.py`.\n\nSo the fallback is probably in deploy config, a separate service or package, or whatever environment you run the app in. I noted in the memory that I couldn't check it against code here.\n\nTo keep this from catching the next person, the fix belongs wherever that switch lives. It should either fail at startup or log a loud warning (with structlog, which this project uses) when it falls back to the fake gateway. If you point me at that code, I can add it, plus a line in the README."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Three things were missing or awkward:\n\n1. **A provenance parameter on `create`** (something like `source: \"user-reported\" | \"agent-verified\" | \"inferred\"`). The PAYMENTS_LIVE hazard came from what you told me, not from code I could check; I found no switch in the repo. The only place I could say that was free text in `premise` and `content`. The injected context now shows the memory as \"source: shared/agent\", which makes it look like the agent established it. I'd have used the field to label it as user-reported and not yet verified.\n\n2. **An `invalidated_by` that can point outside the repo, or an \"unresolved\" marker.** `invalidated_by` only accepts paths and globs. The real gateway switch lives somewhere outside this repo, so the globs I gave (`src/api/checkout.py`, `src/billing/**`) were guesses and probably won't fire when the behavior actually changes. I'd have wanted either a free-text or external-reference trigger (like \"gateway selection code in deploy config / the payments service\"), or an `open_question` / `needs_location` flag. That flag would let a later session see the memory still needs its source code found and checked with `verify`.\n\n3. **Clearer feedback from `query` in filter mode.** My multi-term query (\"payment gateway PAYMENTS_LIVE fake\") returned zero results. It didn't say whether the terms were ANDed or ORed, so I couldn't tell whether there were really no related memories or the query was just too narrow. A `match: \"any\" | \"all\"` parameter, or an echo of how the query was interpreted, would have let me confirm there were no existing payment-related memories to update or challenge, instead of assuming it."
+ }
+]

@@ -1,0 +1,52 @@
+[
+ {
+  "role": "user",
+  "content": "What rounding mode do we use for tax?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f7acc460-2b41-4cac-adf3-0ac942107328\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"83537f08-e15f-451e-8cd7-da5399eb1ec6\", \"session_id\": \"48faf23b-8ff3-42f9-aafd-ee2de247df7e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f7acc460-2b41-4cac-adf3-0ac942107328\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"459e87df-81f8-4187-820a-1b9ed43ce0a9\", \"session_id\": \"48faf23b-8ff3-42f9-aafd-ee2de247df7e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b1d7ada4-f3e5-4eb7-9d3c-20a58e324166\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"9b844c82-97c1-45ff-aadb-62919e967571\", \"session_id\": \"48faf23b-8ff3-42f9-aafd-ee2de247df7e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b1d7ada4-f3e5-4eb7-9d3c-20a58e324166\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"75334b07-e9a4-46bd-950d-24197cf6776c\", \"session_id\": \"48faf23b-8ff3-42f9-aafd-ee2de247df7e\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"ROUND_|rounding|round\\\\(\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/tax-uses-round-half-even_01a0f79c-0fa0-7211-ae94-6bd1fa022bcc.md:6:title: Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f79c-0fa0-7211-ae94-6bd1fa022bcc.md:9:# Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f79c-0fa0-7211-ae94-6bd1fa022bcc.md:11:**Summary:** Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f79c-0fa0-7211-ae94-6bd1fa022bcc.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__get,mcp__plugin_engram_memory__verify\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "assistant",
+  "content": "Tax uses **banker's rounding (`decimal.ROUND_HALF_EVEN`)**. I couldn't confirm this in the code, though.\n\nThe only source is an EngramDB decision memory. It says this was decided with the finance team in March 2026, and that `ROUND_HALF_UP` must not be used. A grep of the repo for `ROUND_`, `rounding` and `round(` found nothing outside that memory file, so there's no tax code here to check it against. I haven't marked the memory as verified."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Mostly nothing was missing, but I hit two small friction points.\n\n1. **The hook-injected memory had no ID or metadata.** The prompt hook showed only \"[decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\". `get` needs a memory ID, and the hook line didn't include one. I only found the ID because my grep matched the memory's filename in `.engramdb/memories/`. I would have wanted the ID in the surfaced line. I would also have wanted the memory's `premise`, `invalidated_by` and `verified_at` fields. With those I could have judged how fresh the decision was without a separate `get`.\n\n2. **`verify` doesn't fit a decision whose source is outside the code.** The memory records a decision made with the finance team, and the repo has no tax code to check it against. `verify` assumes you confirmed the memory against the code, so I left it alone. A way to record \"re-checked, no contradicting code found, still unconfirmed against the source\" would have been useful. That could be a `note` or `status` parameter on `verify`, or a separate lightweight call.\n\nI also never called `get` or `query`. I loaded the schemas for `get` and `verify` and then answered from the grep output, which already contained the memory text. That was my choice, not a tooling limit."
+ }
+]

@@ -1,0 +1,57 @@
+[
+ {
+  "role": "user",
+  "content": "Got it working: the invoice PDF tests were failing because wkhtmltopdf needs the `--enable-local-file-access` flag in newer versions. I've already fixed it locally, thanks."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9546e48d-0acc-4356-b71a-7a424988fac6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d6ece8e1-9104-4b0b-b069-7ac1f1120189\", \"session_id\": \"5b59845c-fb0f-4bb5-92c5-b3489146363a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9546e48d-0acc-4356-b71a-7a424988fac6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3f1a1dec-8383-456d-bbd4-7ef657aa4673\", \"session_id\": \"5b59845c-fb0f-4bb5-92c5-b3489146363a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"40546148-34a9-4dc6-88e1-8ee8946e4456\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"acd35d27-225f-4a15-bc68-9be7f2f4dc21\", \"session_id\": \"5b59845c-fb0f-4bb5-92c5-b3489146363a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"40546148-34a9-4dc6-88e1-8ee8946e4456\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"11981093-9746-4b21-9a86-3626b5cce108\", \"session_id\": \"5b59845c-fb0f-4bb5-92c5-b3489146363a\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create,mcp__plugin_engram_memory__challenge\",\n \"max_results\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"wkhtmltopdf invoice PDF tests\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f791-e44f-7d93-8844-17631f8bdf0a\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.1666032965472734,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1666032965472734,\"keyword\":0.05268107367427279,\"relevance\":0.5,\"rerank\":-2.134227991104126,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4066621637154205,\"situation_multiplier\":0.84,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"invoices.finalize() is not idempotent\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Run `make test-fast` for the unit suite (skips Postgres tests). `make test` runs everything but needs `docker compose up db` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f791-f423-7433-bf92-c7f509cf5e0c\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.1488158763596008,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1488158763596008,\"keyword\":0.09301680950828721,\"relevance\":0.5,\"rerank\":-2.7656869888305664,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3899388926184823,\"situation_multiplier\":0.84,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Run tests with make test-fast\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing existing covers it, so I'll record it."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"epistemic\": \"observation\",\n \"summary\": \"Invoice PDF tests fail on newer wkhtmltopdf unless --enable-local-file-access is passed\",\n \"content\": \"Invoice PDF tests failed because newer wkhtmltopdf versions block local file access by default (e.g. local CSS/images referenced by the invoice HTML). Fix: pass `--enable-local-file-access` to wkhtmltopdf. Reported by the user, who fixed it locally on 2026-10-01; I haven't checked whether the fix is committed in the repo.\",\n \"premise\": \"while invoices are rendered via wkhtmltopdf with local asset references\",\n \"tags\": [\n  \"pdf\",\n  \"wkhtmltopdf\",\n  \"testing\",\n  \"billing\",\n  \"environment\"\n ],\n \"confidence\": 0.75\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f792-4d06-7502-8d10-c8ce2593c60a\",\"created\":true,\"summary\":\"Invoice PDF tests fail on newer wkhtmltopdf unless --enable-local-file-access is passed\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Glad you got it working. I saved a note to the project's memory store: newer wkhtmltopdf versions need `--enable-local-file-access`, or the invoice PDF tests fail. That should save the next person from debugging it again.\n\nWhen this conversation started, git showed no uncommitted changes in the repo. If your fix only exists on your machine (in your environment or a local config), it would help to commit it or document it, so CI and other developers don't hit the same failure."
+ }
+]

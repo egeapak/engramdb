@@ -1,0 +1,70 @@
+[
+ {
+  "role": "user",
+  "content": "We removed the Makefile; tests run with `just test` now. How do I run only the fast tests?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ee2b10be-d3c6-4936-af7b-2530bf6dbaea\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"096b6f5d-97c8-4c70-8a4a-cecfca8cb72e\", \"session_id\": \"95844d95-6404-44e5-be0d-493147c1cb54\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ee2b10be-d3c6-4936-af7b-2530bf6dbaea\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"20a78691-8cb6-445c-8c6d-df642f95e2c4\", \"session_id\": \"95844d95-6404-44e5-be0d-493147c1cb54\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ca1a9e76-f355-4d08-abad-4019402d57f7\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"98f0ec03-efee-4f33-a4a8-876d6af175ed\", \"session_id\": \"95844d95-6404-44e5-be0d-493147c1cb54\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ca1a9e76-f355-4d08-abad-4019402d57f7\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2259e815-7106-4880-994c-0df04af4e97d\", \"session_id\": \"95844d95-6404-44e5-be0d-493147c1cb54\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6749d502-2752-48f1-bcc0-1b1ac72357ed\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"bdeb8476-5f36-4b2f-bdfd-d0cd39a3e2e2\", \"session_id\": \"95844d95-6404-44e5-be0d-493147c1cb54\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6749d502-2752-48f1-bcc0-1b1ac72357ed\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"68ab4940-5052-4fbd-9f3a-e10c1d92c55e\", \"session_id\": \"95844d95-6404-44e5-be0d-493147c1cb54\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{justfile,Justfile,.justfile,Makefile}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Makefile"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ct-just-4fs_pky4/ledgerline/Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t.PHONY: test test-fast\n2\t\n3\ttest-fast:\n4\t\tpytest -m \"not postgres\" -q\n5\t\n6\ttest:\n7\t\tpytest -q\n8\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a && git log --oneline --stat | head -30\",\n \"description\": \"List files and recent commit history\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n2653463 seed\n .engramdb/.gitignore                               |  3 ++\n .engramdb/config.toml                              |  2 ++\n .engramdb/manifest.toml                            | 14 +++++++++\n ...em-json_01a0f799-2008-7350-bac7-07fe8686f601.md | 36 ++++++++++++++++++++++\n ...s-is-on_01a0f799-10c6-7772-9109-7e1004c1a3c2.md | 36 ++++++++++++++++++++++\n ...mpotent_01a0f798-fcc2-7ba2-bde4-c08660d7487a.md | 36 ++++++++++++++++++++++\n ...r-float_01a0f798-f603-7761-bafa-c2c57a31bf6e.md | 36 ++++++++++++++++++++++\n ...gration_01a0f799-0baf-7a71-8dcd-b4328e867fb0.md | 36 ++++++++++++++++++++++\n ...yy-mm-n_01a0f799-248b-7ec0-ac48-81311ffe08d5.md | 36 ++++++++++++++++++++++\n ...st-fast_01a0f799-06ab-7f43-b68b-c8385c2e40b5.md | 36 ++++++++++++++++++++++\n ...-bucket_01a0f799-1a75-7c50-9c5c-60c49e69f94b.md | 36 ++++++++++++++++++++++\n ...lf-even_01a0f799-15d4-7e80-b4f9-35cb8a4cace5.md | 36 ++++++++++++++++++++++\n ...logging_01a0f799-01da-74c0-8368-1fd4cd9f8299.md | 36 ++++++++++++++++++++++\n 13 files changed, 379 insertions(+)\n9e6136c fixture\n .claude/CLAUDE.md                   |  1 +\n .claude/ENGRAM.md                   | 19 +++++++++++++++++++\n Makefile                            |  7 +++++++\n README.md                           | 16 ++++++++++++++++\n flags.toml                          |  2 ++\n migrations/0001_create_invoices.sql |  1 +\n migrations/0002_add_tax.sql         |  1 +\n migrations/0003_add_ledger_ref.sql  |  1 +\n migrations/0004_create_lines.sql    |  1 +\n migrations/0005_create_refunds.sql  |  1 +\n migrations/0006_index_customer.sql  |  1 +\n migrations/0007_add_customers.sql   |  5 +++++\n pyproject.toml                      |  8 ++++++++\n scripts/export.py                   | 15 +++++++++++++++"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat README.md pyproject.toml; git branch -a\",\n \"description\": \"Show README, pyproject, and branches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]\n* main"
+ },
+ {
+  "role": "assistant",
+  "content": "I can't give you the `just` command, because this checkout doesn't have a justfile yet. The repo on `main` (commit `2653463`) still has the `Makefile` and no `justfile`, so the switch probably hasn't been merged or pulled here.\n\nIn the current Makefile, \"fast tests\" means everything except the Postgres-marked tests:\n\n```make\ntest-fast:\n\tpytest -m \"not postgres\" -q\n```\n\nYou can run that directly whether you use `make` or `just`:\n\n```sh\npytest -m \"not postgres\" -q\n```\n\nOnce the justfile is in, check which recipe it uses with `just --list`. It's probably `just test-fast` if the Makefile targets were carried over, but I can't confirm that from here.\n\nThe stored project memory still says \"Run tests with `make test-fast`.\" I haven't changed it because the repo still matches it. Once the justfile lands, I can mark that memory invalid and record the `just` command instead. If you'd like, I can also add the justfile now, with `test` and `test-fast` recipes that copy the Makefile targets."
+ }
+]

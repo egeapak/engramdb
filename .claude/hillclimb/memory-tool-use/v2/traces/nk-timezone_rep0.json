@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"67e41538-9a18-4d74-a461-e6262db8bbee\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c15ed118-cea3-49ea-8f8b-22b5582699a3\", \"session_id\": \"5d5eb0e2-29c3-4765-b30b-8ed73a610dce\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"67e41538-9a18-4d74-a461-e6262db8bbee\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e60a7dae-2a7f-482b-a90b-29bb9036aff1\", \"session_id\": \"5d5eb0e2-29c3-4765-b30b-8ed73a610dce\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5a965ee9-3afc-4aae-ac80-8f6479afb7a4\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"03579088-5f56-4aea-b1f5-3b1ab848d970\", \"session_id\": \"5d5eb0e2-29c3-4765-b30b-8ed73a610dce\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5a965ee9-3afc-4aae-ac80-8f6479afb7a4\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bcaa7e4b-2684-4bf8-a152-8214997da1c0\", \"session_id\": \"5d5eb0e2-29c3-4765-b30b-8ed73a610dce\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create,mcp__plugin_engram_memory__challenge\",\n \"max_results\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamp timezone UTC\",\n \"detail_level\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All DB timestamps are stored in UTC; conversion to the customer's timezone happens only in the API layer\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer. Don't store local or customer-timezone times in the DB, and don't convert timezones in the persistence or domain layers. Accept and pass UTC everywhere below the API, and localize only when building API responses (and normalize API inputs back to UTC).\",\n \"tags\": [\n  \"timestamps\",\n  \"timezone\",\n  \"utc\",\n  \"database\",\n  \"api\"\n ],\n \"logical\": [\n  \"data.timestamps\",\n  \"api.serialization\"\n ],\n \"criticality\": 0.7,\n \"confidence\": 0.95\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f78a-dbd8-7021-8c4d-3fa8d323fc73\",\"created\":true,\"summary\":\"All DB timestamps are stored in UTC; conversion to the customer's timezone happens only in the API layer\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project convention in EngramDB, the project's memory store (ID `01a0f78a\u2026`): all database timestamps are stored in UTC, and conversion to the customer's timezone happens only in the API layer. No existing memory contradicted it.\n\nI added one thing you didn't say: the memory also tells future work to convert incoming API times back to UTC before storing them. Tell me if that isn't how the API handles input and I'll remove it."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One thing was missing: a way to record **where a memory came from**.\n\n- **What I wanted:** a `source` or `provenance` parameter on `create` (something like `source: \"user\"`, `\"agent-inferred\"` or `\"code\"`). Even better would be marking provenance per claim inside the content.\n- **What I'd have used it for:** you stated the UTC-storage rule directly. I added an inferred extension about converting API inputs back to UTC. With per-claim provenance I could have stored your rule as user-stated and authoritative, and kept my addition marked as agent inference to be checked. Instead the hook now shows the whole memory as `source: shared/agent`. That understates your rule and puts my guess at the same authority level. The only levers I had were `confidence` (one number for the whole memory) and `epistemic`, and neither separates \"the user said this\" from \"I inferred this\". The workaround would have been two separate memories linked by a relationship, which is clumsy for a single convention."
+ }
+]

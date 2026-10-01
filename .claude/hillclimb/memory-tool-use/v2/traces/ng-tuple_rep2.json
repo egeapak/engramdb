@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c063f51c-b812-41eb-9838-b334147a9233\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d70d3c7a-6c34-40ed-8a26-d380f2e14222\", \"session_id\": \"805c0469-06ee-4964-a167-206325656e1a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c063f51c-b812-41eb-9838-b334147a9233\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0be831a9-a98d-4bfc-806a-1b02aa018623\", \"session_id\": \"805c0469-06ee-4964-a167-206325656e1a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0dfb0a2d-7ecc-413e-b585-f6d25cc4ca9b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0cf55537-fa32-43b4-ac6e-7b50671ac889\", \"session_id\": \"805c0469-06ee-4964-a167-206325656e1a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0dfb0a2d-7ecc-413e-b585-f6d25cc4ca9b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"861c3eee-fb89-42c8-bb7c-e5e557ba4968\", \"session_id\": \"805c0469-06ee-4964-a167-206325656e1a\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "The main difference is that **lists are mutable and tuples are immutable**. Most of the other differences come from that.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` or `1, 2, 3` |\n| Mutable? | Yes. You can append, remove or reassign items | No. It's fixed once created |\n| Hashable? | No | Yes, if all its elements are hashable |\n| Usable as dict key / set member? | No | Yes |\n| Methods | Many (`append`, `extend`, `insert`, `pop`, `remove`, `sort`, `reverse`, \u2026) | Only `count` and `index` |\n| Memory / speed | Slightly bigger, because it over-allocates so appends are cheap | Smaller and a bit faster to create |\n| Typical use | A collection of similar items that can grow or shrink | A fixed record of related values, like a row or a coordinate |\n\n```python\nnums = [1, 2, 3]\nnums.append(4)      # fine\nnums[0] = 99        # fine\n\npoint = (3, 4)\npoint[0] = 5        # TypeError: 'tuple' object does not support item assignment\n\nlocations = {(40.7, -74.0): \"NYC\"}   # tuple as a dict key works\n# {[40.7, -74.0]: \"NYC\"}             # TypeError: unhashable type: 'list'\n```\n\n**Some gotchas:**\n- A single-element tuple needs a trailing comma. `(5,)` is a tuple, but `(5)` is just the integer `5`.\n- Immutability only goes one level deep. If a tuple contains a list, like `t = ([1, 2], 3)`, then `t[0].append(3)` works. The tuple still points to the same list, but the list itself changed. A tuple like this also can't be hashed.\n- Tuple packing and unpacking is used all over Python, for example `a, b = b, a` and returning several values from a function with `return x, y`.\n\n**Rule of thumb:** use a list for a variable-length sequence of the same kind of thing. Use a tuple for a fixed-size group of values where each position means something. If you want to access those positions by name, use `collections.namedtuple` or `typing.NamedTuple`."
+ }
+]

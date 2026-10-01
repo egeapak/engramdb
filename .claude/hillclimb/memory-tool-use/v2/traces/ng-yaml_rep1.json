@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Convert this JSON to YAML: {\"a\": 1, \"b\": [true, null]}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1d9f79c8-c9e2-4fae-b7e1-92f3698b6b23\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"90aa03be-6a9e-40ab-abf5-852158f997c0\", \"session_id\": \"b9575a94-7ae4-4609-a738-c8c4e7726f2c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1d9f79c8-c9e2-4fae-b7e1-92f3698b6b23\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2a91f752-707c-4ab6-9f57-c9cf8e97c178\", \"session_id\": \"b9575a94-7ae4-4609-a738-c8c4e7726f2c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9f1ad0dc-2c35-40ec-bc23-ba174f1e0ed5\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"e9e0364c-29c2-4a88-9861-2d45e0556508\", \"session_id\": \"b9575a94-7ae4-4609-a738-c8c4e7726f2c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9f1ad0dc-2c35-40ec-bc23-ba174f1e0ed5\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7931003b-1059-49b9-abeb-9993e152c22a\", \"session_id\": \"b9575a94-7ae4-4609-a738-c8c4e7726f2c\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "```yaml\na: 1\nb:\n  - true\n  - null\n```\n\n`null` can also be written as `~` or left empty (`- `). All three mean the same thing in YAML."
+ }
+]

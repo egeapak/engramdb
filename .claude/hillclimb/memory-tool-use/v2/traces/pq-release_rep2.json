@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "What's the process for cutting a release?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"530a476e-1112-499b-8470-08c25187bc4f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"b08567a4-6edb-4102-842a-be847838c4a8\", \"session_id\": \"a66c364e-e6c2-4f42-8c69-ab7a28e88fa7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"530a476e-1112-499b-8470-08c25187bc4f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"41d32c45-f328-468e-8b4c-7e4144e2ba3b\", \"session_id\": \"a66c364e-e6c2-4f42-8c69-ab7a28e88fa7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"32e1ff3c-09a0-4442-803a-52c46abc6eed\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3cfab8ef-7cce-4789-9d61-b10b6c56e37d\", \"session_id\": \"a66c364e-e6c2-4f42-8c69-ab7a28e88fa7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"32e1ff3c-09a0-4442-803a-52c46abc6eed\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f100396c-5796-4025-8850-69e69d9b589f\", \"session_id\": \"a66c364e-e6c2-4f42-8c69-ab7a28e88fa7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__get\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)release|tag\",\n \"path\": \"/tmp/mte-pq-release-14vdajlt/ledgerline\",\n \"output_mode\": \"content\",\n \"head_limit\": 60\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts/export.py:7:    parser.add_argument(\"--env\", default=\"dev\", choices=[\"dev\", \"staging\", \"prod\"])\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f795-3456-7c13-b67d-44bb1bdd5e55.md:20:- **Tags:** `billing`, `ledger`\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f795-57ba-7532-b989-3e602b7ee3c0.md:6:title: Staging EXPORT_BUCKET points at the prod bucket\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f795-57ba-7532-b989-3e602b7ee3c0.md:9:# Staging EXPORT_BUCKET points at the prod bucket\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f795-57ba-7532-b989-3e602b7ee3c0.md:11:**Summary:** Staging EXPORT_BUCKET points at the prod bucket\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f795-57ba-7532-b989-3e602b7ee3c0.md:15:In staging, `EXPORT_BUCKET` points at the production bucket. Never run scripts/export.py against staging without `--dry-run`.\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f795-57ba-7532-b989-3e602b7ee3c0.md:20:- **Tags:** `ops`, `export`\n.engramdb/memories/tax-uses-round-half-even_01a0f795-4fab-79a0-a9d0-c6a5a820520b.md:20:- **Tags:** `billing`, `tax`\n.engramdb/memories/api-errors-use-problem-json_01a0f795-5fea-79f2-9250-56c500f8c612.md:20:- **Tags:** `api`, `errors`\n.engramdb/memories/run-tests-with-make-test-fast_01a0f795-3e89-7173-8a1a-6d26527924bb.md:20:- **Tags:** `testing`, `workflow`\n.engramdb/memories/money-is-integer-cents-never-float_01a0f795-2f35-7200-9c6f-3b031022a28c.md:20:- **Tags:** `billing`, `money`\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f795-3964-7281-92eb-a4e248998bf0.md:20:- **Tags:** `logging`\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f795-6703-7961-a7e6-221cccc7c770.md:6:title: Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f795-6703-7961-a7e6-221cccc7c770.md:9:# Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f795-6703-7961-a7e6-221cccc7c770.md:11:**Summary:** Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f795-6703-7961-a7e6-221cccc7c770.md:15:Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f795-6703-7961-a7e6-221cccc7c770.md:20:- **Tags:** `release`, `workflow`\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f795-4878-79b0-958a-a6df6032b92f.md:20:- **Tags:** `flags`\n.engramdb/memories/never-edit-an-applied-migration_01a0f795-42ef-7cf0-b34f-1ab231087f2b.md:20:- **Tags:** `database`, `migrations`"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git tag -l; ls -a; ls .github/workflows 2>/dev/null; cat Makefile 2>/dev/null | head -40\",\n \"description\": \"List tags, top-level files, CI workflows, Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q"
+ },
+ {
+  "role": "assistant",
+  "content": "To cut a release, you push a git tag named `vYYYY.MM.N` and CI handles the build and publish. Don't publish by hand.\n\n```sh\ngit checkout main && git pull\nmake test                    # full suite, including the Postgres tests\ngit tag v2026.10.1           # year.month.N, e.g. the first release in October 2026\ngit push origin v2026.10.1\n```\n\nN counts releases within the month (the documented example is `v2026.09.2`).\n\nThis comes from a single team memory in the project's EngramDB notes. I couldn't confirm it against anything else in the repo:\n\n- **No CI config in this checkout.** There's no `.github/workflows/` or similar, so I can't see which job builds on the tag, what it publishes, or where.\n- **No tags exist yet.** I couldn't confirm the naming from past releases, or whether N starts at 1 or 0.\n- **No release instructions in the repo.** The README and Makefile don't mention releasing. The Makefile only has `test` and `test-fast`.\n- **Running tests first is my suggestion.** Nothing documented says it's required before tagging.\n\nBefore you push the first tag, ask whoever owns CI where the tag-triggered pipeline is defined. It may live outside this repo."
+ }
+]
