@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"da2ba2b6-d0b7-40c1-a2e3-6b8fc5e10305\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"5f7c7063-4c32-4a40-9ebd-b2b54d3f51de\", \"session_id\": \"4e02d4d5-c0b1-4347-9fb9-ca5258e58bd4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"da2ba2b6-d0b7-40c1-a2e3-6b8fc5e10305\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ead2d55b-dfc5-4eb7-bab5-5e23e9f4402f\", \"session_id\": \"4e02d4d5-c0b1-4347-9fb9-ca5258e58bd4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"faebd38e-8262-4a5f-806b-1181dba98709\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"24d159b1-6226-490d-8a02-1c0ba2148bb2\", \"session_id\": \"4e02d4d5-c0b1-4347-9fb9-ca5258e58bd4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"faebd38e-8262-4a5f-806b-1181dba98709\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9d463983-964a-4bb2-903e-560051198457\", \"session_id\": \"4e02d4d5-c0b1-4347-9fb9-ca5258e58bd4\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API versioning v1 v2 routes\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d4-63fa-7fe0-956a-e1083f1b265b\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.16604323984215583,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.16604323984215583,\"keyword\":0.052145353357251054,\"relevance\":0.5,\"rerank\":-2.6468822956085205,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3914654764888073,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2; /v1 is frozen\",\n \"content\": \"Design review decision (2026-10-01): all new/changed public API routes go under /v2. /v1 is frozen \\u2014 do not add or modify behavior there.\",\n \"epistemic\": \"decision\",\n \"premise\": \"Because the design review chose /v2 as the versioned namespace and froze /v1 to keep existing clients stable.\",\n \"physical\": [\n  \"src/api/\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7d4-88c9-78c3-8cf5-90afe4924a32\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2; /v1 is frozen\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Understood. From now on I'll put public API routes under `/v2` and leave `/v1` unchanged. I also saved this decision to project memory so it carries over to later sessions."
+ }
+]
