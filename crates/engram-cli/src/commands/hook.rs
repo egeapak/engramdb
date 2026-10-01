@@ -103,9 +103,12 @@ fn preview_line(m: &engramdb::types::Memory, max_chars: usize) -> Option<String>
         return Some(format!("  {}", body));
     }
     let kept: String = body.chars().take(max_chars).collect();
-    let how = match id_marker(m) {
-        Some(id) => format!("get {}", id),
-        None => "get".to_string(),
+    // The entry's summary line already carries the id; repeating it here
+    // cost ~40 bytes of a tight budget per truncated preview.
+    let how = if id_marker(m).is_some() {
+        "get the id above"
+    } else {
+        "get"
     };
     Some(format!(
         "  {}… (truncated; full text: {})",
@@ -419,7 +422,7 @@ fn top_preview_chars(preview_chars: usize) -> usize {
 /// Class-grouped, situation-ordered, budget-aware context formatter (§8).
 ///
 /// Two declared loss paths: a body preview cut at its limit ends with
-/// `(truncated; full text: get <id>)`, and entries that do not fit at all
+/// `(truncated; full text: get the id above)`, and entries that do not fit at all
 /// are counted in the trailing omission notice.
 fn format_class_context_with_budget(
     header: &str,
@@ -1977,7 +1980,7 @@ mod tests {
 
         let cut = format_class_entry(&scored(m), Some(10));
         assert!(
-            cut[1].ends_with(&format!("(truncated; full text: get {id})")),
+            cut[1].ends_with("(truncated; full text: get the id above)") && full[0].contains(&id),
             "{}",
             cut[1]
         );
