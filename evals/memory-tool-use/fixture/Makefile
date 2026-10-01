@@ -1,7 +1,7 @@
 .PHONY: test test-fast
 
 test-fast:
-	pytest -m "not postgres" -q
+	python -m pytest -m "not postgres and not integration" -q
 
 test:
-	pytest -q
+	python -m pytest -q

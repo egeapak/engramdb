@@ -41,7 +41,7 @@
   "key": "tests",
   "type": "convention",
   "title": "Test command",
-  "content": "The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.",
+  "content": "The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres and network integration tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.",
   "paths": [],
   "tags": [
    "testing",
@@ -65,7 +65,7 @@
   "key": "flags",
   "type": "convention",
   "title": "Feature flag usage",
-  "content": "Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently.",
+  "content": "Feature flags let us ship code dark and switch it on without editing the code that reads them. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently.",
   "paths": [
    "src/flags.py",
    "flags.toml"

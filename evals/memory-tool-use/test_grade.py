@@ -71,6 +71,44 @@ class Oracle(unittest.TestCase):
         self.assertEqual(g["pass"], 1)
 
 
+class Revise(unittest.TestCase):
+    # Two seeds that share a timestamp prefix, as UUIDv7 ids created in the same minute do.
+    SHARED = {"logging": "01a0f7c2-1264-7000-8000-000000000001", "tests": "01a0f7c2-3c9a-7000-8000-000000000002"}
+
+    def grade(self, calls, before=None, after=None):
+        ev = events(calls, "ok")
+        row, _ = grade.grade_case(CASES["ct-loguru"], ev, "+loguru", before or {}, after or {}, self.SHARED, 1.0)
+        return row["grade"]["revise"]
+
+    def test_full_id_and_unique_prefix_count(self):
+        target = self.SHARED["logging"]
+        self.assertEqual(self.grade([(MEM + "challenge", {"id": target, "evidence": "moved"})]), 1)
+        self.assertEqual(self.grade([(MEM + "update", {"id": target[:13]})]), 1)
+
+    def test_shared_timestamp_prefix_does_not_count(self):
+        self.assertEqual(self.grade([(MEM + "challenge", {"id": "01a0f7c2"})]), 0)
+        self.assertEqual(self.grade([(MEM + "challenge", {"id": self.SHARED["tests"]})]), 0)
+
+    def test_supersede_and_resolve_count_plain_create_and_verify_do_not(self):
+        target = self.SHARED["logging"]
+        self.assertEqual(self.grade([(MEM + "create", {"summary": "use loguru", "supersedes": [target]})]), 1)
+        self.assertEqual(self.grade([(MEM + "resolve", {"id": target, "action": "invalidate"})]), 1)
+        self.assertEqual(self.grade([(MEM + "create", {"summary": "use loguru"})]), 0)
+        self.assertEqual(self.grade([(MEM + "verify", {"id": target})]), 0)
+
+    def test_only_the_existing_target_file_counts_as_changed(self):
+        target = self.SHARED["logging"]
+        old = f"/ws/.engramdb/memories/use-structlog_{target}.md"
+        new = f"/ws/.engramdb/memories/use-loguru_{target[:8]}-9999-7000-8000-000000000009.md"
+        self.assertEqual(self.grade([], before={old: ("a", "x")}, after={old: ("b", "y")}), 1)
+        self.assertEqual(self.grade([], before={old: ("a", "x")}, after={old: ("a", "x"), new: ("c", "z")}), 0)
+
+    def test_create_with_supersedes_is_a_spurious_revise_elsewhere(self):
+        ev = events([(MEM + "create", {"summary": "x", "supersedes": ["abc"]})], "ok")
+        row, _ = grade.grade_case(CASES["pq-tests"], ev, "", {}, {}, IDS, 1.0)
+        self.assertEqual(row["grade"]["no_spurious_revise"], 0)
+
+
 class Signals(unittest.TestCase):
     def test_tool_search_and_auto_memory(self):
         auto = "/tmp/x/claude-config/projects/p/memory/"

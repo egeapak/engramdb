@@ -28,7 +28,10 @@ import subprocess
 from pathlib import Path
 
 CONSULT = {"query", "get", "list"}
-REVISE = {"challenge", "update"}
+# Memory-changing calls that revise what a memory says. `verify` confirms a
+# memory and `compress_apply` merges, so neither revises. `create` revises only
+# with a non-empty `supersedes` (it closes the old memory's validity window).
+REVISE = {"challenge", "update", "resolve", "delete"}
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 MEMORY_TOOL = re.compile(r"^mcp__(?P<server>[^_].*?)__(?P<op>[a-z_]+)$")
 
@@ -182,11 +185,15 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     elif exp["create"] is False:
         g["no_false_create"] = int(not new_files)
 
-    revise_calls = [s for _, op, s in mem if op in REVISE]
+    revise_calls = [s for _, op, s in mem if _is_revision(op, s["input"])]
     if exp["revise"] is True:
         target = seeded_ids.get(case.get("target"), "")
-        hit = any(target and _ids_match(target, s["input"]) for s in revise_calls)
-        target_changed = any(target[:8] in path and before.get(path, (None,))[0] != sha
+        others = [i for i in seeded_ids.values() if i != target]
+        hit = any(target and _ids_match(target, s["input"], others) for s in revise_calls)
+        # The seeded memory's own file changed. Only files that existed before
+        # the run count, matched on the FULL id: UUIDv7 ids share their first 8+
+        # characters (a timestamp) with every memory created in the same minute.
+        target_changed = any(target in Path(path).name and path in before and before[path][0] != sha
                              for path, (sha, _) in after.items()) if target else False
         g["revise"] = int(hit or target_changed)
     elif exp["revise"] is False:
@@ -254,9 +261,33 @@ def hook_delivered_body(case, hooks):
     return any(target["title"] in t and probe in " ".join(t.split()) for t in hook_texts(hooks))
 
 
-def _ids_match(target, tool_input):
-    blob = json.dumps(tool_input)
-    return any(tok in blob for tok in {target, target[:8], target[:12]} if len(tok) >= 8)
+def _is_revision(op, tool_input):
+    if op in REVISE:
+        return True
+    return op == "create" and bool(tool_input.get("supersedes"))
+
+
+def _id_strings(value):
+    """Every string in a tool input (ids can sit in `id`, `supersedes`, ...)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _id_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _id_strings(v)
+
+
+def _ids_match(target, tool_input, other_ids):
+    """True when the input names `target`: its full id, or a prefix the tools
+    would resolve to it (at least 8 characters, matching no other seeded id).
+    A fixed-length prefix is not enough: UUIDv7 prefixes are timestamps."""
+    for text in _id_strings(tool_input):
+        for token in re.findall(r"[0-9a-f-]{8,36}", text.lower()):
+            if target.startswith(token) and not any(o.startswith(token) for o in other_ids):
+                return True
+    return False
 
 
 _SEED_FILE = Path(__file__).parent / "seed_memories.json"

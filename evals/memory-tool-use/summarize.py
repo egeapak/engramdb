@@ -8,7 +8,7 @@ FLOW = Path(__file__).resolve().parent.parent.parent / ".claude" / "hillclimb" /
 METRICS = ["pass", "consulted_before_act", "query_before_act", "explicit_create", "implicit_capture",
            "revise", "no_false_create", "no_spurious_revise"]
 HEAD = ["pass", "consulted", "query first", "explicit create", "implicit capture", "revise",
-        "no false create", "no spurious revise"]
+        "no false create", "no spurious revise", "revise (repo neutral)", "revise (repo disagrees)"]
 
 
 def row(variant, model, change):
@@ -16,6 +16,9 @@ def row(variant, model, change):
     cells = []
     for m in METRICS:
         x = [r["grade"][m] for r in rows if m in r["grade"]]
+        cells.append(f"{100 * sum(x) / len(x):.0f}% ({sum(x)}/{len(x)})" if x else "-")
+    for tag in ("repo_neutral", "repo_disagrees"):
+        x = [r["grade"]["revise"] for r in rows if "revise" in r["grade"] and tag in r["tags"]]
         cells.append(f"{100 * sum(x) / len(x):.0f}% ({sum(x)}/{len(x)})" if x else "-")
     gaps = [r["meta"]["gaps"] for r in rows]
     reads = sum(1 for g in gaps if g["direct_store_access"] or g["bash_workarounds"])
