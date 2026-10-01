@@ -6747,6 +6747,7 @@ async fn query_rank_marks_weak_matches_instead_of_returning_nothing() {
         val["hint"].as_str().unwrap().contains("weak matches"),
         "{val}"
     );
+}
 
 // =================================================================
 // Cold start: the handshake must not wait for startup work.
