@@ -6,6 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] query --mode rank -l core.lang --sho
 exit: 0
 --- stdout ---
 {
+  "dropped_below_threshold": 2,
   "memories": [
     {
       "breakdown": {
