@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "FYI the release process changed: we now release with `make release`, which tags and publishes for us."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cedb61cc-ff55-49ea-8ec4-89250d42f78b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f0ed75a2-9528-4191-8355-9185c57dcbab\", \"session_id\": \"31330ab5-8816-412a-aba6-2e22cec1d09f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cedb61cc-ff55-49ea-8ec4-89250d42f78b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"dc24b5ee-493d-4bb9-8d18-48467bda89f4\", \"session_id\": \"31330ab5-8816-412a-aba6-2e22cec1d09f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cc3f329a-3db8-46e4-baa5-1361f65ec06f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"c9fe62d0-db84-4edc-af8d-5b24633af92a\", \"session_id\": \"31330ab5-8816-412a-aba6-2e22cec1d09f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cc3f329a-3db8-46e4-baa5-1361f65ec06f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2f26ebaa-68ab-40e7-888b-82dee792fa66\", \"session_id\": \"31330ab5-8816-412a-aba6-2e22cec1d09f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release process\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f800-39d1-78a1-9d5e-addf63dbb56c\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.797842604808786,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.797842604808786,\"keyword\":0.9406272973781113,\"relevance\":0.5,\"rerank\":1.8134064674377441,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6254328430140159,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f800-1227-7672-b99c-4c45bda60e54\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.14554958103223484,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14554958103223484,\"keyword\":0.0316656545113515,\"relevance\":0.5,\"rerank\":-2.993328094482422,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.34707139396492054,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Logging library choice\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__update",
+  "content": "{\n \"id\": \"01a0f800-39d1-78a1-9d5e-addf63dbb56c\",\n \"content\": \"Releases are cut with `make release`, which tags and publishes for us. Don't push tags or publish packages by hand. (Previously: pushing a vYYYY.MM.N tag on main triggered CI to build, test and publish; the user said on 2026-10-01 that the process changed to `make release`.)\",\n \"summary\": \"Release process: use `make release` (tags and publishes)\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f800-39d1-78a1-9d5e-addf63dbb56c\",\"updated\":true}"
+ },
+ {
+  "role": "assistant",
+  "content": "Noted. I updated the stored release-process memory, which said to push a `vYYYY.MM.N` tag on `main` and let CI publish. It now says to release with `make release`, which tags and publishes, and not to tag or publish by hand.\n\nI haven't looked for a `Makefile` or run `make release`."
+ }
+]

@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8de8ba00-5710-4fad-b016-204057c2d30a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"2498020e-8183-4c3e-9ac3-0bff4dc3c105\", \"session_id\": \"135c2230-71bb-4b7a-92dc-5b8cea217a7c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8de8ba00-5710-4fad-b016-204057c2d30a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"10f5d6ea-05b1-492a-9479-46c442d93016\", \"session_id\": \"135c2230-71bb-4b7a-92dc-5b8cea217a7c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3ebbe493-4ca8-46cf-a6d8-8c77e4bfcf9a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"39dfb543-6835-4a1d-9e28-4c1a63ceb6aa\", \"session_id\": \"135c2230-71bb-4b7a-92dc-5b8cea217a7c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3ebbe493-4ca8-46cf-a6d8-8c77e4bfcf9a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d42a8f37-f926-44d2-bebd-359b2ed89946\", \"session_id\": \"135c2230-71bb-4b7a-92dc-5b8cea217a7c\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto <newbase> <upstream> [<branch>]` replays a specific range of commits onto a new base. The range is the commits reachable from `<branch>` (default: the current branch) but not from `<upstream>`. Plain `git rebase` can only move a branch onto the upstream it was forked from. `--onto` lets you pick the new base separately from the cutoff point.\n\n**Example: moving a feature branch off another feature branch**\n\nSay `feature-b` was started from `feature-a`, but you want it based on `main`:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\nRun:\n\n```\ngit rebase --onto main feature-a feature-b\n```\n\nThis takes the commits in `feature-a..feature-b` (E and F) and replays them on top of `main`:\n\n```\nmain:       A---B---E'---F'   (feature-b)\n                 \\\nfeature-a:        C---D\n```\n\nE' and F' are new commits with new hashes, since their parent changed.\n\n**Other common uses**\n\n- **Drop a range of commits:** `git rebase --onto A B` removes the commits after `A` up to and including `B` from the current branch's history.\n- **Transplant a topic branch:** the example above, moving work from one base to another.\n\nIf conflicts come up, resolve them, `git add` the files, then run `git rebase --continue`. To back out, use `git rebase --abort`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

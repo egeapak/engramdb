@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Got it working: the invoice PDF tests were failing because wkhtmltopdf needs the `--enable-local-file-access` flag in newer versions. I've already fixed it locally, thanks."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5bc4e99a-550b-4f6a-bd02-8551b07cfc1a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"42afd090-6fe5-4630-b14c-438070a5182b\", \"session_id\": \"97165af5-674d-4ce7-9496-c2d35d1132b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5bc4e99a-550b-4f6a-bd02-8551b07cfc1a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"48acd151-8adc-4146-a5be-03d46c375ecf\", \"session_id\": \"97165af5-674d-4ce7-9496-c2d35d1132b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0c6006ca-c924-45c8-b10d-a339e3b62090\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"90337d92-944a-493a-a58b-01b25e0a8654\", \"session_id\": \"97165af5-674d-4ce7-9496-c2d35d1132b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0c6006ca-c924-45c8-b10d-a339e3b62090\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2784ba76-a430-406c-b3ed-f4729de0ec9c\", \"session_id\": \"97165af5-674d-4ce7-9496-c2d35d1132b7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"wkhtmltopdf\",\n \"include_global\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"wkhtmltopdf needs --enable-local-file-access in newer versions or invoice PDF tests fail\",\n \"content\": \"Invoice PDF tests failed because newer wkhtmltopdf versions block local file access by default. Pass the `--enable-local-file-access` flag when invoking wkhtmltopdf (applied locally by the user).\",\n \"epistemic\": \"observation\",\n \"premise\": \"while the project uses a wkhtmltopdf version that disables local file access by default\",\n \"tags\": [\n  \"wkhtmltopdf\",\n  \"pdf\",\n  \"invoice\",\n  \"tests\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7ff-8d8d-7121-b065-c936fe4543a6\",\"created\":true,\"summary\":\"wkhtmltopdf needs --enable-local-file-access in newer versions or invoice PDF tests fail\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Glad it's working. I saved the wkhtmltopdf `--enable-local-file-access` requirement to EngramDB as a hazard note, so it will come up if the invoice PDF tests fail this way again. I didn't touch any code."
+ }
+]

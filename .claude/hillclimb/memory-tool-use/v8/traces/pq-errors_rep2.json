@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"39dd59a5-8ebe-4a94-91a9-17bb95fb6008\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d7b6754c-3bcc-45b5-93cd-e3ee5fcbd998\", \"session_id\": \"0dd54e4f-b50c-4639-ab8d-852a3d938766\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"39dd59a5-8ebe-4a94-91a9-17bb95fb6008\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fd346f98-251c-40af-a852-c19923300618\", \"session_id\": \"0dd54e4f-b50c-4639-ab8d-852a3d938766\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f71c27af-8b32-489f-bad9-3bde4111cc1e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"e41cc5d0-8854-48fc-94ba-0a8eb705bbf8\", \"session_id\": \"0dd54e4f-b50c-4639-ab8d-852a3d938766\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f71c27af-8b32-489f-bad9-3bde4111cc1e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e283ce26-8658-4abf-ac5d-b17191d9798c\", \"session_id\": \"0dd54e4f-b50c-4639-ab8d-852a3d938766\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API error format\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ee-e136-7993-b839-19eece8e014c\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.855644592292589,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.855644592292589,\"keyword\":0.9533491038179176,\"relevance\":0.5,\"rerank\":2.688570976257324,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.7364440748444399,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API error format\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ee-bb4b-76e1-87ff-08383ac28bd1\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.14505896754266895,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14505896754266895,\"keyword\":0.02551724075060132,\"relevance\":0.5,\"rerank\":-2.961543083190918,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3481379889416513,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"error|Error\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 4 files\n.engramdb/memories/api-error-format_01a0f7ee-e136-7993-b839-19eece8e014c.md\n.engramdb/memories/test-command_01a0f7ee-bb4b-76e1-87ff-08383ac28bd1.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && grep -n -i \\\"error\\\\|raise\\\\|return\\\" src/billing/*.py | head -40\",\n \"description\": \"List tracked files and error handling in billing\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-error-format_01a0f7ee-e136-7993-b839-19eece8e014c.md\n.engramdb/memories/export-script-caution_01a0f7ee-d9c9-7163-a319-f823d78970ea.md\n.engramdb/memories/feature-flag-usage_01a0f7ee-cb11-7c92-85f9-bb4ac7e11328.md\n.engramdb/memories/finalize-caveat_01a0f7ee-ac99-7b70-b4cf-91f838d7fe03.md\n.engramdb/memories/logging-library-choice_01a0f7ee-b43e-7e83-9618-49c3e14c711f.md\n.engramdb/memories/migration-rules_01a0f7ee-c311-7203-a4d9-0d1868aaa06a.md\n.engramdb/memories/money-representation_01a0f7ee-a415-7062-b6ae-408bb1e769a0.md\n.engramdb/memories/release-process_01a0f7ee-e943-7991-948e-c7d734d239a8.md\n.engramdb/memories/tax-rounding-rule_01a0f7ee-d2e4-7be3-96e4-0c457139f430.md\n.engramdb/memories/test-command_01a0f7ee-bb4b-76e1-87ff-08383ac28bd1.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nsrc/billing/invoices.py:23:    resp.raise_for_status()\nsrc/billing/invoices.py:26:    return invoice\nsrc/billing/invoices.py:31:        return invoice\nsrc/billing/invoices.py:32:    return finalize(invoice)\nsrc/billing/money.py:11:        return Money(self.cents + other.cents, self.currency)\nsrc/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")\nsrc/billing/refunds.py:7:    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\nsrc/billing/tax.py:8:    return x\nsrc/billing/tax.py:12:    raise NotImplementedError"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cd /tmp/mte-pq-errors-dzl37nu1/ledgerline/src/api && for f in errors.py checkout.py invoices.py __init__.py; do echo \\\"== $f\\\"; cat -n $f; done\",\n \"description\": \"Show API module sources\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "== errors.py\n     1\tfrom flask import jsonify\n     2\t\n     3\t\n     4\tdef problem(status, title, detail=None):\n     5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n     6\t    if detail:\n     7\t        body[\"detail\"] = detail\n     8\t    resp = jsonify(body)\n     9\t    resp.status_code = status\n    10\t    resp.mimetype = \"application/problem+json\"\n    11\t    return resp\n== checkout.py\n     1\tfrom flask import Blueprint, jsonify, request\n     2\t\n     3\tbp = Blueprint(\"checkout\", __name__)\n     4\t\n     5\t\n     6\t@bp.post(\"/checkout\")\n     7\tdef checkout():\n     8\t    cart = request.get_json()\n     9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n== invoices.py\n     1\tfrom flask import Blueprint, jsonify\n     2\t\n     3\tbp = Blueprint(\"invoices\", __name__)\n     4\t\n     5\t_INVOICES = {}\n     6\t\n     7\t\n     8\t@bp.get(\"/invoices/<invoice_id>\")\n     9\tdef get_invoice(invoice_id):\n    10\t    invoice = _INVOICES.get(invoice_id)\n    11\t    return jsonify(invoice.__dict__)\n== __init__.py"
+ },
+ {
+  "role": "assistant",
+  "content": "Every endpoint should return errors as **RFC 7807 problem+json** using the helper in `src/api/errors.py:4`:\n\n```python\nfrom .errors import problem\n\nreturn problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n```\n\n`problem(status, title, detail=None)` builds a body like `{\"type\": \"about:blank\", \"title\": ..., \"status\": ..., \"detail\": ...}`, sets the HTTP status code, and sets the content type to `application/problem+json`. `detail` is optional and is left out when empty.\n\n**Why:** The project's memory notes say public API clients parse error bodies automatically, so every endpoint has to use the same shape. Don't return your own dicts or plain strings with an error status code. I checked this against the code and the helper exists as described.\n\n**Heads-up:** Neither existing endpoint uses `problem()` yet, and both have unhandled error paths:\n- In `src/api/invoices.py:10-11`, `get_invoice` calls `invoice.__dict__` on `None` when the ID isn't found. That raises an `AttributeError`, so the client gets a 500 instead of a problem+json 404.\n- In `src/api/checkout.py:8-9`, a missing or malformed body or `items` key raises an exception instead of returning a problem+json 400.\n\nI can fix either of these to follow the convention if you'd like."
+ }
+]

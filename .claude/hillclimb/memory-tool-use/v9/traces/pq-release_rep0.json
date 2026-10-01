@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "What's the process for cutting a release?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8058f8cb-14d3-4434-8b6e-000a602ce627\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8cc48a23-1bcd-4156-9db7-d6cfd4d85f93\", \"session_id\": \"545cda11-c45f-4c6e-91b3-fbb0e1cd5798\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8058f8cb-14d3-4434-8b6e-000a602ce627\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"87bde9b1-407a-41ae-80f5-ca0331a12165\", \"session_id\": \"545cda11-c45f-4c6e-91b3-fbb0e1cd5798\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e6812f50-b278-4723-a58e-b97f874a6c06\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"28b2fb52-7a97-4bec-bc56-5f1986ff5c43\", \"session_id\": \"545cda11-c45f-4c6e-91b3-fbb0e1cd5798\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e6812f50-b278-4723-a58e-b97f874a6c06\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5d2111bb-7af4-40ca-bc00-8672da0d9a69\", \"session_id\": \"545cda11-c45f-4c6e-91b3-fbb0e1cd5798\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release process\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7f5-da17-7d71-af8f-014669258250\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.797842604808786,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.797842604808786,\"keyword\":0.9406272973781113,\"relevance\":0.5,\"rerank\":1.8134064674377441,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6254328430140159,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7f5-aae1-7981-8f05-947d15d42b1d\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.14554958103223484,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14554958103223484,\"keyword\":0.0316656545113515,\"relevance\":0.5,\"rerank\":-2.993328094482422,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.34707139396492054,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Logging library choice\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/{RELEASE*,CONTRIBUTING*,CHANGELOG*,Makefile,release*}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Makefile\n.engramdb/memories/release-process_01a0f7f5-da17-7d71-af8f-014669258250.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release|tag|publish\",\n \"path\": \"/tmp/mte-pq-release-4t99h6u4/ledgerline\",\n \"glob\": \"{Makefile,.github/**,.gitlab-ci.yml}\",\n \"output_mode\": \"content\",\n \"-i\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "assistant",
+  "content": "Releasing is a single step: push a git tag on `main` named `vYYYY.MM.N`, for example `v2026.09.2`. The `N` is the release's sequence number within that month. CI then builds the artifacts, runs the full test suite and publishes the release. Don't publish packages by hand.\n\n```\ngit checkout main && git pull\ngit tag v2026.10.1\ngit push origin v2026.10.1\n```\n\nThis comes from a shared project memory, not from anything in the repo. The `Makefile` and any CI config don't mention release, tag or publish steps, so I couldn't check the process against a pipeline definition. The tag format and the \"CI publishes\" part rest on that note alone.\n\nI also don't know how to find the next `N` for a month. Run `git tag --list 'v2026.10.*'` to see which numbers are already taken."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing blocked the task, but a few things were awkward.\n\n1. **Hook-injected memory showed only a summary.** The UserPromptSubmit context gave \"[convention] Release process (source: shared/human)\" with no body. I had to run a `query` with `detail_level: \"full\"` to get the tag format. I would have wanted the hook to include the content, or at least the first line, for short memories.\n\n2. **`query` results had no freshness fields.** I wanted `created_at`, `updated_at`, and a last-verified timestamp, plus any `premise` or `invalidated_by` values, to judge whether the release process was still current. The output showed confidence 0.8 and a `decay` score of 0.0, but no dates. The memory had no premise or invalidation conditions, so I couldn't tell how old it was. I told you its claims rested on the note alone because I had no way to check them. A `verified_at` field in the `query` and `get` output would have helped.\n\n3. **`query` results didn't include the memory's file path.** I ran a Glob and found `.engramdb/memories/release-process_\u2026md` that way. A `path` field in the results would have saved that step.\n\n4. **No tool for checking a memory against the repo.** I grepped the `Makefile` and CI config by hand to corroborate the memory. A `verify`-style tool that takes a memory ID and a list of files to check against would have done this in one call. A `verify` tool existed, but I didn't use it because it records a confirmation rather than performing one.\n\nI didn't need to create or update anything. I didn't reflect or store a memory at the end, since nothing new and durable came up."
+ }
+]

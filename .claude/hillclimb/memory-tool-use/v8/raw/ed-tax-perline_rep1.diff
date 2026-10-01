@@ -1,0 +1,73 @@
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..776f7c0
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..297b3db
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/tax.cpython-311.pyc b/src/billing/__pycache__/tax.cpython-311.pyc
+new file mode 100644
+index 0000000..2539cfb
+Binary files /dev/null and b/src/billing/__pycache__/tax.cpython-311.pyc differ
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..0299691 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import Decimal, ROUND_HALF_EVEN
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,12 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    # str() so a float rate like 0.0825 doesn't carry binary float error.
++    tax = Decimal(amount_cents) * Decimal(str(rate))
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
++
++
++def invoice_tax(lines, rate):
++    # Round each line's tax separately (banker's rounding), then sum.
++    # Never round the invoice total.
++    return sum(tax_for(line_total([line]), rate) for line in lines)
+diff --git a/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..7d02195
+Binary files /dev/null and b/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..18bc661
+Binary files /dev/null and b/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/test_tax.py b/tests/test_tax.py
+index 75e3de8..9130260 100644
+--- a/tests/test_tax.py
++++ b/tests/test_tax.py
+@@ -3,3 +3,24 @@ from src.billing.tax import line_total
+ 
+ def test_line_total():
+     assert line_total([{"quantity": 2, "unit_cents": 150}]) == 300
++
++
++from src.billing.tax import invoice_tax, tax_for
++
++
++def test_tax_for_uses_bankers_rounding():
++    assert tax_for(25, "0.1") == 2  # 2.5 -> 2
++    assert tax_for(35, "0.1") == 4  # 3.5 -> 4
++
++
++def test_invoice_tax_rounds_per_line():
++    lines = [
++        {"quantity": 1, "unit_cents": 15},
++        {"quantity": 1, "unit_cents": 15},
++    ]
++    # Per line: 1.5 -> 2, 1.5 -> 2 => 4 (rounding the total 3.0 would give 3).
++    assert invoice_tax(lines, 0.1) == 4
++
++
++def test_invoice_tax_empty():
++    assert invoice_tax([], 0.08) == 0

@@ -1,0 +1,18 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..7cce070 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_UP, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,6 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    """Tax in integer cents for one line amount, rounded half-up."""
++    tax = Decimal(amount_cents) * Decimal(str(rate))
++    return int(tax.quantize(Decimal("1"), rounding=ROUND_HALF_UP))

@@ -1,0 +1,70 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ea516ef0-080c-466b-9ffe-49f63400c18e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"552d4001-c47d-499b-84ed-dc926350f93f\", \"session_id\": \"36e9b4de-77c5-4734-ace3-a02bec97cd70\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ea516ef0-080c-466b-9ffe-49f63400c18e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"462ca83e-e69a-4bb8-bb9b-ed391c11a57b\", \"session_id\": \"36e9b4de-77c5-4734-ace3-a02bec97cd70\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"117d9305-bed8-43f6-b7a5-7c58553a361e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"19fc4bba-aacb-40b2-b4e6-907b4e0639df\", \"session_id\": \"36e9b4de-77c5-4734-ace3-a02bec97cd70\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"117d9305-bed8-43f6-b7a5-7c58553a361e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] API error format (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"407ad6b4-80bc-4cb4-892f-58bd516bb255\", \"session_id\": \"36e9b4de-77c5-4734-ace3-a02bec97cd70\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API error format\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Clients of the public API parse error bodies automatically, so every endpoint must return errors in the same shape. Use RFC 7807 problem+json responses built with errors.problem(status, title, detail) from src/api/errors.py. Do not return ad-hoc dicts or plain strings with an error status code.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7f6-538a-7ec1-8858-9ee3d74a946b\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.855644592292589,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.855644592292589,\"keyword\":0.9533491038179176,\"relevance\":0.5,\"rerank\":2.688570976257324,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.7364440748444399,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API error format\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7f6-3171-7800-a352-88c5273cfe33\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.14505896754266895,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14505896754266895,\"keyword\":0.02551724075060132,\"relevance\":0.5,\"rerank\":-2.961543083190918,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3481379889416513,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"error\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 4 files\n.engramdb/memories/api-error-format_01a0f7f6-538a-7ec1-8858-9ee3d74a946b.md\n.engramdb/memories/test-command_01a0f7f6-3171-7800-a352-88c5273cfe33.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"src/**/*.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/__init__.py\nsrc/billing/__init__.py\nsrc/api/__init__.py\nsrc/flags.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/api/checkout.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"problem|raise|status\",\n \"path\": \"/tmp/mte-pq-errors-ntqhvj00/ledgerline/src\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")\nsrc/billing/invoices.py:23:    resp.raise_for_status()\nsrc/billing/tax.py:12:    raise NotImplementedError\nsrc/api/checkout.py:10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nsrc/api/errors.py:4:def problem(status, title, detail=None):\nsrc/api/errors.py:5:    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\nsrc/api/errors.py:9:    resp.status_code = status\nsrc/api/errors.py:10:    resp.mimetype = \"application/problem+json\""
+ },
+ {
+  "role": "assistant",
+  "content": "Return errors with `errors.problem(status, title, detail)` from `src/api/errors.py`. It builds an RFC 7807 `application/problem+json` response. This is the project's stored convention, and I confirmed the helper exists in the code.\n\n- **Why:** Clients of the public API parse error bodies automatically, so every endpoint has to use the same shape.\n- **What to avoid:** Don't return ad-hoc dicts or plain strings with an error status code.\n- **What the helper does:** It sets `type` to `about:blank`, plus `title` and `status`, and it adds `detail` when you pass one. It also sets the response status code and mimetype.\n\nExample inside an endpoint:\n\n```python\nfrom src.api.errors import problem\n\nreturn problem(404, \"Invoice not found\", \"No invoice with id 123\")\n```\n\nI only read the signature and the first lines of `errors.py`, not the whole file. I also haven't checked whether the existing endpoints in `src/api/invoices.py` and `src/api/checkout.py` already follow this."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

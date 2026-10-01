@@ -1,0 +1,35 @@
+[
+ {
+  "role": "user",
+  "content": "Which logging library should I use when I add log lines here?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4fe61eea-098c-4b2b-ad7b-06e6ec3e1041\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"5648f6a1-1989-4a8a-8498-d1e341b2a70b\", \"session_id\": \"1b3bd77d-3903-4b92-b925-ef7edf142327\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4fe61eea-098c-4b2b-ad7b-06e6ec3e1041\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"77965f35-499c-4415-83ec-2e3c7a72a3ce\", \"session_id\": \"1b3bd77d-3903-4b92-b925-ef7edf142327\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"313f9e94-1680-4cf3-9691-13ed9c16261c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d3dafe73-becd-4f82-b319-692d261dd190\", \"session_id\": \"1b3bd77d-3903-4b92-b925-ef7edf142327\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"313f9e94-1680-4cf3-9691-13ed9c16261c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Logging library choice (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Logging library choice (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b9e72f27-1089-4154-95f8-d2ee1c6d517d\", \"session_id\": \"1b3bd77d-3903-4b92-b925-ef7edf142327\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"logging library\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7fc-3f3d-7a90-bd77-15236e6600ca\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.7892998374677412,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7892998374677412,\"keyword\":0.9589191473890548,\"relevance\":0.5,\"rerank\":1.5633742809295654,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6508301711626012,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Logging library choice\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "Use **structlog**, in every module. The project decided this during the 2026 observability work so that log processing in production stays uniform.\n\n- Get a logger with `log = structlog.get_logger()`.\n- Don't use the stdlib `logging` module.\n- Write event keys in snake_case.\n- Put identifiers in keyword fields, not in the message string. For example, write `log.info(\"ledger_entry_posted\", entry_id=entry_id)`, not `log.info(f\"posted {entry_id}\")`.\n\nThis comes from a stored project memory, not from the code. I haven't checked whether `src/` already follows it or whether structlog is in the dependencies."
+ }
+]

@@ -1,0 +1,118 @@
+[
+ {
+  "role": "user",
+  "content": "Implement invoice_tax(lines, rate) in src/billing/tax.py. Each line is a dict with quantity and unit_cents; return the invoice's total tax in cents."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c67b8ea0-f300-4c90-85bb-c09017fb654b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"92cbbbc2-a9f8-4ea3-a0af-eefa4996cf98\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c67b8ea0-f300-4c90-85bb-c09017fb654b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0766c591-fc1c-473b-a28e-a8179a90f264\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f66d1672-7537-41d5-bc6b-a9445e479948\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0be784af-aaa0-43b2-8181-a0907517a429\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f66d1672-7537-41d5-bc6b-a9445e479948\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e5849c32-13e1-45c8-a741-6b85f9d75a5e\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e93ac41a-32e2-42b2-a058-639efaf2cd10\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"7f571f92-94d6-4436-8ad7-ad64fc7c1e15\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e93ac41a-32e2-42b2-a058-639efaf2cd10\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax rounding rule (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ec475ba1-d9f8-45f2-83e7-fc8c3bd9f503\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"696b5f52-e0d4-48c0-b48c-d9cf4c98bc2e\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"2bf1e1ca-a84d-4240-8bc9-de124fb7e9b2\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"696b5f52-e0d4-48c0-b48c-d9cf4c98bc2e\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c08dcc38-bcfc-4285-b47e-61d489cb7b62\", \"session_id\": \"1e68341d-f64a-45de-a116-0848e60ffeaf\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"tax rounding\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7ed-17cb-7ed1-a95a-e18b89f4ea6f\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.7831239832213148,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7831239832213148,\"keyword\":0.9750600661427731,\"relevance\":0.5,\"rerank\":1.3785202503204346,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6790589862010976,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax rounding rule\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Billing code moves amounts between invoices, refunds, tax and the ledger, and every one of those paths has been bitten by rounding drift in the past. The rule that came out of that: store and pass every monetary amount as integer cents using the Money type in src/billing/money.py. Never use float for money, not even for intermediate math. New fields that hold an amount end in _cents, for example discount_cents.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ec-f210-7383-8dd6-c7255ee42f83\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.3330553313183382,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3330553313183382,\"keyword\":0.059800620432964566,\"relevance\":0.5,\"rerank\":-0.652671754360199,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5727088901217334,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money representation\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat src/billing/tax.py; ls tests 2>/dev/null\",\n \"description\": \"List repo files and show tax module\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-error-format_01a0f7ed-2805-7c61-839b-0a8106a21c25.md\n.engramdb/memories/export-script-caution_01a0f7ed-1f7a-71e0-8fba-495c17e41099.md\n.engramdb/memories/feature-flag-usage_01a0f7ed-0f35-7072-b9cb-caa8a08da9e6.md\n.engramdb/memories/finalize-caveat_01a0f7ec-f6d2-7a00-9988-ea8f7beaca14.md\n.engramdb/memories/logging-library-choice_01a0f7ec-fb75-7d41-8a26-5fd5ed7b0c73.md\n.engramdb/memories/migration-rules_01a0f7ed-07d4-7572-988b-6dccc85cf798.md\n.engramdb/memories/money-representation_01a0f7ec-f210-7383-8dd6-c7255ee42f83.md\n.engramdb/memories/release-process_01a0f7ed-2fd7-7da0-8257-1ce2ad9748c3.md\n.engramdb/memories/tax-rounding-rule_01a0f7ed-17cb-7ed1-a95a-e18b89f4ea6f.md\n.engramdb/memories/test-command_01a0f7ed-00d5-7693-acba-45e9976c090d.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nfrom decimal import Decimal\n\n\ndef line_total(lines):\n    x = 0\n    for line in lines:\n        x += line[\"quantity\"] * line[\"unit_cents\"]\n    return x\n\n\ndef tax_for(amount_cents, rate):\n    raise NotImplementedError\ntest_payments.py\ntest_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat tests/test_tax.py src/billing/money.py Makefile; cat .engramdb/memories/test-command*\",\n \"description\": \"Show tax tests, Money type, and test command\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from src.billing.tax import line_total\n\n\ndef test_line_total():\n    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Money:\n    cents: int\n    currency: str = \"USD\"\n\n    def __add__(self, other):\n        assert self.currency == other.currency\n        return Money(self.cents + other.cents, self.currency)\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n---\nversion: 2\nid: 01a0f7ed-00d5-7693-acba-45e9976c090d\ntype: convention\nstatus: Active\ntitle: Test command\n---\n\n# Test command\n\n**Summary:** Test command\n\n## Content\n\nThe repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\n\n## Scope\n\n- **Files:** `/`\n- **Tags:** `testing`, `workflow`\n- **Criticality:** 0.5\n- **Confidence:** 0.8\n\n## Provenance\n\n- **Source:** human\n- **Created:** 2026-10-01T14:44:59.733563617+00:00\n- **Updated:** 2026-10-01T14:44:59.733563617+00:00\n\n<!-- engramdb\nvisibility: Shared\naccessed_at: 2026-10-01T14:44:59.733563617Z\ndecay:\n  strategy: none\n  floor: 0.0\n-->"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-tax-perline-inscif5b/ledgerline/src/billing/tax.py\",\n \"content\": \"from decimal import Decimal, ROUND_HALF_EVEN\\n\\n\\ndef line_total(lines):\\n    x = 0\\n    for line in lines:\\n        x += line[\\\"quantity\\\"] * line[\\\"unit_cents\\\"]\\n    return x\\n\\n\\ndef tax_for(amount_cents, rate):\\n    # str() so a float rate like 0.0825 doesn't carry binary float error.\\n    tax = Decimal(amount_cents) * Decimal(str(rate))\\n    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))\\n\\n\\ndef invoice_tax(lines, rate):\\n    # Round each line's tax separately (banker's rounding), then sum.\\n    # Never round the invoice total.\\n    return sum(tax_for(line_total([line]), rate) for line in lines)\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-tax-perline-inscif5b/ledgerline/src/billing/tax.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat >> tests/test_tax.py <<'EOF'\\n\\n\\nfrom src.billing.tax import invoice_tax, tax_for\\n\\n\\ndef test_tax_for_uses_bankers_rounding():\\n    assert tax_for(25, \\\"0.1\\\") == 2  # 2.5 -> 2\\n    assert tax_for(35, \\\"0.1\\\") == 4  # 3.5 -> 4\\n\\n\\ndef test_invoice_tax_rounds_per_line():\\n    lines = [\\n        {\\\"quantity\\\": 1, \\\"unit_cents\\\": 15},\\n        {\\\"quantity\\\": 1, \\\"unit_cents\\\": 15},\\n    ]\\n    # Per line: 1.5 -> 2, 1.5 -> 2 => 4 (rounding the total 3.0 would give 3).\\n    assert invoice_tax(lines, 0.1) == 4\\n\\n\\ndef test_invoice_tax_empty():\\n    assert invoice_tax([], 0.08) == 0\\nEOF\\nmake test-fast\",\n \"description\": \"Add tax tests and run fast test suite\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 2\npytest -m \"not postgres\" -q\n\n==================================== ERRORS ====================================\n___________________ ERROR collecting tests/test_payments.py ____________________\nImportError while importing test module '/tmp/mte-ed-tax-perline-inscif5b/ledgerline/tests/test_payments.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/lib/python3.11/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/test_payments.py:2: in <module>\n    import requests\nE   ModuleNotFoundError: No module named 'requests'\n______________________ ERROR collecting tests/test_tax.py ______________________\nImportError while importing test module '/tmp/mte-ed-tax-perline-inscif5b/ledgerline/tests/test_tax.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/lib/python3.11/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/test_tax.py:1: in <module>\n    from src.billing.tax import line_total\nE   ModuleNotFoundError: No module named 'src'\n=========================== short test summary info ============================\nERROR tests/test_payments.py\nERROR tests/test_tax.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!\n2 errors in 0.12s\nmake: *** [Makefile:4: test-fast] Error 2"
+ },
+ {
+  "role": "assistant",
+  "content": "These are pre-existing environment problems (`src` isn't on the path, and `requests` isn't installed). I'll run just the tax tests with the repo root on the path:"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -m pytest -q tests/test_tax.py\",\n \"description\": \"Run tax tests with repo root on path\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 1\n/usr/local/bin/python: No module named pytest"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"PYTHONPATH=. pytest -q tests/test_tax.py\",\n \"description\": \"Run tax tests via pytest with PYTHONPATH\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "....                                                                     [100%]\n4 passed in 0.01s"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"epistemic\": \"observation\",\n \"summary\": \"make test-fast fails at collection: needs PYTHONPATH=. and the requests package\",\n \"content\": \"As of 2026-10-01, `make test-fast` errors during collection: tests import `src.*` but the repo root isn't on sys.path (No module named 'src'), and tests/test_payments.py imports `requests`, which isn't installed. Workaround: `PYTHONPATH=. pytest -q tests/test_tax.py` (use the `pytest` binary; `python -m pytest` points at a different interpreter that has no pytest).\",\n \"tags\": [\n  \"testing\",\n  \"environment\"\n ],\n \"invalidated_by\": [\n  \"pyproject.toml\",\n  \"Makefile\",\n  \"tests/conftest.py\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7ed-8ca0-76d3-9b83-78d32bef132c\",\"created\":true,\"summary\":\"make test-fast fails at collection: needs PYTHONPATH=. and the requests package\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I added `invoice_tax(lines, rate)` to `src/billing/tax.py`. It follows the tax rule your team stored in project memory (EngramDB): each line's tax is rounded on its own using banker's rounding (exact halves round to the nearest even cent), and the rounded amounts are added up. The invoice total itself is never rounded.\n\n- **`tax_for(amount_cents, rate)`** was an empty placeholder, and I filled it in. It works in exact decimal arithmetic rather than floats and returns a whole number of cents. A rate passed as a float like `0.0825` is converted exactly, so it doesn't pick up float error.\n- **`invoice_tax`** works out each line's subtotal, gets its tax from `tax_for`, and adds the results.\n\n**Tests:** I added three tests to `tests/test_tax.py`:\n- Halves round to the even cent (2.5 \u2192 2, 3.5 \u2192 4).\n- Rounding happens per line: two lines at 1.5\u00a2 give 4\u00a2 total, where rounding the 3.0\u00a2 total would give 3\u00a2.\n- An empty invoice has 0 tax.\n\nAll 4 tests in that file pass, but I only got them running with `PYTHONPATH=. pytest -q tests/test_tax.py`. `make test-fast` fails before running anything: the tests can't find the `src` package, and `tests/test_payments.py` needs `requests`, which isn't installed. I didn't change the test setup, but I saved this and the workaround to project memory."
+ }
+]

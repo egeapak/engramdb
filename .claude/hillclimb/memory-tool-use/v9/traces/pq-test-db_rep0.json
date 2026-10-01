@@ -1,0 +1,70 @@
+[
+ {
+  "role": "user",
+  "content": "What do I need running before I run the full test suite?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"25000d4d-2b70-4c28-86f3-28f63e9d414b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0dce6fd8-294c-407b-a58f-2ac3fa7caf8f\", \"session_id\": \"2dcdfdc1-9f4c-4d6d-82aa-1cdac424fe8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"25000d4d-2b70-4c28-86f3-28f63e9d414b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6667262b-dfbd-4625-9434-a0f7c54b6abc\", \"session_id\": \"2dcdfdc1-9f4c-4d6d-82aa-1cdac424fe8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"16304da2-46bf-4d6b-962c-2b3460d2913f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d6630912-520c-4ba5-9a62-8b6dc4f64169\", \"session_id\": \"2dcdfdc1-9f4c-4d6d-82aa-1cdac424fe8c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"16304da2-46bf-4d6b-962c-2b3460d2913f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Test command (source: shared/human)\\\\n  \\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Test command (source: shared/human)\\\\n  \\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bf65e55d-0b9e-4ea0-b7d9-74414c3d5263\", \"session_id\": \"2dcdfdc1-9f4c-4d6d-82aa-1cdac424fe8c\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"test\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7fb-c569-7b20-aa90-ebd0c3523333\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.5004190395009572,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5004190395009572,\"keyword\":0.9943101300849055,\"relevance\":0.5,\"rerank\":-0.9455331563949585,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.49538164505454146,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7fb-e954-76f0-9611-d9ed714a302d\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.2039535478302539,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2039535478302539,\"keyword\":0.06927040727853581,\"relevance\":0.5,\"rerank\":-1.7704148292541504,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.35414887976448867,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{Makefile,docker-compose*.yml,package.json,pyproject.toml,README*,.env*,justfile}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\npyproject.toml\nMakefile"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"test|postgres|docker\",\n \"path\": \"/tmp/mte-pq-test-db-2263qs2u/ledgerline/Makefile\",\n \"output_mode\": \"content\",\n \"-i\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1:.PHONY: test test-fast\n3:test-fast:\n4:\tpytest -m \"not postgres\" -q\n6:test:\n7:\tpytest -q"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/docker-compose*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No files found"
+ },
+ {
+  "role": "assistant",
+  "content": "You need a running Postgres database before `make test`. Per the stored project note, start it with:\n\n```\ndocker compose up db\n```\n\nWithout it, the tests marked `postgres` fail with connection errors.\n\nIf you don't need the database, `make test-fast` runs `pytest -m \"not postgres\"` and skips those tests.\n\nI checked the repo and found two things you should know:\n- The Makefile matches the note. `make test` runs plain `pytest -q`, and `make test-fast` excludes the `postgres` marker.\n- There is no `docker-compose*` file in the repo. The `docker compose up db` command may not work as written, and the note may be out of date. I haven't checked where the connection settings or the compose file are supposed to come from."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing was missing in the tools. I had what I needed, and I chose not to use some of it.\n\n- **Hook injection:** The UserPromptSubmit hook listed two memories, \"Test command\" and \"Release process\", with blank bodies. Only the summaries came through, so the injected context didn't answer the question. I had to run `query` with `detail_level: \"full\"` to get the content. This was a small extra step, not a blocker. I would have preferred the hook to include the body, or at least one line of it, for memories that matched the prompt closely.\n- **Possibly stale memory:** The \"Test command\" memory says to run `docker compose up db`, but the repo has no docker-compose file. `challenge` (with `evidence`) or `verify` would have been the right tool for flagging that. I didn't call either. I only mentioned the discrepancy in my answer. I also never confirmed that the compose file was truly absent, for example by checking the README or other locations. So the memory may still be wrong, and I left it unflagged.\n\nEverything else I needed was available: `query` for lookup, and `challenge`, `update` and `verify` for correcting a memory."
+ }
+]

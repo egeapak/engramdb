@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2f55b9a8-5803-4102-a33e-4965a9319c81\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0834a814-bead-4f8b-8090-65732b050683\", \"session_id\": \"e77410a0-6892-4082-8af4-6c34204ceb0b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2f55b9a8-5803-4102-a33e-4965a9319c81\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4f7a9f33-f575-4b0b-b243-29fa191f903c\", \"session_id\": \"e77410a0-6892-4082-8af4-6c34204ceb0b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"626b58b4-28eb-4329-b903-73a3f0c2a238\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0c28167c-6660-4c20-a934-58db953e6a02\", \"session_id\": \"e77410a0-6892-4082-8af4-6c34204ceb0b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"626b58b4-28eb-4329-b903-73a3f0c2a238\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0f4e6c72-c60b-4c2d-93a8-8b458be0be2d\", \"session_id\": \"e77410a0-6892-4082-8af4-6c34204ceb0b\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the server understood the request but won't apply it because it conflicts with the current state of the target resource.\n\n**Common causes:**\n- **Edit conflicts / optimistic concurrency:** a client tries to update a resource that someone else changed after the client last read it. This often comes up with version numbers or `ETag` and `If-Match` headers, though a failed `If-Match` precondition is more precisely a **412 Precondition Failed**.\n- **Uniqueness violations:** creating something that already exists, such as a duplicate username, email or idempotency key.\n- **Invalid state transitions:** for example, cancelling an order that has already shipped, or deleting a resource other records still depend on.\n\n**Key points:**\n- It's a 4xx (client error), but the request is usually well-formed. The problem is *when* it was sent or *what state* the resource is in, not the syntax.\n- The client can often fix it and retry, for example by re-fetching the latest version, merging changes and resubmitting.\n- RFC 9110 says the response body should explain the conflict so the user or client can resolve it.\n\n**How it differs from similar codes:**\n- **400 Bad Request:** the request itself is malformed or invalid.\n- **412 Precondition Failed:** a conditional header (`If-Match`, `If-Unmodified-Since`) evaluated to false.\n- **422 Unprocessable Content:** the syntax is valid but the content fails semantic validation, independent of the resource's current state."
+ }
+]

@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "How do I run the tests in this repo?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"88c92257-39da-4d6d-85c8-f063c6c915ea\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"4a5c22af-2b31-45d5-9f89-46574261e0b8\", \"session_id\": \"b9f41d01-1ba9-44f4-a246-6c72ba9beda1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"88c92257-39da-4d6d-85c8-f063c6c915ea\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d2a2becd-d4f6-4d7b-9470-8dcf5c9e8cb9\", \"session_id\": \"b9f41d01-1ba9-44f4-a246-6c72ba9beda1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d48b2960-0d18-41bb-a87e-a942b933b93d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"4bae8a42-dfbd-4304-afdf-3d1be17e9807\", \"session_id\": \"b9f41d01-1ba9-44f4-a246-6c72ba9beda1\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d48b2960-0d18-41bb-a87e-a942b933b93d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Test command (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Test command (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ed1f205c-403d-48eb-935b-244b8cf73d1c\", \"session_id\": \"b9f41d01-1ba9-44f4-a246-6c72ba9beda1\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"test command\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ed-9ecf-7061-a20b-8bee1f22ed62\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.753132312708255,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.753132312708255,\"keyword\":0.9004350538581091,\"relevance\":0.5,\"rerank\":1.381290078163147,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5895691288050167,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ed-c55a-7281-9b9b-a4c2dcce63d7\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.17040567588533195,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.17040567588533195,\"keyword\":0.032231306967303114,\"relevance\":0.5,\"rerank\":-2.2855865955352783,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.36327844998570896,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a && cat Makefile package.json pyproject.toml setup.cfg tox.ini 2>/dev/null | head -80\",\n \"description\": \"List repo files and show build configs\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -R scripts tests; grep -rn -i \\\"postgres\\\\|compose\\\\|DATABASE\\\" --include=* -r . --exclude-dir=.git --exclude-dir=.engramdb | head -20\",\n \"description\": \"Check for compose file and Postgres test setup\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts:\nexport.py\n\ntests:\ntest_payments.py\ntest_tax.py\n./Makefile:4:\tpytest -m \"not postgres\" -q"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__challenge",
+  "content": "{\n \"id\": \"01a0f7ed-9ecf-7061-a20b-8bee1f22ed62\",\n \"evidence\": \"As of 2026-10-01 the repo has no docker-compose/compose file, so `docker compose up db` can't work from the repo root. Also, no test in tests/ (test_payments.py, test_tax.py) uses the `postgres` marker, and pyproject.toml doesn't register it. The Makefile targets test-fast/test do exist as described.\",\n \"source_file\": \"Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"challenged\":true,\"memory\":{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7ed-9ecf-7061-a20b-8bee1f22ed62\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"status\":\"challenged\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}}"
+ },
+ {
+  "role": "assistant",
+  "content": "The repo uses pytest through two Makefile targets. First install the dev dependencies with `pip install -e \".[dev]\"`, then:\n\n- **`make test-fast`** runs `pytest -m \"not postgres\" -q`. It skips the Postgres integration tests and is the one to use day to day.\n- **`make test`** runs `pytest -q`, which is the full suite including the Postgres tests.\n\nI haven't run either command; this comes from reading the `Makefile` and `pyproject.toml`.\n\n**A stored note doesn't match the repo.** The team's EngramDB memory says to run `docker compose up db` before `make test` so the Postgres tests can connect. But:\n- The repo has no `docker-compose.yml` or `compose.yaml`, so that command won't work here.\n- Neither test file (`tests/test_payments.py`, `tests/test_tax.py`) uses the `postgres` marker, and `pyproject.toml` doesn't register it. Right now both targets most likely run the same tests.\n\nThe database setup may have been removed, or it may live somewhere else. I've marked that memory as \"challenged\" so someone can review it. If you know how the Postgres database is supposed to be started, tell me and I'll update the note."
+ }
+]

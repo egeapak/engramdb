@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a44eccd3-8922-4b2b-9a84-aafa7154fae0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a81cde11-c8f6-4638-b6d1-415c838d465f\", \"session_id\": \"b3005be0-fb05-4c29-b747-78f127613ccc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a44eccd3-8922-4b2b-9a84-aafa7154fae0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b6919ec8-ca8f-4f5d-8beb-05167f9adf98\", \"session_id\": \"b3005be0-fb05-4c29-b747-78f127613ccc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d5a38b53-914a-4f9e-bcf3-60f4e29ed2c3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b47d259f-8543-482a-9202-465231a23943\", \"session_id\": \"b3005be0-fb05-4c29-b747-78f127613ccc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d5a38b53-914a-4f9e-bcf3-60f4e29ed2c3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1d8ecce0-c149-4c3c-b708-1000dec6a9b8\", \"session_id\": \"b3005be0-fb05-4c29-b747-78f127613ccc\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto` lets you choose a new base for a range of commits. Normal `git rebase` replays the commits onto the tip of the branch you name. With `--onto` you can also decide which commits get moved and where they go.\n\n### Syntax\n\n```\ngit rebase --onto <newbase> <upstream> [<branch>]\n```\n\nThis takes the commits in `<upstream>..<branch>` (on `<branch>`, but not on `<upstream>`) and replays them onto `<newbase>`. If you leave out `<branch>`, it uses the current branch.\n\n### Example: move a branch off another feature branch\n\nYou branched `feature-b` from `feature-a`, but `feature-b` only needs to be based on `main`:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\n```bash\ngit rebase --onto main feature-a feature-b\n```\n\nGit takes the commits on `feature-b` that aren't on `feature-a` (just `E` and `F`) and replays them onto `main`:\n\n```\nmain:       A---B\n                |\\\nfeature-a:      | C---D\n                 \\\nfeature-b:        E'---F'\n```\n\n`C` and `D` stay on `feature-a` only. `E'` and `F'` are new commits with the same changes as `E` and `F`, but different hashes.\n\n### Another common use: drop commits from the middle\n\nYou can remove commits `C` and `D` from a branch `A-B-C-D-E-F` like this:\n\n```bash\ngit rebase --onto B D\n```\n\nThis replays `E` and `F` onto `B`, so the branch becomes `A-B-E'-F'`.\n\n### Things to keep in mind\n- The commits are rewritten, so their hashes change. If you've already pushed the branch, you'll need `git push --force-with-lease`.\n- If the replayed commits depend on the commits you skipped, you'll get conflicts.\n- If something goes wrong, `git rebase --abort` cancels a rebase in progress. After a finished rebase, `git reflog` shows the old commit so you can go back to it."
+ }
+]
