@@ -988,7 +988,6 @@ pub struct EngramDbServer {
     /// and the list calls do not. Servers built without deferral start
     /// `Ready`.
     startup: tokio::sync::watch::Receiver<StartupStatus>,
-    #[allow(dead_code)]
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
 
