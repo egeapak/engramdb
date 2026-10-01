@@ -228,7 +228,7 @@ def run_one(case, rep, args, out_dir):
         after = grade.snapshot_store(ws, env)
         row, trace = grade.grade_case(case, events, diff, before, after, ids, latency)
 
-        if args.debrief:
+        if args.debrief and rep < args.debrief_reps:
             d_events, _, _ = run_claude(DEBRIEF_PROMPT, ws, env, args, session_id, resume=True,
                                         extra=["--disallowedTools", "Edit", "Write", "Bash", MEMORY_SERVER_TOOLS])
             d_result = next((e for e in reversed(d_events) if e.get("type") == "result"), {})
@@ -269,6 +269,8 @@ def main():
     ap.add_argument("--max-retries", type=int, default=2)
     ap.add_argument("--max-budget-usd", type=float, default=2.0, help="per claude call")
     ap.add_argument("--no-debrief", dest="debrief", action="store_false")
+    ap.add_argument("--debrief-reps", type=int, default=1,
+                    help="debrief only reps below this number (default 1: rep 0 only)")
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--ort-dylib", default=os.environ.get("ORT_DYLIB_PATH", "/tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so"))
     args = ap.parse_args()
