@@ -1,0 +1,108 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9a796686-8d6c-4c7c-be64-e93133399418\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8fc386cd-4a8c-45be-b958-57f6dba689d0\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9a796686-8d6c-4c7c-be64-e93133399418\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"620a10ab-019f-4abb-9d10-7ba9dc256283\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"685f7b5b-8a5a-4255-af57-084bf4a99689\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"db348e59-1127-44fc-a894-7cfab137f543\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"685f7b5b-8a5a-4255-af57-084bf4a99689\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"68414a79-22c4-4abb-8512-1ee552e616e4\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1c689191-cb90-4f18-ba48-3fe550bef2ed\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"a1f3bcfc-b743-424c-bb15-393cf9fb0eef\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1c689191-cb90-4f18-ba48-3fe550bef2ed\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0d7da92c-7b16-46f6-ab5d-89d80807ec75\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0dbb2f26-9623-41af-ae7f-323922d7f27b\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"a5a86d03-6670-4474-80e0-220eb7a5ad36\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0dbb2f26-9623-41af-ae7f-323922d7f27b\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f41afea0-f002-411d-a7c3-9600d918ceb6\", \"session_id\": \"aca90070-0af3-450c-bb31-6c3b40eaa5e5\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I'll check the repo's schema and migration layout first, and load the memory query tool in parallel."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 2 files\n.engramdb/memories/never-edit-an-applied-migration_01a0f79c-9a59-7381-831e-3c754688ad4b.md\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/*{migration,schema,model}*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/never-edit-an-applied-migration_01a0f79c-9a59-7381-831e-3c754688ad4b.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-gjsyjkeo/ledgerline/.engramdb/memories/never-edit-an-applied-migration_01a0f79c-9a59-7381-831e-3c754688ad4b.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f79c-9a59-7381-831e-3c754688ad4b\n4\ttype: hazard\n5\tstatus: Active\n6\ttitle: Never edit an applied migration\n7\t---\n8\t\n9\t# Never edit an applied migration\n10\t\n11\t**Summary:** Never edit an applied migration\n12\t\n13\t## Content\n14\t\n15\tFiles in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `migrations/`\n20\t- **Tags:** `database`, `migrations`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T13:17:10.617083853+00:00\n28\t- **Updated:** 2026-10-01T13:17:10.617083853+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T13:17:10.617083853Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.5\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-gjsyjkeo/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tCREATE TABLE customers (\n2\t    id TEXT PRIMARY KEY,\n3\t    name TEXT NOT NULL,\n4\t    emial TEXT NOT NULL\n5\t);\n6\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"migrations/*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "migrations/0005_create_refunds.sql\nmigrations/0004_create_lines.sql\nmigrations/0002_add_tax.sql\nmigrations/0001_create_invoices.sql\nmigrations/0006_index_customer.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "assistant",
+  "content": "Add a new migration file, `migrations/0008_add_customer_phone.sql`. Don't edit `0007_add_customers.sql`.\n\nA project memory in EngramDB says files in `migrations/` are applied in production and must never be edited. Each change goes in a new file with the next 4-digit number. The latest is `0007`, so yours is `0008`.\n\nSuggested contents:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made `phone` nullable. Existing rows have no phone number, so a `NOT NULL` column would need a default. If you want it required, say so and I'll add one.\n\n`0007` has a typo: the column is `emial`, not `email`. The same rule applies, so fixing it would also need its own migration, such as a `RENAME COLUMN`. I haven't done that, since you didn't ask for it.\n\nThe repo has no model or schema files besides the migrations. I found nothing else that references `customers`. I haven't created the file yet. Do you want me to?"
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

@@ -952,7 +952,7 @@ impl EngramDbServer {
             provider_cache: ops::ProviderCache::new(),
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_warning: None,
-            tool_router: Self::tool_router(),
+            tool_router: Self::default_tool_router(),
         })
     }
 
@@ -998,7 +998,7 @@ impl EngramDbServer {
             provider_cache: ops::ProviderCache::new(),
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_warning: None,
-            tool_router: Self::tool_router(),
+            tool_router: Self::default_tool_router(),
         }
     }
 
@@ -3935,11 +3935,65 @@ finds it and harvest_show digests it straight from the archive."
             .map(|t| t.name.to_string())
             .collect()
     }
+
+    /// The tool router with `[mcp].always_load`'s default set pinned.
+    fn default_tool_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        set_always_load(
+            &mut router,
+            &engramdb::types::McpConfig::default().always_load,
+        );
+        router
+    }
+
+    /// Pin `names` (and only them) as always loaded; see [`set_always_load`].
+    pub fn set_always_load(&mut self, names: &[String]) {
+        set_always_load(&mut self.tool_router, names);
+    }
+
+    /// `[mcp].always_load` from this project's config (defaults if absent).
+    async fn configured_always_load(&self) -> Vec<String> {
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        load_config_or_default(&config_path).await.mcp.always_load
+    }
 }
 
 // ---------------------------------------------------------------------------
 // ServerHandler implementation
 // ---------------------------------------------------------------------------
+
+/// Claude Code's per-tool `_meta` key that keeps a tool's schema loaded
+/// instead of deferring it behind ToolSearch. Other clients ignore it.
+pub const ALWAYS_LOAD_META_KEY: &str = "anthropic/alwaysLoad";
+
+/// Set `_meta["anthropic/alwaysLoad"] = true` on exactly the named tools.
+///
+/// Tools not named lose the key, so a config list replaces the default rather
+/// than adding to it. A name that matches no tool is reported and skipped:
+/// a typo in config must not fail server startup.
+fn set_always_load(
+    router: &mut rmcp::handler::server::tool::ToolRouter<EngramDbServer>,
+    names: &[String],
+) {
+    for name in names {
+        if !router.has_route(name) {
+            tracing::warn!("[mcp].always_load: no tool named {name:?}; ignoring it");
+        }
+    }
+    for route in router.map.values_mut() {
+        let pinned = names.iter().any(|n| n.as_str() == route.attr.name.as_ref());
+        let mut meta = route.attr.meta.take().unwrap_or_default();
+        if pinned {
+            meta.0.insert(
+                ALWAYS_LOAD_META_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        } else {
+            meta.0.remove(ALWAYS_LOAD_META_KEY);
+        }
+        route.attr.meta = (!meta.0.is_empty()).then_some(meta);
+    }
+}
 
 /// SEP-2549 cache hints for a hand-built result, as `(ttl_ms, cache_scope)`.
 ///
@@ -3967,7 +4021,10 @@ fn cache_hints(
     }
 }
 
-#[tool_handler]
+// `router = self.tool_router`: the default (`Self::tool_router()`) builds a
+// fresh router per request, which would drop the per-instance tool `_meta`
+// that `set_always_load` writes.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for EngramDbServer {
     fn get_info(&self) -> ServerConfig {
         let capabilities = ServerCapabilities::builder()
@@ -4383,6 +4440,8 @@ pub async fn run_stdio(
     }
     // Load the embedding model in the background now so the first tool call
     // doesn't pay the ~240ms ONNX session init synchronously.
+    let always_load = server.configured_always_load().await;
+    server.set_always_load(&always_load);
     server.spawn_provider_warmup();
     // Keep the shared daemon resident while this session runs and self-heal it
     // if it dies/restarts.
@@ -4506,8 +4565,12 @@ pub async fn run_sse(
         // so the first connection's first tool call doesn't pay the load.
         warmup.spawn_provider_warmup();
         warmup.spawn_daemon_heartbeat();
-        warmup.embedding_warning
+        (
+            warmup.embedding_warning.clone(),
+            warmup.configured_always_load().await,
+        )
     };
+    let (embedding_warning, always_load) = embedding_warning;
 
     let config = http_server_config();
     let ct = config.cancellation_token.clone();
@@ -4517,12 +4580,14 @@ pub async fn run_sse(
             let embedding_warning = embedding_warning.clone();
             let provider_cache = provider_cache.clone();
             let daemon = daemon.clone();
+            let always_load = always_load.clone();
             move || {
                 let mut server =
                     EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
                         .map(|s| s.with_shared_model_caches(provider_cache.clone(), daemon.clone()))
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
                 server.embedding_warning = embedding_warning.clone();
+                server.set_always_load(&always_load);
                 Ok(server)
             }
         },

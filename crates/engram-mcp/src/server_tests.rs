@@ -6596,3 +6596,100 @@ fn a_search_hit_bounds_the_metadata_it_replays() {
         summary.chars().count()
     );
 }
+
+// ---------------------------------------------------------------------------
+// [mcp].always_load: per-tool `_meta["anthropic/alwaysLoad"]`
+// ---------------------------------------------------------------------------
+
+/// Tools the handler reports as always loaded, read through `get_tool` —
+/// the same `router = self.tool_router` expression `list_tools` uses, so this
+/// also proves the handler reads the per-instance router.
+fn always_loaded(server: &EngramDbServer) -> Vec<String> {
+    let mut names: Vec<String> = EngramDbServer::tool_names()
+        .into_iter()
+        .filter(|name| {
+            let tool = ServerHandler::get_tool(server, name).expect("listed tool resolves");
+            tool.meta
+                .as_ref()
+                .and_then(|m| m.0.get(ALWAYS_LOAD_META_KEY))
+                == Some(&serde_json::Value::Bool(true))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn sorted(names: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn always_load_defaults_name_real_tools() {
+    let tools = EngramDbServer::tool_names();
+    for name in engramdb::types::McpConfig::DEFAULT_ALWAYS_LOAD {
+        assert!(
+            tools.iter().any(|t| t == name),
+            "default always_load names unknown tool {name:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn always_load_pins_core_tools_by_default() {
+    let (_dir, server) = setup().await;
+    assert_eq!(
+        always_loaded(&server),
+        sorted(&engramdb::types::McpConfig::DEFAULT_ALWAYS_LOAD)
+    );
+}
+
+#[tokio::test]
+async fn always_load_config_replaces_the_default() {
+    let (_dir, mut server) = setup().await;
+    server.set_always_load(&["stats".to_string(), "no_such_tool".to_string()]);
+    assert_eq!(
+        always_loaded(&server),
+        vec!["stats".to_string()],
+        "unknown names are skipped"
+    );
+
+    server.set_always_load(&[]);
+    assert!(
+        always_loaded(&server).is_empty(),
+        "an empty list defers every tool"
+    );
+    let query = ServerHandler::get_tool(&server, "query").unwrap();
+    assert!(
+        query.meta.is_none(),
+        "removing the only key leaves no empty _meta object"
+    );
+}
+
+#[tokio::test]
+async fn always_load_reads_the_project_config() {
+    let (dir, server) = setup().await;
+    let engram_dir = dir.path().join(".engramdb");
+    std::fs::create_dir_all(&engram_dir).unwrap();
+    std::fs::write(
+        engram_dir.join("config.toml"),
+        "[mcp]\nalways_load = [\"query\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        server.configured_always_load().await,
+        vec!["query".to_string()]
+    );
+}
+
+#[test]
+fn mcp_config_defaults_when_section_absent() {
+    let cfg: engramdb::types::EngramConfig = toml::from_str("").unwrap();
+    assert_eq!(cfg.mcp, engramdb::types::McpConfig::default());
+    let cfg: engramdb::types::EngramConfig = toml::from_str("[mcp]\n").unwrap();
+    assert_eq!(
+        cfg.mcp.always_load.len(),
+        engramdb::types::McpConfig::DEFAULT_ALWAYS_LOAD.len()
+    );
+}

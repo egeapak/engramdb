@@ -1161,6 +1161,10 @@ pub struct EngramConfig {
     #[serde(default)]
     pub hooks: HooksConfig,
 
+    /// MCP server surface settings (`[mcp]`)
+    #[serde(default)]
+    pub mcp: McpConfig,
+
     /// Memory content constraints (summary length, …)
     #[serde(default)]
     pub content: ContentConfig,
@@ -1608,6 +1612,43 @@ impl Default for EpistemicConfig {
             consolidation_similarity: Self::default_consolidation_similarity(),
             auto_consolidate: false,
             invalidated_retention_days: Self::default_invalidated_retention_days(),
+        }
+    }
+}
+
+/// MCP server surface settings (`[mcp]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpConfig {
+    /// Tools the server marks `_meta["anthropic/alwaysLoad"] = true`.
+    ///
+    /// Claude Code defers MCP tools behind ToolSearch by default: the model
+    /// sees only their names and must load a schema before calling it. In
+    /// the memory-tool-use eval, Sonnet 5.5 took that step in 7 of 122 runs
+    /// and read `.engramdb/memories/` directly instead. Listing a tool here
+    /// keeps its schema in every request, at the cost of those tokens. Other
+    /// MCP clients ignore the key. An empty list defers every tool; unknown
+    /// names are ignored with a warning.
+    #[serde(default = "McpConfig::default_always_load")]
+    pub always_load: Vec<String>,
+}
+
+impl McpConfig {
+    /// The tools a session needs to read, record and correct memories.
+    pub const DEFAULT_ALWAYS_LOAD: [&'static str; 5] =
+        ["query", "get", "create", "update", "challenge"];
+
+    fn default_always_load() -> Vec<String> {
+        Self::DEFAULT_ALWAYS_LOAD
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            always_load: Self::default_always_load(),
         }
     }
 }
