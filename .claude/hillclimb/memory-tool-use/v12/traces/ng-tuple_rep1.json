@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2bf699d2-e1e7-4feb-975c-d9a5cad21c0a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d3bbd881-6a07-4fd9-9816-128f7dc35e4d\", \"session_id\": \"5b4eb80f-c491-4132-b1ff-5c2557fe7145\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2bf699d2-e1e7-4feb-975c-d9a5cad21c0a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"be1d73cc-8b5f-4c24-9319-8095c13bcccb\", \"session_id\": \"5b4eb80f-c491-4132-b1ff-5c2557fe7145\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1afab7a2-c47f-43ad-a219-48b3a11a7bab\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"6c9ae4b0-5fb0-474c-a19b-1b2563b4736c\", \"session_id\": \"5b4eb80f-c491-4132-b1ff-5c2557fe7145\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1afab7a2-c47f-43ad-a219-48b3a11a7bab\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7be57162-4a51-43d0-912e-33d309f0d419\", \"session_id\": \"5b4eb80f-c491-4132-b1ff-5c2557fe7145\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "The main difference is that **lists are mutable and tuples are immutable**. Most of the other differences follow from that.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` or `1, 2, 3` |\n| Can you change it? | Yes: append, remove, assign by index | No, it's fixed once created |\n| Hashable (usable as a dict key or set member)? | No | Yes, if all its elements are hashable |\n| Methods | Many (`append`, `extend`, `sort`, `pop`, \u2026) | Only `count` and `index` |\n| Memory and speed | A bit larger, with extra room to grow | Smaller; slightly faster to create and iterate |\n| Usual use | Many items of the same kind | A fixed-size record whose positions mean different things |\n\n```python\nnums = [1, 2, 3]\nnums[0] = 10        # fine\nnums.append(4)      # fine\n\npoint = (1, 2)\npoint[0] = 10       # TypeError: 'tuple' object does not support item assignment\n\nlocations = {(40.7, -74.0): \"NYC\"}   # tuple as a dict key works\n# {[40.7, -74.0]: \"NYC\"}             # TypeError: unhashable type: 'list'\n```\n\n**Things that often trip people up:**\n- **A one-item tuple needs a trailing comma:** `(5,)` is a tuple, but `(5)` is just the integer 5. The comma is what makes a tuple, not the parentheses.\n- **Immutable only goes one level deep:** in `t = ([1, 2], 3)`, you can't replace `t[0]`, but you can still run `t[0].append(3)`. A tuple like that also isn't hashable, because the list inside it isn't.\n- **Tuples come up all the time without you noticing:** returning several values (`return x, y`), unpacking (`a, b = b, a`), `*args`, and `dict.items()`, which yields `(key, value)` pairs.\n\n**When to use which:** use a list when the collection will grow, shrink or change. Use a tuple when the data is a fixed group of values (like coordinates, an RGB color or a database row), when you need it as a dict key or set member, or when you want to show that it shouldn't change. If a tuple's fields need names, `collections.namedtuple` or `typing.NamedTuple` gives you that and stays immutable."
+ }
+]

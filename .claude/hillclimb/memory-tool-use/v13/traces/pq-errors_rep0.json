@@ -1,0 +1,82 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"63adae79-77e0-4c0f-9614-f806c7e8f928\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"ef50ed21-ab81-4a34-972f-a06c9061f55b\", \"session_id\": \"b7af3c4b-4adf-4232-81f8-bd5719716a21\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"63adae79-77e0-4c0f-9614-f806c7e8f928\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4157546e-52dd-4a2a-a800-039b9f6e52a0\", \"session_id\": \"b7af3c4b-4adf-4232-81f8-bd5719716a21\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"39c1d9cf-72b8-489d-b774-f500246d9868\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"9a712a37-7792-462f-98f1-37cefebfe724\", \"session_id\": \"b7af3c4b-4adf-4232-81f8-bd5719716a21\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"39c1d9cf-72b8-489d-b774-f500246d9868\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5bd7c93e-4b1c-4ee6-a4c3-f17fe44ce586\", \"session_id\": \"b7af3c4b-4adf-4232-81f8-bd5719716a21\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3eb1b9f8-6f47-4ce5-8610-7d8d000ae68a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"eddbf8e7-9fb7-4610-a574-bd0843faf585\", \"session_id\": \"b7af3c4b-4adf-4232-81f8-bd5719716a21\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3eb1b9f8-6f47-4ce5-8610-7d8d000ae68a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"18070a40-338f-4e1c-9ae9-2dbfd76ec2b5\", \"session_id\": \"b7af3c4b-4adf-4232-81f8-bd5719716a21\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"error response endpoint\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f891-c6d0-7362-a972-327848888a59\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.25469201523179963,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.25469201523179963,\"keyword\":0.2321159167634679,\"relevance\":0.5,\"rerank\":-1.7022178173065186,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5221457014551423,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error|exception|status\",\n \"output_mode\": \"files_with_matches\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 16 files\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f891-cb08-7c23-95fe-f4ff97ed1d61.md\n.engramdb/memories/api-errors-use-problem-json_01a0f891-c6d0-7362-a972-327848888a59.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f891-c2b8-76c2-a5bf-b2ce0b8b7aad.md\n.engramdb/memories/tax-uses-round-half-even_01a0f891-be4a-75d2-b895-b5ba7da51893.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f891-ba2b-7a63-aa99-3c4d8b751334.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f891-b638-78f1-86f2-679115036f3e.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f891-b2be-7c53-ac90-eff8cd3bb6dc.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f891-aece-7651-b0eb-cc8cf6cbfee7.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f891-ab20-7043-b104-7c0a0b5f2770.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f891-a79d-7643-8c5c-1fe2cffb9755.md\ntests/test_payments.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/billing/tax.py\nsrc/billing/refunds.py\nsrc/billing/invoices.py"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me verify against the code."
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-ifj2f8go/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"problem|raise|return\",\n \"path\": \"/tmp/mte-pq-errors-ifj2f8go/ledgerline/src/api/checkout.py\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})"
+ },
+ {
+  "role": "assistant",
+  "content": "Endpoints here return errors as RFC 7807 `application/problem+json`. Build the response with `problem(status, title, detail=None)` from `src/api/errors.py`, and don't return ad-hoc dicts.\n\n```python\nfrom src.api.errors import problem\n\nreturn problem(422, \"Invalid cart\", \"cart_id is required\")\n```\n\n`problem()` builds a Flask response with these fields:\n- **`type`:** always `\"about:blank\"`.\n- **`title`:** the title you pass.\n- **`status`:** the status you pass. It is also set as the HTTP status code.\n- **`detail`:** included only if you pass one.\n- **Content type:** `application/problem+json`.\n\nThe convention comes from a stored project memory. I checked it against `src/api/errors.py`, and the helper matches.\n\n`src/api/checkout.py` doesn't use `problem()` yet. It has only a success return, `jsonify({\"total_cents\": ..., \"status\": \"pending\"})`, and no error paths. So I couldn't find an existing endpoint that shows the pattern in use."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

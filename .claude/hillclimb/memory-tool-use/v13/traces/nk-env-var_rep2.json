@@ -1,0 +1,70 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2f469ec8-a692-4464-aefe-b928406b1642\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"060e8614-5a03-4338-a3ef-4a8ef78806ea\", \"session_id\": \"8a3a7ae6-188b-46cd-adaa-8e91b2873c44\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2f469ec8-a692-4464-aefe-b928406b1642\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7d2e81e6-87c0-4a11-b5b5-822d74e127e2\", \"session_id\": \"8a3a7ae6-188b-46cd-adaa-8e91b2873c44\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1695e0d2-de5c-43f1-a8d9-77e421757eac\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1c75fd5d-02a9-4fd4-abf5-ef05f23544a1\", \"session_id\": \"8a3a7ae6-188b-46cd-adaa-8e91b2873c44\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1695e0d2-de5c-43f1-a8d9-77e421757eac\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"807606dd-152f-4472-91b1-d7ff9331fe57\", \"session_id\": \"8a3a7ae6-188b-46cd-adaa-8e91b2873c44\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry, that's a nasty one. I'll check the code and whether a memory already covers it."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock|stub|gateway|environ|getenv|process\\\\.env\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "assistant",
+  "content": "The repo has no `PAYMENTS_LIVE` reference and no gateway code, so I can't confirm where the switch lives. I'll record what you told me as a hazard."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Without the env var PAYMENTS_LIVE=1, the app silently uses a fake payment gateway, with no warning or error. Reported by the user, who lost about two hours to it. If payments appear to succeed but nothing real happens, check PAYMENTS_LIVE first. Not verified in code: a grep of the repo on 2026-10-01 found no PAYMENTS_LIVE reference and no gateway code, so the switch may live outside this repo or in config.\",\n \"epistemic\": \"observation\",\n \"criticality\": 0.8,\n \"tags\": [\n  \"env-var\",\n  \"payments\",\n  \"config\",\n  \"gotcha\"\n ],\n \"invalidated_by\": [\n  \"**/*payment*\",\n  \"**/*gateway*\"\n ],\n \"premise\": \"While the gateway selection is controlled by PAYMENTS_LIVE and defaults to the fake gateway\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f89c-9f2e-7da2-8562-b3608b318188\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved it to EngramDB as a hazard, so future sessions will see it before touching anything payments-related. It says the app silently falls back to a fake gateway unless `PAYMENTS_LIVE=1` is set.\n\nI couldn't find the switch itself. A repo-wide search turned up no `PAYMENTS_LIVE` and no gateway code. The only env var in the repo is `EXPORT_BUCKET` in `scripts/export.py`. The memory notes it as unverified, since the logic may live in another repo or in config.\n\nFixing the underlying problem would stop it biting anyone else. Options, if you point me at the gateway code:\n- Fail loudly at startup when `PAYMENTS_LIVE` is unset outside dev or test.\n- Log a prominent warning whenever the fake gateway is selected.\n- Make the fake gateway opt-in (`PAYMENTS_FAKE=1`) and default to live.\n\nThe default depends on how risky an accidental live charge is for you."
+ }
+]

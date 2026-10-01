@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ea82de50-2e1d-4c96-b27d-66b937b3ac06\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"7a5dba2f-c9e3-498d-b8b2-4d639810586b\", \"session_id\": \"66ec8d0a-64c6-44de-bf7d-5b96f9a07c4a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ea82de50-2e1d-4c96-b27d-66b937b3ac06\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ebe7071e-6b07-4a27-9872-be02e4789f96\", \"session_id\": \"66ec8d0a-64c6-44de-bf7d-5b96f9a07c4a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a04df4c0-ab48-470c-aa7d-1139cceb073c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"320ef2ff-a0f8-404e-b6ee-8cddf326aa14\", \"session_id\": \"66ec8d0a-64c6-44de-bf7d-5b96f9a07c4a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a04df4c0-ab48-470c-aa7d-1139cceb073c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2e783945-f215-4dc1-bb76-b1115b26a646\", \"session_id\": \"66ec8d0a-64c6-44de-bf7d-5b96f9a07c4a\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource on the server.\n\nThe client can usually fix the conflict and send the request again. The response body should explain what the conflict is so the client knows how to fix it.\n\n**Common causes:**\n- **Edit conflicts:** a PUT/PATCH is based on an old version of a resource that someone else has already changed. Some APIs return 409 for this; others use 412 Precondition Failed when the request includes `If-Match`/ETag headers.\n- **Duplicates:** creating a resource that already exists, such as a username or email that's taken, or an idempotency key reused with a different payload.\n- **Invalid state transitions:** for example, refunding a transaction that was never captured, or deleting a resource that still has records depending on it.\n- **Version control:** pushing to a branch that has moved on since you last fetched.\n\n**How it differs from similar codes:**\n- **400 Bad Request:** the request itself is malformed.\n- **409 Conflict:** the request is valid, but it clashes with the resource's current state.\n- **412 Precondition Failed:** a conditional header like `If-Match` didn't match.\n- **422 Unprocessable Content:** the request is well-formed, but the data fails validation.\n\nThe usual way for a client to handle a 409 is to fetch the latest state, reconcile or merge the changes, and retry."
+ }
+]

@@ -1,0 +1,75 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e3d93011-5504-4a38-810d-176bb43af49f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"7f0ae5e1-37c8-4172-ae3a-4098240e509e\", \"session_id\": \"1b77e01e-5b88-4259-bd9b-c332acb7a516\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e3d93011-5504-4a38-810d-176bb43af49f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f24a1bad-8c2a-4274-98ad-920594261bba\", \"session_id\": \"1b77e01e-5b88-4259-bd9b-c332acb7a516\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0755d630-cbbe-4e5b-8262-6e4f9131cc0c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"54445c31-f6fb-414b-97ff-9496f2810ce5\", \"session_id\": \"1b77e01e-5b88-4259-bd9b-c332acb7a516\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0755d630-cbbe-4e5b-8262-6e4f9131cc0c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"40e3c6f1-77e0-45fc-bf34-652cc8d9ab5a\", \"session_id\": \"1b77e01e-5b88-4259-bd9b-c332acb7a516\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry about the two hours. I'll check the code and see whether this is already recorded."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)gateway|fake|PAYMENTS\",\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Per the user (cost them ~2 hours to find): the app silently falls back to a fake payment gateway unless the env var PAYMENTS_LIVE=1 is set. No error or warning is shown, so real charges appear to \\\"work\\\" but never reach a real gateway. When debugging payment behavior, check PAYMENTS_LIVE first. Note: as of 2026-10-01 a grep of the repo finds no PAYMENTS_LIVE reference, so the switch may live outside this repo, in config, or in a dependency; not verified against code.\",\n \"epistemic\": \"observation\",\n \"premise\": \"User-reported behavior; not verified in this repo's source\",\n \"invalidated_by\": [\n  \"tests/test_payments.py\"\n ],\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"gotcha\"\n ],\n \"criticality\": 0.8\n}",
+  "thinking": "I couldn't find any `PAYMENTS_LIVE` reference or fake-gateway code in the repo\u2014just a sandbox URL in `tests/test_payments.py`. Since I can't verify the mechanism from the code itself, I'll record it as you reported it.\n\n"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f893-fe83-7772-b373-73272bd08bfa\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this to EngramDB as a hazard, so future sessions will see it when payments come up. It says the app silently falls back to a fake gateway unless `PAYMENTS_LIVE=1` is set.\n\nI couldn't confirm it from the code. A repo-wide grep finds no `PAYMENTS_LIVE`, no \"fake\" or \"gateway\" code, and no payments config. The only payments reference is a sandbox URL in `tests/test_payments.py`. The memory records it as user-reported and notes that the switch may live outside this repo, in config, or in a dependency.\n\nI can help in two ways:\n- **Find the switch:** I can look through config files, dependencies, and deploy or env files for where the fallback happens.\n- **Make the fallback loud:** if you find the code, I can add a startup warning or fail fast when `PAYMENTS_LIVE` is unset, so it can't cost you two hours again."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

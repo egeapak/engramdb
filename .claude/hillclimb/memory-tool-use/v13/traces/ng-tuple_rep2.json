@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6ed7bd46-da36-4260-92bb-b58fe79a16de\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"daddbb95-1e24-4ce1-8efe-bc6bb0fec8d9\", \"session_id\": \"9581634b-a442-4a57-b88a-82d8dace4934\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6ed7bd46-da36-4260-92bb-b58fe79a16de\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"40ebb0cd-11e0-43b6-9e9f-d3cc9823a66d\", \"session_id\": \"9581634b-a442-4a57-b88a-82d8dace4934\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"72eaa062-8a43-4a6e-92ce-829919214f9f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3902371c-8a92-4f7f-9f0b-5167f86b54b1\", \"session_id\": \"9581634b-a442-4a57-b88a-82d8dace4934\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"72eaa062-8a43-4a6e-92ce-829919214f9f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"36efbe62-66fd-4103-93ed-07ccced03535\", \"session_id\": \"9581634b-a442-4a57-b88a-82d8dace4934\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "A **list** is mutable and a **tuple** is immutable. Most of the other differences follow from that.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` or `1, 2, 3` |\n| Mutability | Can add, remove and change items | Fixed after creation |\n| Hashable | No, so it can't be a dict key or set member | Yes, if all its items are hashable |\n| Methods | Many (`append`, `remove`, `sort`, \u2026) | Only `count` and `index` |\n| Speed and memory | Slightly more overhead | Slightly faster and smaller |\n| Typical use | A collection of similar items that changes | A fixed record of related values |\n\n```python\nlst = [1, 2, 3]\nlst[0] = 99          # fine\nlst.append(4)        # fine\n\ntup = (1, 2, 3)\ntup[0] = 99          # TypeError: 'tuple' object does not support item assignment\n\npoint = (3, 4)\ndistances = {point: \"A\"}   # tuples work as dict keys\n```\n\n**Gotchas**\n- A one-element tuple needs a trailing comma: `(5,)`. Without it, `(5)` is just the integer 5.\n- Tuples are only shallowly immutable. A tuple holding a list can still have that list modified: `([1], 2)[0].append(3)` works.\n\n**Rule of thumb:** use a list for a sequence that grows, shrinks or is reordered. Use a tuple for a fixed group of values, such as coordinates, a database row, or multiple return values. Tuples also signal that the data shouldn't change."
+ }
+]

@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"835b7aaf-b1e7-4711-bd8f-cd0b86203d2a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"205b3104-5dc1-451c-9ff4-0f03145bb830\", \"session_id\": \"2af3bfd6-b59b-4673-b8ce-9f20deaef0cd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"835b7aaf-b1e7-4711-bd8f-cd0b86203d2a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"41794904-4822-4cfb-8ea1-cbfc7b6a3bee\", \"session_id\": \"2af3bfd6-b59b-4673-b8ce-9f20deaef0cd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fc732140-f526-4de2-bead-954490047374\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"09a5760f-d995-4bc9-83f5-47903de24449\", \"session_id\": \"2af3bfd6-b59b-4673-b8ce-9f20deaef0cd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fc732140-f526-4de2-bead-954490047374\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"13d318d3-abf5-435a-8245-32662591744a\", \"session_id\": \"2af3bfd6-b59b-4673-b8ce-9f20deaef0cd\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource. The client can often fix the problem and retry.\n\nCommon causes:\n- **Edit conflicts**: a concurrent update, such as a stale version or ETag in an optimistic-locking scheme.\n- **Duplicate creation**: trying to create something that already exists, such as a username or email that's already taken.\n- **Invalid state transitions**: for example, cancelling an order that has already shipped.\n- **Deletion blocked**: removing a resource that other resources still depend on.\n\nA good 409 response includes a body explaining the conflict and, ideally, how to resolve it. For example, it might show the current resource state so the client can merge changes.\n\nIt differs from similar codes:\n- **400**: the request itself is malformed.\n- **412 Precondition Failed**: an `If-Match` or `If-Unmodified-Since` header check failed.\n- **422**: the request is well-formed but semantically invalid."
+ }
+]

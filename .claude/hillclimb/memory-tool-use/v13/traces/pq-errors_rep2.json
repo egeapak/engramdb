@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3c1ca646-d122-4875-8c8c-ba9ab61dc367\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"441a48dd-5c03-45fd-a5be-afd26ec611f3\", \"session_id\": \"a2a32e85-424e-4486-909c-20a051e64a32\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3c1ca646-d122-4875-8c8c-ba9ab61dc367\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f0385e29-f532-4bbe-88c3-16ff494257cb\", \"session_id\": \"a2a32e85-424e-4486-909c-20a051e64a32\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"bf0bb62e-9eed-4067-aa78-d00f6efa42bc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"2eeee309-2255-4386-9361-7dc88fb06991\", \"session_id\": \"a2a32e85-424e-4486-909c-20a051e64a32\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"bf0bb62e-9eed-4067-aa78-d00f6efa42bc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"561c6a68-f10d-4a98-b050-9ef6370f6b48\", \"session_id\": \"a2a32e85-424e-4486-909c-20a051e64a32\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"error response endpoint\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f89a-bffc-7652-ae57-943ededc0ee5\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.2701358501510038,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2701358501510038,\"keyword\":0.2321159167634679,\"relevance\":0.5,\"rerank\":-1.7022178173065186,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5221457014551423,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"error|Error\",\n \"path\": \"/tmp/mte-pq-errors-eapyeh4p/ledgerline\",\n \"output_mode\": \"files_with_matches\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/api-errors-use-problem-json_01a0f89a-bffc-7652-ae57-943ededc0ee5.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -R src | head -40; cat src/api/errors.py 2>&1 | head -40; grep -rn \\\"problem\\\" src | head\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src:\n__init__.py\napi\nbilling\nflags.py\n\nsrc/api:\n__init__.py\ncheckout.py\nerrors.py\ninvoices.py\n\nsrc/billing:\n__init__.py\ninvoices.py\nmoney.py\nrefunds.py\ntax.py\nfrom flask import jsonify\n\n\ndef problem(status, title, detail=None):\n    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n    if detail:\n        body[\"detail\"] = detail\n    resp = jsonify(body)\n    resp.status_code = status\n    resp.mimetype = \"application/problem+json\"\n    return resp\nsrc/api/errors.py:4:def problem(status, title, detail=None):\nsrc/api/errors.py:10:    resp.mimetype = \"application/problem+json\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/api/checkout.py src/api/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nfrom flask import Blueprint, jsonify\n\nbp = Blueprint(\"invoices\", __name__)\n\n_INVOICES = {}\n\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    return jsonify(invoice.__dict__)"
+ },
+ {
+  "role": "assistant",
+  "content": "Return an RFC 7807 `application/problem+json` response built with `problem(status, title, detail=None)` from `src/api/errors.py`. Don't return ad-hoc dicts or `jsonify({...})` errors.\n\n```python\nfrom .errors import problem\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    if invoice is None:\n        return problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n    return jsonify(invoice.__dict__)\n```\n\n`problem` returns a Flask response with `type: \"about:blank\"`, `title` and `status`. It adds `detail` only if you pass one. It sets the HTTP status code and the `application/problem+json` mimetype.\n\nThis matches the stored project convention, and `src/api/errors.py` still has that helper. Neither existing endpoint uses it yet:\n- **`checkout`:** it would raise a `KeyError` or a `TypeError` on a malformed cart. A 400 via `problem` would be better.\n- **`get_invoice`:** a missing id calls `.__dict__` on `None`, which gives a 500 instead of a 404.\n\nI haven't changed either endpoint. Say so if you want me to."
+ }
+]
