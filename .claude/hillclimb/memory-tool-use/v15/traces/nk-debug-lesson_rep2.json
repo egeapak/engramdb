@@ -1,0 +1,48 @@
+[
+ {
+  "role": "user",
+  "content": "Got it working: the invoice PDF tests were failing because wkhtmltopdf needs the `--enable-local-file-access` flag in newer versions. I've already fixed it locally, thanks."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a17b3c82-6b28-42ab-a101-fb041e7a5a35\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"bf76897d-ffd2-4db5-8323-bffeb0e431e1\", \"session_id\": \"9b3c99f6-e189-4bff-9ad9-233e8311bbc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a17b3c82-6b28-42ab-a101-fb041e7a5a35\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2179b7ed-c427-425b-b32d-ea25ac5994c1\", \"session_id\": \"9b3c99f6-e189-4bff-9ad9-233e8311bbc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c28975bc-ca49-464d-aec8-076827d91f21\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"4dbb9b1e-7779-4005-bedd-e9688257b3c9\", \"session_id\": \"9b3c99f6-e189-4bff-9ad9-233e8311bbc7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c28975bc-ca49-464d-aec8-076827d91f21\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d71901c3-942c-440e-9401-77af09359d07\", \"session_id\": \"9b3c99f6-e189-4bff-9ad9-233e8311bbc7\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Glad it's working. That flag requirement is worth recording, so I'll check for an existing memory first."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"wkhtmltopdf\",\n \"include_invalidated\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"wkhtmltopdf needs --enable-local-file-access in newer versions or invoice PDF tests fail\",\n \"content\": \"Newer wkhtmltopdf versions block local file access by default. Invoice PDF generation (and its tests) fail unless the `--enable-local-file-access` flag is passed. If invoice PDF tests fail after a wkhtmltopdf upgrade or on a fresh environment, check this flag first.\",\n \"epistemic\": \"observation\",\n \"premise\": \"Applies while invoice PDFs are rendered with wkhtmltopdf loading local files (assets, HTML temp files)\",\n \"invalidated_by\": [\n  \"**/invoice*pdf*\"\n ],\n \"tags\": [\n  \"wkhtmltopdf\",\n  \"pdf\",\n  \"invoices\",\n  \"tests\",\n  \"tooling\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f912-433b-77b3-9f26-78f50814455c\",\"created\":true,\"summary\":\"wkhtmltopdf needs --enable-local-file-access in newer versions or invoice PDF tests fail\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved the `--enable-local-file-access` requirement to EngramDB as a hazard memory. Nothing was recorded for it before. Anyone who hits failing invoice PDF tests after a wkhtmltopdf upgrade, or on a fresh environment, will now see it.\n\nI didn't touch the code. Your fix is local and uncommitted, so it still needs committing if you want it shared."
+ }
+]

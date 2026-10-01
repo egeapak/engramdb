@@ -1,0 +1,70 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8cc9dc30-4a78-41dc-acb3-87c1d4f323cf\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"3c8ff812-1517-462a-9c5a-b6d7f955af27\", \"session_id\": \"e0a72323-0021-409a-b2fd-f36e8d123765\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8cc9dc30-4a78-41dc-acb3-87c1d4f323cf\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"52712c20-77c5-45a3-8191-8d30f9dff613\", \"session_id\": \"e0a72323-0021-409a-b2fd-f36e8d123765\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0ae71330-2ee1-4fef-bce8-031849a30e13\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1c4b845f-d9cc-4169-9970-9909a799d497\", \"session_id\": \"e0a72323-0021-409a-b2fd-f36e8d123765\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0ae71330-2ee1-4fef-bce8-031849a30e13\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"029d0fc0-a4c4-4c7f-aa8d-92b1e2426b40\", \"session_id\": \"e0a72323-0021-409a-b2fd-f36e8d123765\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry about the lost two hours. I'll look at how the gateway gets chosen and check whether this is already recorded."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)gateway|fake|mock|stub|environ|getenv|process\\\\.env\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_db.py:9:    with psycopg.connect(os.environ.get(\"DATABASE_URL\", \"postgresql://ledgerline:ledgerline@localhost/ledgerline_test\")) as conn:\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\ndocker-compose.yml:4:    environment:"
+ },
+ {
+  "role": "assistant",
+  "content": "The repo has no `PAYMENTS_LIVE` reference and no payment gateway code, so I can't check the behavior or fix it here. I'll record it as a hazard so it doesn't catch anyone else."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Per the user, the app silently falls back to a fake payment gateway unless the env var PAYMENTS_LIVE=1 is set. There is no warning, so real payments appear to work but never reach a live gateway. It cost the user about two hours to diagnose. If payments seem to succeed but nothing shows up in the real provider, check PAYMENTS_LIVE first. Note: as of 2026-10-01 a grep of this repo finds no reference to PAYMENTS_LIVE or any gateway code, so the switch likely lives in another service or deploy config. Unverified against code.\",\n \"epistemic\": \"observation\",\n \"premise\": \"User-reported behavior; the gateway selection code was not found in this repo\",\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"gotcha\"\n ],\n \"criticality\": 0.8\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f90c-f1b6-7963-83e7-1c707216c777\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved the `PAYMENTS_LIVE=1` behavior to EngramDB as a hazard, so future sessions will see it before touching anything payment-related.\n\nI couldn't confirm it in the code. A search of this repo finds no `PAYMENTS_LIVE`, no gateway code, and no fake or mock payment implementation. The only env vars it reads are `DATABASE_URL` and `EXPORT_BUCKET`. The gateway switch must live in another service, a deploy config, or a branch I don't have. I marked the memory as user-reported and unverified for that reason.\n\nIf you tell me where the gateway selection lives, I can make it fail loudly instead of falling back silently. For example, it could refuse to start in production without an explicit setting, or log a warning when the fake gateway is active."
+ }
+]

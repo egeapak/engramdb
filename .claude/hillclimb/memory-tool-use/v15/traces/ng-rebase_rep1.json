@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"06d98025-8f6e-43f8-9222-d2c61c883826\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"88722bb8-660d-4a1b-bb3b-5f1d497055ab\", \"session_id\": \"f9f447e2-c031-4cf8-a927-1071431bc849\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"06d98025-8f6e-43f8-9222-d2c61c883826\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bdf5dd97-52f8-4418-8c21-428235474732\", \"session_id\": \"f9f447e2-c031-4cf8-a927-1071431bc849\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2c81e62c-72c0-4597-ad49-fff29761a2b3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"76bf179a-28a2-4456-8469-3400baacc151\", \"session_id\": \"f9f447e2-c031-4cf8-a927-1071431bc849\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2c81e62c-72c0-4597-ad49-fff29761a2b3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7f446c79-14ff-4cd8-82c5-4bd866181abd\", \"session_id\": \"f9f447e2-c031-4cf8-a927-1071431bc849\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto <newbase> <upstream> [<branch>]` replays the commits that are in `<branch>` but not in `<upstream>` on top of `<newbase>`. Plain `git rebase` ties the starting point and the destination together. `--onto` separates them, so you can move a slice of history anywhere.\n\n**Example: moving a branch off another feature branch**\n\nSay `feature-b` was branched from `feature-a`, but `feature-a` is not ready, and you want `feature-b` to depend only on `main`:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\n```\ngit rebase --onto main feature-a feature-b\n```\n\nThis takes the commits in `feature-a..feature-b` (E and F) and replays them onto `main`:\n\n```\nmain:       A---B---E'---F'   (feature-b)\n                 \\\nfeature-a:        C---D\n```\n\nE and F become new commits (E' and F') with new hashes. C and D stay on `feature-a`.\n\n**Other common uses**\n\n- **Drop a range of commits.** `git rebase --onto A B` while on a branch removes the commits after B up to HEAD from the old base, so `git rebase --onto main~3 main~1` deletes the two commits between them.\n- **Transplant onto an unrelated base.** Move a topic branch from an old release branch to a newer one: `git rebase --onto release-2.0 release-1.0 topic`.\n\nBecause it rewrites history, avoid using it on commits that others have already pulled. If you must, push with `--force-with-lease`."
+ }
+]

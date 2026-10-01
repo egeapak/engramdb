@@ -1,0 +1,11 @@
+diff --git a/migrations/0007_add_customers.sql b/migrations/0007_add_customers.sql
+index 7fb3273..f734a25 100644
+--- a/migrations/0007_add_customers.sql
++++ b/migrations/0007_add_customers.sql
+@@ -1,5 +1,5 @@
+ CREATE TABLE customers (
+     id TEXT PRIMARY KEY,
+     name TEXT NOT NULL,
+-    emial TEXT NOT NULL
++    email TEXT NOT NULL
+ );

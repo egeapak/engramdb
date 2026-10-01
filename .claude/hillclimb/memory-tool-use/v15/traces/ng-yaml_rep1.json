@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Convert this JSON to YAML: {\"a\": 1, \"b\": [true, null]}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0cc46feb-0a0c-4f4b-b234-f2ffd7666ff2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8ea3a92c-2608-42b8-a675-448de9267738\", \"session_id\": \"edf30eac-a6ab-4d29-9733-1681c8a46a45\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0cc46feb-0a0c-4f4b-b234-f2ffd7666ff2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b10039c4-ba92-4686-be33-489e03455022\", \"session_id\": \"edf30eac-a6ab-4d29-9733-1681c8a46a45\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"354a3e58-d476-4f3f-9f6d-aee0bb074ade\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d9a17d65-d26c-43bd-b158-57fa2fa775c7\", \"session_id\": \"edf30eac-a6ab-4d29-9733-1681c8a46a45\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"354a3e58-d476-4f3f-9f6d-aee0bb074ade\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"922dadfd-e427-4ec7-a629-dda19d5e82af\", \"session_id\": \"edf30eac-a6ab-4d29-9733-1681c8a46a45\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "```yaml\na: 1\nb:\n  - true\n  - null\n```\n\nFlow style also works: `{a: 1, b: [true, null]}`."
+ }
+]

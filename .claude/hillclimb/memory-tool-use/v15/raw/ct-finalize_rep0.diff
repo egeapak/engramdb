@@ -1,0 +1,26 @@
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..15b2360 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -18,9 +18,18 @@ class Invoice:
+     lines: list = field(default_factory=list)
+ 
+ 
+-def finalize(invoice):
+-    resp = requests.post(LEDGER_URL, json={"invoice": invoice.id, "amount": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)
+-    resp.raise_for_status()
++def finalize(invoice, max_attempts=3):
++    # Safe to retry: the ledger deduplicates postings on invoice id.
++    payload = {"invoice": invoice.id, "amount": invoice.subtotal_cents + invoice.tax_cents}
++    for attempt in range(1, max_attempts + 1):
++        try:
++            resp = requests.post(LEDGER_URL, json=payload, timeout=10)
++            resp.raise_for_status()
++            break
++        except requests.RequestException:
++            if attempt == max_attempts:
++                raise
++            log.warning("ledger_post_retry", invoice_id=invoice.id, attempt=attempt)
+     invoice.ledger_ref = resp.json()["ref"]
+     log.info("invoice_finalized", invoice_id=invoice.id)
+     return invoice

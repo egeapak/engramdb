@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"80c39144-37b8-407b-9b41-eedcda2980e9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a0c82e9f-89f0-43f7-a0a8-e3aacc78c298\", \"session_id\": \"7db4f6c0-9240-4898-8007-6c6c7a243085\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"80c39144-37b8-407b-9b41-eedcda2980e9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"591148b5-3e9a-434d-bd10-3aa3916a5e0b\", \"session_id\": \"7db4f6c0-9240-4898-8007-6c6c7a243085\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7b3b1f5b-7934-4f9a-9e99-a14afbec83a6\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3143f572-81e6-41b5-a069-2cbacea5fc91\", \"session_id\": \"7db4f6c0-9240-4898-8007-6c6c7a243085\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7b3b1f5b-7934-4f9a-9e99-a14afbec83a6\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"58231e43-45e5-4030-9e71-2194d925902f\", \"session_id\": \"7db4f6c0-9240-4898-8007-6c6c7a243085\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto` lets you transplant a range of commits onto a different base. The general form is:\n\n```\ngit rebase --onto <newbase> <upstream> [<branch>]\n```\n\nGit takes the commits that are reachable from `<branch>` (default: the current branch) but not from `<upstream>`, and replays them on top of `<newbase>`. Plain `git rebase main` is the shortcut where `<newbase>` and `<upstream>` are the same.\n\n**Example: move a branch off another feature branch**\n\nSay `feature-b` was started from `feature-a`, but you want it based on `main` without `feature-a`'s commits:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\nRun:\n\n```\ngit rebase --onto main feature-a feature-b\n```\n\nThis takes the commits in `feature-a..feature-b` (E and F) and replays them onto `main`:\n\n```\nmain:       A---B---E'---F'   (feature-b)\n                 \\\nfeature-a:        C---D\n```\n\nE' and F' are new commits with new hashes. The content is the same, but the parent changed.\n\n**Other common uses**\n\n- **Drop commits from the middle or start of a branch:** `git rebase --onto HEAD~3 HEAD~1` removes the two commits between `HEAD~3` and `HEAD~1`.\n- **Move a branch after its parent was squash-merged:** `git rebase --onto main <old-parent-commit> my-branch`.\n\nSince it rewrites history, avoid using it on commits that others have already pulled. If you must, you'll need a force push, preferably `--force-with-lease`."
+ }
+]

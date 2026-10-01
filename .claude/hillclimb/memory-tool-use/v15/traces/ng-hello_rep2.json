@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "hi! quick sanity check, are you there?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1f26c762-c831-42f3-8a6c-7c3475c31927\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"db59a6b4-afc5-4ff2-9bcd-08c62d20bb98\", \"session_id\": \"afb0f3eb-e1d8-4e2c-a835-8975f06b1f03\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1f26c762-c831-42f3-8a6c-7c3475c31927\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d91b2247-43be-4980-9c8f-78eb3fdfdd23\", \"session_id\": \"afb0f3eb-e1d8-4e2c-a835-8975f06b1f03\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2ce22a6d-5b34-4520-b1e3-d8fdd6858e2e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"81c1aad8-dc2b-44ff-a6bc-0bce66047e5d\", \"session_id\": \"afb0f3eb-e1d8-4e2c-a835-8975f06b1f03\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2ce22a6d-5b34-4520-b1e3-d8fdd6858e2e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fe7a9b6a-09c3-4929-8899-91350ee2eb52\", \"session_id\": \"afb0f3eb-e1d8-4e2c-a835-8975f06b1f03\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Yes, I'm here and ready to help in the `ledgerline` repo. What would you like to work on?"
+ }
+]

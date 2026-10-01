@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b3e2ed0a-427d-42af-8987-fd10d185c623\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8da54d10-ca3d-4551-9fe7-3b254e4563a9\", \"session_id\": \"0babd75d-63af-44c6-a865-e955791b8b1c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b3e2ed0a-427d-42af-8987-fd10d185c623\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c9953deb-5727-4fec-927b-475d5067bb4c\", \"session_id\": \"0babd75d-63af-44c6-a865-e955791b8b1c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"10315751-6dcd-4ce0-9bd6-58b4800c1449\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3e815b32-89ab-4105-a8e2-8abf14456ef9\", \"session_id\": \"0babd75d-63af-44c6-a865-e955791b8b1c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"10315751-6dcd-4ce0-9bd6-58b4800c1449\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ecb9759a-9791-4624-a4f7-dd0b40d10609\", \"session_id\": \"0babd75d-63af-44c6-a865-e955791b8b1c\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"customers migration schema column\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"memories\":[{\"confidence\":0.8,\"content\":\"Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f910-3eac-7e81-b65d-2b96a4957613\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.3774014777150979,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3774014777150979,\"keyword\":0.10179263046253124,\"relevance\":0.5,\"rerank\":-1.1596182584762573,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5292114525978122,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Never edit an applied migration\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 2 files\n.engramdb/memories/never-edit-an-applied-migration_01a0f910-3eac-7e81-b65d-2b96a4957613.md\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls /tmp/mte-pq-migration-tack2gvt/ledgerline/migrations; cat /tmp/mte-pq-migration-tack2gvt/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "0001_create_invoices.sql\n0002_add_tax.sql\n0003_add_ledger_ref.sql\n0004_create_lines.sql\n0005_create_refunds.sql\n0006_index_customer.sql\n0007_add_customers.sql\nCREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);"
+ },
+ {
+  "role": "assistant",
+  "content": "The change goes in a new migration file, `migrations/0008_add_customer_phone.sql`. Don't edit `0007_add_customers.sql`. Files in `migrations/` are applied in production, and the project's stored hazard memory says never to edit one.\n\nSomething like:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made the column nullable. Existing rows have no phone number, and a `NOT NULL` column with no default would fail on them. If you want it required, add a `DEFAULT` or backfill first.\n\n`0007` also has a typo: the column is `emial`, not `email`. If you want that fixed, it needs its own migration, for example `ALTER TABLE customers RENAME COLUMN emial TO email;`. The repo's own example name for that is `0008_fix_customers.sql`. I haven't made either change. Tell me if you want me to create the files, and whether the rename should go in the same migration or a separate one."
+ }
+]
