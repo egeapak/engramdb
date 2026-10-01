@@ -313,8 +313,14 @@ def take_snapshot(root, out_dir, settings):
              "plugin_json_sha256": sha(root / "plugin" / ".claude-plugin" / "plugin.json"),
              "engram_md_sha256": sha(root / "ENGRAM.md"), **settings}
     path = out_dir / "build.json"
-    if path.exists() and json.loads(path.read_text()) != build:
-        sys.exit(f"{path} differs from the snapshot in {root}; refusing to mix builds in one variant")
+    if path.exists():
+        # The commit is recorded when the snapshot is taken and kept; HEAD moving
+        # afterwards is not a different build. Hashes and run settings must match.
+        recorded = json.loads(path.read_text())
+        same = {k: v for k, v in recorded.items() if k != "git_head_at_snapshot"}
+        if same != {k: v for k, v in build.items() if k != "git_head_at_snapshot"}:
+            sys.exit(f"{path} differs from the snapshot in {root}; refusing to mix builds in one variant")
+        return
     path.write_text(json.dumps(build, indent=1) + "\n")
 
 
