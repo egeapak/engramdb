@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Convert this JSON to YAML: {\"a\": 1, \"b\": [true, null]}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1da00d81-e585-470c-8ca2-ca166a8aafd2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0e3a9004-13cc-4bca-ba6e-ea03c486f9d6\", \"session_id\": \"daade97a-0140-4953-ba49-bc1c24a9d74c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1da00d81-e585-470c-8ca2-ca166a8aafd2\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"754723ba-1673-4afb-9f9d-d4aefca3c977\", \"session_id\": \"daade97a-0140-4953-ba49-bc1c24a9d74c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9f13f302-2dad-4bd8-819f-1b109c573501\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"cb8bc845-cdd2-4607-8730-6588d468ee39\", \"session_id\": \"daade97a-0140-4953-ba49-bc1c24a9d74c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9f13f302-2dad-4bd8-819f-1b109c573501\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"54c9ffd2-f7c5-4759-b3b3-058762e9a25a\", \"session_id\": \"daade97a-0140-4953-ba49-bc1c24a9d74c\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "```yaml\na: 1\nb:\n  - true\n  - null\n```\n\n`null` can also be written as `~`, or you can leave the value empty after the dash."
+ }
+]

@@ -1,0 +1,79 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"560faf16-8e5a-4d38-89c6-6d29ae0bfd9b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c5d952f9-89d3-404c-9695-845daf4eb194\", \"session_id\": \"ce4d629b-2484-478d-bdb5-97b705ca7ac7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"560faf16-8e5a-4d38-89c6-6d29ae0bfd9b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7ffef898-9c2e-4f4c-a92a-7f8edd3556c3\", \"session_id\": \"ce4d629b-2484-478d-bdb5-97b705ca7ac7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3795f928-aec3-4508-a60e-54396c8b144a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"36e857bb-9746-452d-9bee-f834a9fbe768\", \"session_id\": \"ce4d629b-2484-478d-bdb5-97b705ca7ac7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3795f928-aec3-4508-a60e-54396c8b144a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e6a203b2-04ff-49ff-b8e8-537b7a18402c\", \"session_id\": \"ce4d629b-2484-478d-bdb5-97b705ca7ac7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"42326637-d59a-4979-b512-1ef4b18f3eac\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"fd725b1a-8e67-44df-af49-38c5a9181b82\", \"session_id\": \"ce4d629b-2484-478d-bdb5-97b705ca7ac7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"42326637-d59a-4979-b512-1ef4b18f3eac\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7da8b48e-4be1-48ed-82d9-09de7d22410e\", \"session_id\": \"ce4d629b-2484-478d-bdb5-97b705ca7ac7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway PAYMENTS_LIVE fake\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payment|gateway|fake|stub\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 1 file\ntests/test_payments.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-coejxxbu/ledgerline/tests/test_payments.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport pytest\n2\timport requests\n3\t\n4\tSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n5\t\n6\t\n7\t@pytest.mark.integration\n8\tdef test_charges_roundtrip():\n9\t    for amount in (100, 250, 999, 1200):\n10\t        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n11\t        assert resp.status_code == 201\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"epistemic\": \"observation\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set; no warning is logged\",\n \"content\": \"The user reported (2026-10-01) that the app silently falls back to a fake/stub payment gateway unless the env var PAYMENTS_LIVE=1 is set. Nothing warns you, and it cost them about two hours of debugging. When payments behave oddly (charges don't show up, the real gateway is never called), check PAYMENTS_LIVE first. Note: on 2026-10-01, grepping this repo found no PAYMENTS_LIVE reference and no gateway code (only tests/test_payments.py, which posts directly to sandbox.payments.example), so the switch probably lives in a dependency, a deploy config, or a different service.\",\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"silent-fallback\"\n ],\n \"logical\": [\n  \"payments.gateway\",\n  \"config.env\"\n ],\n \"criticality\": 0.8,\n \"premise\": \"The gateway still defaults to fake when PAYMENTS_LIVE is unset\",\n \"invalidated_by\": [\n  \"**/payments/**\",\n  \"**/*gateway*\",\n  \"**/.env*\",\n  \"**/settings*\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7c1-596b-76c2-b3c3-01ad62d0900f\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set; no warning is logged\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry that cost you two hours. I've saved it in the project's EngramDB memory as a high-priority warning, so future sessions will show it whenever payments come up: if payments act strangely, check whether `PAYMENTS_LIVE=1` is set.\n\nI couldn't find where the switch lives, though. `PAYMENTS_LIVE` doesn't appear anywhere in this repo, and there's no gateway code here at all. The only payments file is `tests/test_payments.py`, and it sends requests straight to `sandbox.payments.example`. So the fallback is probably in a dependency, a deploy or `.env` config, or a separate service. I noted that in the memory too.\n\nIf you can point me to where the gateway is chosen, I can make sure this doesn't catch anyone else:\n- **Log a loud warning at startup** whenever the fake gateway is active.\n- **Refuse to start in production** without an explicit `PAYMENTS_LIVE=0` or `1`, so it can't quietly use the fake one.\n- **Document the variable** in the README or `.env.example`."
+ }
+]

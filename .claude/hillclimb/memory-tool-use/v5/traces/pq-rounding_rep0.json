@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "What rounding mode do we use for tax?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cbecc14f-1a47-400b-b82c-1fc8c514a82e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"2a61310c-4ecc-4cb6-9162-da7092373280\", \"session_id\": \"6899bd6e-7911-4595-a163-a7f8df518fa6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cbecc14f-1a47-400b-b82c-1fc8c514a82e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"00788c06-b7fe-438e-84d9-da70150851c3\", \"session_id\": \"6899bd6e-7911-4595-a163-a7f8df518fa6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"09338a4b-a810-46f1-a9bb-4b6a5e6bfce2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"11686b3a-8f97-4154-9b06-05884ce45752\", \"session_id\": \"6899bd6e-7911-4595-a163-a7f8df518fa6\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"09338a4b-a810-46f1-a9bb-4b6a5e6bfce2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"252961b6-8b83-45cd-b7f8-4c54f68efac4\", \"session_id\": \"6899bd6e-7911-4595-a163-a7f8df518fa6\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"tax rounding\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f7cb-38ba-7c01-b969-702b18f5059c\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.7220596325282789,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7220596325282789,\"keyword\":0.9592241756187145,\"relevance\":0.5,\"rerank\":0.717685341835022,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.7179042532080786,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax uses ROUND_HALF_EVEN\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"ROUND_|rounding|round\\\\(\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/tax-uses-round-half-even_01a0f7cb-38ba-7c01-b969-702b18f5059c.md:6:title: Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f7cb-38ba-7c01-b969-702b18f5059c.md:9:# Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f7cb-38ba-7c01-b969-702b18f5059c.md:11:**Summary:** Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f7cb-38ba-7c01-b969-702b18f5059c.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/billing/tax.py 2>&1 | head -40\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from decimal import Decimal\n\n\ndef line_total(lines):\n    x = 0\n    for line in lines:\n        x += line[\"quantity\"] * line[\"unit_cents\"]\n    return x\n\n\ndef tax_for(amount_cents, rate):\n    raise NotImplementedError"
+ },
+ {
+  "role": "assistant",
+  "content": "Tax uses banker's rounding, `decimal.ROUND_HALF_EVEN`. This comes from a recorded decision made with the finance team in March 2026, and the note says not to use `ROUND_HALF_UP`.\n\nThe code doesn't implement it yet. `tax_for` in `src/billing/tax.py` just raises `NotImplementedError`, and nothing in the repo references a rounding mode. Whoever implements it should quantize with `ROUND_HALF_EVEN`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

@@ -1,0 +1,81 @@
+[
+ {
+  "role": "user",
+  "content": "There's a typo in a column name in migrations/0007_add_customers.sql (`emial`). Fix it."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c01aed5c-270d-4ae9-ad37-2601e8b8b611\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"de46e4cd-59ff-4113-80d4-5e85c00b541d\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c01aed5c-270d-4ae9-ad37-2601e8b8b611\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0e6780fe-857f-4c87-b247-f8a28457da05\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3aa08550-d443-4125-bfcd-ba880195fa0d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"43b00f1c-61de-48d6-82ae-0789f4017c14\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3aa08550-d443-4125-bfcd-ba880195fa0d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] Never edit an applied migration (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] Never edit an applied migration (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ae0e3ba9-d139-415c-8193-29a1bdc2cf14\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8b2db37f-aad6-468c-bb47-242271adc753\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"2cf3cbd6-fc38-4a3f-8f33-be2b47324243\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8b2db37f-aad6-468c-bb47-242271adc753\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fdcf24db-6230-49f1-8791-75b19052ec5e\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7ddd7595-7e37-449c-b8e2-811a1bb651d9\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"f23c4571-c414-44c3-a58c-e0f34008ac37\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7ddd7595-7e37-449c-b8e2-811a1bb651d9\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"04e62887-57e6-47f5-becb-731aa6958990\", \"session_id\": \"99d44b16-a190-4ec7-85d4-6b2ef06a2404\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"migration\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7b8-4c26-7e90-a0b4-73bf15eddab7\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.5853899775314529,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5853899775314529,\"keyword\":0.981614811797528,\"relevance\":0.5,\"rerank\":-0.20453883707523346,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.516701561615429,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Never edit an applied migration\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls migrations && cat migrations/0007_add_customers.sql && grep -rn \\\"emial\\\" . --exclude-dir=.git | head -30\",\n \"description\": \"List migrations and find typo usages\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "0001_create_invoices.sql\n0002_add_tax.sql\n0003_add_ledger_ref.sql\n0004_create_lines.sql\n0005_create_refunds.sql\n0006_index_customer.sql\n0007_add_customers.sql\nCREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);\n./migrations/0007_add_customers.sql:4:    emial TEXT NOT NULL"
+ },
+ {
+  "role": "assistant",
+  "content": "Project memory says files in `migrations/` are already applied in production and must not be edited, so I'll leave 0007 alone and add a new migration that renames the column."
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-migration-typo-irhx_i5h/ledgerline/migrations/0008_fix_customers_email.sql\",\n \"content\": \"ALTER TABLE customers RENAME COLUMN emial TO email;\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-ed-migration-typo-irhx_i5h/ledgerline/migrations/0008_fix_customers_email.sql (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "I fixed the typo by adding a new migration, `migrations/0008_fix_customers_email.sql`, rather than editing `0007_add_customers.sql`:\n\n```sql\nALTER TABLE customers RENAME COLUMN emial TO email;\n```\n\nI didn't touch 0007 because the project's memory notes say the files in `migrations/` have already been run in production and must not be edited. Changing 0007 wouldn't fix the production database, which already has the `emial` column. It would also make fresh databases differ from production.\n\nNothing else in the repo uses `emial`, so no other code needed changing. I haven't run the migration. `RENAME COLUMN` works in Postgres and in SQLite 3.25 and later; if you use a different database, check that it supports it.\n\nIf 0007 has never actually been run anywhere, editing it directly is fine. Tell me and I'll do that instead."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Only one minor thing was awkward; I didn't hit anything I actually couldn't do.\n\n- **The hook's injected memory had no content.** The UserPromptSubmit hook gave me only the summary line \"Never edit an applied migration\" and an empty body. I had to make a separate `query` call (`mode: \"filter\"`, `detail_level: \"full\"`) to read the useful part: the convention to add a new file with the next 4-digit number, such as `0008_...sql`. I'd have wanted the hook to include the content of short, high-relevance hazards inline, using something like the `content` detail level. That would have saved a round trip on a task where the rule decided the whole approach.\n\nOtherwise, `query` gave me what I needed. I didn't try `verify`, `create` or `challenge`, so I can't say whether they would have been awkward."
+ }
+]

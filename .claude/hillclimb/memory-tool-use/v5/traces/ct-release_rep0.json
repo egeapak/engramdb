@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "FYI the release process changed: we now release with `make release`, which tags and publishes for us."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ad782112-937c-400c-9896-d3bb949e2167\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"b159a2d7-ff43-4a19-ab0c-5950ef3eb043\", \"session_id\": \"04da6523-d948-44f5-bb8a-21056673438f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ad782112-937c-400c-9896-d3bb949e2167\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d754de20-2320-45f1-a318-338740edf9fe\", \"session_id\": \"04da6523-d948-44f5-bb8a-21056673438f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dc9eeba7-dee9-4fe0-a9d5-3797f6d44600\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"e428b3dc-2420-422e-9a9a-704f7aa83e65\", \"session_id\": \"04da6523-d948-44f5-bb8a-21056673438f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dc9eeba7-dee9-4fe0-a9d5-3797f6d44600\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9c126503-7482-41f2-9b98-4072d1598660\", \"session_id\": \"04da6523-d948-44f5-bb8a-21056673438f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7cf-2ea2-7c23-a356-d318254e12c0\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.5126365656771532,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5126365656771532,\"keyword\":0.9826214185882456,\"relevance\":0.5,\"rerank\":-0.8295179009437561,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5144882528483552,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release by tagging vYYYY.MM.N\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7cf-2ea2-7c23-a356-d318254e12c0.md:6:title: Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7cf-2ea2-7c23-a356-d318254e12c0.md:9:# Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7cf-2ea2-7c23-a356-d318254e12c0.md:11:**Summary:** Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7cf-2ea2-7c23-a356-d318254e12c0.md:15:Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7cf-2ea2-7c23-a356-d318254e12c0.md:20:- **Tags:** `release`, `workflow`"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__update",
+  "content": "{\n \"id\": \"01a0f7cf-2ea2-7c23-a356-d318254e12c0\",\n \"summary\": \"Release with `make release` (tags and publishes)\",\n \"content\": \"Releases are cut with `make release`, which tags and publishes. Don't push tags or publish by hand. (Previously: push a tag `vYYYY.MM.N` and let CI publish. The user said this process changed on 2026-10-01; whether the tag format is still vYYYY.MM.N is unconfirmed.)\",\n \"premise\": \"While the release process is `make release`\",\n \"invalidated_by\": [\n  \"Makefile\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7cf-2ea2-7c23-a356-d318254e12c0\",\"updated\":true}"
+ },
+ {
+  "role": "assistant",
+  "content": "Noted. Releases now go through `make release`, which tags and publishes.\n\nThe saved EngramDB memory said to push a `vYYYY.MM.N` tag and let CI publish, so I updated it to say `make release`. I left the tag format marked as unconfirmed, because you didn't say whether it's still `vYYYY.MM.N`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Mostly nothing was blocked, but a few things were awkward.\n\n1. **Provenance on update.** The memory I edited had `provenance: human` (source: shared/human). `update` has no parameter to show whether my edit would override a human-authored memory, or to record that this change came from the user's statement. I wanted something like `provenance` or `source_note` on `update`. I would have used it to log \"changed per user message on 2026-10-01\".\n\n2. **Preserving history.** The project instructions say to prefer `resolve` with `invalidate`, or `supersedes`, over overwriting when something was true and no longer is. I overwrote the content in place with `update`, which loses the old text. The old text survives only as a prose note I wrote inside the content. A `create` with `supersedes` would have kept the history. I chose the in-place edit because the change was small and the old and new text were both about one release convention. A \"revise with history\" option on `update` would have made that choice easier.\n\n3. **Unconfirmed fields.** I couldn't mark one part of a memory as unconfirmed. The tag format `vYYYY.MM.N` might be stale, but I could only say so in free text. A per-claim `confidence`, or a `status: needsreview` flag with a reason field, would have fit better than a single memory-wide confidence. I could have used `status: needsreview`, but I didn't think of it in the moment.\n\n4. **No way to check the claim.** I didn't read the Makefile to confirm that a `release` target exists. That is a limit of my own approach, not of EngramDB. A way to attach a verification command to a memory would have helped. I would have used it to re-check `make release` later.\n\n5. **Dangling tool reference.** The session-start hook and ENGRAM.md mention `verify`, `resolve`, `task_current` and `task_complete`. I didn't call any of them, and the MCP server later disconnected, so they became unavailable. That didn't affect this task."
+ }
+]

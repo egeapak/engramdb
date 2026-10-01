@@ -1,0 +1,74 @@
+[
+ {
+  "role": "user",
+  "content": "I want to put a new checkout flow behind a feature flag. How do we do flags in this project?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d3f62712-6518-49a6-aace-99342ff9050c\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"123ca26c-97e1-4ab6-b9c3-40748005f530\", \"session_id\": \"c36cf935-154e-4e29-816f-9968f0d29da8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d3f62712-6518-49a6-aace-99342ff9050c\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"aac3cb8e-474b-4424-8248-13d33dc4e943\", \"session_id\": \"c36cf935-154e-4e29-816f-9968f0d29da8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"befe17ec-9352-47f4-938a-c3afcecd721d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"2ab5920f-3216-4b91-826f-d4d6f676fa91\", \"session_id\": \"c36cf935-154e-4e29-816f-9968f0d29da8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"befe17ec-9352-47f4-938a-c3afcecd721d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b6e84b96-0723-4a25-8539-52c531251d9b\", \"session_id\": \"c36cf935-154e-4e29-816f-9968f0d29da8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b7ebb6b2-b9fd-43ec-aac8-87fd48c9e136\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"6a73758a-1cb7-476c-8f34-1704c4e91b80\", \"session_id\": \"c36cf935-154e-4e29-816f-9968f0d29da8\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b7ebb6b2-b9fd-43ec-aac8-87fd48c9e136\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bb351471-a5ff-474c-aa9f-1621fd12dc9d\", \"session_id\": \"c36cf935-154e-4e29-816f-9968f0d29da8\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"feature flags\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Read feature flags only with `flags.is_on(\\\"name\\\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d1-4237-7521-ba2d-77c3d84d53bf\",\"logical\":[],\"physical\":[\"src/flags.py\",\"flags.toml\"],\"provenance\":\"human\",\"score\":0.7340692093238808,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7340692093238808,\"keyword\":0.962151802012715,\"relevance\":0.5,\"rerank\":1.029699683189392,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.57770812909615,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Feature flags go through flags.is_on()\",\"tags\":[\"flags\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"flags\\\\.is_on|is_on\\\\(|feature.?flag\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d1-4237-7521-ba2d-77c3d84d53bf.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d1-4237-7521-ba2d-77c3d84d53bf.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d1-4237-7521-ba2d-77c3d84d53bf.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d1-4237-7521-ba2d-77c3d84d53bf.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\nsrc/flags.py:7:def is_on(name):"
+ },
+ {
+  "role": "assistant",
+  "content": "Memory says to use `flags.is_on`; let me verify against the code."
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-tp870hsm/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat flags.toml; ls\",\n \"description\": \"Show flags.toml and repo root\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "[flags]\ninvoice-pdf-v2 = false\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests"
+ },
+ {
+  "role": "assistant",
+  "content": "Flags here are a static TOML file read through one helper.\n\n**How it works**\n- **Declare the flag** in `flags.toml` under `[flags]`. Names are kebab-case, and the only existing flag is `invoice-pdf-v2 = false`. For your flow you'd add something like `new-checkout-flow = false`.\n- **Read the flag** with `flags.is_on(\"new-checkout-flow\")` from `src/flags.py`. That's the project convention, so don't read the TOML directly.\n- **Missing flags are off.** `is_on` returns `bool(_FLAGS.get(name, False))`, so a name that isn't declared silently evaluates to `False` instead of raising. A typo in the flag name will quietly disable your new flow, so double-check the spelling.\n- **Flags are static.** The TOML is loaded once at import time. There's no per-user or percentage rollout and no runtime toggling. Changing a value means editing the file and restarting.\n\n**Usage sketch**\n```python\nfrom src import flags\n\nif flags.is_on(\"new-checkout-flow\"):\n    return new_checkout(cart)\nreturn legacy_checkout(cart)\n```\n\nI haven't checked how the existing `invoice-pdf-v2` flag is used or tested, so I don't know whether there's a test pattern for flags. I can look at that, or add the flag and the branch in the checkout code. Tell me which you want."
+ }
+]

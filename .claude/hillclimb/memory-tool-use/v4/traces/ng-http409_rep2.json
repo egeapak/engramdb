@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8c43d37a-7b80-4033-bb79-d3829b38ba81\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"1ba7af52-b983-4676-8782-cd167fd491dc\", \"session_id\": \"db64e199-eac3-42bf-a6c2-c0eda6dc676b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8c43d37a-7b80-4033-bb79-d3829b38ba81\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"de2baa11-3040-42a9-bfeb-d28ba6ad0bd0\", \"session_id\": \"db64e199-eac3-42bf-a6c2-c0eda6dc676b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1106e6dd-f410-42cd-b357-556ccbc10972\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"88f45f40-c10e-4b1e-9b86-9d0ed167aec4\", \"session_id\": \"db64e199-eac3-42bf-a6c2-c0eda6dc676b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1106e6dd-f410-42cd-b357-556ccbc10972\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2aa7854c-1c32-4f05-bdf5-d46eba7bab4d\", \"session_id\": \"db64e199-eac3-42bf-a6c2-c0eda6dc676b\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource on the server.\n\n**Common causes:**\n- **Concurrent edits / optimistic locking:** you try to update a resource using a stale version, for example with an `If-Match` ETag or a version number that no longer matches.\n- **Uniqueness violations:** you try to create something that already exists, such as a user with a username that's taken or a record with a duplicate key.\n- **Invalid state transitions:** for example, cancelling an order that has already shipped, or deleting a resource that other resources still depend on.\n- **Version control style conflicts:** for example, uploading a file that conflicts with a newer version already on the server.\n\n**How it differs from similar codes:**\n- **400 Bad Request:** the request itself is malformed. With 409, the request is valid but clashes with the server's current state.\n- **412 Precondition Failed:** a conditional header like `If-Match` explicitly failed. Some APIs use 412 for optimistic locking and 409 for more general conflicts.\n- **422 Unprocessable Content:** the request is well formed but fails semantic validation. It isn't about a clash with existing state.\n\n**Client handling:** The response body should explain the conflict so the client can resolve it. Usually that means fetching the latest version of the resource, merging or adjusting the change, and resubmitting. A 409 isn't something to retry blindly, because the same request will keep failing until the conflict is resolved.\n\nIt's defined in RFC 9110, \u00a715.5.10."
+ }
+]

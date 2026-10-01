@@ -1,0 +1,52 @@
+[
+ {
+  "role": "user",
+  "content": "What's the process for cutting a release?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3a248e97-3168-4476-b509-4fc739521433\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"6d12bb2e-31af-4116-a657-23a3f669aab6\", \"session_id\": \"726b03a4-764b-4cd8-b71e-fc90c1252ec2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3a248e97-3168-4476-b509-4fc739521433\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"57c70d47-6c20-4dd8-bca7-a7320f848d94\", \"session_id\": \"726b03a4-764b-4cd8-b71e-fc90c1252ec2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"20eb700c-c64a-4464-ac18-ad47fc7e1b95\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"27595cc9-4260-4afe-b025-8605619c3525\", \"session_id\": \"726b03a4-764b-4cd8-b71e-fc90c1252ec2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"20eb700c-c64a-4464-ac18-ad47fc7e1b95\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d5963611-c097-48e0-a14a-d9cb7ade09b8\", \"session_id\": \"726b03a4-764b-4cd8-b71e-fc90c1252ec2\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7cb-438c-7510-bef5-930ecf80e9bc\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.5126365656771532,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5126365656771532,\"keyword\":0.9826214185882456,\"relevance\":0.5,\"rerank\":-0.8295179009437561,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5144882528483552,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release by tagging vYYYY.MM.N\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 1 file\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7cb-438c-7510-bef5-930ecf80e9bc.md"
+ },
+ {
+  "role": "assistant",
+  "content": "Per the project's recorded convention, a release is cut by pushing a git tag:\n\n1. **Tag format:** `vYYYY.MM.N`. `N` is the release number within that month, for example `v2026.09.2`. For October it would start at `v2026.10.1`.\n2. **Push the tag.** CI then builds and publishes the release.\n3. **Don't publish by hand.** CI does all the publishing.\n\nThe tag is `git tag v2026.10.1 && git push origin v2026.10.1`. Check existing tags first (`git tag -l 'v2026.10.*'`) so you pick the right `N`.\n\nThe only source for this is the EngramDB memory. The repo has no release docs, CI config or scripts that mention releases, so I can't confirm what CI checks or runs. I haven't run any git commands or created a tag."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

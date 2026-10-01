@@ -1667,11 +1667,21 @@ pub struct HooksConfig {
     /// context injection (SessionStart uses its own fixed 2000-char cap).
     #[serde(default = "HooksConfig::default_prompt_context_budget")]
     pub prompt_context_budget: usize,
+
+    /// Characters of each injected memory's body to show under its summary
+    /// line. The top-ranked entry gets 2.5x this; a cut body ends with a
+    /// `get <id>` pointer. `0` shows summaries only.
+    #[serde(default = "HooksConfig::default_preview_chars")]
+    pub preview_chars: usize,
 }
 
 impl HooksConfig {
     fn default_prompt_context_budget() -> usize {
         1000
+    }
+
+    fn default_preview_chars() -> usize {
+        160
     }
 }
 
@@ -1680,6 +1690,7 @@ impl Default for HooksConfig {
         Self {
             class_order: None,
             prompt_context_budget: Self::default_prompt_context_budget(),
+            preview_chars: Self::default_preview_chars(),
         }
     }
 }

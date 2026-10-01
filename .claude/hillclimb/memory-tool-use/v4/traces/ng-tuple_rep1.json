@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"201a966c-5a81-455f-ba2e-6cbcbe8f4eeb\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"6fb51431-a333-4987-91c1-d1502c35bc70\", \"session_id\": \"a4e1b366-ba16-45db-a7b9-1ecf2ce6440e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"201a966c-5a81-455f-ba2e-6cbcbe8f4eeb\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c4a33857-73dd-4ebd-a9c6-0ab813d98d40\", \"session_id\": \"a4e1b366-ba16-45db-a7b9-1ecf2ce6440e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f80568a0-b99b-4ca6-a0f7-a3fbddae5413\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"ec3ea885-14d6-4f31-9650-6dc8c0b1e56b\", \"session_id\": \"a4e1b366-ba16-45db-a7b9-1ecf2ce6440e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f80568a0-b99b-4ca6-a0f7-a3fbddae5413\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8e051faa-bc7c-4368-8a52-d81145eb6020\", \"session_id\": \"a4e1b366-ba16-45db-a7b9-1ecf2ce6440e\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "In Python, a list can be changed after it's created and a tuple can't.\n\n| | **List** | **Tuple** |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` or `1, 2, 3` |\n| Can be changed | Yes: you can add, remove or reassign items | No: it's fixed once created |\n| Methods | Many (`append`, `extend`, `insert`, `remove`, `pop`, `sort`, \u2026) | Only `count` and `index` |\n| Usable as dict key or set member | No (not hashable) | Yes, if all its items are hashable |\n| Memory and speed | Somewhat larger, because it keeps spare space to grow | Smaller and a little faster to create |\n| Usual use | A collection of similar items whose length varies | A fixed group of related values, like a record |\n\n```python\nnums = [1, 2, 3]\nnums.append(4)        # OK -> [1, 2, 3, 4]\nnums[0] = 99          # OK\n\npoint = (3, 4)\npoint[0] = 5          # TypeError: 'tuple' object does not support item assignment\n\nlocations = {(40.7, -74.0): \"NYC\"}   # tuple as a dict key: OK\n# {[40.7, -74.0]: \"NYC\"}             # TypeError: unhashable type: 'list'\n```\n\n**Points that often cause confusion:**\n- **A one-item tuple needs a trailing comma.** `(5,)` is a tuple, but `(5)` is just the integer 5.\n- **A tuple's items can still change if they are mutable.** In `t = ([1], 2)`, you can run `t[0].append(3)`. The tuple can't point to different objects, but the objects it holds can change. Such a tuple also can't be hashed.\n- **Unpacking and multiple return values use tuples.** For example, `x, y = get_point()` and `return a, b`.\n- **Named tuples give fields names.** `collections.namedtuple` and `typing.NamedTuple` let you write `p.x` instead of `p[0]`.\n\n**When to use which:** use a list when the collection will grow, shrink or be reordered. Use a tuple when the values belong together as one fixed unit, such as coordinates, an RGB color or a database row. Also use a tuple when you need the value to be hashable or want to make clear it shouldn't change."
+ }
+]

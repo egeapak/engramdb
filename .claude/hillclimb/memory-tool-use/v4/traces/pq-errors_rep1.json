@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c7058d66-2f68-4b55-a550-33e7d41555d4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"badef569-7e7e-4cf4-a9ad-a28b134fb88c\", \"session_id\": \"b0ebdf3a-9308-481d-bf34-32cf482bb4fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c7058d66-2f68-4b55-a550-33e7d41555d4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a1fd2270-c96b-4777-8bde-384399ce7acc\", \"session_id\": \"b0ebdf3a-9308-481d-bf34-32cf482bb4fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2c4498d8-c4f6-496e-95a1-353419512b48\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0cdbbcc2-b269-40c9-ace1-33caa9015d26\", \"session_id\": \"b0ebdf3a-9308-481d-bf34-32cf482bb4fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2c4498d8-c4f6-496e-95a1-353419512b48\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7bd15d72-31bd-45c8-a285-f0452b01cb80\", \"session_id\": \"b0ebdf3a-9308-481d-bf34-32cf482bb4fb\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"error response endpoint\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7be-6a14-74f2-bedf-2df3622a6834\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.2701358501510038,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2701358501510038,\"keyword\":0.2321159167634679,\"relevance\":0.5,\"rerank\":-1.7022178173065186,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5221457014551423,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/api-errors-use-problem-json_01a0f7be-6a14-74f2-bedf-2df3622a6834.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"src/**/*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/__init__.py\nsrc/billing/__init__.py\nsrc/api/__init__.py\nsrc/flags.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/api/checkout.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error|raise|status\",\n \"path\": \"src\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/refunds.py-3-\nsrc/billing/refunds.py-4-def refund(invoice: Invoice, amount_cents: int):\nsrc/billing/refunds.py-5-    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")\nsrc/billing/refunds.py-7-    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\n--\nsrc/billing/invoices.py-20-\nsrc/billing/invoices.py-21-def finalize(invoice):\nsrc/billing/invoices.py-22-    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\nsrc/billing/invoices.py:23:    resp.raise_for_status()\nsrc/billing/invoices.py-24-    invoice.ledger_ref = resp.json()[\"ref\"]\nsrc/billing/invoices.py-25-    log.info(\"invoice_finalized\", invoice_id=invoice.id)\nsrc/billing/invoices.py-26-    return invoice\n--\nsrc/billing/tax.py-9-\nsrc/billing/tax.py-10-\nsrc/billing/tax.py-11-def tax_for(amount_cents, rate):\nsrc/billing/tax.py:12:    raise NotImplementedError\n--\nsrc/api/checkout.py-7-def checkout():\nsrc/api/checkout.py-8-    cart = request.get_json()\nsrc/api/checkout.py-9-    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\nsrc/api/checkout.py:10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n--\nsrc/api/errors.py-1-from flask import jsonify\nsrc/api/errors.py-2-\nsrc/api/errors.py-3-\nsrc/api/errors.py:4:def problem(status, title, detail=None):\nsrc/api/errors.py:5:    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\nsrc/api/errors.py-6-    if detail:\nsrc/api/errors.py-7-        body[\"detail\"] = detail\nsrc/api/errors.py-8-    resp = jsonify(body)\nsrc/api/errors.py:9:    resp.status_code = status\nsrc/api/errors.py-10-    resp.mimetype = \"application/problem+json\"\nsrc/api/errors.py-11-    return resp"
+ },
+ {
+  "role": "assistant",
+  "content": "Return an RFC 7807 `problem+json` response built with the `problem()` helper in `src/api/errors.py:4`. Don't hand-roll a `jsonify({...})` dict.\n\n```python\nfrom src.api.errors import problem\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json(silent=True)\n    if not cart or \"items\" not in cart:\n        return problem(400, \"Invalid cart\", \"Request body must include 'items'.\")\n    ...\n```\n\nWhat `problem(status, title, detail=None)` does:\n- Builds the body `{\"type\": \"about:blank\", \"title\": ..., \"status\": ...}`, and adds `detail` only if you pass one.\n- Sets the HTTP status code to match.\n- Sets `Content-Type: application/problem+json`.\n\nA few practical notes:\n- **`title`** is a short summary that stays the same for every occurrence of that kind of error. **`detail`** explains this specific occurrence.\n- **Domain errors:** code under `src/billing/` raises plain exceptions. For example, `refund()` raises `ValueError(\"refund exceeds invoice total\")` at `src/billing/refunds.py:6`. Catch these in the endpoint and turn them into a `problem(...)` response with a fitting status, usually 400 or 422. Otherwise the client gets a bare 500.\n- **Nothing uses it yet:** no endpoint calls `problem()` so far. For example, `src/api/checkout.py` has no error handling at all; a malformed cart causes a `KeyError` and a 500. If you want this applied everywhere, a Flask `errorhandler` that calls `problem()` would be a good next step.\n\nThis rule was already recorded in the project's memory store as \"API errors use problem+json\", and I checked it against the current code: the file and function both exist with that signature."
+ }
+]

@@ -1,0 +1,35 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"bc548c8e-a6e4-4ee1-83ca-fa84de1ee4fb\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f03de13d-d066-4af5-bfab-8aab96a40919\", \"session_id\": \"9555560f-408c-48e9-baaf-ab0bfb558611\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"bc548c8e-a6e4-4ee1-83ca-fa84de1ee4fb\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b435276f-4c9f-4f85-ba54-cdcb337c9607\", \"session_id\": \"9555560f-408c-48e9-baaf-ab0bfb558611\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"548538dc-4a65-478c-8eb3-7741408b8a11\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"fc6f42ea-08ce-4133-bc6f-567634cdd582\", \"session_id\": \"9555560f-408c-48e9-baaf-ab0bfb558611\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"548538dc-4a65-478c-8eb3-7741408b8a11\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e05df0e8-d18b-4d40-89ee-334834584659\", \"session_id\": \"9555560f-408c-48e9-baaf-ab0bfb558611\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"409 conflict HTTP status\",\n \"max_results\": 5\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7c2-ecf7-7182-b0c8-70fa62b88bb3\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.17097521611691738,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.17097521611691738,\"keyword\":0.02911847314701111,\"relevance\":0.5,\"rerank\":-2.57292103767395,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.44315159588518027,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "HTTP **409 Conflict** means the request couldn't be completed because it conflicts with the resource's current state on the server. It's a 4xx client error, so the request itself was understood and well-formed. It just can't be applied to the resource as it is right now.\n\n**Typical causes:**\n- **Edit conflicts or optimistic concurrency:** a client tries to update a resource that someone else changed after the client last read it. For example, a version number or ETag no longer matches. (`412 Precondition Failed` is the more specific code when the check uses `If-Match`.)\n- **Uniqueness violations:** creating something that already exists, such as a duplicate username or an idempotency key reused with a different payload.\n- **Invalid state transitions:** for example, refunding a payment that has already been refunded, or deleting a resource that other records still depend on.\n\n**How it differs from nearby codes:**\n- `400 Bad Request`: the request is malformed or invalid no matter what state the server is in.\n- `422 Unprocessable Content`: the syntax is fine but the content fails semantic validation.\n- `409`: the request might have been valid, but it clashes with the current state. The client can often fix this by re-fetching the resource, merging changes and retrying.\n\nThe spec (RFC 9110 \u00a715.5.10) says the response body should include enough information for the client to understand and resolve the conflict.\n\n**In this codebase:** project memory says API errors use RFC 7807 problem+json, built with `errors.problem(status, title, detail)` from `src/api/errors.py`. A 409 here would look something like `errors.problem(409, \"Conflict\", \"Invoice was modified by another request; reload and retry\")`."
+ }
+]

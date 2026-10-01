@@ -1,0 +1,12 @@
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..62a1601 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -16,6 +16,7 @@ class Invoice:
+     tax_cents: int = 0
+     ledger_ref: str | None = None
+     lines: list = field(default_factory=list)
++    discount_cents: int = 0
+ 
+ 
+ def finalize(invoice):

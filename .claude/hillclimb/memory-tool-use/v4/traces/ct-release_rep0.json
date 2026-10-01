@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "FYI the release process changed: we now release with `make release`, which tags and publishes for us."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d85f6701-ae2e-426a-9e81-0d05800396f8\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"4396ec47-605f-44dc-b43d-199d1ef02b4c\", \"session_id\": \"04b90706-7c52-4c03-98ff-057da1506028\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d85f6701-ae2e-426a-9e81-0d05800396f8\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"53e17a59-107b-400d-a168-b6cdb9351208\", \"session_id\": \"04b90706-7c52-4c03-98ff-057da1506028\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ad97821b-7dfb-4fd4-bd32-bc290b641860\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a9b73861-5004-41b7-ad1f-bf4f085cee58\", \"session_id\": \"04b90706-7c52-4c03-98ff-057da1506028\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ad97821b-7dfb-4fd4-bd32-bc290b641860\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c7a53b57-dc05-4744-8657-18787e6299cc\", \"session_id\": \"04b90706-7c52-4c03-98ff-057da1506028\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7bb-c44c-7920-b3a0-dba2049a8990\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.5126365656771532,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5126365656771532,\"keyword\":0.9826214185882456,\"relevance\":0.5,\"rerank\":-0.8295179009437561,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5144882528483552,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release by tagging vYYYY.MM.N\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release\",\n \"-i\": true,\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7bb-c44c-7920-b3a0-dba2049a8990.md:6:title: Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7bb-c44c-7920-b3a0-dba2049a8990.md:9:# Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7bb-c44c-7920-b3a0-dba2049a8990.md:11:**Summary:** Release by tagging vYYYY.MM.N\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7bb-c44c-7920-b3a0-dba2049a8990.md:15:Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7bb-c44c-7920-b3a0-dba2049a8990.md:20:- **Tags:** `release`, `workflow`"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"Release with `make release` (tags and publishes); replaces manual vYYYY.MM.N tag push\",\n \"content\": \"Releases are now cut by running `make release`, which creates the tag and publishes. Don't push a `vYYYY.MM.N` tag by hand, and don't publish by hand. This replaces the old process of pushing the tag yourself and letting CI publish. Stated by the user on 2026-10-01. At that time this repo had no Makefile or release target checked in.\",\n \"epistemic\": \"fact\",\n \"tags\": [\n  \"release\",\n  \"workflow\"\n ],\n \"supersedes\": [\n  \"01a0f7bb-c44c-7920-b3a0-dba2049a8990\"\n ],\n \"invalidated_by\": [\n  \"Makefile\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7bb-ee46-77d1-bdd9-4bc9bb09b4eb\",\"created\":true,\"summary\":\"Release with `make release` (tags and publishes); replaces manual vYYYY.MM.N tag push\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I updated the project memory, so the new release process will come up in future sessions:\n\n- **New memory:** release with `make release`, which tags and publishes. Don't push the tag or publish by hand.\n- **Old memory replaced:** the one saying \"push a `vYYYY.MM.N` tag and CI publishes\" is now marked as superseded, not deleted, so its history is kept.\n\nThis repo doesn't have a `Makefile` or a `release` target checked in yet, so `make release` won't work from here at the moment. If that target lives in another repo or is still to come, tell me where and I'll add that to the memory."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things were missing or awkward:\n\n1. **A provenance or source parameter on `create`.** The memory I replaced has `provenance: \"human\"`, and its source is shown as \"shared/human\". The new fact came straight from the user, but `create` has no way to say so. My only option was to write \"Stated by the user on 2026-10-01\" in the content text. I'd have wanted something like `provenance: \"human\"` or `source: \"user-stated\"`. That would record that the new release process came from the user, not from my own guess. It would also stop the new memory from looking less trusted than the human-sourced one it replaces, in ranking and in later checks.\n\n2. **Confirmation from `create` that `supersedes` worked.** The response only returned `{\"id\", \"created\": true, \"summary\"}`. It didn't say whether memory `01a0f7bb-c44c-\u2026a8990` was actually closed or marked as replaced. I'd have wanted a field like `superseded: [{id, invalidated: true}]` in the response. That would have let me confirm the old \"push a `vYYYY.MM.N` tag\" memory will stop coming up, without a second `query` call using `include_invalidated: true` just to check."
+ }
+]

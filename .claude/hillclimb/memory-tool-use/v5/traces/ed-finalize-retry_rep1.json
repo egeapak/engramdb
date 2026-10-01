@@ -1,0 +1,52 @@
+[
+ {
+  "role": "user",
+  "content": "finalize() in src/billing/invoices.py sometimes fails on network errors. Make it retry up to 3 times."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c8b0aa21-4649-40c4-95aa-036097b72dfe\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"fa09891f-9e36-4da9-be11-9f40c1d7b4ff\", \"session_id\": \"b0713bc2-8a52-4bb7-8c4b-13a4d460af6b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c8b0aa21-4649-40c4-95aa-036097b72dfe\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"41af313d-8e4c-4e61-8ecd-a03c15ef76f8\", \"session_id\": \"b0713bc2-8a52-4bb7-8c4b-13a4d460af6b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9e1834d1-10d8-4fb6-b0a1-9c60df1e053b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"040e911e-d611-407b-8a81-58efc2e58645\", \"session_id\": \"b0713bc2-8a52-4bb7-8c4b-13a4d460af6b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9e1834d1-10d8-4fb6-b0a1-9c60df1e053b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c3fc9e60-9dfd-47ba-b75a-a660aaca8e07\", \"session_id\": \"b0713bc2-8a52-4bb7-8c4b-13a4d460af6b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c6e74f1e-84ff-4532-91e6-992a95bbbf81\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"992733f7-ffe0-4d24-ae0e-21c8b6ecca6e\", \"session_id\": \"b0713bc2-8a52-4bb7-8c4b-13a4d460af6b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c6e74f1e-84ff-4532-91e6-992a95bbbf81\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"44971cfa-08cd-434e-84a4-7dd494df7504\", \"session_id\": \"b0713bc2-8a52-4bb7-8c4b-13a4d460af6b\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-finalize-retry-lai2v8sv/ledgerline/src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass, field\n2\t\n3\timport requests\n4\timport structlog\n5\t\n6\tlog = structlog.get_logger()\n7\t\n8\tLEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\"\n9\t\n10\t\n11\t@dataclass\n12\tclass Invoice:\n13\t    id: str\n14\t    customer_id: str\n15\t    subtotal_cents: int\n16\t    tax_cents: int = 0\n17\t    ledger_ref: str | None = None\n18\t    lines: list = field(default_factory=list)\n19\t\n20\t\n21\tdef finalize(invoice):\n22\t    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n23\t    resp.raise_for_status()\n24\t    invoice.ledger_ref = resp.json()[\"ref\"]\n25\t    log.info(\"invoice_finalized\", invoice_id=invoice.id)\n26\t    return invoice\n27\t\n28\t\n29\tdef finalize_once(invoice):\n30\t    if invoice.ledger_ref:\n31\t        return invoice\n32\t    return finalize(invoice)\n33\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"retry finalize network\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d2-df56-7051-849e-84515e88c9f9\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.3223793595348673,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3223793595348673,\"keyword\":0.11142295446669236,\"relevance\":0.5,\"rerank\":-0.630746603012085,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4075904081317819,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"invoices.finalize() is not idempotent\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "I haven't changed anything yet, because retrying `finalize()` could double-post to the ledger.\n\nAn EngramDB hazard memory on this file says `finalize()` posts to the ledger with no idempotency key, so calling it twice double-posts. It says never to add retries around it. I checked the code and that still holds. The POST at `src/billing/invoices.py:22` sends only `invoice` and `amount`. A network error such as a read timeout or a connection reset can happen after the ledger has already recorded the posting. A retry would then post it again and duplicate the charge.\n\nHere are the options I see:\n\n1. **Retry only errors where the request never reached the ledger.** That means `requests.ConnectTimeout`, and possibly connection-refused or DNS failures. It's safe, but it won't cover read timeouts or resets, which may be the failures you're seeing.\n2. **Add an idempotency key.** I'd send a deterministic key such as the invoice id, e.g. in an `Idempotency-Key` header, and then retry up to 3 times on any network error. This is the proper fix, but it only works if the ledger service honors the key. Do you know whether it does?\n3. **Retry on all network errors anyway.** I'd do this only if you confirm the ledger dedupes by invoice id or double-posts are acceptable.\n\nWhich one do you want? Option 2 is my recommendation if the ledger supports it."
+ }
+]

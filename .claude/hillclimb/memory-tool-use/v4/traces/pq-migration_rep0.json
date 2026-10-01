@@ -1,0 +1,95 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"75d474d8-46e4-49f0-a644-9e4bc02e9233\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"fa16bca9-f1be-4255-a36b-6be0e6f4da49\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"75d474d8-46e4-49f0-a644-9e4bc02e9233\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"47eabb0d-04b0-4c06-bde7-7fa9c1568c68\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1feffa5e-86e7-43de-b443-3fe73bea0649\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"dadb6ac5-b3a0-4ffb-afd7-4ace90832f41\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1feffa5e-86e7-43de-b443-3fe73bea0649\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"21441270-6602-467c-9d8f-baed8ecd0f3f\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8b48ae9e-3883-4d09-9859-230f873ebd27\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"3c290ba7-8565-49a5-831d-474f47723933\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8b48ae9e-3883-4d09-9859-230f873ebd27\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1ba715ab-c4f7-431b-a968-54849312622c\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c8daf5d0-9284-42f9-9854-f11922b28d43\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"2d9a34bd-b148-4f16-9701-671981281229\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c8daf5d0-9284-42f9-9854-f11922b28d43\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0045e615-6e10-464b-99cb-5297195a71af\", \"session_id\": \"4eaf6803-ccb3-4ff6-ab95-312cf46f45f7\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"migration schema customers column\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -100\",\n \"description\": \"List tracked files\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f7b7-42d8-7743-8481-789824a0366b.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7b7-3450-7da1-932a-e7276e7bf9d1.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7b7-2097-7ff2-a490-6502c8c9dcbe.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7b7-1b1c-7140-a15f-16ab8264d89e.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f7b7-2f57-7182-a3d9-24a43e1e9cac.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7b7-4924-7bb1-a5dd-c4477a98b1d1.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f7b7-2a8f-7702-98d5-bbc4f09dbada.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f7b7-3e29-75a3-8378-ddc2af806b03.md\n.engramdb/memories/tax-uses-round-half-even_01a0f7b7-396c-73d0-b76c-09c0a10093a5.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f7b7-2586-7221-b0a0-0ea5dd36e068.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-7t_ke3kg/ledgerline/.engramdb/memories/never-edit-an-applied-migration_01a0f7b7-2f57-7182-a3d9-24a43e1e9cac.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f7b7-2f57-7182-a3d9-24a43e1e9cac\n4\ttype: hazard\n5\tstatus: Active\n6\ttitle: Never edit an applied migration\n7\t---\n8\t\n9\t# Never edit an applied migration\n10\t\n11\t**Summary:** Never edit an applied migration\n12\t\n13\t## Content\n14\t\n15\tFiles in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `migrations/`\n20\t- **Tags:** `database`, `migrations`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T13:46:12.695974093+00:00\n28\t- **Updated:** 2026-10-01T13:46:12.695974093+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T13:46:12.695974093Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.5\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-7t_ke3kg/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tCREATE TABLE customers (\n2\t    id TEXT PRIMARY KEY,\n3\t    name TEXT NOT NULL,\n4\t    emial TEXT NOT NULL\n5\t);\n6\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat README.md Makefile; grep -rn \\\"customer\\\" --include=*.py --include=*.sql . | grep -v .engramdb\",\n \"description\": \"Read README, Makefile, customer references\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n./src/billing/invoices.py:14:    customer_id: str\n./migrations/0001_create_invoices.sql:1:CREATE TABLE invoices (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, subtotal_cents BIGINT NOT NULL);\n./migrations/0006_index_customer.sql:1:CREATE INDEX invoices_customer ON invoices(customer_id);\n./migrations/0007_add_customers.sql:1:CREATE TABLE customers ("
+ },
+ {
+  "role": "assistant",
+  "content": "Put it in a **new migration file**, `migrations/0008_add_customer_phone.sql`. Don't edit `0007_add_customers.sql`.\n\nThe project has a recorded rule that files in `migrations/` have already been applied in production, so you never edit one. Each change goes in a new file with the next 4-digit number. The latest file is `0007`, so yours is `0008`:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI left it nullable because existing customer rows have no phone number. If you need `NOT NULL`, add the column, fill in the existing rows, then add the constraint, either later in the same file or in a following migration.\n\nNo Python code reads or writes the `customers` table yet, so this file is the only change needed.\n\nTwo other things I noticed:\n- In `0007_add_customers.sql`, the email column is misspelled as `emial`. If you want that fixed, it also needs its own new migration (e.g. `ALTER TABLE customers RENAME COLUMN emial TO email;`), not an edit to 0007.\n- The memory search returned no results even though the migration rule exists in `.engramdb/memories/`, so I read that file directly. The search index may be out of date and need rebuilding."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things got in the way, and part of the problem was how I used the tools.\n\n1. **`query` gave no reason for returning nothing.** My `mode: \"rank\"` query (\"migration schema customers column\", `situation: \"design_choice\"`) came back with `total: 0` and `retrieval_quality: \"full\"`. Yet `.engramdb/memories/` holds a hazard tagged `migrations` and scoped to `migrations/`. I'd have wanted the response to tell me why nothing matched: how many memories the store holds, whether the index is empty or out of date, and whether `rank` mode needs a `path` or `logical` signal to score anything. With that, I'd have known whether to retry with `path: \"migrations/\"`, use `mode: \"filter\"`, or rebuild the index. Without it, I skipped the store and read the markdown file directly. In fairness, `doctor` and `reindex` were available as deferred tools and I didn't load either. I also never retried with `path` or `filter` mode. So I told you the index \"may be out of date\" without checking, and that gap is partly mine.\n\n2. **The session-start hook didn't bring up the relevant memory.** The hook only added a reminder to reflect at the end of the task. I'd have wanted hooks to raise memories automatically based on the files I touch. Reading or listing under `migrations/` could then have shown the \"never edit an applied migration\" hazard without me querying at all. That would have avoided depending on the query that came back empty."
+ }
+]

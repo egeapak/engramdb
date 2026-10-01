@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"83429fe8-4a2b-4503-9911-8d4dbbec5b63\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"b97a6edb-d1e8-4024-bafc-35930bf9fb25\", \"session_id\": \"b84a07b9-a5e5-401f-a2da-fba305c6ba84\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"83429fe8-4a2b-4503-9911-8d4dbbec5b63\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f1a7db03-8646-4aee-8858-797f0f427cd4\", \"session_id\": \"b84a07b9-a5e5-401f-a2da-fba305c6ba84\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2322244c-bd69-4d71-be20-3c97c6e4069a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"9823be7a-2e7a-42d6-9a03-557561b8fb6d\", \"session_id\": \"b84a07b9-a5e5-401f-a2da-fba305c6ba84\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2322244c-bd69-4d71-be20-3c97c6e4069a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"70bf8971-5fd4-45d1-bc24-523b894f5ca3\", \"session_id\": \"b84a07b9-a5e5-401f-a2da-fba305c6ba84\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"customers schema migration column\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7cb-983f-7013-b47d-4ba1bed335d3\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.28457232913498,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.28457232913498,\"keyword\":0.1015889989724757,\"relevance\":0.5,\"rerank\":-1.1679517030715942,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5373472854142437,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Never edit an applied migration\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"output_mode\": \"files_with_matches\",\n \"-i\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 2 files\n.engramdb/memories/never-edit-an-applied-migration_01a0f7cb-983f-7013-b47d-4ba1bed335d3.md\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls migrations; cat migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "0001_create_invoices.sql\n0002_add_tax.sql\n0003_add_ledger_ref.sql\n0004_create_lines.sql\n0005_create_refunds.sql\n0006_index_customer.sql\n0007_add_customers.sql\nCREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);"
+ },
+ {
+  "role": "assistant",
+  "content": "The change goes in a **new migration file**, `migrations/0008_add_customer_phone.sql`. Don't edit `0007_add_customers.sql`, which creates the table. Files in `migrations/` are applied in production, and a project memory records that rule.\n\nContents:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made it nullable because existing rows have no phone number. If you want `NOT NULL`, add a `DEFAULT ''`.\n\n`0007` has a typo: the column is `emial` instead of `email`. Leave it alone for the same reason. If you want it fixed, do that in its own migration, such as `0009_fix_customers_email.sql` with a `RENAME COLUMN`.\n\nI only found `customers` referenced in the migrations, so there don't seem to be model or query files to update. Do you want me to create the migration file?"
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]
