@@ -50,6 +50,18 @@ DEBRIEF_PROMPT = (
     "have used it for. If nothing was missing, answer exactly: nothing missing."
 )
 
+PASSTHROUGH_ENV = {
+    "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "TMPDIR",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN",
+    # Auth through a host-managed proxy (Claude Code on the web).
+    "CLAUDE_SESSION_INGRESS_TOKEN_FILE", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+}
+
+# Grants every tool of the plugin's MCP server. A bare `mcp__*` does not.
+MEMORY_SERVER_TOOLS = "mcp__plugin_engram_memory"
+
 _write_lock = threading.Lock()
 
 
@@ -77,7 +89,12 @@ def sh(cmd, cwd, env, timeout=120, check=True):
 
 
 def case_env(tmp, args):
-    env = dict(os.environ)
+    # Start from an allowlist, not the parent environment: a host that runs Claude
+    # Code itself (a cloud container, CI) sets variables that change behavior, e.g.
+    # MCP_CONNECTION_NONBLOCKING=true starts the turn before the plugin's MCP
+    # server connects, so the memory tools never appear. Each case should start
+    # like a fresh local install; only auth and network settings pass through.
+    env = {k: v for k, v in os.environ.items() if k in PASSTHROUGH_ENV}
     env["PATH"] = f"{ENGRAMDB_BIN}{os.pathsep}{env.get('PATH', '')}"
     env["CLAUDE_CONFIG_DIR"] = str(tmp / "claude-config")
     env["ENGRAMDB_DATA_DIR"] = str(tmp / "engram-data")
@@ -86,8 +103,6 @@ def case_env(tmp, args):
     env["ENGRAMDB_OFFLINE"] = "1"  # models are pre-staged; never download mid-run
     if args.ort_dylib:
         env["ORT_DYLIB_PATH"] = args.ort_dylib
-    for k in ("ANTHROPIC_MODEL", "CLAUDE_CODE_EFFORT_LEVEL"):
-        env.pop(k, None)
     (tmp / "claude-config").mkdir()
     cfg = tmp / "engram-config"
     cfg.mkdir()
@@ -108,10 +123,33 @@ def setup_workspace(tmp, env):
     ids = {}
     for m in json.loads((HERE / "seed_memories.json").read_text()):
         ids[m["key"]] = seed_memory(ws, env, m)
+    warm_daemon(ws, env)
     # Commit the seeded store so the end-state diff shows only what the run changed.
     git("-c", "user.name=eval", "-c", "user.email=eval@example.com", "add", "-A")
     git("-c", "user.name=eval", "-c", "user.email=eval@example.com", "commit", "-qm", "seed", "--allow-empty")
     return ws, ids
+
+
+def warm_daemon(ws, env):
+    """Start the embedding daemon before Claude Code starts the MCP server.
+
+    A cold `engramdb serve` (no daemon running) needs about 3 s to answer
+    `initialize`. Claude Code 2.1.x's protocol-discovery probe times out first,
+    and the reconnect fails on every list request, so the session has no memory
+    tools at all. That is a product bug, reported separately; the eval measures
+    Claude's behavior with working tools, as with a daemon already running.
+    """
+    proc = subprocess.Popen(["engramdb", "serve", "--dir", "."], cwd=ws, env=env, stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    try:
+        init = {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "warmup", "version": "1"}}}
+        proc.stdin.write(json.dumps(init) + "\n")
+        proc.stdin.flush()
+        proc.stdout.readline()
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def seed_memory(ws, env, m):
@@ -132,7 +170,7 @@ def run_claude(prompt, ws, env, args, session_id, resume=False, extra=()):
         "--output-format", "stream-json", "--verbose", "--include-hook-events",
         "--plugin-dir", str(REPO),
         "--permission-mode", "acceptEdits",
-        "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep", "Bash", "mcp__*",
+        "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep", "Bash", MEMORY_SERVER_TOOLS,
         "--max-budget-usd", str(args.max_budget_usd),
     ]
     cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
@@ -178,6 +216,13 @@ def run_one(case, rep, args, out_dir):
             session_id = str(uuid.uuid4())
         if result is None:
             raise RuntimeError(f"no result event (exit {code}): {stderr[-1500:]}")
+        # The first init event can predate the connection; the last one reflects it.
+        init = next((e for e in reversed(events) if e.get("type") == "system" and e.get("subtype") == "init"), {})
+        servers = {s["name"]: s.get("status") for s in init.get("mcp_servers", [])}
+        engram = {n: s for n, s in servers.items() if "engram" in n}
+        if not engram or any(s != "connected" for s in engram.values()):
+            # Without the memory tools the case measures the harness, not Claude.
+            raise RuntimeError(f"mcp_not_connected: {servers}")
 
         diff = grade.workspace_diff(ws, env)
         after = grade.snapshot_store(ws, env)
@@ -185,7 +230,7 @@ def run_one(case, rep, args, out_dir):
 
         if args.debrief:
             d_events, _, _ = run_claude(DEBRIEF_PROMPT, ws, env, args, session_id, resume=True,
-                                        extra=["--disallowedTools", "Edit", "Write", "Bash", "mcp__*"])
+                                        extra=["--disallowedTools", "Edit", "Write", "Bash", MEMORY_SERVER_TOOLS])
             d_result = next((e for e in reversed(d_events) if e.get("type") == "result"), {})
             row["meta"]["debrief"] = d_result.get("result", "")
             row["meta"]["debrief_cost_usd"] = d_result.get("total_cost_usd")

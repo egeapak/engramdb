@@ -1,0 +1,102 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"39576850-845c-4b3f-816e-e5cf033c810f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"2c14356c-d3a1-4536-b376-6fc13b9f33fa\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"39576850-845c-4b3f-816e-e5cf033c810f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ec53e1d6-3a6c-4c41-99f9-802274c678b4\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e5b6cb5b-4c6c-4259-8c8b-e0b8ea0e98a2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"e582130d-6486-4244-b2a5-04aff3254c18\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e5b6cb5b-4c6c-4259-8c8b-e0b8ea0e98a2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e586ee34-6da4-4cd8-816c-31e6b6193e8a\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"339a8e4c-3a52-48e6-ad4f-af0c4bb89d18\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"e631b8f8-b9d8-4b35-b261-05c333821b38\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"339a8e4c-3a52-48e6-ad4f-af0c4bb89d18\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f8fecedf-48c7-4b1f-ac80-55ecb55e430d\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f8e96b71-4862-49a2-bf2f-112b9f35f9db\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"f188a7aa-6521-4fa4-bd0c-714c23d916f0\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f8e96b71-4862-49a2-bf2f-112b9f35f9db\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a28b3bda-1ecf-4d9b-a3de-238788735571\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"322add06-6c09-418e-9b2a-fed9b1b9d1dc\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"810f48c9-b09e-45fa-a643-10b93087a02f\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"322add06-6c09-418e-9b2a-fed9b1b9d1dc\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4a25f7da-5e6c-4157-9f80-a1c1fb9a9e04\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dcfbea55-ee13-4bf2-830b-b01a55f4c790\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"669ada48-fe1d-4816-9cef-1fbee343a83d\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dcfbea55-ee13-4bf2-830b-b01a55f4c790\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e87d8ae1-e910-41d8-b116-871003e76dc9\", \"session_id\": \"5d7651a8-edf7-44db-8808-57205bd516ac\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payment|gateway|fake\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-dpp4ovqx/claude-config/projects/-tmp-mte-nk-env-var-dpp4ovqx-ledgerline/memory/payments-live-env-var.md\",\n \"content\": \"---\\nname: payments-live-env-var\\ndescription: Hazard \\u2014 app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\\nmetadata:\\n  type: project\\n---\\n\\nThe app silently falls back to a fake/sandbox payment gateway unless the env var `PAYMENTS_LIVE=1` is set. There's no warning or log line when this happens. As of 2026-10-01, the `PAYMENTS_LIVE` check isn't anywhere in the ledgerline repo source (it may live in a dependency, a config layer, or the deploy environment). The only related reference is `SANDBOX = \\\"https://sandbox.payments.example/v1/charges\\\"` in `tests/test_payments.py`.\\n\\n**Why:** The user lost two hours debugging payments that were silently hitting the fake gateway.\\n\\n**How to apply:** When payments act strangely (charges don't show up, responses look canned), check `PAYMENTS_LIVE` first. Mention it whenever running or debugging payment flows.\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-env-var-dpp4ovqx/claude-config/projects/-tmp-mte-nk-env-var-dpp4ovqx-ledgerline/memory/payments-live-env-var.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-dpp4ovqx/claude-config/projects/-tmp-mte-nk-env-var-dpp4ovqx-ledgerline/memory/MEMORY.md\",\n \"content\": \"- [PAYMENTS_LIVE env var](payments-live-env-var.md) \\u2014 fake payment gateway is used unless PAYMENTS_LIVE=1; no warning\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-env-var-dpp4ovqx/claude-config/projects/-tmp-mte-nk-env-var-dpp4ovqx-ledgerline/memory/MEMORY.md (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "Losing two hours to a silent fallback is rough. I've saved it to memory, so future sessions will check `PAYMENTS_LIVE` first whenever payments act strangely.\n\nWhen I searched the repo, the `PAYMENTS_LIVE` check isn't anywhere in ledgerline's source. The only related code is a sandbox URL in `tests/test_payments.py:4`. So the switch probably lives in a dependency, a config layer, or your deploy setup.\n\nTo stop this from catching anyone else, the code that picks the gateway should say which one it chose. It could log a loud warning at startup, like \"Using FAKE payment gateway (set PAYMENTS_LIVE=1 for live)\", or refuse to start in production without the variable set. If you can tell me where the switch is, I can add that, or document it in a README or `.env.example`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "I can't fairly say whether anything was missing, because I never used EngramDB this session. I saved the `PAYMENTS_LIVE` hazard to the file-based auto-memory instead (`payments-live-env-var.md` plus its `MEMORY.md` pointer), and I never loaded or called any `mcp__plugin_engram_memory__*` tool. So no EngramDB tool, parameter or command blocked me.\n\nWhat I can report is an awkward spot I didn't address at the time. The session had two overlapping memory systems: the file-based auto-memory and EngramDB, whose SessionStart hook asked me to record durable facts there. Nothing said which one to use or whether to write to both. I picked one without checking, so the hazard isn't in EngramDB. A future session that relies on EngramDB's `query` won't find it, and I didn't tell the user that.\n\nIf I had used EngramDB, I would have wanted these:\n\n- **`create` with a hazard type and a `path` or `tags` anchor.** I would have used it to tie the memory to `tests/test_payments.py` and to a \"payments\" or \"env-var\" tag, so that path-based queries surface it when payment code is touched. I don't know if the existing parameters fully cover this, because I never loaded the schema.\n- **A way to mark a fact as unconfirmed.** For example, an `epistemic: observation` value with a note that the source of the switch hasn't been found. The user reported the behaviour, but I couldn't find the `PAYMENTS_LIVE` check in the repo, so the memory should say that and not present it as confirmed."
+ }
+]
