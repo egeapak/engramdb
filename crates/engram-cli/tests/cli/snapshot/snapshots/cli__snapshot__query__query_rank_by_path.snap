@@ -6,7 +6,6 @@ $ engramdb --no-maintenance --dir [PROJECT] query --mode rank -p src/main.rs
 exit: 0
 --- stdout ---
 {
-  "dropped_below_threshold": 1,
   "memories": [
     {
       "memory": {
@@ -44,8 +43,44 @@ exit: 0
         "visibility": "Shared"
       },
       "score": 0.9
+    },
+    {
+      "memory": {
+        "accessed_at": "[TIMESTAMP]",
+        "challenges": [],
+        "confidence": 0.8,
+        "content": "Applies to every crate in the workspace.",
+        "created_at": "[TIMESTAMP]",
+        "criticality": 0.6,
+        "decay": {
+          "floor": 0.0,
+          "strategy": "none"
+        },
+        "epistemic": "fact",
+        "id": "[UUID]",
+        "logical": [
+          "core.style"
+        ],
+        "physical": [
+          "/"
+        ],
+        "provenance": {
+          "source": "human"
+        },
+        "status": "Active",
+        "summary": "Name variables in snake_case",
+        "supersedes": [],
+        "tags": [
+          "style"
+        ],
+        "title": "Name Variables Snake Case",
+        "type": "convention",
+        "updated_at": "[TIMESTAMP]",
+        "visibility": "Shared"
+      },
+      "score": 0.[PROJECT_ID]
     }
   ],
-  "total": 1
+  "total": 2
 }
 --- stderr ---
