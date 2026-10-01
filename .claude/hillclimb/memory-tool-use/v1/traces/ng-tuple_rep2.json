@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b287002a-ba8b-4ef5-9e32-1b07786e2658\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"627cbceb-564f-4b6c-b2ec-a1227d9d84bd\", \"session_id\": \"4e83a4ec-8e76-497e-b65f-e9f51226f4fa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b287002a-ba8b-4ef5-9e32-1b07786e2658\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a332c67f-eff4-4c7d-b762-c1ebedac5aa0\", \"session_id\": \"4e83a4ec-8e76-497e-b65f-e9f51226f4fa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6de629d6-6712-4038-ba40-c5d90844070b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a6807c7d-887a-4f49-8641-7acee1a53bad\", \"session_id\": \"4e83a4ec-8e76-497e-b65f-e9f51226f4fa\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6de629d6-6712-4038-ba40-c5d90844070b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b4371234-c74c-486a-a464-19d3cbfb70be\", \"session_id\": \"4e83a4ec-8e76-497e-b65f-e9f51226f4fa\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**Lists** are mutable. **Tuples** are immutable.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` |\n| Mutable | Yes: you can append, remove, or reassign items | No: contents can't change after creation |\n| Hashable | No, so it can't be a dict key or set member | Yes, if all its items are hashable |\n| Methods | Many (`append`, `extend`, `pop`, `sort`, \u2026) | Only `count` and `index` |\n| Performance | Slightly more memory and slower to create | Slightly smaller and faster |\n\n```python\nlst = [1, 2, 3]\nlst[0] = 99          # fine\nlst.append(4)        # fine\n\ntup = (1, 2, 3)\ntup[0] = 99          # TypeError: 'tuple' object does not support item assignment\n\nd = {(1, 2): \"point\"}   # tuples work as dict keys\nd = {[1, 2]: \"point\"}   # TypeError: unhashable type: 'list'\n```\n\n**When to use which:**\n- Use a **list** for a collection that grows, shrinks, or changes. Its items are usually all the same kind, such as a list of users.\n- Use a **tuple** for a fixed record where position has meaning, such as `(x, y)`, `(name, age)`, or multiple return values. Tuples also suit data you want to protect from modification, and keys for dicts or sets.\n\n**Caveats:**\n- A one-element tuple needs a trailing comma: `(1,)`. Without it, `(1)` is just the integer `1`.\n- Tuple immutability is shallow. `([1, 2], 3)` can't have its items replaced, but the inner list can still be mutated."
+ }
+]

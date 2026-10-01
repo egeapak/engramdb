@@ -1,0 +1,92 @@
+[
+ {
+  "role": "user",
+  "content": "Gate the checkout() function in src/api/checkout.py behind a new feature flag for the new checkout."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c31d91a6-1a49-4a9e-a00a-618bfd066b75\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"54a539cc-9bf8-446e-8bad-a88d2615c20a\", \"session_id\": \"dabd8309-2efa-485f-939b-47af91dc006c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c31d91a6-1a49-4a9e-a00a-618bfd066b75\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fb243f5f-013a-4508-b534-45baa4379c8c\", \"session_id\": \"dabd8309-2efa-485f-939b-47af91dc006c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"58c2af44-cb2b-40bb-9ef0-0927e5e57e9e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"488a75db-6766-4271-bb18-28ffae8db08a\", \"session_id\": \"dabd8309-2efa-485f-939b-47af91dc006c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"58c2af44-cb2b-40bb-9ef0-0927e5e57e9e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\\n- [convention] API errors use problem+json (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\\n- [convention] API errors use problem+json (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d9fa6892-be8f-4cc8-ab4d-36ce1ee7ab9b\", \"session_id\": \"dabd8309-2efa-485f-939b-47af91dc006c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a882c3a9-c623-47b2-a6a0-0ea7a8965c00\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"a867f67a-bb25-4c90-a5d5-d5896eb7fe95\", \"session_id\": \"dabd8309-2efa-485f-939b-47af91dc006c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a882c3a9-c623-47b2-a6a0-0ea7a8965c00\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1ec7f35e-e717-4b3c-b7eb-cd26a65ec350\", \"session_id\": \"dabd8309-2efa-485f-939b-47af91dc006c\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-9n1wylt9/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"flags\\\\.is_on|import flags|from .*flags\",\n \"path\": \"/tmp/mte-ed-flag-9n1wylt9/ledgerline\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dd-9d37-7730-9aa4-60fed1241f13.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dd-9d37-7730-9aa4-60fed1241f13.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dd-9d37-7730-9aa4-60fed1241f13.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dd-9d37-7730-9aa4-60fed1241f13.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/flags.py flags.toml; ls src src/api; grep -rn \\\"problem\\\" src | head\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "import tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\n[flags]\ninvoice-pdf-v2 = false\nsrc:\n__init__.py\napi\nbilling\nflags.py\n\nsrc/api:\n__init__.py\ncheckout.py\nerrors.py\ninvoices.py\nsrc/api/errors.py:4:def problem(status, title, detail=None):\nsrc/api/errors.py:10:    resp.mimetype = \"application/problem+json\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/api/errors.py; grep -n \\\"flags\\\\|problem\\\" -B2 -A4 src/api/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from flask import jsonify\n\n\ndef problem(status, title, detail=None):\n    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n    if detail:\n        body[\"detail\"] = detail\n    resp = jsonify(body)\n    resp.status_code = status\n    resp.mimetype = \"application/problem+json\"\n    return resp"
+ },
+ {
+  "role": "assistant",
+  "content": "When the flag is off, I'll return a 404 problem+json response, following the repo's conventions."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python - <<'E'\\np='src/api/checkout.py'\\ns=open(p).read()\\ns=s.replace('from flask import Blueprint, jsonify, request\\\\n','from flask import Blueprint, jsonify, request\\\\n\\\\nfrom src import flags\\\\nfrom src.api.errors import problem\\\\n')\\ns=s.replace('def checkout():\\\\n','def checkout():\\\\n    if not flags.is_on(\\\"new-checkout\\\"):\\\\n        return problem(404, \\\"Not Found\\\", \\\"Checkout is not available\\\")\\\\n')\\nopen(p,'w').write(s)\\nE\\necho 'new-checkout = false' >> flags.toml\\npython -c \\\"\\nfrom flask import Flask\\nfrom src.api.checkout import bp\\na=Flask('x');a.register_blueprint(bp)\\nr=a.test_client().post('/checkout',json={'items':[]});print(r.status_code,r.data)\\\"\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 2, in <module>\nModuleNotFoundError: No module named 'flask'"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -m py_compile src/api/checkout.py && python -c \\\"from src import flags;print(flags.is_on('new-checkout'))\\\"; git diff\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "False\ndiff --git a/flags.toml b/flags.toml\nindex 5080f31..375ea47 100644\n--- a/flags.toml\n+++ b/flags.toml\n@@ -1,2 +1,3 @@\n [flags]\n invoice-pdf-v2 = false\n+new-checkout = false\ndiff --git a/src/api/checkout.py b/src/api/checkout.py\nindex 81e65b5..058fa64 100644\n--- a/src/api/checkout.py\n+++ b/src/api/checkout.py\n@@ -1,10 +1,15 @@\n from flask import Blueprint, jsonify, request\n \n+from src import flags\n+from src.api.errors import problem\n+\n bp = Blueprint(\"checkout\", __name__)\n \n \n @bp.post(\"/checkout\")\n def checkout():\n+    if not flags.is_on(\"new-checkout\"):\n+        return problem(404, \"Not Found\", \"Checkout is not available\")\n     cart = request.get_json()\n     total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n     return jsonify({\"total_cents\": total, \"status\": \"pending\"})"
+ },
+ {
+  "role": "assistant",
+  "content": "`checkout()` in `src/api/checkout.py` now sits behind a new `new-checkout` flag, which defaults to off. I couldn't run the endpoint because Flask isn't installed here. The file compiles and `flags.is_on('new-checkout')` returns `False`.\n\n- **Flag:** I declared `new-checkout = false` in `flags.toml`, and the check uses `flags.is_on(\"new-checkout\")`, as the repo convention requires.\n- **Flag off:** `POST /checkout` returns a 404 `application/problem+json` response through the existing `problem()` helper. The 404 was my choice, so switch it if you'd rather return something else, such as 403 or 501.\n- **Flag on:** the handler behaves exactly as before.\n\nOne thing to be aware of: with the flag off, every caller of `/checkout` now gets a 404, including the current checkout path. If the old behaviour should stay available while the new checkout is rolled out, the flag should switch between two implementations instead of blocking the endpoint. Let me know if you want it that way.\n\nI didn't save anything to memory, since nothing durable came up beyond conventions already recorded."
+ }
+]

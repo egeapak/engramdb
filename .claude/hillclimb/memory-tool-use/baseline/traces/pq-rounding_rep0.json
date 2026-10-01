@@ -1,0 +1,86 @@
+[
+ {
+  "role": "user",
+  "content": "What rounding mode do we use for tax?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"22f6722a-de3f-4bb7-beaa-3995a140d5d9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"877c80ae-d877-4877-9986-5f5b125ea76f\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"22f6722a-de3f-4bb7-beaa-3995a140d5d9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3aa079b6-b8a3-4d37-a5b9-3d2d35b73825\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"51700f8f-78fe-4db2-94d7-16e942e6d573\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1c91cf29-c133-45c5-94eb-e2e928e11cb1\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"51700f8f-78fe-4db2-94d7-16e942e6d573\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"affb13e8-9cf3-41e6-939d-8e1347c8eb5d\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"196c481e-fa02-47f7-8c3f-01a40cb6e9ce\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"e1649bb4-b5a5-43ee-b497-0ae566bbc682\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"196c481e-fa02-47f7-8c3f-01a40cb6e9ce\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a9bdf23f-eba5-4ca4-909c-b3514d12f0c5\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1c733d52-e527-4afa-85ee-c96c9212b10a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"ec2c8c30-201c-46ea-bc9a-02597fe3d930\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1c733d52-e527-4afa-85ee-c96c9212b10a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ed18aa95-5b13-4ed8-a98c-667032f1d6c5\", \"session_id\": \"76a73fd4-5c9e-4d6a-a939-74a25698810e\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"ROUND_|round|Rounding\",\n \"output_mode\": \"content\",\n \"-i\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:8:def test_charges_roundtrip():\n.engramdb/memories/tax-uses-round-half-even_01a0f6b6-1dcc-7232-9b1b-0f9373bc665b.md:6:title: Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f6b6-1dcc-7232-9b1b-0f9373bc665b.md:9:# Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f6b6-1dcc-7232-9b1b-0f9373bc665b.md:11:**Summary:** Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f6b6-1dcc-7232-9b1b-0f9373bc665b.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f6b5-fdc8-7b72-b0b1-02e817513246.md:15:`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"tax|quantize|Decimal\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"glob\": \"!.engramdb/**\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_tax.py:1:from src.billing.tax import line_total\nmigrations/0002_add_tax.sql:1:ALTER TABLE invoices ADD COLUMN tax_cents BIGINT NOT NULL DEFAULT 0;\nREADME.md:4:computes tax, posts finalized invoices to the external ledger, and exports\nREADME.md:9:- `src/billing/` - money, invoices, refunds, and tax logic\nsrc/billing/refunds.py:5:    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/invoices.py:16:    tax_cents: int = 0\nsrc/billing/invoices.py:22:    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/billing/tax.py:11:def tax_for(amount_cents, rate):"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-rounding-mkhag_ji/ledgerline/src/billing/tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom decimal import Decimal\n2\t\n3\t\n4\tdef line_total(lines):\n5\t    x = 0\n6\t    for line in lines:\n7\t        x += line[\"quantity\"] * line[\"unit_cents\"]\n8\t    return x\n9\t\n10\t\n11\tdef tax_for(amount_cents, rate):\n12\t    raise NotImplementedError\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-rounding-mkhag_ji/ledgerline/tests/test_tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom src.billing.tax import line_total\n2\t\n3\t\n4\tdef test_line_total():\n5\t    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300\n6\t"
+ },
+ {
+  "role": "assistant",
+  "content": "The code doesn't use any rounding mode for tax yet. `tax_for()` in `src/billing/tax.py:11` just raises `NotImplementedError`. Nothing in `src/`, `tests/` or `migrations/` calls `quantize` or sets a `ROUND_*` mode, and the tests only cover `line_total`.\n\nThe decided mode is **banker's rounding (`decimal.ROUND_HALF_EVEN`)**, not `ROUND_HALF_UP`. This comes from a team note in the repo (`.engramdb/memories/tax-uses-round-half-even_\u2026md`), which says it was agreed with the finance team in March 2026. The code doesn't confirm it yet.\n\nWhen `tax_for` gets written, it should do something like:\n\n```python\nfrom decimal import Decimal, ROUND_HALF_EVEN\n\ndef tax_for(amount_cents, rate):\n    return int((Decimal(amount_cents) * Decimal(str(rate))).quantize(Decimal(\"1\"), rounding=ROUND_HALF_EVEN))\n```\n\nIt should also have tests for the .5-cent cases, for example 0.5 \u2192 0 and 1.5 \u2192 2, so the mode is pinned down."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One thing was awkward.\n\n**The hook's injected context had no memory ID or body.** The UserPromptSubmit and PreToolUse hooks only gave me the title and source (\"[decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\"). They left out the memory ID, the file path, the date and the rationale. I wanted the full text, for example \"agreed with finance in March 2026, do not use ROUND_HALF_UP\", so I could cite it and judge how reliable it was. Without an ID I couldn't go straight to `get`. So I grepped the raw `.engramdb/memories/*.md` files instead of using the MCP tools. Including the memory ID (or path) and a one-line body excerpt in the injected context would have let me call `get(id)`, or skip the lookup entirely.\n\nOtherwise nothing was missing. I didn't load the schemas for `query`, `get`, `update` or `verify`, so I can't say whether they would have fallen short. For example, I might have wanted to note on the decision that `tax_for` isn't implemented yet, so the rule isn't in the code. `update` or `verify` may already cover that."
+ }
+]

@@ -1,6 +1,42 @@
-id	split	baseline
-pq-tests	all	0.000
-nk-env-var	all	1.000
-ed-tax	all	0.000
-ct-loguru	all	0.000
-ng-bankers	all	1.000
+id	split	baseline	v1
+pq-tests	all	0.000	0.000
+nk-env-var	all	1.000	1.000
+ed-tax	all	0.000	0.000
+ct-loguru	all	0.000	0.000
+ng-bankers	all	1.000	1.000
+pq-logging	all	0.000	0.000
+pq-money	all	1.000	0.000
+pq-flags	all	0.000	0.000
+pq-release	all	0.000	0.000
+pq-rounding	all	0.000	0.000
+pq-export	all	0.000	0.000
+pq-errors	all	1.000	0.000
+pq-migration	all	0.333	0.000
+pq-finalize	all	1.000	0.333
+ed-discount	all	0.000	0.000
+ed-refund-log	all	0.000	0.000
+ed-flag	all	0.000	0.000
+ed-migration-typo	all	0.000	0.000
+ed-finalize-retry	all	1.000	0.000
+ed-404	all	0.000	0.000
+ed-export-since	all	0.000	0.000
+nk-jobs-explicit	all	0.333	0.000
+nk-python-min	all	1.000	1.000
+nk-sandbox-ratelimit	all	1.000	1.000
+nk-owner	all	1.000	1.000
+nk-timezone	all	0.667	0.000
+nk-debug-lesson	all	1.000	1.000
+nk-api-version	all	1.000	0.000
+ct-just	all	0.000	0.000
+ct-release	all	1.000	1.000
+ng-tuple	all	1.000	1.000
+ct-rounding	all	1.000	1.000
+ng-regex	all	1.000	1.000
+ng-hello	all	1.000	1.000
+ng-math	all	1.000	1.000
+ng-http409	all	1.000	1.000
+ng-yaml	all	1.000	1.000
+ng-rebase	all	1.000	1.000
+nc-rename	all	1.000	1.000
+nc-docstring	all	1.000	1.000
+nc-readme	all	1.000	1.000

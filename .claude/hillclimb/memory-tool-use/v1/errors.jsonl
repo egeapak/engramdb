@@ -1,0 +1,1 @@
+{"prompt_id": "pq-export", "rep": 0, "model": "claude-sonnet-5-5", "retries": 0, "failure_class": "harness_error", "error": "mcp_not_connected: {'plugin:engram:memory': 'pending'}"}

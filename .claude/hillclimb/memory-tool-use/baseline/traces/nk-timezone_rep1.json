@@ -1,0 +1,85 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"18481c6e-7214-4a60-a491-8f86bf150a3a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"7aa2e64b-77a9-4b01-a39a-11cb94c0499d\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"18481c6e-7214-4a60-a491-8f86bf150a3a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fb0b2f26-27a3-4eac-9f2e-367f359bf8ed\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"224269df-a7fc-4e31-acdd-d3bfa03bf1cc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"ae25167a-970b-42ae-a05e-bf15777aa9bb\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"224269df-a7fc-4e31-acdd-d3bfa03bf1cc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"186fa2e6-62f6-4426-b195-0c653fb36fff\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f28f8088-ca6e-425b-a079-99f1a4031eac\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"5552a09e-8e8a-4f1c-8fdb-ee398b97392d\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f28f8088-ca6e-425b-a079-99f1a4031eac\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e755e335-ac96-4d5c-9e87-83903d8139ec\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4bfbfc9b-bb83-4b31-a59b-9e06d0dd49a5\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"ef72c538-c544-4a2d-a5da-9ae0de1be784\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4bfbfc9b-bb83-4b31-a59b-9e06d0dd49a5\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"54b9b49d-1a5b-4d85-980b-4e55feec94b9\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"55506c5c-678c-4c10-b9d4-896eea6500b8\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"c4fafb20-1c87-4872-ac30-8afb7ef42dc9\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"55506c5c-678c-4c10-b9d4-896eea6500b8\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"861bbc83-cf56-4432-96fa-7dcca0fd2d89\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d586f530-f6d4-4c3d-bd55-a5ecc7211949\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"22528be5-cfff-423d-aab4-5b1abe30659d\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d586f530-f6d4-4c3d-bd55-a5ecc7211949\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"442a2501-1a15-47ff-bc2d-789c568fd4b8\", \"session_id\": \"39e60178-8402-4893-8e69-56ae69945e1d\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -la /tmp/mte-nk-timezone-u4pa5_ie/claude-config/projects/-tmp-mte-nk-timezone-u4pa5-ie-ledgerline/memory/; cat /tmp/mte-nk-timezone-u4pa5_ie/claude-config/projects/-tmp-mte-nk-timezone-u4pa5-ie-ledgerline/memory/MEMORY.md 2>/dev/null\",\n \"description\": \"List existing memory files and index\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 1\ntotal 8\ndrwxr-xr-x 2 root root 4096 Oct  1 09:18 .\ndrwxr-xr-x 3 root root 4096 Oct  1 09:18 .."
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-timezone-u4pa5_ie/claude-config/projects/-tmp-mte-nk-timezone-u4pa5-ie-ledgerline/memory/utc-timestamps-convert-in-api.md\",\n \"content\": \"---\\nname: utc-timestamps-convert-in-api\\ndescription: DB timestamps are always UTC; conversion to customer timezone happens only in the API layer\\nmetadata:\\n  type: project\\n---\\n\\nAll timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer.\\n\\n**Why:** Stated by the user as a project convention (2026-10-01). A single storage timezone keeps comparisons, sorting, and aggregation in the DB unambiguous.\\n\\n**How to apply:** Never write local or customer-zone times to the DB, and don't convert timezones in models, services, jobs, or queries. Do any conversion to the customer's timezone at the API boundary (serialization/response layer), and convert incoming customer-local times to UTC there too.\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-timezone-u4pa5_ie/claude-config/projects/-tmp-mte-nk-timezone-u4pa5-ie-ledgerline/memory/utc-timestamps-convert-in-api.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-timezone-u4pa5_ie/claude-config/projects/-tmp-mte-nk-timezone-u4pa5-ie-ledgerline/memory/MEMORY.md\",\n \"content\": \"- [UTC timestamps, convert in API](utc-timestamps-convert-in-api.md) \\u2014 DB stores UTC only; customer-timezone conversion happens only in the API layer\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-timezone-u4pa5_ie/claude-config/projects/-tmp-mte-nk-timezone-u4pa5-ie-ledgerline/memory/MEMORY.md (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project memory, so future sessions in ledgerline will see it:\n\n- **Rule:** All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer.\n- **What I'll do with it:** I won't put local times in the database or convert timezones in models, services, jobs or queries. Any conversion happens in the API layer, both for responses going out and for customer-local times coming in.\n\nIt's in my file-based memory, not in EngramDB. If you'd also like it in EngramDB, or in a shared store so related projects see it too, I can add it there."
+ }
+]

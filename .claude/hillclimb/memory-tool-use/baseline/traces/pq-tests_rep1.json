@@ -1,0 +1,35 @@
+[
+ {
+  "role": "user",
+  "content": "How do I run the tests in this repo?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"84c11222-86b2-43dd-974b-d860e258a5c7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"9e62989b-4c99-420c-bdd6-7b70a96f3a0f\", \"session_id\": \"318b192b-65a7-417a-aead-7b12d5ec0dbe\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"84c11222-86b2-43dd-974b-d860e258a5c7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ae92acbf-992c-440c-a075-08e249498550\", \"session_id\": \"318b192b-65a7-417a-aead-7b12d5ec0dbe\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6c35c14c-c972-4610-91f3-722d4f8f97f3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"ebf922ad-6b0a-4ce4-b612-2262060949a5\", \"session_id\": \"318b192b-65a7-417a-aead-7b12d5ec0dbe\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6c35c14c-c972-4610-91f3-722d4f8f97f3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ffc271e2-458b-4c96-8372-8a472847de9a\", \"session_id\": \"318b192b-65a7-417a-aead-7b12d5ec0dbe\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a && cat Makefile 2>/dev/null; cat README* 2>/dev/null | head -50; cat package.json pyproject.toml 2>/dev/null | head -60\",\n \"description\": \"Inspect repo files for test setup\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n# ledgerline\n\nLedgerline is the invoicing and billing servce for Acme. It creates invoices,\ncomputes tax, posts finalized invoices to the external ledger, and exports\nmonthly reports.\n\n## Layout\n\n- `src/billing/` - money, invoices, refunds, and tax logic\n- `src/api/` - the HTTP endpoints\n- `migrations/` - the SQL schema migrations\n- `scripts/` - operational scripts\n\n## Development\n\nInstall the dependancies with `pip install -e .[dev]`, then run the tests.\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]"
+ },
+ {
+  "role": "assistant",
+  "content": "The tests use pytest, with two Makefile targets:\n\n```bash\npip install -e .[dev]   # one-time: installs pytest and the app's dependencies\n\nmake test-fast          # pytest -m \"not postgres\" -q  (skips tests marked postgres)\nmake test               # pytest -q                    (full suite, includes postgres tests)\n```\n\n`make test-fast` is the one to use day to day; a saved project note also names it as the usual command. It skips the tests marked `postgres`, so it should work without a database. Use `make test` when you need the full suite, which includes those Postgres tests, so you'll need a database available.\n\nTo run one file or one test, call pytest directly, e.g. `pytest tests/<file>.py -k <name> -q`.\n\nI haven't run either target here, so I can't confirm the suite currently passes."
+ }
+]

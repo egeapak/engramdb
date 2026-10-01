@@ -1,0 +1,57 @@
+[
+ {
+  "role": "user",
+  "content": "FYI the release process changed: we now release with `make release`, which tags and publishes for us."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f1f452a6-3ccd-4e94-bf5a-a0ba2427b0fd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"5447cac4-59f4-450a-a1ae-27c5ad66c41b\", \"session_id\": \"1059774c-6a98-4b28-8f18-35e26b1d7598\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f1f452a6-3ccd-4e94-bf5a-a0ba2427b0fd\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"43cf6657-a0b1-4dd2-ba55-e57c03054a11\", \"session_id\": \"1059774c-6a98-4b28-8f18-35e26b1d7598\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6b441886-54a8-411d-a731-5a7b4774d67e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"9e5b7dfa-2df2-4f08-93c9-9b65ecaa67d1\", \"session_id\": \"1059774c-6a98-4b28-8f18-35e26b1d7598\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6b441886-54a8-411d-a731-5a7b4774d67e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"18ae8674-77a4-4d9c-8e29-631ce6873a68\", \"session_id\": \"1059774c-6a98-4b28-8f18-35e26b1d7598\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Noted. That differs from an existing memory that says to release by tagging, so I'll check it and update it."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__update,mcp__plugin_engram_memory__challenge\",\n \"max_results\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release tag\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f6d9-e234-77c3-bf4b-4905a4b832bb\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.7046535759720441,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7046535759720441,\"keyword\":0.9371240596027867,\"relevance\":0.5,\"rerank\":0.7310556769371033,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6252147808903253,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release by tagging vYYYY.MM.N\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__update",
+  "content": "{\n \"id\": \"01a0f6d9-e234-77c3-bf4b-4905a4b832bb\",\n \"summary\": \"Release with `make release` (tags and publishes)\",\n \"content\": \"Releases are cut by running `make release`, which tags and publishes. Don't push tags or publish by hand. (Per the user on 2026-10-01; this replaces the earlier process of manually pushing a `vYYYY.MM.N` tag and letting CI publish. Tag naming under `make release` hasn't been confirmed.)\",\n \"premise\": \"while releases go through the Makefile `release` target\",\n \"invalidated_by\": [\n  \"Makefile\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f6d9-e234-77c3-bf4b-4905a4b832bb\",\"updated\":true}"
+ },
+ {
+  "role": "assistant",
+  "content": "Got it: releases now go through `make release`, which tags and publishes. I updated the saved project memory, which still said to push a `vYYYY.MM.N` tag by hand. It now says to use `make release`. I've noted that the tag format under the new process isn't confirmed. I haven't run `make release` and won't unless you ask."
+ }
+]

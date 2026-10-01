@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "I want to put a new checkout flow behind a feature flag. How do we do flags in this project?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"30932cac-c658-4e1f-a021-be5b8ee00dda\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"7ea5f4b8-d888-48ff-a129-45a1d22a0dae\", \"session_id\": \"6914703a-0a49-4624-a769-6228a262e0b3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"30932cac-c658-4e1f-a021-be5b8ee00dda\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8b37faca-b807-44ef-ad9b-712f01122b21\", \"session_id\": \"6914703a-0a49-4624-a769-6228a262e0b3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2c0e7296-8331-4554-a89c-9579bdc34b31\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"4967997c-8144-491b-8534-d1ef043a858a\", \"session_id\": \"6914703a-0a49-4624-a769-6228a262e0b3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2c0e7296-8331-4554-a89c-9579bdc34b31\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e990f7e5-7068-4679-bcbc-0a78ddd7b0a5\", \"session_id\": \"6914703a-0a49-4624-a769-6228a262e0b3\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"is_on|feature.?flag|flags\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 50\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "flags.toml:1:[flags]\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dc-32fd-76a2-b230-8c1cd4fafa7a.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dc-32fd-76a2-b230-8c1cd4fafa7a.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dc-32fd-76a2-b230-8c1cd4fafa7a.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dc-32fd-76a2-b230-8c1cd4fafa7a.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dc-32fd-76a2-b230-8c1cd4fafa7a.md:19:- **Files:** `src/flags.py`, `flags.toml`\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6dc-32fd-76a2-b230-8c1cd4fafa7a.md:20:- **Tags:** `flags`\nsrc/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\nsrc/flags.py:7:def is_on(name):\nsrc/flags.py:8:    return bool(_FLAGS.get(name, False))\nsrc/flags.py:11:def all_flags():\nsrc/flags.py:12:    return dict(_FLAGS)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat flags.toml src/flags.py; grep -rn \\\"flags\\\" --include=*.py . | grep -v \\\"^./src/flags.py\\\"\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "[flags]\ninvoice-pdf-v2 = false\nimport tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)"
+ },
+ {
+  "role": "assistant",
+  "content": "Flags here are simple and file-based.\n\n**How it works**\n- `flags.toml` at the repo root declares every flag under `[flags]` as a boolean. The only one today is `invoice-pdf-v2 = false`.\n- `src/flags.py` loads that file once, when the module is imported. `is_on(name)` returns `True` or `False`, and anything not declared counts as off. `all_flags()` returns a copy of the whole dict.\n- The project convention, which I confirmed in the stored memory and in the code, is to read flags only through `flags.is_on(\"name\")`. Names are kebab-case and must be declared in `flags.toml`.\n- Nothing in the repo calls `is_on` yet, so `invoice-pdf-v2` isn't wired to any code path. I found no existing usage pattern to copy.\n\n**For the new checkout flow**\n1. Add `new-checkout-flow = false` to `flags.toml`. The name is just a suggestion.\n2. Branch at the entry point of the checkout code:\n   ```python\n   from src import flags\n\n   if flags.is_on(\"new-checkout-flow\"):\n       return new_checkout(...)\n   return legacy_checkout(...)\n   ```\n   Adjust the import to match how the other modules import from `src`.\n3. Flip the value to `true` in `flags.toml` to enable it.\n\n**Limitations**\n- Flags are static. They're read at import time, so changing one needs a code change and a restart. There's no per-user, percentage or environment targeting.\n- A typo in a flag name silently returns `False`, because `is_on` doesn't check that the name is declared. Be careful with spelling, or I can make `is_on` raise on undeclared names.\n\nI haven't changed anything. Do you want me to add the flag and scaffold the branch? If so, tell me where the checkout code lives."
+ }
+]

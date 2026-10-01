@@ -1,0 +1,126 @@
+[
+ {
+  "role": "user",
+  "content": "Gate the checkout() function in src/api/checkout.py behind a new feature flag for the new checkout."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"650c4ce1-9a02-436b-a691-73dd0be3b033\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"1eea1fda-2a65-44ff-9b0c-7c5edaf9ec87\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"650c4ce1-9a02-436b-a691-73dd0be3b033\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"904ce29c-0251-45e5-8f6d-cee9cdea5f9e\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f986a293-2eed-4844-b7c4-899a785e9dbc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"cf86ba7c-ec73-4ad3-89d7-ca7e31836f52\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f986a293-2eed-4844-b7c4-899a785e9dbc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\\n- [convention] API errors use problem+json (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\\n- [convention] API errors use problem+json (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2ba8697d-c8c4-429e-9569-71412b65240f\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b80ad45c-525c-499d-989f-c84f67ebcc51\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"b2ca37ff-6625-4439-9f6e-ccaa1e81f7cd\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b80ad45c-525c-499d-989f-c84f67ebcc51\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"09d01d5b-c7ed-4065-b46e-5fb060c5549f\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5b44fb53-9953-46f7-966f-8421764b7e26\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"0a60bd80-79eb-4633-9ac1-194e0fbec43e\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5b44fb53-9953-46f7-966f-8421764b7e26\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"731250fc-d932-4afb-8061-1b58e43b77cf\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0ec11e9e-0cdf-483b-ad4f-f56c52759f84\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"9efb4db0-7e65-4f51-af99-b88a0eccf3d2\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0ec11e9e-0cdf-483b-ad4f-f56c52759f84\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"755c1e99-ee45-45ff-b9c3-187735ff5a98\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e61d39df-cde7-4c50-b821-852a7ec908e8\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"a111f5b7-cb2c-43a9-aaf9-5ee6d1c27f2d\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e61d39df-cde7-4c50-b821-852a7ec908e8\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b85f27ff-285c-4c52-9ee8-beb676370ac2\", \"session_id\": \"e6cbf653-276f-4970-a8c6-ad98c4f8fb0a\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat src/api/checkout.py && grep -rn \\\"is_on\\\\|flags\\\" --include=*.py . | head -30\",\n \"description\": \"List files and inspect checkout and flag usage\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f6c7-651e-76b1-982f-dee13406ecca.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6c7-4e2d-7551-bc49-88f8d8af00af.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f6c7-313b-7672-ba8c-9b0038373245.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f6c7-29ab-7950-b5b9-b4813125b957.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f6c7-472c-7242-b16b-2bc67290a14d.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f6c7-6cd9-7f71-98f0-601624a66fe7.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f6c7-4090-71f0-9654-fef5e241c183.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f6c7-5d71-7cf1-b609-823f81a0e271.md\n.engramdb/memories/tax-uses-round-half-even_01a0f6c7-5465-7c61-b341-6d64827ab0b7.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6c7-3964-7383-9a0e-c18a9d251820.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nfrom flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n./src/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n./src/flags.py:7:def is_on(name):\n./src/flags.py:11:def all_flags():"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/flags.py flags.toml src/api/errors.py src/api/invoices.py .engramdb/memories/feature-flags*.md .engramdb/memories/api-errors*.md\",\n \"description\": \"Read flags module, config, errors helper, and conventions\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "import tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\n[flags]\ninvoice-pdf-v2 = false\nfrom flask import jsonify\n\n\ndef problem(status, title, detail=None):\n    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n    if detail:\n        body[\"detail\"] = detail\n    resp = jsonify(body)\n    resp.status_code = status\n    resp.mimetype = \"application/problem+json\"\n    return resp\nfrom flask import Blueprint, jsonify\n\nbp = Blueprint(\"invoices\", __name__)\n\n_INVOICES = {}\n\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    return jsonify(invoice.__dict__)\n---\nversion: 2\nid: 01a0f6c7-4e2d-7551-bc49-88f8d8af00af\ntype: convention\nstatus: Active\ntitle: Feature flags go through flags.is_on()\n---\n\n# Feature flags go through flags.is_on()\n\n**Summary:** Feature flags go through flags.is_on()\n\n## Content\n\nRead feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\n\n## Scope\n\n- **Files:** `src/flags.py`, `flags.toml`\n- **Tags:** `flags`\n- **Criticality:** 0.5\n- **Confidence:** 0.8\n\n## Provenance\n\n- **Source:** human\n- **Created:** 2026-10-01T09:24:11.949538944+00:00\n- **Updated:** 2026-10-01T09:24:11.949538944+00:00\n\n<!-- engramdb\nvisibility: Shared\naccessed_at: 2026-10-01T09:24:11.949538944Z\ndecay:\n  strategy: none\n  floor: 0.0\n-->\n---\nversion: 2\nid: 01a0f6c7-651e-76b1-982f-dee13406ecca\ntype: convention\nstatus: Active\ntitle: API errors use problem+json\n---\n\n# API errors use problem+json\n\n**Summary:** API errors use problem+json\n\n## Content\n\nHTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\n\n## Scope\n\n- **Files:** `src/api/`\n- **Tags:** `api`, `errors`\n- **Criticality:** 0.5\n- **Confidence:** 0.8\n\n## Provenance\n\n- **Source:** human\n- **Created:** 2026-10-01T09:24:17.822265679+00:00\n- **Updated:** 2026-10-01T09:24:17.822265679+00:00\n\n<!-- engramdb\nvisibility: Shared\naccessed_at: 2026-10-01T09:24:17.822265679Z\ndecay:\n  strategy: none\n  floor: 0.0\n-->"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"^(from|import) \",\n \"path\": \"/tmp/mte-ed-flag-vuw2rb1z/ledgerline\",\n \"glob\": \"{src,tests,scripts}/**/*.py\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:1:import pytest\ntests/test_payments.py:2:import requests\ntests/test_tax.py:1:from src.billing.tax import line_total\nscripts/export.py:1:import argparse\nscripts/export.py:2:import os\nsrc/billing/refunds.py:1:from .invoices import Invoice\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/billing/invoices.py:1:from dataclasses import dataclass, field\nsrc/billing/invoices.py:3:import requests\nsrc/billing/invoices.py:4:import structlog\nsrc/billing/money.py:1:from dataclasses import dataclass\nsrc/api/invoices.py:1:from flask import Blueprint, jsonify\nsrc/api/errors.py:1:from flask import jsonify\nsrc/api/checkout.py:1:from flask import Blueprint, jsonify, request\nsrc/flags.py:1:import tomllib\nsrc/flags.py:2:from pathlib import Path"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-flag-vuw2rb1z/ledgerline/flags.toml\",\n \"old_string\": \"invoice-pdf-v2 = false\",\n \"new_string\": \"invoice-pdf-v2 = false\\nnew-checkout = false\"\n}",
+  "thinking": "I'll add a `new-checkout` flag (defaulting off) in `flags.toml` and return a 404 problem+json via `errors.problem()` when it's disabled, following the project's existing conventions.\n\n"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-flag-vuw2rb1z/ledgerline/flags.toml has been updated successfully."
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-flag-vuw2rb1z/ledgerline/src/api/checkout.py\",\n \"old_string\": \"from flask import Blueprint, jsonify, request\\n\\nbp = Blueprint(\\\"checkout\\\", __name__)\\n\\n\\n@bp.post(\\\"/checkout\\\")\\ndef checkout():\\n    cart\",\n \"new_string\": \"from flask import Blueprint, jsonify, request\\n\\nfrom .. import flags\\nfrom .errors import problem\\n\\nbp = Blueprint(\\\"checkout\\\", __name__)\\n\\n\\n@bp.post(\\\"/checkout\\\")\\ndef checkout():\\n    if not flags.is_on(\\\"new-checkout\\\"):\\n        return problem(404, \\\"Not Found\\\", \\\"Checkout is not enabled.\\\")\\n    cart\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-flag-vuw2rb1z/ledgerline/src/api/checkout.py has been updated successfully."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -c \\\"\\nfrom flask import Flask\\nfrom src.api.checkout import bp\\nfrom src import flags\\napp=Flask(__name__); app.register_blueprint(bp); c=app.test_client()\\nr=c.post('/checkout',json={'items':[{'unit_cents':100,'quantity':2}]}); print(r.status_code,r.mimetype,r.get_json())\\nflags._FLAGS['new-checkout']=True\\nr=c.post('/checkout',json={'items':[{'unit_cents':100,'quantity':2}]}); print(r.status_code,r.get_json())\\n\\\"\",\n \"description\": \"Smoke-test checkout with flag off and on\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 2, in <module>\nModuleNotFoundError: No module named 'flask'"
+ },
+ {
+  "role": "assistant",
+  "content": "Flask isn't installed here, so I'm checking what I can without it: that the files compile and the flag reads correctly."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -m py_compile src/api/checkout.py && python -c \\\"from src import flags; print(flags.is_on('new-checkout'), flags.all_flags())\\\"\",\n \"description\": \"Compile check and verify flag loads\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "False {'invoice-pdf-v2': False, 'new-checkout': False}"
+ },
+ {
+  "role": "assistant",
+  "content": "`checkout()` now sits behind a new `new-checkout` feature flag. The flag is off by default, so `POST /checkout` returns a 404 until someone turns it on. I couldn't test the endpoint itself because Flask isn't installed in this environment.\n\n**Changes:**\n- **`flags.toml`**: added `new-checkout = false`.\n- **`src/api/checkout.py`**: `checkout()` first checks `flags.is_on(\"new-checkout\")`. If the flag is off, it returns a 404 error via `errors.problem()` (\"Checkout is not enabled.\") and never reads the cart. If it's on, it works exactly as before.\n\nThis follows the project's existing rules: flags are read only through `flags.is_on()` and declared in `flags.toml`, and API errors use the shared `errors.problem()` helper.\n\n**Checked:** the changed file compiles, and `flags.is_on(\"new-checkout\")` loads and returns `False`. I didn't add a test because there's no existing test for the checkout endpoint to extend.\n\n**Decision for you:** I used 404 so that, while the flag is off, the endpoint looks like it doesn't exist. If you'd rather tell callers it's temporarily turned off, 503 would do that. Tell me and I'll switch it.\n\nChanges are uncommitted."
+ }
+]

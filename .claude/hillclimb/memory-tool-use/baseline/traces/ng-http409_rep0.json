@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6cad2b9a-3d3b-41ab-bdab-f453f2537e6c\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8112c4c2-a913-428e-874c-481a48256859\", \"session_id\": \"2f046390-5fca-4163-b1a3-05131add5723\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6cad2b9a-3d3b-41ab-bdab-f453f2537e6c\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9f678203-133c-4a91-9da7-2f1553844fa6\", \"session_id\": \"2f046390-5fca-4163-b1a3-05131add5723\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6ac66682-9572-4479-b7d1-3dce4b864235\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"7a39d323-cc99-45da-99c7-71be4430f3cb\", \"session_id\": \"2f046390-5fca-4163-b1a3-05131add5723\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6ac66682-9572-4479-b7d1-3dce4b864235\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"77959c93-d9b2-4961-bf52-5f7870ebcf51\", \"session_id\": \"2f046390-5fca-4163-b1a3-05131add5723\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource on the server.\n\nCommon causes:\n- **Edit conflicts / optimistic concurrency.** A client tries to update a resource using an outdated version, e.g. a stale `ETag` or version number, because someone else changed it first. (Some APIs use `412 Precondition Failed` here when `If-Match` headers are involved.)\n- **Uniqueness violations.** Creating a resource that already exists, like registering a username or email that's taken.\n- **State-machine violations.** An action that isn't allowed in the resource's current state, like cancelling an order that has already shipped or deleting a non-empty directory.\n- **Version control / sync.** Pushing changes that conflict with what's on the server.\n\nKey points:\n- It's a **client error (4xx)**. The request is well-formed, but the server won't apply it as things stand.\n- The client can often fix the problem and retry. For example, it can re-fetch the latest version, merge the changes, and resubmit.\n- The response body should explain the conflict so the user or client can resolve it.\n\nHow it differs from similar codes:\n- **400 Bad Request:** the request itself is malformed or invalid.\n- **412 Precondition Failed:** a conditional header like `If-Match` or `If-Unmodified-Since` didn't match.\n- **422 Unprocessable Content:** the syntax is fine, but the content fails semantic validation."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

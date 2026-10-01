@@ -1,0 +1,93 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"57d84879-4ffe-48a3-a10b-4e73f1a6838f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f35b73b2-1c0a-4ccb-82ce-1ae4db75e5d9\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"57d84879-4ffe-48a3-a10b-4e73f1a6838f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"61e72f4e-80b4-4160-a070-ea44e62f5a3e\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"20b9683b-9264-4d51-9901-03eb89db6ba8\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"5f68678f-9cce-482c-9e3c-d3fdf9af3c54\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"20b9683b-9264-4d51-9901-03eb89db6ba8\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2598d0c1-7f37-4a92-a7e1-e5b202c969df\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5a1962bc-d130-4263-b5a2-48f574805197\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"d5b85255-02b7-4c4f-8fbb-665eb9334041\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5a1962bc-d130-4263-b5a2-48f574805197\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"140dae7d-98be-4207-8ced-a95399084b06\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"54e73860-2aff-497d-8cb9-49e05da7cd7d\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"c1b8d0d7-426f-42ca-b69b-ea200a8f0b00\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"54e73860-2aff-497d-8cb9-49e05da7cd7d\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"86254b3e-0b09-4a18-b22a-ddca4613c37c\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"01bdd556-7eb6-4046-b43b-c9412aec5f8e\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"78c5083d-14a8-4361-a1ad-959afa9ecb88\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"01bdd556-7eb6-4046-b43b-c9412aec5f8e\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3ad75a65-d5b5-45ee-b5b8-3fe1a69e688b\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1d7d6317-7186-4862-bf57-8faabe4f4fc7\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"b784310d-8b82-4796-83b6-95313ddac488\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1d7d6317-7186-4862-bf57-8faabe4f4fc7\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"46f82a7e-b56a-4ccb-a031-52a3b7ed9c55\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"23f9a296-0300-4ad4-b7a8-71e0f7d95b66\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"421f266a-4995-4bf1-83d7-d0b30997aaf0\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"23f9a296-0300-4ad4-b7a8-71e0f7d95b66\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"cb0f2d98-1552-471e-8b7d-b0bb1856500e\", \"session_id\": \"40d05b88-3eaa-4134-bb17-cbcc1beaa04f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-api-version-k7d5h4be/claude-config/projects/-tmp-mte-nk-api-version-k7d5h4be-ledgerline/memory/MEMORY.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File does not exist. Note: your current working directory is /tmp/mte-nk-api-version-k7d5h4be/ledgerline."
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-api-version-k7d5h4be/claude-config/projects/-tmp-mte-nk-api-version-k7d5h4be-ledgerline/memory/api-v2-versioning.md\",\n \"content\": \"---\\nname: api-v2-versioning\\ndescription: Public API routes are versioned under /v2 going forward; /v1 is frozen\\nmetadata:\\n  type: project\\n---\\n\\nDecision from the 2026-10-01 design review: all public API routes are versioned under /v2 from now on, and /v1 is frozen (no new routes or changes).\\n\\n**Why:** Decided in the design review; the user asked that it be kept in mind going forward.\\n**How to apply:** Put new or changed public API routes under /v2. Don't add features or behavior changes to /v1 routes.\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-api-version-k7d5h4be/claude-config/projects/-tmp-mte-nk-api-version-k7d5h4be-ledgerline/memory/api-v2-versioning.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-api-version-k7d5h4be/claude-config/projects/-tmp-mte-nk-api-version-k7d5h4be-ledgerline/memory/MEMORY.md\",\n \"content\": \"- [API versioning](api-v2-versioning.md) \\u2014 public routes go under /v2; /v1 is frozen\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-api-version-k7d5h4be/claude-config/projects/-tmp-mte-nk-api-version-k7d5h4be-ledgerline/memory/MEMORY.md (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "Understood. New and changed public API routes go under /v2, and I won't touch /v1. I've saved this to project memory so it carries over to later sessions."
+ }
+]

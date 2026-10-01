@@ -1,0 +1,87 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2c6b2322-ab83-4da5-93bc-aa74929e449a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"da9d1e31-0540-4f39-a34c-59da56dc2bc2\", \"session_id\": \"a49200d3-6747-4300-9c5a-2112a3f73d06\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2c6b2322-ab83-4da5-93bc-aa74929e449a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"95802c10-2b62-46d3-98e7-176870079a6b\", \"session_id\": \"a49200d3-6747-4300-9c5a-2112a3f73d06\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a4d72cbd-48a7-440f-a7cf-3067ff4af227\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d94ff76b-d6ca-4a46-8cf9-05ffd1350b82\", \"session_id\": \"a49200d3-6747-4300-9c5a-2112a3f73d06\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a4d72cbd-48a7-440f-a7cf-3067ff4af227\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"bae6ece4-7852-49e4-8289-1a47b4c81fe5\", \"session_id\": \"a49200d3-6747-4300-9c5a-2112a3f73d06\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3512ab97-e75d-47aa-a9ef-81903ea8f16c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"faf11398-8705-46f7-8e4a-dcdaaa81e042\", \"session_id\": \"a49200d3-6747-4300-9c5a-2112a3f73d06\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3512ab97-e75d-47aa-a9ef-81903ea8f16c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7e1216d2-aec6-4e3c-a7da-a8b62e8d4f0d\", \"session_id\": \"a49200d3-6747-4300-9c5a-2112a3f73d06\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error|exception|raise|status_code\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 6 files\n.engramdb/memories/api-errors-use-problem-json_01a0f6b6-c87d-7592-85e5-af0ac003bffc.md\ntests/test_payments.py\nsrc/api/errors.py\nsrc/billing/tax.py\nsrc/billing/refunds.py\nsrc/billing/invoices.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"api error response\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f6b6-c87d-7592-85e5-af0ac003bffc\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.7509461789698195,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7509461789698195,\"keyword\":0.8765910918656766,\"relevance\":0.5,\"rerank\":1.377260684967041,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6129189089898925,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-veqf22cs/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)raise|error|status\",\n \"path\": \"/tmp/mte-pq-errors-veqf22cs/ledgerline/src/billing\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")\nsrc/billing/invoices.py:23:    resp.raise_for_status()\nsrc/billing/tax.py:12:    raise NotImplementedError"
+ },
+ {
+  "role": "assistant",
+  "content": "Return an RFC 7807 `application/problem+json` response built with the `problem()` helper in `src/api/errors.py:4`. Don't build ad-hoc error dicts. That rule comes from a project memory written by a person. The helper's code, which I checked, matches it.\n\n```python\nfrom api.errors import problem\n\n@app.post(\"/refunds\")\ndef create_refund():\n    ...\n    if amount > invoice.total:\n        return problem(422, \"Refund exceeds invoice total\",\n                       detail=f\"Requested {amount}, invoice total is {invoice.total}\")\n```\n\nWhat `problem(status, title, detail=None)` does:\n- **Body:** `{\"type\": \"about:blank\", \"title\": ..., \"status\": ...}`, plus `detail` when you pass one.\n- **Status:** sets the HTTP status code to match `status`.\n- **Content type:** sets the response to `application/problem+json`.\n\nUsage notes:\n- **`title`** should be a short summary that's the same every time for a given kind of problem. Put anything specific to this request, like the amounts above, in `detail`.\n- **`type`** is always `about:blank`. If you need machine-readable error types, you'd have to extend the helper.\n- **Domain errors** should be caught at the endpoint and turned into a `problem()` response. For example, `src/billing/refunds.py:6` raises `ValueError(\"refund exceeds invoice total\")`. Don't let the exception escape, or Flask returns its default HTML 500 page.\n\nNo endpoint in the repo calls `problem()` yet, so there's no existing example to copy."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

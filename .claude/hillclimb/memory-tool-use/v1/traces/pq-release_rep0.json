@@ -1,0 +1,95 @@
+[
+ {
+  "role": "user",
+  "content": "What's the process for cutting a release?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dc1ea660-386e-4644-b99a-6a174fa1e5ac\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"85a3fd94-d38e-4a34-8b30-76569e5044c4\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dc1ea660-386e-4644-b99a-6a174fa1e5ac\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"cb46ecc6-e05e-4560-b417-88a7e6c1403b\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3743faa8-8587-411b-92eb-69e4ce065d4a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"bd580696-3d56-4d6c-b952-85406e3c9cf5\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3743faa8-8587-411b-92eb-69e4ce065d4a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release by tagging vYYYY.MM.N (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f384357c-43aa-4d96-9691-5a0631b68f21\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cf73daec-590a-453b-ac0d-96556c472cd6\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"12189dcc-e86c-48e8-a38d-eaf3f4a84032\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cf73daec-590a-453b-ac0d-96556c472cd6\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e69718ad-ff8d-4e3b-aea0-d386021cf6e9\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f07ff207-6cf8-45df-a71d-33b7fdcb5d0f\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"2f6c7054-e106-490e-b2af-8e026358551f\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f07ff207-6cf8-45df-a71d-33b7fdcb5d0f\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c2387146-ddcb-496b-83ee-5d7129eb251a\", \"session_id\": \"2031e8a9-014e-4c6f-b950-8108ba37365c\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release|tag\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 11 files\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f6cd-c2b1-7241-9d83-77dda90f2e8c.md\n.engramdb/memories/api-errors-use-problem-json_01a0f6cd-bc42-75e1-a5f5-a918063f0087.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f6cd-b5a8-76d1-bae5-58eee7e817cb.md\n.engramdb/memories/tax-uses-round-half-even_01a0f6cd-af29-78e3-90da-f45e27bafd0f.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6cd-a864-74d0-af1d-bac07b2bc5ce.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f6cd-a1a4-7582-be64-edf9ea916afe.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f6cd-9aa0-7620-9098-8e9e06a0d00b.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6cd-8eed-7723-bf97-7b7201a2836e.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f6cd-86a0-7e73-9bdf-c9b61d25bdb5.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f6cd-7dfc-7c02-8882-62cdb7569069.md\nscripts/export.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{README*,CONTRIBUTING*,RELEASE*,CHANGELOG*,Makefile,.github/workflows/*,docs/*}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\nMakefile"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-release-uakplld5/ledgerline/.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f6cd-c2b1-7241-9d83-77dda90f2e8c.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f6cd-c2b1-7241-9d83-77dda90f2e8c\n4\ttype: convention\n5\tstatus: Active\n6\ttitle: Release by tagging vYYYY.MM.N\n7\t---\n8\t\n9\t# Release by tagging vYYYY.MM.N\n10\t\n11\t**Summary:** Release by tagging vYYYY.MM.N\n12\t\n13\t## Content\n14\t\n15\tReleases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `/`\n20\t- **Tags:** `release`, `workflow`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T09:31:14.993472568+00:00\n28\t- **Updated:** 2026-10-01T09:31:14.993472568+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T09:31:14.993472568Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.0\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-release-uakplld5/ledgerline/Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t.PHONY: test test-fast\n2\t\n3\ttest-fast:\n4\t\tpytest -m \"not postgres\" -q\n5\t\n6\ttest:\n7\t\tpytest -q\n8\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release|tag\",\n \"-i\": true,\n \"path\": \"/tmp/mte-pq-release-uakplld5/ledgerline/README.md\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "assistant",
+  "content": "Releases are cut by pushing a git tag named `vYYYY.MM.N`, for example `v2026.09.2`. This comes from a project memory in EngramDB. The repo has no release docs, CI workflow files or release Makefile target to check it against.\n\n1. Make sure `main` has the commits you want to ship. Run `make test` first (the full suite, including the Postgres tests). `make test-fast` skips the Postgres tests.\n2. Pick the tag: the current year and month, then `N`, a counter for that month. I'm assuming it starts at 1 and goes up with each release, but the memory doesn't say. Check the existing tags with `git tag -l 'v2026.10.*'` to find the next number.\n3. Create and push the tag, for example `git tag v2026.10.1 && git push origin v2026.10.1`.\n4. CI builds and publishes from the tag. Never publish by hand.\n\nI couldn't find the CI config in this checkout, so I can't say what the pipeline does or how to check that it succeeded. I haven't created or pushed any tag."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing was missing from the tool set itself. I didn't call any EngramDB tools. The hook put the release convention in my context, and I read the memory file directly to confirm it.\n\nOne thing was awkward. The injected memory was a single line, \"Release by tagging vYYYY.MM.N\". The full content, including \"CI builds and publishes; never publish by hand\", only showed up after I opened the file. A hook option to inject the full body for high-relevance hits would have saved me that read. I'd have used it so the answer could come straight from the injected context."
+ }
+]

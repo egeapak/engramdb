@@ -1,0 +1,101 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a0fa5d45-62e8-4fd6-ba55-c667567402d4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"77b99649-04f7-4e73-8748-41095a1db674\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a0fa5d45-62e8-4fd6-ba55-c667567402d4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"15b7870c-0d5b-41e1-95e1-24489fab034c\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7701d690-f902-4791-b956-78fb112d1c0f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0a694c32-a1e9-4502-b87a-7ac741c5b450\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7701d690-f902-4791-b956-78fb112d1c0f\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"30fea225-88be-4bcf-b1c6-bb54e6171d58\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"585c3111-64a5-4f82-b974-5902f10823b9\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"7e142197-c0c1-47c4-871d-93e5ec27ccad\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"585c3111-64a5-4f82-b974-5902f10823b9\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"edf3973b-25b4-48b5-97b4-e314fbe49f7c\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"500c04d3-89ba-4177-a125-727a342906a5\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"859c3aa3-10f1-43ef-bf6d-9cd12cfa3fa9\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"500c04d3-89ba-4177-a125-727a342906a5\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"766ec05f-6274-4e8d-a0b3-14b3f0ed070a\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2cc314c4-5869-41ae-a835-dbc2a03f215d\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"51241065-bc35-42df-bb90-69fcc940dfc8\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2cc314c4-5869-41ae-a835-dbc2a03f215d\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ec94e488-940f-4090-8a53-e3d4d0efadf6\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e6a27022-a035-4c25-9e32-7da3602f40c9\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"895d5299-6b35-4a1e-ba0d-92a713c2e378\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e6a27022-a035-4c25-9e32-7da3602f40c9\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d595345d-bdfd-4f7c-9bb1-43623f8797b0\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ebfe718f-f246-482b-9ed0-43f524a5f73b\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"6938683e-0e8d-4bc8-9fe4-a308dd0cb841\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ebfe718f-f246-482b-9ed0-43f524a5f73b\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8cfd09bb-7c09-4cda-94bb-32c791c2c7a0\", \"session_id\": \"21884077-c87a-4eae-9eb7-346ceb9c61c9\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-api-version-5lkmxrrj/claude-config/projects/-tmp-mte-nk-api-version-5lkmxrrj-ledgerline/memory/MEMORY.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File does not exist. Note: your current working directory is /tmp/mte-nk-api-version-5lkmxrrj/ledgerline."
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-api-version-5lkmxrrj/claude-config/projects/-tmp-mte-nk-api-version-5lkmxrrj-ledgerline/memory/api-versioning-v2.md\",\n \"content\": \"---\\nname: api-versioning-v2\\ndescription: Public API routes are versioned under /v2 going forward; /v1 is frozen (decided 2026-10-01 design review)\\nmetadata:\\n  type: project\\n---\\n\\nPublic API routes are versioned under /v2 from now on, and /v1 is frozen.\\n\\n**Why:** Decision from the design review on 2026-10-01.\\n**How to apply:** Add new or changed public routes under /v2 only; don't modify /v1 routes.\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-api-version-5lkmxrrj/claude-config/projects/-tmp-mte-nk-api-version-5lkmxrrj-ledgerline/memory/api-versioning-v2.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-api-version-5lkmxrrj/claude-config/projects/-tmp-mte-nk-api-version-5lkmxrrj-ledgerline/memory/MEMORY.md\",\n \"content\": \"- [API versioning](api-versioning-v2.md) \\u2014 new public routes go under /v2; /v1 is frozen\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-api-version-5lkmxrrj/claude-config/projects/-tmp-mte-nk-api-version-5lkmxrrj-ledgerline/memory/MEMORY.md (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "Noted. New public API routes go under `/v2`, and `/v1` stays frozen, so I won't change it. I saved this to project memory so it carries over to future sessions."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

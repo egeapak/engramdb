@@ -1,0 +1,78 @@
+[
+ {
+  "role": "user",
+  "content": "What rounding mode do we use for tax?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7cd69a53-8edc-4ab9-acd5-a7512f319772\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"7fa0f5d6-556f-429a-9ec5-1cb8efeedbb5\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7cd69a53-8edc-4ab9-acd5-a7512f319772\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"200fb007-4c46-4749-8d51-db8eaf4fdac2\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ee8a7a4c-d1e5-4876-ad24-8ab6699e2e42\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"7ba96c14-ff61-4e3d-8ced-f4ad38423c52\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ee8a7a4c-d1e5-4876-ad24-8ab6699e2e42\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0c1db11d-cb23-4586-9aa0-ce3248a48e21\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"93979652-dba5-4a6a-a4a4-355c3993d020\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"96f9c0c1-0e7c-4383-a0d9-e527b0d68a11\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"93979652-dba5-4a6a-a4a4-355c3993d020\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d4d3da5a-a3ce-421e-a9ce-81478afc6213\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1d62aadb-9190-43ba-888d-090a15d3c46e\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"40450ed3-f310-415c-ad21-70d5ef8c9e40\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1d62aadb-9190-43ba-888d-090a15d3c46e\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2e015d37-e306-414a-a85c-b8c2bf71f195\", \"session_id\": \"8f7047c9-ebdf-4211-926f-1eaef541e936\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"ROUND_|round|Rounding\",\n \"-i\": true,\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:8:def test_charges_roundtrip():\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f6bd-e4c7-7c11-9e58-018d61f44c91.md:15:`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\n.engramdb/memories/tax-uses-round-half-even_01a0f6be-0439-7d31-b32d-95f7bf9c29e0.md:6:title: Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f6be-0439-7d31-b32d-95f7bf9c29e0.md:9:# Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f6be-0439-7d31-b32d-95f7bf9c29e0.md:11:**Summary:** Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f6be-0439-7d31-b32d-95f7bf9c29e0.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"tax|quantize|decimal\",\n \"-i\": true,\n \"glob\": \"!.engramdb/**\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_tax.py:1:from src.billing.tax import line_total\nmigrations/0002_add_tax.sql:1:ALTER TABLE invoices ADD COLUMN tax_cents BIGINT NOT NULL DEFAULT 0;\nREADME.md:4:computes tax, posts finalized invoices to the external ledger, and exports\nREADME.md:9:- `src/billing/` - money, invoices, refunds, and tax logic\nsrc/billing/refunds.py:5:    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/invoices.py:16:    tax_cents: int = 0\nsrc/billing/invoices.py:22:    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/billing/tax.py:11:def tax_for(amount_cents, rate):"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-rounding-evyyh9ag/ledgerline/src/billing/tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom decimal import Decimal\n2\t\n3\t\n4\tdef line_total(lines):\n5\t    x = 0\n6\t    for line in lines:\n7\t        x += line[\"quantity\"] * line[\"unit_cents\"]\n8\t    return x\n9\t\n10\t\n11\tdef tax_for(amount_cents, rate):\n12\t    raise NotImplementedError\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-rounding-evyyh9ag/ledgerline/tests/test_tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom src.billing.tax import line_total\n2\t\n3\t\n4\tdef test_line_total():\n5\t    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300\n6\t"
+ },
+ {
+  "role": "assistant",
+  "content": "The intended rounding mode is **banker's rounding (`decimal.ROUND_HALF_EVEN`)**, but the code doesn't apply it anywhere yet.\n\n- **Where that comes from:** a project memory note says the finance team decided on `ROUND_HALF_EVEN` for tax in March 2026, and says not to use `ROUND_HALF_UP`. I couldn't find this written down anywhere else in the repo \u2014 not in the README, comments or tests.\n- **What the code does now:** `tax_for(amount_cents, rate)` in `src/billing/tax.py:11` just raises `NotImplementedError`. `Decimal` is imported in that file but never used, and the repo has no `quantize` calls or `ROUND_*` constants. The only tax test, `tests/test_tax.py`, covers `line_total`, which works in whole cents and does no rounding.\n\nSo whoever implements `tax_for` should use `Decimal` and `.quantize(Decimal(\"1\"), rounding=ROUND_HALF_EVEN)` when converting to whole cents. It's worth adding tests for halfway values, for example 2.5 cents rounding to 2 and 3.5 cents rounding to 4."
+ }
+]

@@ -1,0 +1,70 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"42f1411f-255b-4273-aba3-95094a3a9be8\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"4b13c4d4-7eb2-44ce-8e2b-ca10c1a91e9d\", \"session_id\": \"d611615a-6b2a-4828-90f6-25fb8f8d4947\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"42f1411f-255b-4273-aba3-95094a3a9be8\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"adaabccb-bbcf-4e67-af69-a7be70b08fca\", \"session_id\": \"d611615a-6b2a-4828-90f6-25fb8f8d4947\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"715d88d8-6bbe-44c9-9e1f-17f97134d799\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b619b808-d796-4857-b1c1-ab402e082158\", \"session_id\": \"d611615a-6b2a-4828-90f6-25fb8f8d4947\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"715d88d8-6bbe-44c9-9e1f-17f97134d799\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"494e1073-1586-4897-bdb8-7ed4d6bb22b7\", \"session_id\": \"d611615a-6b2a-4828-90f6-25fb8f8d4947\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"522f811c-a6af-4adf-8aa7-fb15a0471710\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"bb0fe977-0269-44a9-a458-efbfb45dab35\", \"session_id\": \"d611615a-6b2a-4828-90f6-25fb8f8d4947\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"522f811c-a6af-4adf-8aa7-fb15a0471710\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"eb35c691-72a8-4887-a811-d23ff58f6404\", \"session_id\": \"d611615a-6b2a-4828-90f6-25fb8f8d4947\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 2 files\n.engramdb/memories/never-edit-an-applied-migration_01a0f6dc-bf80-73e0-a8ba-4c0f17ab9971.md\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/*{migration,schema,model}*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/never-edit-an-applied-migration_01a0f6dc-bf80-73e0-a8ba-4c0f17ab9971.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-nc3fapv0/ledgerline/.engramdb/memories/never-edit-an-applied-migration_01a0f6dc-bf80-73e0-a8ba-4c0f17ab9971.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f6dc-bf80-73e0-a8ba-4c0f17ab9971\n4\ttype: hazard\n5\tstatus: Active\n6\ttitle: Never edit an applied migration\n7\t---\n8\t\n9\t# Never edit an applied migration\n10\t\n11\t**Summary:** Never edit an applied migration\n12\t\n13\t## Content\n14\t\n15\tFiles in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `migrations/`\n20\t- **Tags:** `database`, `migrations`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T09:47:37.216490129+00:00\n28\t- **Updated:** 2026-10-01T09:47:37.216490129+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T09:47:37.216490129Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.5\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls /tmp/mte-pq-migration-nc3fapv0/ledgerline/migrations; cat /tmp/mte-pq-migration-nc3fapv0/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "0001_create_invoices.sql\n0002_add_tax.sql\n0003_add_ledger_ref.sql\n0004_create_lines.sql\n0005_create_refunds.sql\n0006_index_customer.sql\n0007_add_customers.sql\nCREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);"
+ },
+ {
+  "role": "assistant",
+  "content": "The change goes in a new migration file, `migrations/0008_add_customer_phone.sql`. Don't edit `0007_add_customers.sql`, which is where the table is created.\n\nA project memory (`.engramdb/memories/never-edit-an-applied-migration_\u2026md`) says files in `migrations/` are applied in production and must never be edited. The next number after `0007` is `0008`.\n\nSomething like:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made it nullable so existing rows don't need a backfill. If you want it required, you'd need a default or a backfill step.\n\n`0007` has a typo, `emial` instead of `email`. It's out of scope for the phone column, but you'll want a separate `0009` migration to rename it. Fixing it by editing `0007` would break the rule above.\n\nI haven't created the file yet. Want me to add it?"
+ }
+]

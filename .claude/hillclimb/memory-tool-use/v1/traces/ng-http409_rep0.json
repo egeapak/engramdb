@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f4c64d8f-068a-43d6-a35a-8544aea1c426\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8dd2a211-9fa0-4f2d-b964-fa5237e06f60\", \"session_id\": \"ab4e4932-f754-4cee-8872-abc0480602fc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f4c64d8f-068a-43d6-a35a-8544aea1c426\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b7b71467-a0c3-4ce4-a496-b439a049dc4d\", \"session_id\": \"ab4e4932-f754-4cee-8872-abc0480602fc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0a166036-318a-47fb-a486-edd525d8808c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"6e52281c-04f9-4108-90c9-c3df42fdc242\", \"session_id\": \"ab4e4932-f754-4cee-8872-abc0480602fc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0a166036-318a-47fb-a486-edd525d8808c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2eeddb81-6bd2-4be3-b457-614720337a07\", \"session_id\": \"ab4e4932-f754-4cee-8872-abc0480602fc\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "HTTP 409 Conflict means the request can't be completed because it conflicts with the current state of the target resource. The client can often fix the problem and retry.\n\nCommon causes:\n- **Edit conflicts:** The resource changed since the client last read it. This is typical with optimistic concurrency, such as a stale `ETag` or version number on a `PUT` or `PATCH`.\n- **Duplicates:** The request would create something that already exists, such as registering an email address that's already taken.\n- **State violations:** The action isn't valid in the resource's current state, such as deleting a non-empty folder or cancelling an order that has already shipped.\n\nServers should include a response body that explains the conflict, and ideally how to resolve it. Clients typically re-fetch the resource, reconcile the differences, and resubmit.\n\n409 differs from nearby codes:\n- **400** means the request itself is malformed.\n- **412** means a precondition header such as `If-Match` failed.\n- **422** means the request is well-formed but semantically invalid."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

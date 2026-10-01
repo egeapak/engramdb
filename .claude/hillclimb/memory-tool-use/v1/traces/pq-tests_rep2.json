@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "How do I run the tests in this repo?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9e891541-b68d-46da-b281-f37d5a0489fa\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"19ef671e-cf5c-473b-b7da-03e12515467d\", \"session_id\": \"2a5c2b66-bf12-4204-9592-4d23fa0a47c3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9e891541-b68d-46da-b281-f37d5a0489fa\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"30c6e9a7-61c7-4c55-a2ae-d3c63c8b5b68\", \"session_id\": \"2a5c2b66-bf12-4204-9592-4d23fa0a47c3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"eca53a63-abc6-44e8-adf8-c3a2b1232d55\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"68466c2c-b5da-4835-b97d-7576d71e4851\", \"session_id\": \"2a5c2b66-bf12-4204-9592-4d23fa0a47c3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"eca53a63-abc6-44e8-adf8-c3a2b1232d55\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"951c683e-0fc6-40a1-ad7a-83c0b3f2cd09\", \"session_id\": \"2a5c2b66-bf12-4204-9592-4d23fa0a47c3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d8870d2c-c0ab-485b-b98c-22377e1be134\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"4dd59194-79c7-42ba-b4dc-a9612c3dd202\", \"session_id\": \"2a5c2b66-bf12-4204-9592-4d23fa0a47c3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d8870d2c-c0ab-485b-b98c-22377e1be134\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"118bc449-8901-416f-b877-fe92be3d79ec\", \"session_id\": \"2a5c2b66-bf12-4204-9592-4d23fa0a47c3\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"^test[\\\\w-]*:\",\n \"path\": \"/tmp/mte-pq-tests-aohg8lzz/ledgerline\",\n \"glob\": \"Makefile*\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Makefile:3:test-fast:\nMakefile:6:test:"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{README*,package.json,pyproject.toml,go.mod,Cargo.toml,CLAUDE.md}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\npyproject.toml"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-tests-aohg8lzz/ledgerline/Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t.PHONY: test test-fast\n2\t\n3\ttest-fast:\n4\t\tpytest -m \"not postgres\" -q\n5\t\n6\ttest:\n7\t\tpytest -q\n8\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Use the Makefile targets:\n\n- `make test-fast` runs `pytest -m \"not postgres\" -q`. It skips tests marked `postgres`, so you don't need a database. This is the one the project's memory notes as the convention.\n- `make test` runs the full suite with `pytest -q`. The `postgres`-marked tests are included, so you'll probably need a Postgres instance available.\n\nI didn't run either one. I only read the Makefile."
+ }
+]

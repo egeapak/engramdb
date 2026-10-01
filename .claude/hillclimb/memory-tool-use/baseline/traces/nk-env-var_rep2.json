@@ -1,0 +1,84 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4aba2458-c3ba-47f0-91e5-e6b1c64ace2c\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c8bf9749-535a-4e9b-8541-a45d4b12b3d8\", \"session_id\": \"4e7f5775-a80c-4f89-8e9e-b6fcd7a9c389\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4aba2458-c3ba-47f0-91e5-e6b1c64ace2c\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"00ae5453-6bd6-477f-a05f-000c071018a3\", \"session_id\": \"4e7f5775-a80c-4f89-8e9e-b6fcd7a9c389\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d644acdb-8ba9-483d-a061-29d6c4b77e85\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d0caae32-5fd2-4265-996f-80ac121ced39\", \"session_id\": \"4e7f5775-a80c-4f89-8e9e-b6fcd7a9c389\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d644acdb-8ba9-483d-a061-29d6c4b77e85\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"726f3789-2edc-47ea-92ca-c0076197e671\", \"session_id\": \"4e7f5775-a80c-4f89-8e9e-b6fcd7a9c389\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock.*gateway|gateway|PAYMENTS\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -la /tmp/mte-nk-env-var-_opeyiao/claude-config/projects/-tmp-mte-nk-env-var--opeyiao-ledgerline/memory/; cat /tmp/mte-nk-env-var-_opeyiao/claude-config/projects/-tmp-mte-nk-env-var--opeyiao-ledgerline/memory/MEMORY.md 2>/dev/null; git -C /tmp/mte-nk-env-var-_opeyiao/ledgerline ls-files\",\n \"description\": \"Check memory dir and list repo files\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "total 8\ndrwxr-xr-x 2 root root 4096 Oct  1 09:26 .\ndrwxr-xr-x 3 root root 4096 Oct  1 09:26 ..\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f6c9-a698-7a41-9f0b-47de9b223ecc.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6c9-919c-79a0-ae7f-dc40503299ed.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f6c9-7879-7440-8969-bdee084d29b9.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f6c9-71ec-7260-9360-3407ee1e9198.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f6c9-8b28-7e31-b37b-798b621ffdfa.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f6c9-ad0c-7dc0-a383-487eed7a8439.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f6c9-8578-7980-8aab-1ebf9e438aed.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f6c9-9f92-7622-bc88-9a044de2d99d.md\n.engramdb/memories/tax-uses-round-half-even_01a0f6c9-98ea-74a2-a0b1-71babf43fe73.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6c9-7f47-7f41-b596-f4c33de00d8f.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway live sandbox fake env\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "assistant",
+  "content": "I'm saving this as a hazard in the project's EngramDB store so nobody else gets caught by it."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Unless the env var PAYMENTS_LIVE=1 is set, the app silently uses a fake/stub payment gateway. It logs no warning and raises no error, so charges look like they succeed. A user lost about 2 hours debugging this (reported 2026-10-01). When debugging payments or checkout behavior, check PAYMENTS_LIVE first. Note: a grep for PAYMENTS_LIVE in this repo found nothing, so the switch probably lives in a dependency, deploy config, or code outside this tree. tests/test_payments.py points at a sandbox URL (https://sandbox.payments.example/v1/charges).\",\n \"epistemic\": \"observation\",\n \"criticality\": 0.8,\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"gateway\",\n  \"config\"\n ],\n \"logical\": [\n  \"payments\",\n  \"checkout\"\n ],\n \"physical\": [\n  \"src/api/checkout.py\",\n  \"tests/test_payments.py\"\n ],\n \"premise\": \"While gateway selection defaults to fake when PAYMENTS_LIVE is not set\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f6ca-004f-7bc3-97a8-89dc357aada3\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry about the lost two hours. A silent fallback like that is hard to track down.\n\nI saved it as a high-priority warning in the project's EngramDB memory store. It's tagged to payments and checkout, so it'll come up the next time anyone works on payment code.\n\n`PAYMENTS_LIVE` doesn't appear anywhere in this repo. The only payment reference I found is a sandbox URL in `tests/test_payments.py:4`. The switch is probably set in a dependency, in deploy or environment config, or in code outside this repo. Do you know where it's defined?\n\nA few ways to stop this happening to the next person:\n- **Log a clear warning at startup** when the fake gateway is active, so it's never silent.\n- **Fail fast in production-like environments**: refuse to start if it's not a dev setup and `PAYMENTS_LIVE` isn't set.\n- **Document it** in the README and in a `.env.example`, if there is one.\n\nI can add the README note now, and the startup warning once we find where the gateway gets picked."
+ }
+]

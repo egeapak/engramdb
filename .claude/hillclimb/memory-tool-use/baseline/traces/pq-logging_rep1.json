@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "Which logging library should I use when I add log lines here?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"16718e8c-1b58-49c2-920d-85d329eea955\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d679d55b-90ee-4569-8547-0d3181f56195\", \"session_id\": \"c3219e15-d705-419f-b2b0-2914ea6e24db\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"16718e8c-1b58-49c2-920d-85d329eea955\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c17665b5-d2ec-46ff-b50b-3ce6e2153a0d\", \"session_id\": \"c3219e15-d705-419f-b2b0-2914ea6e24db\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"08099f59-1bd0-4f9d-80b7-024c301c8bf1\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"84b206ef-5867-4944-bfa0-af439e57c833\", \"session_id\": \"c3219e15-d705-419f-b2b0-2914ea6e24db\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"08099f59-1bd0-4f9d-80b7-024c301c8bf1\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Use structlog, not stdlib logging (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Use structlog, not stdlib logging (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"856a6d93-d5e0-4793-aab7-9d222e688d53\", \"session_id\": \"c3219e15-d705-419f-b2b0-2914ea6e24db\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"structlog|import logging|getLogger|loguru\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "pyproject.toml:5:dependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6bd-58ed-7e21-84f1-bad9f6b9b3fe.md:6:title: Use structlog, not stdlib logging\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6bd-58ed-7e21-84f1-bad9f6b9b3fe.md:9:# Use structlog, not stdlib logging\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6bd-58ed-7e21-84f1-bad9f6b9b3fe.md:11:**Summary:** Use structlog, not stdlib logging\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6bd-58ed-7e21-84f1-bad9f6b9b3fe.md:15:We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.\nsrc/billing/invoices.py:4:import structlog\nsrc/billing/invoices.py:6:log = structlog.get_logger()"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{pyproject.toml,requirements*.txt,setup.py,setup.cfg,CLAUDE.md,README*}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\npyproject.toml"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"log\\\\.\",\n \"path\": \"src/billing/invoices.py\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "6:log = structlog.get_logger()\n25:    log.info(\"invoice_finalized\", invoice_id=invoice.id)"
+ },
+ {
+  "role": "assistant",
+  "content": "Use **structlog**, not the stdlib `logging` module.\n\n- `pyproject.toml:5` lists `structlog>=24.1` as a dependency.\n- `src/billing/invoices.py` already uses it:\n  ```python\n  import structlog\n\n  log = structlog.get_logger()\n  ...\n  log.info(\"invoice_finalized\", invoice_id=invoice.id)\n  ```\n- A project memory records this as a team decision. It says to use structlog everywhere and never stdlib `logging`, and to name events in snake_case.\n\nWhen you add log lines, follow the same pattern. Create a module-level `log = structlog.get_logger()`. Give each event a short snake_case name and pass details as keyword arguments, like `log.warning(\"payment_retry_failed\", invoice_id=..., attempt=n)`. Don't put the details into the message string with an f-string."
+ }
+]

@@ -1,0 +1,176 @@
+[
+ {
+  "role": "user",
+  "content": "Implement tax_for(amount_cents, rate) in src/billing/tax.py."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"81dba5b1-2607-48fa-abec-77bf9817262a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"4956ccd9-9543-408e-bcc2-ea11ef679564\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"81dba5b1-2607-48fa-abec-77bf9817262a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fabc6c32-30b9-4394-9ea6-4d09c7c856d6\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"85f4ea37-7e17-425a-8c01-d7fc6d7d255a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0387c675-3750-47dc-9032-7ce8d5ca1be7\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"85f4ea37-7e17-425a-8c01-d7fc6d7d255a\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Money is integer cents, never float (source: shared/human)\\\\n  \\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Money is integer cents, never float (source: shared/human)\\\\n  \\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"06a3ab71-8d1d-4c8e-85b6-f1bf49e2daa8\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"02e213d2-eda4-433d-b555-dc269f36c78e\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"6bf0701a-5f66-4ba0-8925-455a4af51446\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"02e213d2-eda4-433d-b555-dc269f36c78e\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"363d53a2-aa3c-41e7-9115-6b490f8fdbf3\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5dba66b3-3228-4967-be41-83405564a3e4\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"6aac728a-31fb-4677-be63-17b5d66d0829\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5dba66b3-3228-4967-be41-83405564a3e4\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d7b66476-2317-479b-a581-ea6b0b192108\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"196cbd1b-ae01-4ef0-ae88-671db6a48ead\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"622b09b4-8f1f-4b28-ae36-2112b665bd83\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"196cbd1b-ae01-4ef0-ae88-671db6a48ead\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"74550be0-b19d-4feb-99f2-56baf7a0c2df\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ddb96f38-995b-475a-9720-6e98d4545e10\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"ba207f0e-58e5-427e-9d06-415ecaee79f7\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ddb96f38-995b-475a-9720-6e98d4545e10\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"da7e06d0-99c2-4397-a24f-f38d66a91104\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cda43254-11e5-47b3-b356-306a1db05d53\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"c51b7e23-c449-443b-996e-7629d04a8114\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cda43254-11e5-47b3-b356-306a1db05d53\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0c8ef1be-b5fc-40b7-b0c4-3f0d9244444c\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"99efc18c-58b4-4cad-b1ed-4293a7a761e1\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"53a3c580-2772-46b6-8752-7483e91bb3ce\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"99efc18c-58b4-4cad-b1ed-4293a7a761e1\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ac2162df-ac47-45b0-98b0-283145b3e8b3\", \"session_id\": \"36733faf-92df-4e84-a99e-8a4451dce9fb\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat src/billing/tax.py && ls tests 2>/dev/null; grep -rn \\\"tax\\\\|ROUND\\\" --include=*.py --include=*.md . | head -50\",\n \"description\": \"Inspect repo files and tax module\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f6c8-24b0-75b0-bdba-f5f729e1dbc9.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f6c8-080e-7f90-ba62-e5ac04c75373.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f6c7-e656-7d51-9b6d-67c720a771f3.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f6c7-e093-7d72-aee5-49d1a493eb05.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f6c7-fd3d-7640-940c-150077c4970d.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f6c8-2a9d-7310-93ba-6f63b2cd5bc3.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f6c7-f3e3-7360-aab6-0790c71ea479.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f6c8-1e6c-7c81-818e-473e10303caf.md\n.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f6c7-ed38-7671-bd7e-72d74afdef1d.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py\nfrom decimal import Decimal\n\n\ndef line_total(lines):\n    x = 0\n    for line in lines:\n        x += line[\"quantity\"] * line[\"unit_cents\"]\n    return x\n\n\ndef tax_for(amount_cents, rate):\n    raise NotImplementedError\ntest_payments.py\ntest_tax.py\n./src/billing/tax.py:11:def tax_for(amount_cents, rate):\n./src/billing/invoices.py:16:    tax_cents: int = 0\n./src/billing/invoices.py:22:    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n./src/billing/refunds.py:5:    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\n./README.md:4:computes tax, posts finalized invoices to the external ledger, and exports\n./README.md:9:- `src/billing/` - money, invoices, refunds, and tax logic\n./.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md:6:title: Tax uses ROUND_HALF_EVEN\n./.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md:9:# Tax uses ROUND_HALF_EVEN\n./.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md:11:**Summary:** Tax uses ROUND_HALF_EVEN\n./.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\n./.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md:19:- **Files:** `src/billing/tax.py`\n./.engramdb/memories/tax-uses-round-half-even_01a0f6c8-1253-7881-9ce0-01dc31cbe18c.md:20:- **Tags:** `billing`, `tax`\n./tests/test_tax.py:1:from src.billing.tax import line_total"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat tests/test_tax.py src/billing/money.py Makefile; cat .engramdb/memories/run-tests*\",\n \"description\": \"Read tests, money module, Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from src.billing.tax import line_total\n\n\ndef test_line_total():\n    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300\nfrom dataclasses import dataclass\n\n\n@dataclass(frozen=True)\nclass Money:\n    cents: int\n    currency: str = \"USD\"\n\n    def __add__(self, other):\n        assert self.currency == other.currency\n        return Money(self.cents + other.cents, self.currency)\n.PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n---\nversion: 2\nid: 01a0f6c7-f3e3-7360-aab6-0790c71ea479\ntype: convention\nstatus: Active\ntitle: Run tests with make test-fast\n---\n\n# Run tests with make test-fast\n\n**Summary:** Run tests with make test-fast\n\n## Content\n\nRun `make test-fast` for the unit suite (skips Postgres tests). `make test` runs everything but needs `docker compose up db` first.\n\n## Scope\n\n- **Files:** `/`\n- **Tags:** `testing`, `workflow`\n- **Criticality:** 0.5\n- **Confidence:** 0.8\n\n## Provenance\n\n- **Source:** human\n- **Created:** 2026-10-01T09:24:54.371411321+00:00\n- **Updated:** 2026-10-01T09:24:54.371411321+00:00\n\n<!-- engramdb\nvisibility: Shared\naccessed_at: 2026-10-01T09:24:54.371411321Z\ndecay:\n  strategy: none\n  floor: 0.0\n-->"
+ },
+ {
+  "role": "assistant",
+  "content": "Implementing with Decimal and ROUND_HALF_EVEN, returning integer cents; rate converted via `str` to avoid float artifacts."
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-tax-v8cqj4b6/ledgerline/src/billing/tax.py\",\n \"old_string\": \"from decimal import Decimal\\n\",\n \"new_string\": \"from decimal import ROUND_HALF_EVEN, Decimal\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-tax-v8cqj4b6/ledgerline/src/billing/tax.py has been updated successfully."
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-tax-v8cqj4b6/ledgerline/src/billing/tax.py\",\n \"old_string\": \"    raise NotImplementedError\",\n \"new_string\": \"    # str() so a float rate like 0.0825 becomes Decimal(\\\"0.0825\\\"), not its binary approximation\\n    tax = Decimal(amount_cents) * Decimal(str(rate))\\n    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-tax-v8cqj4b6/ledgerline/src/billing/tax.py has been updated successfully."
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-tax-v8cqj4b6/ledgerline/tests/test_tax.py\",\n \"old_string\": \"from src.billing.tax import line_total\\n\\n\\ndef test_line_total():\\n    assert line_total([{\\\"quantity\\\": 2, \\\"unit_cents\\\": 150}]) == 300\",\n \"new_string\": \"from decimal import Decimal\\n\\nfrom src.billing.tax import line_total, tax_for\\n\\n\\ndef test_line_total():\\n    assert line_total([{\\\"quantity\\\": 2, \\\"unit_cents\\\": 150}]) == 300\\n\\n\\ndef test_tax_for_returns_int_cents():\\n    assert tax_for(1000, Decimal(\\\"0.0825\\\")) == 82\\n    assert isinstance(tax_for(1000, 0.0825), int)\\n\\n\\ndef test_tax_for_rounds_half_even():\\n    assert tax_for(50, Decimal(\\\"0.05\\\")) == 2  # 2.5 -> 2\\n    assert tax_for(70, Decimal(\\\"0.05\\\")) == 4  # 3.5 -> 4\\n\\n\\ndef test_tax_for_float_rate():\\n    assert tax_for(50, 0.05) == 2\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-tax-v8cqj4b6/ledgerline/tests/test_tax.py has been updated successfully."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"make test-fast 2>&1 | tail -15\",\n \"description\": \"Run fast unit test suite\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "ImportError while importing test module '/tmp/mte-ed-tax-v8cqj4b6/ledgerline/tests/test_tax.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/lib/python3.11/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/test_tax.py:3: in <module>\n    from src.billing.tax import line_total, tax_for\nE   ModuleNotFoundError: No module named 'src'\n=========================== short test summary info ============================\nERROR tests/test_payments.py\nERROR tests/test_tax.py\n!!!!!!!!!!!!!!!!!!! Interrupted: 2 errors during collection !!!!!!!!!!!!!!!!!!!!\n2 errors in 0.25s\nmake: *** [Makefile:4: test-fast] Error 2"
+ },
+ {
+  "role": "assistant",
+  "content": "The `src` import also fails in the untouched `test_payments.py`, so it's a problem with how the tests are set up, not with my change. I'll run the tests with the repo root on the path:"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"python -m pytest -m \\\"not postgres\\\" -q tests/test_tax.py 2>&1 | tail -5; cat pyproject.toml\",\n \"description\": \"Run tax tests with repo root on path\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "/usr/local/bin/python: No module named pytest\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"PYTHONPATH=. pytest -m \\\"not postgres\\\" -q tests/test_tax.py 2>&1 | tail -5\",\n \"description\": \"Run tax tests with PYTHONPATH set\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "....                                                                     [100%]\n4 passed in 0.01s"
+ },
+ {
+  "role": "assistant",
+  "content": "That `make test-fast` failure is worth saving to memory, since it affects the project's documented test command."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__create\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"make test-fast fails with ModuleNotFoundError 'src' unless PYTHONPATH=. is set\",\n \"content\": \"Running `make test-fast` (plain `pytest`) from the repo root fails during test collection with `ModuleNotFoundError: No module named 'src'`, for tests/test_payments.py and tests/test_tax.py alike. The tests import `src.billing...`, but pyproject.toml has no pytest pythonpath config and no conftest.py. Workaround: `PYTHONPATH=. pytest -m \\\"not postgres\\\" -q`. A durable fix would be adding `[tool.pytest.ini_options] pythonpath = [\\\".\\\"]` to pyproject.toml.\",\n \"epistemic\": \"observation\",\n \"physical\": [\n  \"Makefile\",\n  \"pyproject.toml\",\n  \"tests/\"\n ],\n \"invalidated_by\": [\n  \"pyproject.toml\",\n  \"Makefile\",\n  \"tests/conftest.py\",\n  \"conftest.py\"\n ],\n \"premise\": \"while pyproject.toml has no pytest pythonpath setting and there is no conftest.py\",\n \"tags\": [\n  \"testing\",\n  \"workflow\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f6c8-9ae8-79d2-8f1e-a46088474bc6\",\"created\":true,\"summary\":\"make test-fast fails with ModuleNotFoundError 'src' unless PYTHONPATH=. is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I implemented `tax_for` in `src/billing/tax.py`. It returns the tax as whole cents (an `int`) and rounds with banker's rounding (`ROUND_HALF_EVEN`), following the project's rule that money is never a float and its tax rounding decision.\n\n```python\ndef tax_for(amount_cents, rate):\n    # str() so a float rate like 0.0825 becomes Decimal(\"0.0825\"), not its binary approximation\n    tax = Decimal(amount_cents) * Decimal(str(rate))\n    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))\n```\n\n`rate` can be a `Decimal` or a float. A float is converted through `str()` so values like `0.05` round correctly instead of picking up tiny float errors.\n\nI added three tests to `tests/test_tax.py`. They check that the result is whole cents, that halves round to even (2.5 \u2192 2, 3.5 \u2192 4), and that float rates work. All 4 tests in that file pass.\n\n**The project's test command is broken.** `make test-fast` fails before running any tests because Python can't find the `src` package. This already happened before my change: the untouched `tests/test_payments.py` fails the same way. I ran the tests with `PYTHONPATH=. pytest -m \"not postgres\" -q` instead, and only ran `tests/test_tax.py`. A lasting fix would be adding `[tool.pytest.ini_options] pythonpath = [\".\"]` to `pyproject.toml`. I didn't make that change because it's outside this task; I can if you want.\n\nI saved a note about the test-command problem and its workaround to the project's EngramDB memory. It adds to the existing \"run tests with `make test-fast`\" note rather than contradicting it."
+ }
+]

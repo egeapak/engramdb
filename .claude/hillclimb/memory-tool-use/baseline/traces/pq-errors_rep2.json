@@ -1,0 +1,151 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"aef78654-152a-4faf-aff4-596dd53fb2eb\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"3adf0cbc-8aea-4b70-8a09-cd6e1ecd3c6f\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"aef78654-152a-4faf-aff4-596dd53fb2eb\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2b9b0afd-cd96-4d24-9690-257f443be2fd\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a4ee3987-9507-4e52-8cbf-e7a3a923b97b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"15c7788c-ca71-41b8-aca6-adf7403bc41d\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a4ee3987-9507-4e52-8cbf-e7a3a923b97b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"055a7e25-f233-4dca-a899-f8fd71a2b642\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b135049b-3fc7-4d56-bbb7-58d543bdaa63\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"4760d343-0110-4e0d-872b-1c296ff65191\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b135049b-3fc7-4d56-bbb7-58d543bdaa63\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"def5d8d7-369f-4293-a299-6d950b4380e9\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2dddba6c-fb18-4307-8a07-6a7d5f7a5d6a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"c833403d-02e4-41db-b572-67a34fdb0324\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2dddba6c-fb18-4307-8a07-6a7d5f7a5d6a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Relevant memories for this file:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"PreToolUse\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"be177064-076a-4da6-a0a1-e8794c610499\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"279e5d65-8e77-40c9-aa9c-c4e92415c4b4\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"b47587f0-4ade-48bb-a105-17b0b6027eb7\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"279e5d65-8e77-40c9-aa9c-c4e92415c4b4\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1da9f95e-8229-43b5-8310-0f987aece212\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"49c3bf95-bdc3-4f8c-a994-a05569160357\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"74174bde-71df-4bed-9ab3-b272406ea54f\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"49c3bf95-bdc3-4f8c-a994-a05569160357\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b802816c-cb3d-42a7-b063-6919e801e236\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9a50637a-5669-44d8-94f1-9cc368d6c78b\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"ef313a9d-625e-44b8-b7b4-9b632d46447d\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9a50637a-5669-44d8-94f1-9cc368d6c78b\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0fba27ff-cf12-4770-9174-d55e4a9d821a\", \"session_id\": \"58510391-bff2-4c0a-8da6-c637ac7bb42c\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/api-errors-use-problem-json_01a0f6c6-6869-7c00-b327-8b7d597750aa.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"endpoint error response\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f6c6-6869-7c00-b327-8b7d597750aa\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.25989882552355603,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.25989882552355603,\"keyword\":0.2321159167634679,\"relevance\":0.5,\"rerank\":-1.797073483467102,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4937926905024259,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-ag0m18ph/ledgerline/src/billing/refunds.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom .invoices import Invoice\n2\t\n3\t\n4\tdef refund(invoice: Invoice, amount_cents: int):\n5\t    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\n6\t        raise ValueError(\"refund exceeds invoice total\")\n7\t    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\n8\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-ag0m18ph/ledgerline/src/billing/tax.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom decimal import Decimal\n2\t\n3\t\n4\tdef line_total(lines):\n5\t    x = 0\n6\t    for line in lines:\n7\t        x += line[\"quantity\"] * line[\"unit_cents\"]\n8\t    return x\n9\t\n10\t\n11\tdef tax_for(amount_cents, rate):\n12\t    raise NotImplementedError\n13\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me verify the helper the memory names actually exists."
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"src/**/*.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/__init__.py\nsrc/billing/__init__.py\nsrc/api/__init__.py\nsrc/flags.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/api/checkout.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-ag0m18ph/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-ag0m18ph/ledgerline/src/api/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify\n2\t\n3\tbp = Blueprint(\"invoices\", __name__)\n4\t\n5\t_INVOICES = {}\n6\t\n7\t\n8\t@bp.get(\"/invoices/<invoice_id>\")\n9\tdef get_invoice(invoice_id):\n10\t    invoice = _INVOICES.get(invoice_id)\n11\t    return jsonify(invoice.__dict__)\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-ag0m18ph/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Use RFC 7807 `application/problem+json` responses, built with the `problem()` helper in `src/api/errors.py:4`. Don't return ad-hoc dicts.\n\n```python\nfrom flask import Blueprint, jsonify\nfrom .errors import problem\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    if invoice is None:\n        return problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n    return jsonify(invoice.__dict__)\n```\n\n`problem(status, title, detail=None)` does the following:\n- It builds a body of `{\"type\": \"about:blank\", \"title\": ..., \"status\": ...}`.\n- It adds a `\"detail\"` field only when you pass one.\n- It sets the HTTP status code and the `application/problem+json` mimetype.\n\n**Where this comes from:** a project memory written by a person records this as the convention. I checked the code and the helper exists with that signature.\n\n**Nothing uses it yet.** Neither endpoint in `src/api/` (`invoices.py`, `checkout.py`) calls it. Both currently skip error handling:\n- **`get_invoice`:** when the ID is unknown, it calls `.__dict__` on `None`, which raises an `AttributeError` and returns a 500. The example above is the fix for that.\n- **`checkout`:** if the JSON is malformed or `items` is missing, it raises a `KeyError` or `TypeError` and returns a 500. It should return something like `problem(400, \"Invalid cart\", ...)` instead.\n\n**Domain errors:** `billing/refunds.py` raises `ValueError` for an over-refund. Endpoints that call billing code should catch domain exceptions like this and turn them into a `problem(...)` response, usually a 400 or 422.\n\nI can apply these fixes to the two endpoints if you want."
+ }
+]
