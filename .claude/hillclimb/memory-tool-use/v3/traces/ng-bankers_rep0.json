@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "In general, what is banker's rounding and why do accountants like it?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dcea5bda-8a2b-4006-b3ca-d806b9360dda\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c056d269-5235-4bf5-80a5-cbdea193ab2c\", \"session_id\": \"1d49a268-f470-41e9-b0ca-017b776fcd56\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dcea5bda-8a2b-4006-b3ca-d806b9360dda\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ad399dc9-e5d2-4b8b-8a74-6286dc246696\", \"session_id\": \"1d49a268-f470-41e9-b0ca-017b776fcd56\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"41d9dbcb-822f-402f-ac6c-ed3250ad52d3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"963a1afa-45d8-4f7c-93c1-7d59b86a8559\", \"session_id\": \"1d49a268-f470-41e9-b0ca-017b776fcd56\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"41d9dbcb-822f-402f-ac6c-ed3250ad52d3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4e6eca56-ada6-4c22-9ea4-ffddf1a395d5\", \"session_id\": \"1d49a268-f470-41e9-b0ca-017b776fcd56\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**Banker's rounding** (round-half-to-even, IEEE 754's default) rounds to the nearest value as usual. When a number falls exactly halfway, it rounds to the nearest **even** digit.\n\n| Value | Round half up | Banker's |\n|-------|---------------|----------|\n| 2.5 \u2192 integer | 3 | **2** |\n| 3.5 \u2192 integer | 4 | **4** |\n| 0.125 \u2192 2 dp | 0.13 | **0.12** |\n| 0.135 \u2192 2 dp | 0.14 | **0.14** |\n\n**Why accountants like it**\n\n- **No systematic bias.** With round-half-up, every tie goes up. Over thousands of line items, the totals drift upward. Under banker's rounding, ties go up about half the time and down about half the time, so the errors roughly cancel.\n- **Better aggregates.** Sums, averages and tax totals over large datasets stay closer to the true unrounded figures.\n- **It's a standard.** IEEE 754, many tax and financial regulations, and the default modes in many libraries use it. Examples are Python's `round()` and `decimal.ROUND_HALF_EVEN`, and .NET's `Math.Round`. Using the same mode makes results reproducible and auditable.\n\n**Caveats**\n\n- It only matters for exact ties. For most values it behaves like ordinary rounding.\n- Binary floats can't represent most decimals exactly, so use a decimal type (`Decimal`, `BigDecimal`, integer cents) for money. Otherwise 0.125 may work as a tie but 0.135 won't.\n- Some contexts, such as certain retail or jurisdiction-specific rules, mandate half-up. Check which mode the rules require.\n\nThis project's memory also records that tax calculations use `ROUND_HALF_EVEN`. I haven't opened that memory, so I can't speak to its details."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing was missing from the EngramDB tools.\n\nThe injected context surfaced the \"Tax uses ROUND_HALF_EVEN\" decision, and `get` would have let me expand it. I didn't, because the question was general and I didn't need the details. I said so in my answer. That was my choice, not a tool limitation."
+ }
+]

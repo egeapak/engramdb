@@ -1,0 +1,119 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4f9f3669-0d43-41f2-baa5-2e2e9584122a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"8b0ef6bd-5597-46d9-86a0-ac40d111043b\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4f9f3669-0d43-41f2-baa5-2e2e9584122a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c58d7910-6d8a-4c18-b14a-c958006f0804\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a92e63d6-bfb8-4e24-82d3-2a9d73917ab5\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d8503b05-32e6-407a-8305-8ece92847944\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a92e63d6-bfb8-4e24-82d3-2a9d73917ab5\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7883073b-2b40-44c1-9b49-e02b6011a984\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7289d73b-a9f3-4f14-b66f-99b9fa950eb7\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"b98e6673-af0a-4e74-a756-07f70af438a0\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7289d73b-a9f3-4f14-b66f-99b9fa950eb7\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9e6353e3-c1ae-4b6e-8623-33c697e215fb\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e383e989-0f56-474b-97c5-238d336d73d7\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"4aa54aa7-9fb6-4ea8-bb58-ead740f553cb\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e383e989-0f56-474b-97c5-238d336d73d7\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5f043c0d-1a34-42b4-9472-625ec2441233\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2d2621a4-209a-461b-befc-71e2785ae37d\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"b0a5424c-d478-4cd8-8215-b540b859c582\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2d2621a4-209a-461b-befc-71e2785ae37d\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a1805ba1-cdad-494e-80d6-21b703938875\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"66602f8c-8758-44da-9d2d-23c5ec6fb377\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"uuid\": \"e570d274-28ab-459b-9e9f-30de25897894\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"66602f8c-8758-44da-9d2d-23c5ec6fb377\", \"hook_name\": \"PreToolUse:Write\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"025a88bc-b4ef-4ccb-b72d-512e6c6946c8\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"524d7e9c-1119-45f3-8d8d-105add2ee7b3\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"uuid\": \"4ec2d930-34f8-4790-85a4-50198b01f926\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"524d7e9c-1119-45f3-8d8d-105add2ee7b3\", \"hook_name\": \"PostToolUse:Write\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"74f1fa52-1a77-40a2-a8e1-d1c565f5ab19\", \"session_id\": \"31ffe2b2-4f84-4d9e-a2db-4708d4abe790\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-jobs-explicit-mh2k1sls/claude-config/projects/-tmp-mte-nk-jobs-explicit-mh2k1sls-ledgerline/memory/MEMORY.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File does not exist. Note: your current working directory is /tmp/mte-nk-jobs-explicit-mh2k1sls/ledgerline."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__create\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must go through jobs.enqueue(); never call celery directly.\",\n \"content\": \"All background jobs must be dispatched via `jobs.enqueue()`. Never call celery directly (no direct task.delay/apply_async or celery app calls). Stated by the user as a standing rule for future sessions.\",\n \"tags\": [\n  \"jobs\",\n  \"celery\",\n  \"background-jobs\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f79f-166b-7ee1-aabd-921ae3313c5f\",\"created\":true,\"summary\":\"All background jobs must go through jobs.enqueue(); never call celery directly.\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-jobs-explicit-mh2k1sls/claude-config/projects/-tmp-mte-nk-jobs-explicit-mh2k1sls-ledgerline/memory/background-jobs-enqueue.md\",\n \"content\": \"---\\nname: background-jobs-enqueue\\ndescription: Background jobs must go through jobs.enqueue(); never call celery directly\\nmetadata:\\n  type: feedback\\n---\\n\\nAll background jobs must go through `jobs.enqueue()`; never call celery directly.\\n\\n**Why:** Explicit standing rule from the user (2026-10-01).\\n**How to apply:** When adding or modifying any background/async job code, dispatch via `jobs.enqueue()` rather than celery APIs.\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-jobs-explicit-mh2k1sls/claude-config/projects/-tmp-mte-nk-jobs-explicit-mh2k1sls-ledgerline/memory/background-jobs-enqueue.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Write",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-jobs-explicit-mh2k1sls/claude-config/projects/-tmp-mte-nk-jobs-explicit-mh2k1sls-ledgerline/memory/MEMORY.md\",\n \"content\": \"- [Background jobs rule](background-jobs-enqueue.md) \\u2014 always use jobs.enqueue(), never call celery directly\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "File created successfully at: /tmp/mte-nk-jobs-explicit-mh2k1sls/claude-config/projects/-tmp-mte-nk-jobs-explicit-mh2k1sls-ledgerline/memory/MEMORY.md (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "Saved. From now on, background jobs go through `jobs.enqueue()`, and I won't call celery directly. I recorded the rule in two places so future sessions will pick it up:\n\n- **EngramDB:** a convention memory for the project.\n- **File memory:** `background-jobs-enqueue.md`, with a pointer in `MEMORY.md`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

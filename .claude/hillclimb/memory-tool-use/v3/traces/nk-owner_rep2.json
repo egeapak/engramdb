@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Note for later: Priya owns the ledger integration; any change to src/billing/invoices.py needs her review."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b2af8d6f-06d6-4740-abe9-6ed1b2dd8e74\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"90ef0176-94d0-4916-b655-6e1df933891f\", \"session_id\": \"49725d68-8036-438e-ab68-0b1b0750a6f9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b2af8d6f-06d6-4740-abe9-6ed1b2dd8e74\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"13619c47-b477-472a-94d2-67c2f86dd063\", \"session_id\": \"49725d68-8036-438e-ab68-0b1b0750a6f9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2ccc3a15-4d56-43e3-83c0-b6cb7899a5d3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"8d18bc35-2a3d-4d93-8aff-fdda5f9f310e\", \"session_id\": \"49725d68-8036-438e-ab68-0b1b0750a6f9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2ccc3a15-4d56-43e3-83c0-b6cb7899a5d3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7eee530b-5538-48cc-bdb0-d3d26b12d9c0\", \"session_id\": \"49725d68-8036-438e-ab68-0b1b0750a6f9\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__create\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"Priya owns the ledger integration; changes to src/billing/invoices.py need her review.\",\n \"content\": \"Priya owns the ledger integration. Any change to src/billing/invoices.py requires her review before merging.\",\n \"physical\": [\n  \"src/billing/invoices.py\"\n ],\n \"tags\": [\n  \"ownership\",\n  \"review\",\n  \"billing\"\n ],\n \"epistemic\": \"fact\",\n \"premise\": \"Priya remains the ledger integration owner\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7aa-0689-75d3-9880-b0f12e360789\",\"created\":true,\"summary\":\"Priya owns the ledger integration; changes to src/billing/invoices.py need her review.\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Noted and saved to EngramDB: Priya owns the ledger integration, and any change to `src/billing/invoices.py` needs her review. The memory is tied to that file path, so it should come up when someone works on it.\n\nAn existing memory says `invoices.finalize()` isn't idempotent. That's worth keeping in mind alongside this note if you edit that file."
+ }
+]

@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d7eef624-42b9-40b4-9aed-8b6c8f5ccfb0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"5c1f8189-5548-4acf-9d55-553f39f4d065\", \"session_id\": \"6c19170f-4971-4b7b-bbae-3ba3237da087\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d7eef624-42b9-40b4-9aed-8b6c8f5ccfb0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"40b739ae-908b-4595-a4d1-8198f2ba0ba2\", \"session_id\": \"6c19170f-4971-4b7b-bbae-3ba3237da087\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7c3275be-6a2e-4838-a779-d9d90aaab960\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a09dc8a5-477d-422e-8200-c8c230c309dc\", \"session_id\": \"6c19170f-4971-4b7b-bbae-3ba3237da087\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7c3275be-6a2e-4838-a779-d9d90aaab960\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"56aba1a2-4f0e-4008-bccf-36fc8615a11f\", \"session_id\": \"6c19170f-4971-4b7b-bbae-3ba3237da087\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I'll record this decision in EngramDB. First I need to load the tools and check for existing memories on API versioning."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API versioning v1 v2 routes\",\n \"include_invalidated\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7aa-48d5-75c2-80ca-e90c3b75e0fc\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.16604323984215583,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.16604323984215583,\"keyword\":0.052145353357251054,\"relevance\":0.5,\"rerank\":-2.6468822956085205,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3914654764888073,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing existing conflicts with this. I'll save it."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2 going forward; /v1 is frozen\",\n \"content\": \"Decided in the 2026-10-01 design review: all new and changed public API routes go under /v2. /v1 is frozen \\u2014 no new features or behavior changes there. Alternatives are not recorded.\",\n \"epistemic\": \"decision\",\n \"premise\": \"The design-review decision that /v2 is the active version and /v1 is frozen still stands.\",\n \"physical\": [\n  \"src/api/\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"v2\",\n  \"v1\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7aa-6fab-71f2-9bcd-71b3099959c3\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2 going forward; /v1 is frozen\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Understood. From here on, new and changed public API routes go under `/v2`, and `/v1` stays frozen. I've saved this as an EngramDB decision memory, scoped to `src/api/`, so it will come up in future sessions. Nothing in the existing memories conflicted with it."
+ }
+]

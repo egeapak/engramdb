@@ -1,0 +1,83 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ebb6982a-7c15-460e-ac9a-2e5b42de1ddc\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"01fb6642-1904-4eab-a118-ebf3c07d1a3b\", \"session_id\": \"2182f9c1-875c-49d0-bfa9-433f08501887\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ebb6982a-7c15-460e-ac9a-2e5b42de1ddc\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"df279db8-09c9-4b2b-b477-ab2c2a63260a\", \"session_id\": \"2182f9c1-875c-49d0-bfa9-433f08501887\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3455f3c9-59ec-4e2f-bd02-0e7b40810cbb\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"8771f8b5-4a53-4521-8c31-6d3d4fe5ef10\", \"session_id\": \"2182f9c1-875c-49d0-bfa9-433f08501887\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3455f3c9-59ec-4e2f-bd02-0e7b40810cbb\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2259e5a7-711d-4a23-a033-eb0a38325c30\", \"session_id\": \"2182f9c1-875c-49d0-bfa9-433f08501887\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry, that's a nasty trap. I'll find where the fallback happens."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__create\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock|stub|gateway|getenv|environ|process\\\\.env\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway fake env\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set (user-reported, not found in repo code)\",\n \"content\": \"The user reports the app silently falls back to a fake payment gateway unless the env var PAYMENTS_LIVE=1 is set; no warning is emitted. It cost them ~2 hours to diagnose. When debugging payment behaviour, check PAYMENTS_LIVE first. Note: a grep of the repo on 2026-10-01 found no reference to PAYMENTS_LIVE, so the switch may live outside this repo (deploy config, another service or dependency) \\u2014 verify the location before relying on this.\",\n \"epistemic\": \"observation\",\n \"premise\": \"While the payment gateway selection is gated on PAYMENTS_LIVE and falls back silently\",\n \"confidence\": 0.6,\n \"criticality\": 0.7,\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"debugging\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f79f-bc60-7050-8d5b-2d2a2f8cbfa4\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set (user-reported, not found in repo code)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I couldn't find the switch in this repo. A search for `PAYMENTS_LIVE` returned nothing. The only env var read anywhere is `EXPORT_BUCKET` in `scripts/export.py`, and there's no code that mentions a fake, mock or stub gateway. So the fallback must live somewhere I can't see from here, such as deploy config, a dependency or another service.\n\nI saved a hazard note to EngramDB so it surfaces next time anyone debugs payments. I marked it as user-reported and unverified, with the caveat that it isn't in this repo.\n\nWhere is the gateway selected? If you point me at it, I can:\n- make the fallback loud, with a startup warning or a visible \"FAKE GATEWAY\" log line;\n- make it fail closed, so the app refuses to start without an explicit choice;\n- update the memory with the real location."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing missing.\n\nThe two tools I used, `query` and `create`, did what I needed. The `query` call was a filter search for existing memories, and `create` stored the hazard note with the `premise`, `epistemic`, `confidence` and `tags` parameters I wanted. I didn't try `get`, `verify`, `challenge` or `task_current`, because nothing in this session called for them."
+ }
+]

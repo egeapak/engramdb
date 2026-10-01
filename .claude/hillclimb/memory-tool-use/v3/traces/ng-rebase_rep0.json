@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8e9a0da6-9296-4bac-9915-dd9cd7a7ae41\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"3c5ed609-c1f9-4196-bca1-ac806abf990c\", \"session_id\": \"ee703e21-7d93-4c90-9521-8fae94942f8a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8e9a0da6-9296-4bac-9915-dd9cd7a7ae41\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"16cd6486-b02f-4d3d-93e0-9105127c229c\", \"session_id\": \"ee703e21-7d93-4c90-9521-8fae94942f8a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"06d2ea79-a34d-46a4-9dce-56e51629b652\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"5cace72b-532f-4d89-aa52-4efd4617c932\", \"session_id\": \"ee703e21-7d93-4c90-9521-8fae94942f8a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"06d2ea79-a34d-46a4-9dce-56e51629b652\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"9a5377a4-a542-4366-8ee0-ce907937aa88\", \"session_id\": \"ee703e21-7d93-4c90-9521-8fae94942f8a\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto <newbase> <upstream> [<branch>]` replays the commits that are in `<branch>` but not in `<upstream>` on top of `<newbase>`. Plain `git rebase` makes you use the same commit for the \"where do I stop copying\" and \"where do I land\" roles. `--onto` lets you pick them separately.\n\n**Example**\n\nSay `feature` was branched off `topic`, and `topic` was branched off `main`:\n\n```\nmain:     A---B\n               \\\ntopic:          C---D\n                     \\\nfeature:              E---F\n```\n\nYou want `feature` to carry only its own commits (E, F) and sit directly on `main`, without topic's C and D:\n\n```\ngit rebase --onto main topic feature\n```\n\nResult:\n\n```\nmain:     A---B\n              |\\\n              | E'---F'   <- feature\n               \\\ntopic:          C---D\n```\n\n- `main` is the new base, where the commits will land.\n- `topic` is the old base. Commits reachable from `feature` but not from `topic` (E and F) are the ones that get copied.\n- `feature` is the branch being rebased. If you leave it out, the current branch is used.\n\nE' and F' are new commits with new hashes. The originals are left behind and can be recovered through the reflog.\n\n**Common uses**\n\n- Moving a branch off another in-progress branch, as above.\n- Dropping a range of commits: `git rebase --onto A B` removes the commits after `A` up to `B` from the current branch's history.\n- Fixing a branch that was started from the wrong base.\n\nSince this rewrites history, avoid doing it on commits that others have already pulled."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

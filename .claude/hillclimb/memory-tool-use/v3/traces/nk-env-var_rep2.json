@@ -1,0 +1,165 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a34411de-8dd5-4425-8021-121e27f0a580\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"47fbf1d5-fc44-4126-9f99-50134abab526\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a34411de-8dd5-4425-8021-121e27f0a580\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"405c96eb-fead-45e5-bece-5214bac2705e\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ac476c86-8b02-4dee-aaa1-0526e8667551\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"148bcc92-15c9-41e5-8258-c27f162f0439\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ac476c86-8b02-4dee-aaa1-0526e8667551\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e7eebdfa-d464-49fa-bc46-6dc717a64cb0\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f2dad805-d42d-4b0f-97eb-c5615acaa4eb\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"5738dfef-e61c-4d77-b0a0-a8e101bff576\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f2dad805-d42d-4b0f-97eb-c5615acaa4eb\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"285c262d-51fc-49b6-8140-046839bb36ab\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2817d70b-36ac-4438-ab26-c1260e99f343\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"ed992dbb-023e-4bea-a767-18af7748f76a\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2817d70b-36ac-4438-ab26-c1260e99f343\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"011932d9-44b9-4bc6-986c-e81a22d013ab\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"27aff5ca-9a4b-4b5b-a7f3-edbcfb5a9506\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"f2e14a1c-cac9-460f-9881-b2ebd5d97b56\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"27aff5ca-9a4b-4b5b-a7f3-edbcfb5a9506\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f1d31cc7-e92c-43a8-a03d-b89a8134c968\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b2dcc894-23b9-4db3-9c7c-f6b5b91e1562\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"28149808-e4df-4421-8ed3-df9002948c6c\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b2dcc894-23b9-4db3-9c7c-f6b5b91e1562\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"767f0623-9988-454f-8424-0ce3707d1abf\", \"session_id\": \"14f2d461-84a0-46bf-8f1a-5f512316f44b\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "That sounds painful. I'll look at where the gateway gets chosen."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock|stub|gateway|environ|getenv|process\\\\.env\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "scripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\npyproject.toml\nMakefile\nsrc/__init__.py\nflags.toml\nsrc/billing/__init__.py\nsrc/api/__init__.py\nsrc/flags.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/api/checkout.py\nmigrations/0005_create_refunds.sql\nmigrations/0004_create_lines.sql\nmigrations/0002_add_tax.sql\nmigrations/0001_create_invoices.sql\nmigrations/0006_index_customer.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0007_add_customers.sql\nscripts/export.py\ntests/test_payments.py\ntests/test_tax.py\n.claude/ENGRAM.md\n.git/description\n.git/hooks/pre-applypatch.sample\n.git/hooks/pre-push.sample\n.git/hooks/sendemail-validate.sample\n.git/hooks/fsmonitor-watchman.sample\n.git/hooks/commit-msg.sample\n.git/hooks/post-update.sample\n.git/hooks/update.sample\n.git/hooks/pre-commit.sample\n.git/hooks/pre-rebase.sample\n.git/hooks/prepare-commit-msg.sample\n.git/hooks/push-to-checkout.sample\n.git/hooks/pre-merge-commit.sample\n.git/hooks/pre-receive.sample\n.git/hooks/applypatch-msg.sample\n.git/info/exclude\n.claude/CLAUDE.md\n.git/HEAD\n.git/config\n.git/objects/7b/dbe3dad8e783b5dde0cfb6ad2b82f05e0b70a4\n.git/objects/3b/493dc42238c7b129a8d522c13e9c288bc03c16\n.git/objects/be/5dee360b70efc822989862e537f76e8798a7e8\n.git/objects/a9/e9ba5eb29124b8b82887a69ce9cb274e899971\n.git/objects/ff/4dada24d530c288ab58fca4462c79c20226741\n.git/objects/59/98495966ed0ba9f685bbe7bc2ff189cadb45d9\n.git/objects/50/06f7cde8ac4d7d6de66923f5490486aae0d30e\n.git/objects/50/80f31ef1c5ecf46dddbae16e018ef770ab912e\n.git/objects/75/e3de865d0207314b62c3f0c7b9b35ca1a847b2\n.git/objects/e6/9de29bb2d1d6434b8b29ae775ad8c2e48c5391\n.git/objects/6f/a3aef93ac6e988a6d4f0d32a358d758fd5f031\n.git/objects/54/3713d0203d41d7894200bb0790fd16d0c7e5c6\n.git/objects/7f/21856cf1166c1d2759439f8244391ec1b27a37\n.git/objects/7f/b32736a750f03693bf03cbd3a5e88d93ab8240\n.git/objects/cb/193c838da4ab8a4e01c08623012614739c0f71\n.git/objects/21/f39c6d28fae1a971be89aadadd085f09def1c3\n.git/objects/71/ff1bdccbff2a028c39588d0db62d60641a8180\n.git/objects/81/e65b541c819de6c9af33c44b272ebd1c78dfc9\n.git/objects/dc/6ea9fe804721ec46781f0b68fdbd91eb102a3a\n.git/objects/31/48b5845a16472dd85f5b216bef5a9df20eec02\n.git/objects/0f/d8ca7a029ec73154d8b88853ee6449ee68d1f8\n.git/objects/cd/f05a810d26416912f7e72e4c44f7766450a228\n.git/objects/34/9d15adc4adbe02e5ad434296efc062e8012d0b\n.git/objects/56/8e289de552f0ea87ec2589b9bbf9fe5615f2ea\n.git/objects/2b/3db8e9784a444412b0f4504e3617c8b3aa1d36\n.git/objects/51/7af331e8d083ec863d4ad3dcc413006c634ef9\n.git/objects/31/ab5668c3abee61016ebf0d61bd4905949971a6\n.git/objects/44/2764ce36f31635c127647bcc871cade34dbea7\n.git/objects/f8/1209596ad69b2654fab3af1e12d88e9cc0b42d\n.git/objects/4d/03e82f581e4a9aa8bfef590ae3b791dca65971\n.git/objects/b8/bcb10cdc9651d8580ba1317c4a18eb88a799ca\n.engramdb/config.toml\n.engramdb/.gitignore\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7a9-cd1e-7622-b074-ba5f857612ed.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7a9-d235-7912-b2af-a6706718f088.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f7a9-d7ef-7be3-b7b2-166574a84038.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f7a9-dd16-78e1-bf2d-827d5f8557c9.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f7a9-e225-7d12-a1e8-1020673e0fe1.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7a9-e78b-7d52-a412-8e757697e647.md\n.engramdb/memories/tax-uses-round-half-even_01a0f7a9-ecf2-7183-8837-413c284d0d91.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f7a9-f2a9-7121-848d-dab0d524bb15.md\n.engramdb/memories/api-errors-use-problem-json_01a0f7a9-f829-7bc2-a8d5-140ecbfd24d4.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7a9-fd1f-7d51-924f-cbd934e43fd0.md\n.engramdb/manifest.toml\n.git/objects/56/74708e2030b2db4182797ce46de7783ba88f94\n.git/objects/e0/14c6b97f74b60512547767fa333a617b13c840\n.git/objects/bc/470d6f62f873f5419b036b36ec8917117901f4\n.git/objects/6e/1e333395d971e49ea27ba824e67c902697f09b\n.git/objects/9b/38685f1f0558f408492c5789ee8569de3c4d04\n.git/objects/df/e3db9e537e296fbae484e10b559f629bd5e92f\n.git/objects/59/3935be9ea912dbb64e9dba7cf7a48692a51566\n.git/objects/32/a24beda48117fb192f537c9a1a3fd07e1e070c\n.git/objects/bc/fadf0743ca02ad2acd2c478b0b5c1d0fc20014\n.git/objects/01/de804bb46d74ae2c3ec775cd8c097a68f8edf1\n.git/objects/84/26ee4356a6bb06f949421cedd85ff0089f81cd\n(Showing 100 of 114 matching files; 14 more are not listed. Narrow the pattern or path to see the rest.)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-ygipqp2z/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-ygipqp2z/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-ygipqp2z/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-ygipqp2z/ledgerline/tests/test_payments.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport pytest\n2\timport requests\n3\t\n4\tSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n5\t\n6\t\n7\t@pytest.mark.integration\n8\tdef test_charges_roundtrip():\n9\t    for amount in (100, 250, 999, 1200):\n10\t        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n11\t        assert resp.status_code == 201\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payment|live\",\n \"glob\": \"!.git/**\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:4:SANDBOX = \"https://sandbox.payments.example/v1/charges\""
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__create,mcp__plugin_engram_memory__query\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"payment gateway fake PAYMENTS_LIVE\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "assistant",
+  "content": "Nothing is stored about this yet, so I'm saving it as a hazard memory."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Reported by the user after losing ~2 hours: the app silently falls back to a fake payment gateway unless the env var PAYMENTS_LIVE=1 is set. No error or warning is given. As of 2026-10-01, no reference to PAYMENTS_LIVE exists in this repo's source (src/, scripts/, flags.toml, tests/), so the switch lives outside the checked-in code, e.g. in deployment config or another service. If payments look successful but nothing reaches the real provider, check this variable first.\",\n \"epistemic\": \"observation\",\n \"premise\": \"User-reported behavior; not verifiable in this repo's source\",\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"gotcha\"\n ],\n \"criticality\": 0.7,\n \"confidence\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7aa-40e9-7003-8cbb-40f26d8cf10a\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I couldn't find the fake-gateway switch in this repo. `PAYMENTS_LIVE` appears nowhere in the checked-in code, and there's no gateway selection or payment client in `src/`. `src/api/checkout.py` only sums the cart and returns `pending`. The only payment code is `tests/test_payments.py`, which posts to a hardcoded sandbox URL. The fallback must live somewhere else, such as another service, a deploy config, or an uncommitted branch.\n\nI saved a hazard memory in EngramDB so the next session sees it. It's marked as user-reported and unverified in the source.\n\nIf you tell me where the gateway is wired up, I can make it fail loudly instead of silently falling back. For example, it could refuse to start without an explicit `PAYMENTS_LIVE=0` or `1`, or log a prominent warning when it picks the fake gateway."
+ }
+]

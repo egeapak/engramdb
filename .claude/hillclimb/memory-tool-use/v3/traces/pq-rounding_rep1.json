@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "What rounding mode do we use for tax?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f6bd453f-9937-4aa8-b294-520c19244e63\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"fc31e51b-596f-4332-9f1c-0c94f8bf7815\", \"session_id\": \"4d65ee30-9aae-4d76-b60e-0c892cc0efae\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f6bd453f-9937-4aa8-b294-520c19244e63\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"98883d63-c656-453c-a359-3af8242c421d\", \"session_id\": \"4d65ee30-9aae-4d76-b60e-0c892cc0efae\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cb61b61f-5b0c-4ab1-ac01-6212f092e5b3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"408536ab-33d6-4488-805d-d0758119f912\", \"session_id\": \"4d65ee30-9aae-4d76-b60e-0c892cc0efae\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cb61b61f-5b0c-4ab1-ac01-6212f092e5b3\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"99a8d3b3-f9fa-4c94-aa17-8d0d2f657533\", \"session_id\": \"4d65ee30-9aae-4d76-b60e-0c892cc0efae\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"ROUND_|rounding|round\\\\(\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/tax-uses-round-half-even_01a0f7a2-c2c9-7901-969d-6018bfe0551e.md:6:title: Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f7a2-c2c9-7901-969d-6018bfe0551e.md:9:# Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f7a2-c2c9-7901-969d-6018bfe0551e.md:11:**Summary:** Tax uses ROUND_HALF_EVEN\n.engramdb/memories/tax-uses-round-half-even_01a0f7a2-c2c9-7901-969d-6018bfe0551e.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__get\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "assistant",
+  "content": "Tax uses banker's rounding, `decimal.ROUND_HALF_EVEN`. An EngramDB decision memory records this as agreed with the finance team in March 2026, and it says not to use `ROUND_HALF_UP`.\n\nI couldn't confirm it in the code. A search for rounding calls found nothing outside the memory file, so the repo doesn't implement tax rounding yet or I missed where it lives. Treat the memory as the source of truth for now."
+ }
+]

@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What is 17 * 23?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d3937fc1-9e40-4607-9324-7e8be8ee5805\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"4dede379-cf57-4771-9100-c64ea1bb788a\", \"session_id\": \"cbee0d2f-d9de-450d-a2eb-4bb9a93c98e7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d3937fc1-9e40-4607-9324-7e8be8ee5805\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"49bd92ba-c93f-43e3-a7b1-07f94ffe1431\", \"session_id\": \"cbee0d2f-d9de-450d-a2eb-4bb9a93c98e7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6f340776-b597-44a8-9072-7fa7bd1c171c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b52cc7a6-6ded-485a-9309-33915bf87247\", \"session_id\": \"cbee0d2f-d9de-450d-a2eb-4bb9a93c98e7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6f340776-b597-44a8-9072-7fa7bd1c171c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c5431387-1493-412a-aead-b915fca8efc8\", \"session_id\": \"cbee0d2f-d9de-450d-a2eb-4bb9a93c98e7\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "17 \u00d7 23 = **391**\n\n(17 \u00d7 20 = 340, plus 17 \u00d7 3 = 51, giving 391.)\n\nNothing durable came up in this exchange, so I haven't saved anything to EngramDB."
+ }
+]

@@ -1,0 +1,68 @@
+[
+ {
+  "role": "user",
+  "content": "Heads up: the payments sandbox rate-limits at 5 requests per second. That's why test_payments flakes in CI. Can you add a short sleep between calls in tests/test_payments.py?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a2b4f8cf-c98f-453d-a2ea-9ad1633526a4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"34afae8e-1a67-4b4b-9663-72e5661a2903\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a2b4f8cf-c98f-453d-a2ea-9ad1633526a4\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2f8a75f4-4bb3-4147-bd60-8f55264f4f9a\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"82d8aca6-30fa-457c-9a2e-9a1a3d83e27c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"49b26eae-ff02-4387-be42-1fd111b88a13\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"82d8aca6-30fa-457c-9a2e-9a1a3d83e27c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b227d226-cb1e-4826-bed6-dc0db195f259\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"002058fb-3d7a-46c7-b3ec-88855932d0a3\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"17d537e2-ee63-4a4a-ad3e-caee82a45f6e\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"002058fb-3d7a-46c7-b3ec-88855932d0a3\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a190f34f-722d-4198-94e8-90a4daf98b26\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d7cf117a-354f-4fe2-80bf-4ee708673e1b\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"15243904-c7e9-4080-9048-1e20829a4472\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d7cf117a-354f-4fe2-80bf-4ee708673e1b\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2011ee45-1638-40b3-aa19-8d75988a928d\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9d9acd30-dbd3-478b-9da5-4ea68f4ae52b\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"ab4657ae-79b4-4f31-8186-a511fe25a7a2\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9d9acd30-dbd3-478b-9da5-4ea68f4ae52b\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c08d63ea-4861-4b69-bf90-7b4a1eb3032e\", \"session_id\": \"79c98a28-4b88-4770-a3a3-20b7d2302661\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-sandbox-ratelimit-bz2bqoom/ledgerline/tests/test_payments.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport pytest\n2\timport requests\n3\t\n4\tSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n5\t\n6\t\n7\t@pytest.mark.integration\n8\tdef test_charges_roundtrip():\n9\t    for amount in (100, 250, 999, 1200):\n10\t        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n11\t        assert resp.status_code == 201\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-nk-sandbox-ratelimit-bz2bqoom/ledgerline/tests/test_payments.py\",\n \"old_string\": \"import pytest\\nimport requests\\n\\nSANDBOX = \\\"https://sandbox.payments.example/v1/charges\\\"\\n\\n\\n@pytest.mark.integration\\ndef test_charges_roundtrip():\\n    for amount in (100, 250, 999, 1200):\\n        resp = requests.post(SANDBOX, json={\\\"amount_cents\\\": amount}, timeout=10)\\n        assert resp.status_code == 201\",\n \"new_string\": \"import time\\n\\nimport pytest\\nimport requests\\n\\nSANDBOX = \\\"https://sandbox.payments.example/v1/charges\\\"\\n# Sandbox rate-limits at 5 req/s; space calls slightly over 1/5s.\\nCALL_INTERVAL_S = 0.25\\n\\n\\n@pytest.mark.integration\\ndef test_charges_roundtrip():\\n    for amount in (100, 250, 999, 1200):\\n        resp = requests.post(SANDBOX, json={\\\"amount_cents\\\": amount}, timeout=10)\\n        assert resp.status_code == 201\\n        time.sleep(CALL_INTERVAL_S)\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-nk-sandbox-ratelimit-bz2bqoom/ledgerline/tests/test_payments.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "I added a 0.25s sleep after each call in `tests/test_payments.py`. At 5 requests per second the minimum spacing is 0.2s, so 0.25s leaves a small margin. The interval is a `CALL_INTERVAL_S` constant at the top of the file. I haven't run the test, since it hits the live sandbox.\n\nThe sleep only spaces calls within this test. If CI runs other tests against the sandbox at the same time, or runs several jobs in parallel, they share the same limit and could still trip it."
+ }
+]

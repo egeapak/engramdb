@@ -1,0 +1,74 @@
+[
+ {
+  "role": "user",
+  "content": "How should I represent a currency amount in new billing code?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2297bb4e-e6c2-4eed-8272-27c29055cf44\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"7322555e-450e-4558-814d-fc509cffd0f6\", \"session_id\": \"c8483ca8-7d24-4a05-92e9-874a08c2c8dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2297bb4e-e6c2-4eed-8272-27c29055cf44\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"97888c35-fca9-433f-8f79-db0679ab20c6\", \"session_id\": \"c8483ca8-7d24-4a05-92e9-874a08c2c8dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8e7a52dc-2722-477a-aa9e-6dbfed33792c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"4826e92a-951d-4ff9-901f-6c6c214b4e38\", \"session_id\": \"c8483ca8-7d24-4a05-92e9-874a08c2c8dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8e7a52dc-2722-477a-aa9e-6dbfed33792c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"745cf7bc-0d32-4f02-bda9-6141a5b7e370\", \"session_id\": \"c8483ca8-7d24-4a05-92e9-874a08c2c8dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c2e10bbd-6e73-4cc5-9994-6c24783eb6d5\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"5c969d12-da66-4b58-bf53-27768b96b7e7\", \"session_id\": \"c8483ca8-7d24-4a05-92e9-874a08c2c8dc\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c2e10bbd-6e73-4cc5-9994-6c24783eb6d5\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7d5bd54c-95de-4246-97ed-97164b072f4e\", \"session_id\": \"c8483ca8-7d24-4a05-92e9-874a08c2c8dc\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I'll check for existing project conventions on money first."
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__get\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"Money|Decimal|cents|currency|amount\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_payments.py:9:    for amount in (100, 250, 999, 1200):\ntests/test_payments.py:10:        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\ntests/test_tax.py:5:    assert line_total([{\"quantity\": 2, \"unit_cents\": 150}]) == 300\nsrc/billing/refunds.py:4:def refund(invoice: Invoice, amount_cents: int):\nsrc/billing/refunds.py:5:    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/refunds.py:7:    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\nsrc/billing/invoices.py:15:    subtotal_cents: int\nsrc/billing/invoices.py:16:    tax_cents: int = 0\nsrc/billing/invoices.py:22:    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\nsrc/billing/money.py:5:class Money:\nsrc/billing/money.py:6:    cents: int\nsrc/billing/money.py:7:    currency: str = \"USD\"\nsrc/billing/money.py:10:        assert self.currency == other.currency\nsrc/billing/money.py:11:        return Money(self.cents + other.cents, self.currency)\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/billing/tax.py:7:        x += line[\"quantity\"] * line[\"unit_cents\"]\nsrc/billing/tax.py:11:def tax_for(amount_cents, rate):\nsrc/api/checkout.py:9:    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\nsrc/api/checkout.py:10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n.engramdb/memories/tax-uses-round-half-even_01a0f7a7-5e43-7b02-a7ab-fc46d46df451.md:15:Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\nmigrations/0001_create_invoices.sql:1:CREATE TABLE invoices (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, subtotal_cents BIGINT NOT NULL);\nmigrations/0002_add_tax.sql:1:ALTER TABLE invoices ADD COLUMN tax_cents BIGINT NOT NULL DEFAULT 0;\nmigrations/0004_create_lines.sql:1:CREATE TABLE invoice_lines (invoice_id TEXT REFERENCES invoices(id), quantity INT, unit_cents BIGINT);\nmigrations/0005_create_refunds.sql:1:CREATE TABLE refunds (id TEXT PRIMARY KEY, invoice_id TEXT REFERENCES invoices(id), refunded_cents BIGINT);\nREADME.md:9:- `src/billing/` - money, invoices, refunds, and tax logic\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7a7-3fa4-7881-a621-8fd85d192a31.md:6:title: Money is integer cents, never float\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7a7-3fa4-7881-a621-8fd85d192a31.md:9:# Money is integer cents, never float\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7a7-3fa4-7881-a621-8fd85d192a31.md:11:**Summary:** Money is integer cents, never float\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7a7-3fa4-7881-a621-8fd85d192a31.md:15:All monetary amounts are stored and passed as integer cents using the `Money` type in src/billing/money.py. Never use float for money. Field names end in `_cents`.\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7a7-3fa4-7881-a621-8fd85d192a31.md:20:- **Tags:** `billing`, `money`"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"money currency cents\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"All monetary amounts are stored and passed as integer cents using the `Money` type in src/billing/money.py. Never use float for money. Field names end in `_cents`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7a7-3fa4-7881-a621-8fd85d192a31\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.5417884319423578,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5417884319423578,\"keyword\":0.5178685340754858,\"relevance\":0.5,\"rerank\":0.328674852848053,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6258781794935223,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money is integer cents, never float\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-money-vabkbid5/ledgerline/src/billing/money.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass\n2\t\n3\t\n4\t@dataclass(frozen=True)\n5\tclass Money:\n6\t    cents: int\n7\t    currency: str = \"USD\"\n8\t\n9\t    def __add__(self, other):\n10\t        assert self.currency == other.currency\n11\t        return Money(self.cents + other.cents, self.currency)\n12\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Use the `Money` type in `src/billing/money.py`. It holds integer cents plus a currency code, never a float.\n\n```python\nfrom src.billing.money import Money\n\nprice = Money(1250)         # $12.50, currency defaults to \"USD\"\ntotal = price + Money(300)  # Money(cents=1550, currency=\"USD\")\n```\n\nThis is the project's recorded convention, and the existing code follows it:\n\n- **Representation:** amounts are integer cents. Float is never used.\n- **Naming:** fields and parameters end in `_cents`, for example `subtotal_cents`, `tax_cents` and `amount_cents`.\n- **Storage:** database columns are `BIGINT` cents, as in the `invoices`, `invoice_lines` and `refunds` migrations.\n- **Tax:** where you need fractional math, use `Decimal` and round with `ROUND_HALF_EVEN`. Finance agreed this in March 2026, so don't use `ROUND_HALF_UP`.\n\nSome things to know before you build on it:\n\n- **Mixed usage:** `invoices.py`, `refunds.py` and `checkout.py` currently pass bare `int` cents rather than `Money` objects. New code should still use `Money` for amounts. Where it touches those modules, convert at the boundary with `Money(x_cents)` and `.cents`.\n- **Currency check:** `Money.__add__` uses an `assert` to check that currencies match. Asserts are stripped under `python -O`, so a currency mismatch could pass silently in production. If your code adds amounts across currencies, consider raising a `ValueError` there.\n- **Missing operations:** `Money` only supports `+`. You'll need to add subtraction, comparison and multiplication by quantity if you want them. Today, `tax.py` and `checkout.py` do that math on raw ints.\n\nI didn't change any code or memories."
+ }
+]

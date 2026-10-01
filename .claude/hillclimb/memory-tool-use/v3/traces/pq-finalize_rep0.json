@@ -1,0 +1,78 @@
+[
+ {
+  "role": "user",
+  "content": "Anything I should know before I touch invoice finalization?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"68338f5a-d9fc-4c07-a993-df0e56100262\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"38bfe7fb-c04f-42e3-a6a5-30aabd0ccb30\", \"session_id\": \"33da17ad-48a4-4941-b291-cc84e62e9c25\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"68338f5a-d9fc-4c07-a993-df0e56100262\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3623e78c-08e3-465a-966a-be2e2f109ae9\", \"session_id\": \"33da17ad-48a4-4941-b291-cc84e62e9c25\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c2c8054b-4be8-4eb4-9c34-fe484d466c43\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"fa26b4d7-c5f0-4a98-b19d-fbefe90ee982\", \"session_id\": \"33da17ad-48a4-4941-b291-cc84e62e9c25\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c2c8054b-4be8-4eb4-9c34-fe484d466c43\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"25cee3a1-aa66-47d4-8686-bcd6b12791ce\", \"session_id\": \"33da17ad-48a4-4941-b291-cc84e62e9c25\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3cc975a1-354f-4576-87cc-243cc7acf26c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"43d31827-e2aa-4b11-9518-68e7b3da8f66\", \"session_id\": \"33da17ad-48a4-4941-b291-cc84e62e9c25\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3cc975a1-354f-4576-87cc-243cc7acf26c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e67e4781-f584-460d-945e-03305782908c\", \"session_id\": \"33da17ad-48a4-4941-b291-cc84e62e9c25\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__query,mcp__plugin_engram_memory__get\",\n \"max_results\": 5\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"finalize\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 50\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/invoices-finalize-is-not-idempotent_01a0f79c-f112-7810-903d-6afc934cad2f.md:6:title: invoices.finalize() is not idempotent\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f79c-f112-7810-903d-6afc934cad2f.md:9:# invoices.finalize() is not idempotent\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f79c-f112-7810-903d-6afc934cad2f.md:11:**Summary:** invoices.finalize() is not idempotent\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f79c-f112-7810-903d-6afc934cad2f.md:15:`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\nREADME.md:4:computes tax, posts finalized invoices to the external ledger, and exports\nsrc/billing/invoices.py:21:def finalize(invoice):\nsrc/billing/invoices.py:25:    log.info(\"invoice_finalized\", invoice_id=invoice.id)\nsrc/billing/invoices.py:29:def finalize_once(invoice):\nsrc/billing/invoices.py:32:    return finalize(invoice)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-finalize-rn554tos/ledgerline/src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass, field\n2\t\n3\timport requests\n4\timport structlog\n5\t\n6\tlog = structlog.get_logger()\n7\t\n8\tLEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\"\n9\t\n10\t\n11\t@dataclass\n12\tclass Invoice:\n13\t    id: str\n14\t    customer_id: str\n15\t    subtotal_cents: int\n16\t    tax_cents: int = 0\n17\t    ledger_ref: str | None = None\n18\t    lines: list = field(default_factory=list)\n19\t\n20\t\n21\tdef finalize(invoice):\n22\t    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n23\t    resp.raise_for_status()\n24\t    invoice.ledger_ref = resp.json()[\"ref\"]\n25\t    log.info(\"invoice_finalized\", invoice_id=invoice.id)\n26\t    return invoice\n27\t\n28\t\n29\tdef finalize_once(invoice):\n30\t    if invoice.ledger_ref:\n31\t        return invoice\n32\t    return finalize(invoice)\n33\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"invoice finalization\",\n \"path\": \"src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f79c-f112-7810-903d-6afc934cad2f\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.7791065256626839,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7791065256626839,\"keyword\":0.8423994281649049,\"relevance\":0.5,\"rerank\":2.1118550300598145,\"scope\":1.0,\"scope_multiplier\":1.0,\"semantic\":0.5402773738085197,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"invoices.finalize() is not idempotent\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "The main thing to know is that `finalize()` is not idempotent. The code confirms the stored hazard memory.\n\n- **Double-posting:** `finalize()` in `src/billing/invoices.py:21` POSTs to the external ledger (`LEDGER_URL`) with no idempotency key. If you call it twice, the invoice is posted twice.\n- **No retries:** Don't wrap it in retry logic. A request that times out after the ledger has already recorded the posting would be retried and double-posted. The call has a 10-second timeout, so this can happen.\n- **Use `finalize_once()`:** It's at line 29 and skips the call if `invoice.ledger_ref` is already set. Prefer it for any new call site.\n- **Remaining gap:** `finalize_once()` only checks the local `ledger_ref`. That value is only set after the ledger responds successfully. If the POST succeeds on the ledger side but the response is lost, `ledger_ref` stays empty. A later `finalize_once()` would then post again. Fixing that properly needs an idempotency key sent to the ledger, which depends on whether the ledger supports one. I haven't checked that.\n- **No concurrency guard:** Two concurrent `finalize_once()` calls on the same invoice can both pass the `ledger_ref` check. Nothing in this code prevents that.\n\nI didn't look for other callers of `finalize()` beyond this file. I'll check for direct calls that bypass `finalize_once()` once you tell me what you're changing."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

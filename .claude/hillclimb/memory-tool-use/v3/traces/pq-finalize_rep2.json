@@ -1,0 +1,65 @@
+[
+ {
+  "role": "user",
+  "content": "Anything I should know before I touch invoice finalization?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fa2605f8-8d8a-47be-9c30-a270da3cba85\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d1455299-a985-40b7-bb5b-6e52b751cf2b\", \"session_id\": \"e27562a2-087c-4117-812b-a3041df46218\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fa2605f8-8d8a-47be-9c30-a270da3cba85\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e335d875-3f50-4b90-9b29-8a214fbb0425\", \"session_id\": \"e27562a2-087c-4117-812b-a3041df46218\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a727a37c-a7b9-4c8b-84eb-0148425c0512\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"c14e005f-efb1-4c1a-a2d6-f6ffd16556b4\", \"session_id\": \"e27562a2-087c-4117-812b-a3041df46218\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a727a37c-a7b9-4c8b-84eb-0148425c0512\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [hazard] invoices.finalize() is not idempotent (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2ccd4d59-a062-4b12-97cb-fa32de2845a8\", \"session_id\": \"e27562a2-087c-4117-812b-a3041df46218\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b848fd6c-daed-45e3-b798-5f71c090c75a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"29069409-9e35-4be1-bd6a-1d0310f43121\", \"session_id\": \"e27562a2-087c-4117-812b-a3041df46218\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b848fd6c-daed-45e3-b798-5f71c090c75a\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"83ddf6e2-44e0-4b63-970f-ae63ded621d8\", \"session_id\": \"e27562a2-087c-4117-812b-a3041df46218\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__get,mcp__plugin_engram_memory__query\",\n \"max_results\": 2\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "\n"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"finalize\",\n \"output_mode\": \"content\",\n \"-n\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7a8-3ebf-72b2-b44e-68f38bcc5515.md:6:title: invoices.finalize() is not idempotent\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7a8-3ebf-72b2-b44e-68f38bcc5515.md:9:# invoices.finalize() is not idempotent\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7a8-3ebf-72b2-b44e-68f38bcc5515.md:11:**Summary:** invoices.finalize() is not idempotent\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7a8-3ebf-72b2-b44e-68f38bcc5515.md:15:`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\nREADME.md:4:computes tax, posts finalized invoices to the external ledger, and exports\nsrc/billing/invoices.py:21:def finalize(invoice):\nsrc/billing/invoices.py:25:    log.info(\"invoice_finalized\", invoice_id=invoice.id)\nsrc/billing/invoices.py:29:def finalize_once(invoice):\nsrc/billing/invoices.py:32:    return finalize(invoice)"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me verify the memory against the code."
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-finalize-tfpohg1x/ledgerline/src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass, field\n2\t\n3\timport requests\n4\timport structlog\n5\t\n6\tlog = structlog.get_logger()\n7\t\n8\tLEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\"\n9\t\n10\t\n11\t@dataclass\n12\tclass Invoice:\n13\t    id: str\n14\t    customer_id: str\n15\t    subtotal_cents: int\n16\t    tax_cents: int = 0\n17\t    ledger_ref: str | None = None\n18\t    lines: list = field(default_factory=list)\n19\t\n20\t\n21\tdef finalize(invoice):\n22\t    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n23\t    resp.raise_for_status()\n24\t    invoice.ledger_ref = resp.json()[\"ref\"]\n25\t    log.info(\"invoice_finalized\", invoice_id=invoice.id)\n26\t    return invoice\n27\t\n28\t\n29\tdef finalize_once(invoice):\n30\t    if invoice.ledger_ref:\n31\t        return invoice\n32\t    return finalize(invoice)\n33\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Yes, one thing matters most: **`finalize()` isn't idempotent.** I checked this against `src/billing/invoices.py`, and the EngramDB hazard memory is accurate.\n\n- **Double-posting:** `finalize()` (line 21) POSTs to the external ledger at `LEDGER_URL` with no idempotency key. Calling it twice posts the invoice twice.\n- **No retries:** Don't wrap `finalize()` in retry logic. The call has a 10s timeout, so a timeout is easy to hit. The ledger may have already recorded the posting by then, and a retry would post it again.\n- **Use `finalize_once()`:** It's at line 29 and returns early if `invoice.ledger_ref` is already set. New call sites should use it instead of `finalize()`.\n- **Weak guard:** `finalize_once()` only protects you after `ledger_ref` has been set. If the POST succeeds but the response is lost, `ledger_ref` stays empty and a second call will still double-post.\n- **Concurrency:** There's no locking, so two concurrent `finalize_once()` calls on the same invoice can both pass the check and both post.\n- **Mutation:** `finalize()` mutates the invoice in place by setting `ledger_ref`. It doesn't persist anything, so saving the invoice afterwards is up to the caller.\n\nI haven't looked at the callers. If you're changing behavior here, I can check how they use it. A real fix would send an idempotency key to the ledger, for example derived from `invoice.id`, if the ledger API supports one. I haven't checked whether it does."
+ }
+]

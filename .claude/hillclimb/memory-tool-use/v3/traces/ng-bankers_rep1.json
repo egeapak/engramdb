@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "In general, what is banker's rounding and why do accountants like it?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dcdfa1e1-a20a-4588-9b68-150bfcca3a5f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"28618a20-263e-441c-b624-829f3ab6fca8\", \"session_id\": \"77ae57ca-290c-4141-9fbb-4fbbe8d29f68\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dcdfa1e1-a20a-4588-9b68-150bfcca3a5f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"0ffa87a6-b761-4768-a97d-87b9d61cf2dd\", \"session_id\": \"77ae57ca-290c-4141-9fbb-4fbbe8d29f68\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"39d9bd61-aecb-4e6c-86fe-fb50edebb4d0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"3e035567-dbef-4061-ae9b-d4f891fa4d51\", \"session_id\": \"77ae57ca-290c-4141-9fbb-4fbbe8d29f68\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"39d9bd61-aecb-4e6c-86fe-fb50edebb4d0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Decisions (1):\\\\n- [decision] Tax uses ROUND_HALF_EVEN (source: shared/human)\\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fc1c95d2-cfa5-4429-a593-2907c7f49626\", \"session_id\": \"77ae57ca-290c-4141-9fbb-4fbbe8d29f68\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**Banker's rounding** (also called round-half-to-even, or `ROUND_HALF_EVEN`) is a rule for values that fall exactly halfway between two candidates. Round to the nearest even digit instead of always rounding up.\n\n- 2.5 \u2192 2\n- 3.5 \u2192 4\n- 0.125 \u2192 0.12 (to 2 decimals)\n- 0.135 \u2192 0.14\n\nAnything that isn't exactly a tie rounds the usual way, so 2.4 \u2192 2 and 2.6 \u2192 3.\n\n**Why accountants like it**\n\n1. **It's unbiased.** The usual \"round half up\" rule always pushes ties in the same direction. Over thousands of line items, such as interest, tax, or currency conversions, that adds up to a systematic upward drift. With half-even, ties round up about as often as they round down, so the errors cancel out.\n2. **Totals stay closer to the truth.** The sum of rounded values tracks the sum of the unrounded values better. This matters for reconciliation, where a one-cent discrepancy across many rows is hard to chase down.\n3. **It's a standard.** It's the default in IEEE 754 floating point and in many financial systems and regulations. Using it means your numbers match other systems.\n\n**Caveats**\n\n- The bias reduction only applies to exact ties. With binary floats, 0.125 is exactly representable but 0.135 isn't, so use a decimal type (such as Python's `Decimal` or Java's `BigDecimal`) for money.\n- Some jurisdictions or contracts mandate half-up, so check which rule applies.\n- Python's built-in `round()` uses half-even, which surprises people expecting `round(2.5) == 3`.\n\nThe project memory also records that tax in this codebase uses `ROUND_HALF_EVEN`. That's consistent with the above, though I haven't opened that memory or the code."
+ }
+]
