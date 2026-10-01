@@ -1859,7 +1859,7 @@ mod tests {
         let m = Memory::new(
             MemoryType::Convention,
             "Accents",
-            &"é".repeat(30),
+            "é".repeat(30),
             Provenance::human(),
         );
         let cut = format_class_entry(&scored(m.clone()), Some(10));
