@@ -70,6 +70,27 @@ class Oracle(unittest.TestCase):
         self.assertEqual(g["pass"], 1)
 
 
+class Signals(unittest.TestCase):
+    def test_tool_search_and_auto_memory(self):
+        auto = "/tmp/x/claude-config/projects/p/memory/"
+        ev = [{"type": "system", "subtype": "init", "tools": ["ToolSearch", "Write"], "memory_paths": {"auto": auto}},
+              {"type": "assistant", "message": {"content": [
+                  {"type": "tool_use", "id": "a", "name": "ToolSearch", "input": {"query": "select:" + MEM + "create"}}]}},
+              {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "a",
+                  "content": [{"type": "tool_reference", "tool_name": MEM + "create"}]}]}},
+              {"type": "assistant", "message": {"content": [
+                  {"type": "tool_use", "id": "b", "name": "Write", "input": {"file_path": auto + "jobs.md"}}]}},
+              {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b", "content": "ok"}]}},
+              {"type": "result", "subtype": "success", "result": "saved", "usage": {}}]
+        _, row = run("nk-jobs-explicit", ev)
+        ts = row["meta"]["gaps"]["tool_search"]
+        self.assertEqual(ts[0]["matched"], [MEM + "create"])
+        self.assertTrue(ts[0]["hit_memory"])
+        self.assertFalse(ts[0]["followed_by_memory_call"])
+        self.assertEqual(row["wrote_auto_memory"], 1)
+        self.assertEqual(row["grade"]["explicit_create"], 0)
+
+
 class Null(unittest.TestCase):
     def test_empty_answer_fails(self):
         for cid in ("pq-tests", "ed-tax", "nk-jobs-explicit", "ct-loguru"):

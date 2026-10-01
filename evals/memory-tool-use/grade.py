@@ -48,6 +48,7 @@ PERF_FIELDS = [
     {"id": "hook_hit", "label": "hook hit"},
     {"id": "in_tokens", "label": "in tok"},
     {"id": "out_tokens", "label": "out tok"},
+    {"id": "wrote_auto_memory", "label": "auto-mem write"},
 ]
 
 
@@ -112,12 +113,16 @@ def parse_events(events):
             for b in content if isinstance(content, list) else []:
                 if b.get("type") == "tool_result":
                     c = b.get("content")
+                    refs = []
                     if isinstance(c, list):
+                        refs = [x.get("tool_name", "") for x in c
+                                if isinstance(x, dict) and x.get("type") == "tool_reference"]
                         c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
-                    results[b["tool_use_id"]] = {"text": c or "", "is_error": bool(b.get("is_error"))}
+                    results[b["tool_use_id"]] = {"text": c or "", "is_error": bool(b.get("is_error")),
+                                                 "refs": refs}
     for s in steps:
         if s["kind"] == "tool":
-            s["result"] = results.get(s["id"], {"text": "", "is_error": False})
+            s["result"] = results.get(s["id"], {"text": "", "is_error": False, "refs": []})
     final = next((e for e in reversed(events) if e.get("type") == "result"), {})
     return steps, hooks, init, final
 
@@ -187,6 +192,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     g["pass"] = int(all(graded)) if graded else 1
 
     usage = final.get("usage", {}) or {}
+    gaps = gap_signals(tools, init, hooks)
     target_title = _target_title(case)
     hook_text = json.dumps(hooks)
     row = {
@@ -205,8 +211,9 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         "in_tokens": (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0)),
         "out_tokens": usage.get("output_tokens"),
+        "wrote_auto_memory": int(bool(gaps["auto_memory_writes"])),
         "usage": usage,
-        "meta": {"gaps": gap_signals(tools, init, hooks), "model_usage": final.get("modelUsage"),
+        "meta": {"gaps": gaps, "model_usage": final.get("modelUsage"),
                  "claude_code_version": init.get("claude_code_version")},
     }
     return row, to_trace(steps, hooks, case["prompt"])
@@ -245,7 +252,18 @@ def gap_signals(tools, init, hooks):
     available = set(init.get("tools", []))
     sig = {"memory_calls": [], "mcp_errors": [], "empty_queries": [], "bash_workarounds": [],
            "direct_store_access": [], "unknown_tools": [], "hook_events": len(hooks),
-           "memory_tools_available": sorted(n for n in available if memory_op(n))}
+           "memory_tools_available": sorted(n for n in available if memory_op(n)),
+           "tool_search": [], "auto_memory_writes": []}
+    auto_dir = (init.get("memory_paths") or {}).get("auto") or ""
+    for i, s in enumerate(tools):
+        if s["name"] == "ToolSearch":
+            refs = s["result"].get("refs", [])
+            sig["tool_search"].append({
+                "query": s["input"].get("query", ""), "matched": refs,
+                "hit_memory": any(memory_op(r) for r in refs),
+                "followed_by_memory_call": any(memory_op(t["name"]) for t in tools[i + 1:])})
+        elif s["name"] in EDIT_TOOLS and auto_dir and s["input"].get("file_path", "").startswith(auto_dir):
+            sig["auto_memory_writes"].append(s["input"]["file_path"])
     for s in tools:
         op = memory_op(s["name"])
         res = s["result"]

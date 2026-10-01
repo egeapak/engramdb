@@ -20,6 +20,7 @@ accepts) in the environment.
 """
 
 import argparse
+import hashlib
 import concurrent.futures as cf
 import json
 import os
@@ -40,6 +41,9 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 FLOW_DIR = REPO / ".claude" / "hillclimb" / "memory-tool-use"
 ENGRAMDB_BIN = REPO / "target" / "release"
+# Per-variant copy of everything the run reads from the repo (binary, plugin
+# files, ENGRAM.md), so a rebuild during a run cannot mix two versions.
+SNAPSHOT = {"bin": ENGRAMDB_BIN, "plugin": REPO, "engram_md": None}
 
 DEBRIEF_PROMPT = (
     "Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\n"
@@ -95,7 +99,7 @@ def case_env(tmp, args):
     # server connects, so the memory tools never appear. Each case should start
     # like a fresh local install; only auth and network settings pass through.
     env = {k: v for k, v in os.environ.items() if k in PASSTHROUGH_ENV}
-    env["PATH"] = f"{ENGRAMDB_BIN}{os.pathsep}{env.get('PATH', '')}"
+    env["PATH"] = f"{SNAPSHOT['bin']}{os.pathsep}{env.get('PATH', '')}"
     env["CLAUDE_CONFIG_DIR"] = str(tmp / "claude-config")
     env["ENGRAMDB_DATA_DIR"] = str(tmp / "engram-data")
     env["ENGRAMDB_CONFIG_DIR"] = str(tmp / "engram-config")
@@ -127,7 +131,7 @@ def install_engram_md(ws):
     """
     claude_dir = ws / ".claude"
     claude_dir.mkdir(exist_ok=True)
-    (claude_dir / "ENGRAM.md").write_text(engram_md_text())
+    (claude_dir / "ENGRAM.md").write_text(SNAPSHOT["engram_md"] or engram_md_text())
     (claude_dir / "CLAUDE.md").write_text("@ENGRAM.md\n")
 
 
@@ -190,7 +194,7 @@ def run_claude(prompt, ws, env, args, session_id, resume=False, extra=()):
         "claude", "-p", prompt,
         "--model", args.model,
         "--output-format", "stream-json", "--verbose", "--include-hook-events",
-        "--plugin-dir", str(REPO),
+        "--plugin-dir", str(SNAPSHOT["plugin"]),
         "--permission-mode", "acceptEdits",
         "--allowedTools", "Read", "Edit", "Write", "Glob", "Grep", "Bash", MEMORY_SERVER_TOOLS,
         "--max-budget-usd", str(args.max_budget_usd),
@@ -275,8 +279,35 @@ def run_one(case, rep, args, out_dir):
         append_jsonl(out_dir / "errors.jsonl", {**attempt, "failure_class": cls, "error": str(exc)[-2000:]})
         return None
     finally:
+        # Each case spawns its own daemon (about 400 MB). It does not honor a
+        # short idle timeout from the case config, so stop it explicitly;
+        # otherwise a full run piles up dozens of them.
+        if "env" in locals():
+            subprocess.run(["engramdb", "daemon", "stop"], env=env, capture_output=True, timeout=30)
         if not args.keep_workspaces:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def take_snapshot(root, out_dir):
+    """Copy the binary and plugin files once per variant; reuse them on resume."""
+    root.mkdir(parents=True, exist_ok=True)
+    if not (root / "bin" / "engramdb").exists():
+        (root / "bin").mkdir(exist_ok=True)
+        shutil.copy2(ENGRAMDB_BIN / "engramdb", root / "bin" / "engramdb")
+        shutil.rmtree(root / "plugin", ignore_errors=True)
+        shutil.copytree(REPO / ".claude-plugin", root / "plugin" / ".claude-plugin")
+        shutil.copytree(REPO / "commands", root / "plugin" / "commands")
+        (root / "ENGRAM.md").write_text(engram_md_text())
+    SNAPSHOT.update(bin=root / "bin", plugin=root / "plugin", engram_md=(root / "ENGRAM.md").read_text())
+    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+    git = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True).stdout.strip()
+    build = {"git_head_at_snapshot": git, "engramdb_sha256": sha(root / "bin" / "engramdb"),
+             "plugin_json_sha256": sha(root / "plugin" / ".claude-plugin" / "plugin.json"),
+             "engram_md_sha256": sha(root / "ENGRAM.md")}
+    path = out_dir / "build.json"
+    if path.exists() and json.loads(path.read_text()) != build:
+        sys.exit(f"{path} differs from the snapshot in {root}; refusing to mix builds in one variant")
+    path.write_text(json.dumps(build, indent=1) + "\n")
 
 
 def main():
@@ -294,6 +325,8 @@ def main():
     ap.add_argument("--debrief-reps", type=int, default=1,
                     help="debrief only reps below this number (default 1: rep 0 only)")
     ap.add_argument("--keep-workspaces", action="store_true")
+    ap.add_argument("--snapshot-root", default=os.path.join(tempfile.gettempdir(), "mte-snapshots"),
+                    help="where per-variant copies of the binary and plugin live")
     ap.add_argument("--engram-md", action="store_true",
                     help="add .claude/ENGRAM.md + @ENGRAM.md, as `engramdb setup` does (the README's recommended install)")
     ap.add_argument("--ort-dylib", default=os.environ.get("ORT_DYLIB_PATH", "/tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so"))
@@ -307,6 +340,8 @@ def main():
         cases = [c for c in cases if c["id"] in want]
 
     out_dir = FLOW_DIR / args.variant
+    out_dir.mkdir(parents=True, exist_ok=True)
+    take_snapshot(Path(args.snapshot_root) / args.variant, out_dir)
     (out_dir / "traces").mkdir(parents=True, exist_ok=True)
     (out_dir / "raw").mkdir(exist_ok=True)
     grade.write_state(FLOW_DIR)
