@@ -1,0 +1,78 @@
+[
+ {
+  "role": "user",
+  "content": "I want to put a new checkout flow behind a feature flag. How do we do flags in this project?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7a080ef8-fc7e-4ea6-91d7-e11601a69b23\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"cca70e8c-8b09-43e5-9b57-d71a2f741982\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7a080ef8-fc7e-4ea6-91d7-e11601a69b23\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"23209af3-3ce0-42e0-925a-1737bd300973\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6a7b6bd1-ae8a-429f-9e28-865fc9f2a722\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"f2112f63-25ca-4566-b3bc-2479ad7f0e4d\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6a7b6bd1-ae8a-429f-9e28-865fc9f2a722\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ac83fa23-b30e-4851-af7b-ee0868f048ef\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"564f91c0-52ae-417c-a6cb-ba0356813789\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"7c9e5054-bbca-40e3-a239-306f2794dbcc\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"564f91c0-52ae-417c-a6cb-ba0356813789\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"60549847-0d13-48ff-9f7c-f000d7140733\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"41d38cb9-1fe4-4fc6-a406-a1429be52312\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"49d878e5-3385-42a7-bdba-ad6d34189440\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"41d38cb9-1fe4-4fc6-a406-a1429be52312\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7e4d33c9-d970-4059-836a-6c8311889f37\", \"session_id\": \"e9cb0daa-b238-4bbe-837a-48b4ae033e4f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"feature flags\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Read feature flags only with `flags.is_on(\\\"name\\\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d\",\"logical\":[],\"physical\":[\"src/flags.py\",\"flags.toml\"],\"provenance\":\"human\",\"score\":0.7340692093238808,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7340692093238808,\"keyword\":0.962151802012715,\"relevance\":0.5,\"rerank\":1.029699683189392,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.57770812909615,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Feature flags go through flags.is_on()\",\"tags\":[\"flags\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"is_on|feature_flag|flags\",\n \"output_mode\": \"content\",\n \"head_limit\": 50\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "flags.toml:1:[flags]\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d.md:19:- **Files:** `src/flags.py`, `flags.toml`\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d7-29c4-7d40-9d8f-c4fe8730d74d.md:20:- **Tags:** `flags`\nsrc/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\nsrc/flags.py:7:def is_on(name):\nsrc/flags.py:11:def all_flags():"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-5z4xs655/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-flags-5z4xs655/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Flags in this project are plain booleans in a TOML file, read through one helper.\n\n**How it works**\n- `flags.toml` has a `[flags]` table with one boolean per flag. Right now it holds only `invoice-pdf-v2 = false`.\n- `src/flags.py` loads that file once at import time. `is_on(name)` returns `bool(_FLAGS.get(name, False))`, and `all_flags()` returns a copy of the whole dict.\n- The project convention, saved in EngramDB, is to read flags only through `flags.is_on(\"name\")`. Flag names are kebab-case and must be declared in `flags.toml`.\n\n**Adding your checkout flag**\n1. Declare it in `flags.toml`, off by default:\n   ```toml\n   [flags]\n   invoice-pdf-v2 = false\n   new-checkout-flow = false\n   ```\n2. Branch on it at the entry point of the checkout code:\n   ```python\n   from src import flags\n\n   if flags.is_on(\"new-checkout-flow\"):\n       return new_checkout(...)\n   return legacy_checkout(...)\n   ```\n   Match whatever import style the rest of `src/` uses.\n\n**Things to know**\n- A flag that isn't in `flags.toml`, or is misspelled in code, silently evaluates to `False`. `is_on` doesn't raise, so check the spelling in both places.\n- Flags are read once at process start. Changing `flags.toml` needs a restart or redeploy, and there's no per-user or percentage rollout. A gradual rollout would need `flags.py` extended.\n- I haven't looked at where the current checkout code lives. Point me at it and I can add the flag and the branch."
+ }
+]

@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "We removed the Makefile; tests run with `just test` now. How do I run only the fast tests?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5de06121-b7d5-4e05-8ce7-216aae20fb77\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"75c70ad5-8fce-4089-8bb8-20d856934561\", \"session_id\": \"c1a5d9c1-e0f2-4afa-9bef-ef281c735ee3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5de06121-b7d5-4e05-8ce7-216aae20fb77\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2e6c30df-5fe1-4e8f-bf13-eb0ba2b06c9f\", \"session_id\": \"c1a5d9c1-e0f2-4afa-9bef-ef281c735ee3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"efb4856d-7b2e-4167-865c-d085352eef42\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"f80a843b-1866-402b-abfd-2f72f75af202\", \"session_id\": \"c1a5d9c1-e0f2-4afa-9bef-ef281c735ee3\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"efb4856d-7b2e-4167-865c-d085352eef42\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"66ac9db5-7cb4-45d2-bb41-917af19c6470\", \"session_id\": \"c1a5d9c1-e0f2-4afa-9bef-ef281c735ee3\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{justfile,Justfile,.justfile}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No files found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"test-fast\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Run `make test-fast` for the unit suite (skips Postgres tests). `make test` runs everything but needs `docker compose up db` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d4-af28-7840-a364-774b346e2751\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.6403185803407563,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.6403185803407563,\"keyword\":0.9560321489433692,\"relevance\":0.5,\"rerank\":0.2009948045015335,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5844749265679434,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Run tests with make test-fast\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a && (command -v just; git ls-files | head -50)\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests\n.claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f7d4-d14e-7fc0-9d41-ea8f0941de5d.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d4-bc14-7390-9618-dcac0d30678d.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7d4-a16b-79e2-886c-c9ae4627909e.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7d4-9c24-7e12-a984-ceebd6d51868.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f7d4-b5e0-7b63-ac79-4d17ea963c8d.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7d4-d760-7800-a74f-e86bc5d6682a.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f7d4-af28-7840-a364-774b346e2751.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f7d4-c9c3-7c72-9830-12be9532d10d.md\n.engramdb/memories/tax-uses-round-half-even_01a0f7d4-c2a3-7113-b757-d489e6586a99.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f7d4-a784-7eb3-a5f5-ddd90acdf8ba.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat Makefile; grep -n -i -A8 'pytest' pyproject.toml; grep -rn -i 'mark\\\\|postgres\\\\|slow' tests | head\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n8:dev = [\"pytest>=8.0\"]\ntests/test_payments.py:7:@pytest.mark.integration"
+ },
+ {
+  "role": "assistant",
+  "content": "I can't tell you the `just` command from this checkout, because it still contains the Makefile and has no justfile (and `just` isn't installed here). Your branch may differ from what I'm looking at.\n\nThe old Makefile ran the fast tests as:\n\n```\npytest -m \"not postgres\" -q\n```\n\nYou can run that directly. It skips the Postgres tests, and `just test` presumably runs the full suite (the old `make test` needed `docker compose up db`).\n\nThere's a catch with that marker. The only marked test I found is `tests/test_payments.py`, and it's marked `integration`, not `postgres`. The `not postgres` filter may therefore not exclude anything. Try `pytest -m \"not integration\" -q` if you want to skip it.\n\nIf your justfile defines a fast recipe, `just --list` will show its name. If it doesn't have one, a recipe like this would replace the old target:\n\n```just\ntest-fast:\n    pytest -m \"not postgres\" -q\n```\n\nThe EngramDB memory \"Run tests with make test-fast\" is now stale. I haven't changed it. Should I update it to the `just` workflow once you confirm the recipe name?"
+ }
+]

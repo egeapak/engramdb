@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fe33c9ab-eae8-4735-88bc-05d8c79703d9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"9d62bb02-6d7c-4cc4-bb51-01dddd35f399\", \"session_id\": \"cfbb4cd0-18fb-49ea-8874-4f9a840f3a72\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fe33c9ab-eae8-4735-88bc-05d8c79703d9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3e8ca8cb-a9c4-4a0f-ba4d-b1e3cc06dfee\", \"session_id\": \"cfbb4cd0-18fb-49ea-8874-4f9a840f3a72\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9f02e5bc-7205-439c-b661-c7b82cb75c17\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"b69e2ee1-3d4d-46c4-8f2f-4d2b610dce12\", \"session_id\": \"cfbb4cd0-18fb-49ea-8874-4f9a840f3a72\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9f02e5bc-7205-439c-b661-c7b82cb75c17\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"79d5b0d5-fd60-4178-a51f-ff6119ff1403\", \"session_id\": \"cfbb4cd0-18fb-49ea-8874-4f9a840f3a72\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "HTTP **409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource. The client can often resolve it and retry.\n\nCommon cases:\n- **Edit conflicts**: a concurrent update, such as a stale version or ETag that doesn't match (optimistic locking).\n- **Duplicate creation**: trying to create something that already exists, such as a username or email that's already taken.\n- **Invalid state transitions**: for example, cancelling an order that has already shipped.\n- **Dependency violations**: deleting a resource that others still depend on.\n\nHow it differs from similar codes:\n- **400**: the request itself is malformed. With 409 the request is valid, but the resource's state blocks it.\n- **412 Precondition Failed**: an explicit conditional header, such as `If-Match`, failed.\n- **422**: the request is well-formed but semantically invalid.\n\nA good 409 response includes a body explaining the conflict and, ideally, how to resolve it, such as the current resource version or the conflicting field."
+ }
+]

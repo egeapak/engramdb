@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ebc2ae77-b1b0-4211-a181-c33986ab33f5\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"19c9c43a-c88c-4696-8035-e91c978ea777\", \"session_id\": \"e4cf67ae-83f5-421a-8b0f-029a3c672f6f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ebc2ae77-b1b0-4211-a181-c33986ab33f5\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b2ccdaf1-5f07-417e-beb3-654c8a84646c\", \"session_id\": \"e4cf67ae-83f5-421a-8b0f-029a3c672f6f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"843eb6b3-4286-4b9d-8cbe-6ae8ffb5fa58\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"c0c75db6-1375-4815-beac-ec28ae65b1c8\", \"session_id\": \"e4cf67ae-83f5-421a-8b0f-029a3c672f6f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"843eb6b3-4286-4b9d-8cbe-6ae8ffb5fa58\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a81a43d9-a573-4693-9e2b-c0ff2981c976\", \"session_id\": \"e4cf67ae-83f5-421a-8b0f-029a3c672f6f\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "A list is mutable and a tuple is immutable. That's the core difference. The rest follows from it.\n\n| | **List** | **Tuple** |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` or `1, 2, 3` |\n| Mutability | Mutable: you can add, remove and change items | Immutable: fixed once created |\n| Hashable | No, so it can't be a dict key or set member | Yes, if all its items are hashable |\n| Methods | Many (`append`, `remove`, `sort`, and so on) | Only `count` and `index` |\n| Performance | Slightly more memory, slightly slower | Smaller and a bit faster to create and iterate |\n\n```python\nnums = [1, 2, 3]\nnums[0] = 99          # fine\nnums.append(4)        # fine\n\npoint = (1, 2)\npoint[0] = 99         # TypeError: 'tuple' object does not support item assignment\n```\n\n**When to use which**\n- **List:** a collection that grows, shrinks or changes, usually of items of the same kind (for example, a list of usernames).\n- **Tuple:** a fixed record whose positions have meaning, like `(x, y)`, `(name, age)` or a function returning several values. Tuples also work as dict keys, such as `{(0, 0): \"origin\"}`.\n\n**Gotchas**\n- A single-item tuple needs a trailing comma: `(5,)`. Without it, `(5)` is just the integer 5.\n- Immutability is shallow. A tuple holding a list can still have that list modified: `t = (1, [2, 3]); t[1].append(4)` works."
+ }
+]

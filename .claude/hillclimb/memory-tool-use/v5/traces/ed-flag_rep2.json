@@ -1,0 +1,180 @@
+[
+ {
+  "role": "user",
+  "content": "Gate the checkout() function in src/api/checkout.py behind a new feature flag for the new checkout."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"efe646ad-776d-4c73-838a-4d3f9681ffa1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"5815ab67-538d-426d-a387-c8c9ddb8e5ed\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"efe646ad-776d-4c73-838a-4d3f9681ffa1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"69e9d105-3aa3-4df5-8515-4160ef06e15c\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4905f434-2aca-44be-9ab8-382b58b1b7ad\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"8b052a5e-fab6-4174-a7cc-0f4c9588c869\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4905f434-2aca-44be-9ab8-382b58b1b7ad\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\\n- [convention] API errors use problem+json (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Feature flags go through flags.is_on() (source: shared/human)\\\\n  \\\\n- [convention] API errors use problem+json (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"feba37f2-8010-466b-ad0e-599beab1690c\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e9958a35-2ee6-444f-820b-140b559f8b4d\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"5878676f-90ce-4e61-b4e4-bbc3b18e0f89\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e9958a35-2ee6-444f-820b-140b559f8b4d\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"adbcb345-6613-4203-8d55-30122d3abea6\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ce3f1bdb-c21f-4597-bd47-f8c4d7acd24c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"7ae0f4da-1e1a-471f-b03a-edec48a88aff\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ce3f1bdb-c21f-4597-bd47-f8c4d7acd24c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"cae14640-3b26-4728-86e6-563f693c6e40\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f63b5f50-33bb-452a-9c4a-3c5651a671c8\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"4557d3dc-738c-4b79-9bd0-4a1c99216d5b\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f63b5f50-33bb-452a-9c4a-3c5651a671c8\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"572c1211-be9c-47c8-acac-b2fce25a4727\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c878e03d-e445-46bf-83b1-1c1439759925\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"f52d7455-e1ca-451c-b549-8b4aff5875f0\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c878e03d-e445-46bf-83b1-1c1439759925\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a8bbd4df-5ce0-48ff-be76-a3fc333f1122\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a5458657-39e9-4420-aef7-3c20c0e224d8\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"8b6427b6-3c5e-4638-9395-318c2fb0db11\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a5458657-39e9-4420-aef7-3c20c0e224d8\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e159aae8-6e76-4150-9132-f47c7c6e5e7c\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dd68d827-c9d2-4ed1-9635-abcd11fb86c0\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"cfcd8e26-4427-4d8f-be75-650f733c31ad\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dd68d827-c9d2-4ed1-9635-abcd11fb86c0\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"84a965fd-d1b0-448d-9d2f-a6013f71adf8\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b0d1a295-d0af-429f-b8ea-c530e1062513\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"88f6258f-16d5-48eb-b2ac-5aeda33676a4\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b0d1a295-d0af-429f-b8ea-c530e1062513\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1a037886-c452-4e9d-b798-3a70807b2968\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e1522150-a147-495d-88de-1c970758a327\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"a3e9e14f-752b-4a90-a444-ace011b222e8\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e1522150-a147-495d-88de-1c970758a327\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"35a15f9e-9636-4f85-ba16-f823c0c75546\", \"session_id\": \"c1709d36-c46c-4994-9526-d354a856626f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"flags\\\\.|is_on\",\n \"path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d8-6526-7582-ad79-03926024471c.md:6:title: Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d8-6526-7582-ad79-03926024471c.md:9:# Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d8-6526-7582-ad79-03926024471c.md:11:**Summary:** Feature flags go through flags.is_on()\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d8-6526-7582-ad79-03926024471c.md:15:Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d8-6526-7582-ad79-03926024471c.md:19:- **Files:** `src/flags.py`, `flags.toml`\nsrc/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\nsrc/flags.py:7:def is_on(name):"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"feature flag\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Read feature flags only with `flags.is_on(\\\"name\\\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d8-6526-7582-ad79-03926024471c\",\"logical\":[],\"physical\":[\"src/flags.py\",\"flags.toml\"],\"provenance\":\"human\",\"score\":0.711120437840328,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.711120437840328,\"keyword\":0.962151802012715,\"relevance\":0.5,\"rerank\":0.8452931046485901,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5489791073551684,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Feature flags go through flags.is_on()\",\"tags\":[\"flags\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"problem\\\\+json|application/problem\",\n \"path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/src\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/api/errors.py:10:    resp.mimetype = \"application/problem+json\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"^from|^import\",\n \"path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/src/api\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/api/invoices.py:1:from flask import Blueprint, jsonify\nsrc/api/checkout.py:1:from flask import Blueprint, jsonify, request\nsrc/api/errors.py:1:from flask import jsonify"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/src/api/checkout.py\",\n \"old_string\": \"bp = Blueprint(\\\"checkout\\\", __name__)\\n\\n\\n@bp.post(\\\"/checkout\\\")\\ndef checkout():\\n\",\n \"new_string\": \"from src import flags\\nfrom src.api.errors import problem\\n\\nbp = Blueprint(\\\"checkout\\\", __name__)\\n\\n\\n@bp.post(\\\"/checkout\\\")\\ndef checkout():\\n    if not flags.is_on(\\\"new-checkout\\\"):\\n        return problem(404, \\\"Not Found\\\", \\\"New checkout is not enabled\\\")\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-flag-zzbucf59/ledgerline/src/api/checkout.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-flag-zzbucf59/ledgerline/flags.toml\",\n \"old_string\": \"invoice-pdf-v2 = false\\n\",\n \"new_string\": \"invoice-pdf-v2 = false\\nnew-checkout = false\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-flag-zzbucf59/ledgerline/flags.toml has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "`checkout()` in `src/api/checkout.py` is now gated behind a new `new-checkout` flag. I haven't run the code or any tests.\n\n- **Flag:** I declared `new-checkout = false` in `flags.toml`, so the flag is off by default. The check uses `flags.is_on(\"new-checkout\")`, following the project convention.\n- **Flag off:** the endpoint returns a 404 in problem+json format, using the existing `problem()` helper. The 404 is my choice. Say so if you'd rather return something else, such as a 503.\n- **Flag on:** the endpoint behaves as before.\n- **Scope:** the existing checkout logic is unchanged. It is the only code behind the flag, so there is no separate old-checkout path to fall back to.\n\nI didn't record any new memories. The flag and error conventions were already stored."
+ }
+]

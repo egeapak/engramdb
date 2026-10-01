@@ -1,0 +1,84 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"80db194c-0e3a-4eb5-8b1f-96879e81a16e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"50942e8b-1546-417b-af21-82f89acf2819\", \"session_id\": \"483fba46-7c10-4868-a075-22891452f7c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"80db194c-0e3a-4eb5-8b1f-96879e81a16e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"223a27ac-fbde-4ce4-8525-be6ea25d3a39\", \"session_id\": \"483fba46-7c10-4868-a075-22891452f7c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5760a163-e759-4220-ac62-09b6f60cb3ad\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1e950f39-3ca0-46fb-a2b5-a0de6036b588\", \"session_id\": \"483fba46-7c10-4868-a075-22891452f7c2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5760a163-e759-4220-ac62-09b6f60cb3ad\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"aa5b44e2-9806-4182-9b2f-0baf9c61ecbd\", \"session_id\": \"483fba46-7c10-4868-a075-22891452f7c2\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I'll look at how the gateway gets selected."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 4\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock|stub|gateway|LIVE\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -50\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f7d9-ec45-7272-93ff-a6a8bc4e2a3d.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f7d9-dbb1-7c40-8a93-bdf51be59844.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f7d9-c356-72c1-a174-89330babe8ed.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f7d9-bea3-7af3-9d6e-46ab038efe45.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f7d9-d467-75b2-9138-47fbb54f6e5b.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f7d9-f22e-7e02-9ff4-cbd83c9c11ad.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f7d9-ce26-7362-863b-5a5f893fb00a.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f7d9-e6c8-7b51-aab2-9daab59a1911.md\n.engramdb/memories/tax-uses-round-half-even_01a0f7d9-e147-7151-ba0d-372384f31294.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f7d9-c89f-74c1-a465-2f28196271d3.md\nMakefile\nREADME.md\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/flags.py flags.toml src/api/checkout.py; grep -rn \\\"environ\\\\|getenv\\\" src scripts\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "import tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\n[flags]\ninvoice-pdf-v2 = false\nfrom flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"Payments silently use a fake gateway unless PAYMENTS_LIVE=1 is set (user-reported)\",\n \"content\": \"The user reported that the app silently uses a fake payment gateway unless the env var PAYMENTS_LIVE=1 is set; it cost them about two hours to diagnose. When payments look fake or no real charges happen, check PAYMENTS_LIVE first. Not found in this checkout (2026-10-01): no reference to PAYMENTS_LIVE or a gateway in src/, so it may live in deployment config or another branch/repo.\",\n \"epistemic\": \"observation\",\n \"confidence\": 0.7,\n \"criticality\": 0.7,\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"hazard\"\n ],\n \"invalidated_by\": [\n  \"src/api/checkout.py\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7da-2d2b-7233-9340-cc56283befab\",\"created\":true,\"summary\":\"Payments silently use a fake gateway unless PAYMENTS_LIVE=1 is set (user-reported)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Two hours is a lot to lose to a silent default, sorry.\n\nI can't find the behavior in this checkout. There's no `PAYMENTS_LIVE`, gateway, fake or mock code anywhere in `src/` or `scripts/`. `/checkout` in `src/api/checkout.py` only sums the cart and returns `status: \"pending\"`, and the only env var read is `EXPORT_BUCKET` in `scripts/export.py`. The switch must live somewhere else, such as another branch, a separate service or package, or deployment config.\n\nI saved a note about it to EngramDB, marked as user-reported and unverified here, so it surfaces next time payments look fake.\n\nIf you point me to where the gateway is chosen, I can make it fail loudly. Two options:\n- Refuse to start without an explicit `PAYMENTS_LIVE` value, either `0` or `1`.\n- Log a loud warning at startup, and tag responses, whenever the fake gateway is active.\n\nI'd lean toward the first."
+ }
+]

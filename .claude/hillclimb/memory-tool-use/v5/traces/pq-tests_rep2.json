@@ -1,0 +1,57 @@
+[
+ {
+  "role": "user",
+  "content": "How do I run the tests in this repo?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9eee26cc-c684-4e96-9ef0-568370459511\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0b9e5bf7-7fc3-4740-bd0a-51579bcd1aa7\", \"session_id\": \"334c59fb-160c-4308-8f0c-b672408350bf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9eee26cc-c684-4e96-9ef0-568370459511\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"516ad61c-4b13-405c-981b-6c26d5da915a\", \"session_id\": \"334c59fb-160c-4308-8f0c-b672408350bf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"38a8ce6a-bf89-44da-9f66-c7812fd1a70d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"6508ecec-afb2-439b-82e9-960132029f22\", \"session_id\": \"334c59fb-160c-4308-8f0c-b672408350bf\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"38a8ce6a-bf89-44da-9f66-c7812fd1a70d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Run tests with make test-fast (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5284aba4-0d8e-4a73-9387-71ca26919497\", \"session_id\": \"334c59fb-160c-4308-8f0c-b672408350bf\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"tests\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Run `make test-fast` for the unit suite (skips Postgres tests). `make test` runs everything but needs `docker compose up db` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f7d6-b965-7aa1-838e-c87f578c15e0\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.49819469879963185,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.49819469879963185,\"keyword\":0.9917589057601423,\"relevance\":0.5,\"rerank\":-0.9241750240325928,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4699664044315718,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Run tests with make test-fast\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"{Makefile,package.json,pyproject.toml,Cargo.toml,go.mod,README*}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\npyproject.toml\nMakefile"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me verify against the Makefile."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"^test|docker|pytest\",\n \"path\": \"/tmp/mte-pq-tests-8j5k7zey/ledgerline/Makefile\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "3:test-fast:\n4:\tpytest -m \"not postgres\" -q\n6:test:\n7:\tpytest -q"
+ },
+ {
+  "role": "assistant",
+  "content": "Use `make test-fast` to run the unit suite. It runs `pytest -m \"not postgres\" -q`, so it skips the Postgres tests.\n\nTo run everything, use `make test`, which runs `pytest -q`. A project memory says the Postgres tests need the database running first, so start it with `docker compose up db`. The Makefile doesn't mention docker, so I haven't confirmed that part."
+ }
+]

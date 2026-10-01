@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4c7d35f2-780a-4a98-8197-8cf745543c44\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0ee91a61-c647-4678-93f3-8ee1964e3293\", \"session_id\": \"ed89c43a-6ba5-47e0-aa90-60cb74011af9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4c7d35f2-780a-4a98-8197-8cf745543c44\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1ddfc93f-85a0-49e8-ae6f-17d7089a3ddc\", \"session_id\": \"ed89c43a-6ba5-47e0-aa90-60cb74011af9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"9bbf2eaf-80ef-4144-a695-b3903c7ef374\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"12ec9f05-355c-4e31-8455-c588e69b3bbb\", \"session_id\": \"ed89c43a-6ba5-47e0-aa90-60cb74011af9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"9bbf2eaf-80ef-4144-a695-b3903c7ef374\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"db5b1bdb-b909-4b73-af32-9e39e150549e\", \"session_id\": \"ed89c43a-6ba5-47e0-aa90-60cb74011af9\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto <newbase> <upstream> [<branch>]` replays the commits that are in `<branch>` but not in `<upstream>` on top of `<newbase>`. Plain `git rebase` can only move a branch onto the upstream it was forked from. `--onto` lets you pick the new base and the cut point separately.\n\n**Example: move a branch off another feature branch**\n\nYou branched `feature-b` from `feature-a`, but `feature-a` isn't ready. You want `feature-b` to sit directly on `main`:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\n```bash\ngit rebase --onto main feature-a feature-b\n```\n\n- `main` is the new base.\n- `feature-a` is the old base. Commits reachable from it (C, D) are excluded.\n- `feature-b` is the branch to move. It defaults to the current branch.\n\nResult:\n\n```\nmain:       A---B---E'---F'\n                \\\nfeature-a:       C---D\n```\n\nE and F are replayed as new commits E' and F' with new hashes. `feature-a` is untouched.\n\n**Other common uses**\n\n- **Drop commits from the middle or start of a branch:** `git rebase --onto A~3 A~1` removes the commits between those two points.\n- **Transplant a range:** `git rebase --onto main abc123 def456` moves only the commits after `abc123` up to `def456`.\n\nIf you've already pushed the branch, rebasing rewrites its history, so you'll need `git push --force-with-lease` afterward."
+ }
+]

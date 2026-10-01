@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7fa2a131-d0fd-442e-b479-9d290cf65701\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"37b411c7-a56c-4e5c-8895-d61c5c6e0edb\", \"session_id\": \"2594e1ff-76be-48c1-83ba-777ba1233158\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7fa2a131-d0fd-442e-b479-9d290cf65701\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"403ac810-6d95-41be-b6f7-a4da91ed8879\", \"session_id\": \"2594e1ff-76be-48c1-83ba-777ba1233158\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"19461b48-cd8b-425a-b663-c406fd7eca32\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"c37c6f37-283d-43e4-ba99-719399e1e3f1\", \"session_id\": \"2594e1ff-76be-48c1-83ba-777ba1233158\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"19461b48-cd8b-425a-b663-c406fd7eca32\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a4158959-6540-4e51-9cae-a7707049ec72\", \"session_id\": \"2594e1ff-76be-48c1-83ba-777ba1233158\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"jobs enqueue celery background jobs\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must go through jobs.enqueue(); never call celery directly\",\n \"content\": \"Convention: all background jobs must be dispatched via `jobs.enqueue()`. Never call celery directly (e.g. task.delay / apply_async / celery app APIs) from application code.\",\n \"tags\": [\n  \"jobs\",\n  \"celery\",\n  \"background-jobs\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f7d9-61e7-7482-abb6-8d090c7358f9\",\"created\":true,\"summary\":\"All background jobs must go through jobs.enqueue(); never call celery directly\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Saved. From now on, background jobs go through `jobs.enqueue()`, and I won't call celery directly. I stored this as a project convention in EngramDB, so later sessions in this project will see it."
+ }
+]
