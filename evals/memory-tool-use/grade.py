@@ -1,0 +1,308 @@
+"""Grading for the memory-tool-use eval.
+
+Every check is a program; there is no LLM judge. Each property is its own
+metric so one score cannot hide another:
+
+    query_before_act     an EngramDB query/get/list call comes before the
+                         final answer, or before the first Edit/Write
+    fact_used            the final answer or the workspace diff contains an
+                         expected string (passes when a hook supplied the fact)
+    explicit_create      a new or changed memory contains a create term
+    implicit_capture     same check; a rate only, never part of `pass`
+    no_false_create      no new memory appeared where none was expected
+    revise               challenge/update targeted the contradicted memory
+    no_spurious_revise   no challenge/update where nothing was contradicted
+    pass                 every applicable metric above passed, except
+                         implicit_capture
+
+A metric is omitted from a row when it does not apply to the case.
+"""
+
+import hashlib
+import json
+import math
+import re
+import subprocess
+from pathlib import Path
+
+CONSULT = {"query", "get", "list"}
+REVISE = {"challenge", "update"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+MEMORY_TOOL = re.compile(r"^mcp__(?P<server>[^_].*?)__(?P<op>[a-z_]+)$")
+
+METRICS = [
+    {"id": "pass", "label": "pass", "kind": "binary"},
+    {"id": "query_before_act", "label": "query first", "kind": "binary"},
+    {"id": "fact_used", "label": "fact used", "kind": "binary"},
+    {"id": "explicit_create", "label": "expl. create", "kind": "binary"},
+    {"id": "implicit_capture", "label": "impl. capture", "kind": "binary"},
+    {"id": "no_false_create", "label": "no false create", "kind": "binary"},
+    {"id": "revise", "label": "revise", "kind": "binary"},
+    {"id": "no_spurious_revise", "label": "no spur. revise", "kind": "binary"},
+]
+PERF_FIELDS = [
+    {"id": "memory_calls", "label": "memory calls"},
+    {"id": "cost_usd", "label": "cost", "unit": "$"},
+    {"id": "latency_s", "label": "latency", "unit": "s"},
+    {"id": "turns", "label": "turns"},
+    {"id": "hook_hit", "label": "hook hit"},
+    {"id": "in_tokens", "label": "in tok"},
+    {"id": "out_tokens", "label": "out tok"},
+]
+
+
+def memory_op(tool_name):
+    """Return the EngramDB operation for an MCP tool name, else None."""
+    m = MEMORY_TOOL.match(tool_name or "")
+    if m and ("engram" in m["server"] or "memory" in m["server"]):
+        return m["op"]
+    return None
+
+
+# ---------------------------------------------------------------- end state
+
+def _memory_files(ws, env):
+    roots = [Path(ws) / ".engramdb", Path(env["ENGRAMDB_DATA_DIR"])]
+    for root in roots:
+        if root.exists():
+            for p in root.rglob("*.md"):
+                if "memories" in p.parts or "personal" in p.parts:
+                    yield p
+
+
+def snapshot_store(ws, env):
+    """Map every memory file to (sha256, text)."""
+    snap = {}
+    for p in _memory_files(ws, env):
+        text = p.read_text(errors="replace")
+        snap[str(p)] = (hashlib.sha256(text.encode()).hexdigest(), text)
+    return snap
+
+
+def workspace_diff(ws, env):
+    """The run's changes, including new files, excluding the store."""
+    subprocess.run(["git", "add", "-A"], cwd=ws, env=env, capture_output=True)
+    p = subprocess.run(["git", "diff", "--cached", "--", ".", ":(exclude).engramdb"],
+                       cwd=ws, env=env, capture_output=True, text=True)
+    return p.stdout
+
+
+# ---------------------------------------------------------------- transcript
+
+def parse_events(events):
+    """Flatten stream-json events into ordered steps and side metrics."""
+    steps, hooks, init = [], [], {}
+    results = {}
+    for e in events:
+        t, sub = e.get("type"), e.get("subtype", "")
+        if t == "system" and sub == "init":
+            init = e
+        elif t == "system" and "hook" in sub:
+            hooks.append(e)
+        elif t == "assistant":
+            for b in e.get("message", {}).get("content", []):
+                if b.get("type") == "tool_use":
+                    steps.append({"kind": "tool", "id": b["id"], "name": b["name"], "input": b.get("input", {})})
+                elif b.get("type") == "text":
+                    steps.append({"kind": "text", "text": b["text"]})
+                elif b.get("type") == "thinking" and b.get("thinking"):
+                    steps.append({"kind": "thinking", "text": b["thinking"]})
+        elif t == "user":
+            content = e.get("message", {}).get("content", [])
+            for b in content if isinstance(content, list) else []:
+                if b.get("type") == "tool_result":
+                    c = b.get("content")
+                    if isinstance(c, list):
+                        c = "\n".join(x.get("text", "") for x in c if isinstance(x, dict))
+                    results[b["tool_use_id"]] = {"text": c or "", "is_error": bool(b.get("is_error"))}
+    for s in steps:
+        if s["kind"] == "tool":
+            s["result"] = results.get(s["id"], {"text": "", "is_error": False})
+    final = next((e for e in reversed(events) if e.get("type") == "result"), {})
+    return steps, hooks, init, final
+
+
+def to_trace(steps, hooks, prompt):
+    trace = [{"role": "user", "content": prompt}]
+    for h in hooks:
+        trace.append({"role": "system", "content": "[hook] " + json.dumps(h)[:4000]})
+    thinking = None
+    for s in steps:
+        if s["kind"] == "thinking":
+            thinking = s["text"]
+        elif s["kind"] == "text":
+            trace.append({"role": "assistant", "content": s["text"], **({"thinking": thinking} if thinking else {})})
+            thinking = None
+        else:
+            trace.append({"role": "tool_call", "name": s["name"], "content": json.dumps(s["input"], indent=1),
+                          **({"thinking": thinking} if thinking else {})})
+            thinking = None
+            trace.append({"role": "tool_result", "content": s["result"]["text"][:20000]})
+    return trace
+
+
+# ---------------------------------------------------------------- grading
+
+def _contains_any(text, needles):
+    low = text.lower()
+    return any(n.lower() in low for n in needles)
+
+
+def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
+    exp = case["expect"]
+    steps, hooks, init, final = parse_events(events)
+    tools = [s for s in steps if s["kind"] == "tool"]
+    mem = [(i, memory_op(s["name"]), s) for i, s in enumerate(tools) if memory_op(s["name"])]
+    first_edit = next((i for i, s in enumerate(tools) if s["name"] in EDIT_TOOLS), None)
+    answer = final.get("result") or ""
+    g = {}
+
+    if exp["query"] is True:
+        g["query_before_act"] = int(any(op in CONSULT and (first_edit is None or i < first_edit) for i, op, _ in mem))
+    if exp["facts"]:
+        ok = _contains_any(answer + "\n" + diff, exp["facts"])
+        if case["id"] == "ed-migration-typo":  # the applied migration must stay untouched
+            ok = ok and "migrations/0007_add_customers.sql" not in diff
+        g["fact_used"] = int(ok)
+
+    new_or_changed = [text for path, (sha, text) in after.items() if before.get(path, (None,))[0] != sha]
+    new_files = [p for p in after if p not in before]
+    if exp["create"] is True:
+        captured = any(_contains_any(t, exp["create_terms"]) for t in new_or_changed)
+        g["implicit_capture" if "implicit" in case["tags"] else "explicit_create"] = int(captured)
+    elif exp["create"] is False:
+        g["no_false_create"] = int(not new_files)
+
+    revise_calls = [s for _, op, s in mem if op in REVISE]
+    if exp["revise"] is True:
+        target = seeded_ids.get(case.get("target"), "")
+        hit = any(target and _ids_match(target, s["input"]) for s in revise_calls)
+        target_changed = any(target[:8] in path and before.get(path, (None,))[0] != sha
+                             for path, (sha, _) in after.items()) if target else False
+        g["revise"] = int(hit or target_changed)
+    elif exp["revise"] is False:
+        g["no_spurious_revise"] = int(not revise_calls)
+
+    graded = [v for k, v in g.items() if k != "implicit_capture"]
+    g["pass"] = int(all(graded)) if graded else 1
+
+    usage = final.get("usage", {}) or {}
+    target_title = _target_title(case)
+    hook_text = json.dumps(hooks)
+    row = {
+        "prompt_id": case["id"],
+        "prompt": case["prompt"],
+        "tags": case["tags"],
+        "model": _served_model(events, init),
+        "stop_reason": final.get("subtype"),
+        "status": "ok",
+        "grade": g,
+        "memory_calls": len(mem),
+        "cost_usd": final.get("total_cost_usd"),
+        "latency_s": round(latency_s, 2),
+        "turns": final.get("num_turns"),
+        "hook_hit": (int(bool(target_title) and target_title in hook_text) if case.get("target") else None),
+        "in_tokens": (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                      + usage.get("cache_creation_input_tokens", 0)),
+        "out_tokens": usage.get("output_tokens"),
+        "usage": usage,
+        "meta": {"gaps": gap_signals(tools, init, hooks), "model_usage": final.get("modelUsage"),
+                 "claude_code_version": init.get("claude_code_version")},
+    }
+    return row, to_trace(steps, hooks, case["prompt"])
+
+
+def _ids_match(target, tool_input):
+    blob = json.dumps(tool_input)
+    return any(tok in blob for tok in {target, target[:8], target[:12]} if len(tok) >= 8)
+
+
+_TITLES = None
+
+
+def _target_title(case):
+    global _TITLES
+    if _TITLES is None:
+        seeds = json.loads((Path(__file__).parent / "seed_memories.json").read_text())
+        _TITLES = {m["key"]: m["title"] for m in seeds}
+    return _TITLES.get(case.get("target"))
+
+
+def _served_model(events, init):
+    for e in events:
+        if e.get("type") == "assistant" and e.get("message", {}).get("model"):
+            return e["message"]["model"]
+    return init.get("model")
+
+
+# ---------------------------------------------------------------- tool gaps
+
+EMPTY_RESULT = re.compile(r'"(results|memories)"\s*:\s*\[\s*\]|no (matching )?memories|0 results', re.I)
+
+
+def gap_signals(tools, init, hooks):
+    """Evidence that EngramDB lacked a tool, parameter, or command."""
+    available = set(init.get("tools", []))
+    sig = {"memory_calls": [], "mcp_errors": [], "empty_queries": [], "bash_workarounds": [],
+           "direct_store_access": [], "unknown_tools": [], "hook_events": len(hooks),
+           "memory_tools_available": sorted(n for n in available if memory_op(n))}
+    for s in tools:
+        op = memory_op(s["name"])
+        res = s["result"]
+        if op:
+            sig["memory_calls"].append({"op": op, "input": s["input"], "is_error": res["is_error"],
+                                        "result_head": res["text"][:600]})
+            if res["is_error"]:
+                sig["mcp_errors"].append({"op": op, "input": s["input"], "error": res["text"][:1000]})
+            elif op in CONSULT and EMPTY_RESULT.search(res["text"][:2000]):
+                sig["empty_queries"].append({"op": op, "input": s["input"]})
+        elif s["name"] == "Bash" and re.search(r"engramdb|\.engramdb", s["input"].get("command", "")):
+            sig["bash_workarounds"].append({"command": s["input"].get("command", ""), "result_head": res["text"][:600]})
+        elif s["name"] in {"Read", "Grep", "Glob"} and ".engramdb" in json.dumps(s["input"]):
+            sig["direct_store_access"].append({"tool": s["name"], "input": s["input"]})
+        if available and s["name"] not in available:
+            sig["unknown_tools"].append(s["name"])
+        if res["is_error"] and "No such tool" in res["text"]:
+            sig["unknown_tools"].append(s["name"])
+    return sig
+
+
+# ---------------------------------------------------------------- summary
+
+def write_state(flow_dir):
+    flow_dir.mkdir(parents=True, exist_ok=True)
+    state = flow_dir / "_state.json"
+    data = json.loads(state.read_text()) if state.exists() else {}
+    data.update({"metrics": METRICS, "perf_fields": PERF_FIELDS})
+    state.write_text(json.dumps(data, indent=1))
+
+
+def wilson(k, n, z=1.96):
+    if n == 0:
+        return (math.nan, math.nan)
+    p = k / n
+    d = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / d
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0, c - h), min(1, c + h))
+
+
+def summarize(out_dir):
+    rows = [json.loads(l) for l in (out_dir / "results.jsonl").read_text().splitlines() if l.strip()]
+    errs = (out_dir / "errors.jsonl")
+    n_err = len(errs.read_text().splitlines()) if errs.exists() else 0
+    lines = [f"{out_dir.name}: {len(rows)} graded rows, {n_err} failed attempts"]
+    for m in METRICS:
+        vals = [r["grade"][m["id"]] for r in rows if m["id"] in r["grade"]]
+        if vals:
+            lo, hi = wilson(sum(vals), len(vals))
+            lines.append(f"  {m['id']:<20} {sum(vals)/len(vals):6.1%}  ({sum(vals)}/{len(vals)}, 95% CI {lo:.0%}-{hi:.0%})")
+    costs = [r["cost_usd"] for r in rows if isinstance(r.get("cost_usd"), (int, float))]
+    lat = [r["latency_s"] for r in rows]
+    if costs:
+        lines.append(f"  cost: ${sum(costs):.2f} total, ${sum(costs)/len(costs):.3f}/case; latency mean {sum(lat)/len(lat):.1f}s")
+    return "\n".join(lines)
+
+
+def print_summary(out_dir):
+    print(summarize(out_dir))
