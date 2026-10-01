@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "We removed the Makefile; tests run with `just test` now. How do I run only the fast tests?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"24aaaa52-c3ca-439e-b852-0bf60be21c6e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"0a1d9062-d321-43cb-8d6e-ff7041541fdd\", \"session_id\": \"daae3f77-d5d6-4500-b2ca-6c66b404739b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"24aaaa52-c3ca-439e-b852-0bf60be21c6e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4e8edbd4-e74b-4316-8e06-585c799785ea\", \"session_id\": \"daae3f77-d5d6-4500-b2ca-6c66b404739b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"98840c8f-fd75-4c91-9939-355ba5873cb1\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"aefc2d7f-9086-41bf-b598-59faac7fa612\", \"session_id\": \"daae3f77-d5d6-4500-b2ca-6c66b404739b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"98840c8f-fd75-4c91-9939-355ba5873cb1\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Test command (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Test command (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f5d4f949-0a11-4af3-93e0-c8f07c7f14d9\", \"session_id\": \"daae3f77-d5d6-4500-b2ca-6c66b404739b\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/{justfile,Justfile,.justfile}\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No files found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"test command\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"The repository has two kinds of tests: fast unit tests and integration tests that talk to a real Postgres instance, marked with the postgres marker. For day-to-day work run make test-fast, which skips the Postgres tests. The full suite, make test, needs a database: run docker compose up db first, or the Postgres tests fail on connection errors.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f805-5e66-7222-baad-82556edd96d6\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.753132312708255,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.753132312708255,\"keyword\":0.9004350538581091,\"relevance\":0.5,\"rerank\":1.381290078163147,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5895691288050167,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Test command\",\"tags\":[\"testing\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f805-82f9-75b1-bcba-03c12794e048\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.17040567588533195,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.17040567588533195,\"keyword\":0.032231306967303114,\"relevance\":0.5,\"rerank\":-2.2855865955352783,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.36327844998570896,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls -a && cat justfile Justfile .justfile 2>/dev/null; grep -rn \\\"postgres\\\" --include=*.toml --include=*.ini --include=*.cfg --include=conftest.py . 2>/dev/null | head\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat Makefile; cat pyproject.toml; git log --stat --oneline | head -30\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".PHONY: test test-fast\n\ntest-fast:\n\tpytest -m \"not postgres\" -q\n\ntest:\n\tpytest -q\n[project]\nname = \"ledgerline\"\nversion = \"2026.9.1\"\nrequires-python = \">=3.10\"\ndependencies = [\"flask>=3.0\", \"structlog>=24.1\", \"requests>=2.32\"]\n\n[project.optional-dependencies]\ndev = [\"pytest>=8.0\"]\n7b54b0d seed\n .engramdb/.gitignore                               |  3 ++\n .engramdb/config.toml                              |  2 ++\n .engramdb/manifest.toml                            | 14 +++++++++\n ...-format_01a0f805-7bce-7ca1-b65c-2064c7a998cf.md | 36 ++++++++++++++++++++++\n ...caution_01a0f805-757a-7d72-9a26-1acbb42ad198.md | 36 ++++++++++++++++++++++\n ...g-usage_01a0f805-6959-7b43-9fea-123e4471d257.md | 36 ++++++++++++++++++++++\n ...-caveat_01a0f805-534e-7ce1-829c-20f48f72442b.md | 36 ++++++++++++++++++++++\n ...-choice_01a0f805-59e2-77b3-96b0-24670a873fdc.md | 36 ++++++++++++++++++++++\n ...n-rules_01a0f805-630b-7513-a999-fae69834040a.md | 36 ++++++++++++++++++++++\n ...ntation_01a0f805-4dbb-7db0-96dc-987f24e45c96.md | 36 ++++++++++++++++++++++\n ...process_01a0f805-82f9-75b1-bcba-03c12794e048.md | 36 ++++++++++++++++++++++\n ...ng-rule_01a0f805-6f4b-7712-9972-ee9d751e8f13.md | 36 ++++++++++++++++++++++\n ...command_01a0f805-5e66-7222-baad-82556edd96d6.md | 36 ++++++++++++++++++++++\n 13 files changed, 379 insertions(+)\n57ecb7e fixture\n .claude/CLAUDE.md                   |  1 +\n .claude/ENGRAM.md                   | 19 +++++++++++++++++++\n Makefile                            |  7 +++++++\n README.md                           | 16 ++++++++++++++++\n flags.toml                          |  2 ++\n migrations/0001_create_invoices.sql |  1 +\n migrations/0002_add_tax.sql         |  1 +\n migrations/0003_add_ledger_ref.sql  |  1 +\n migrations/0004_create_lines.sql    |  1 +\n migrations/0005_create_refunds.sql  |  1 +\n migrations/0006_index_customer.sql  |  1 +\n migrations/0007_add_customers.sql   |  5 +++++\n pyproject.toml                      |  8 ++++++++\n scripts/export.py                   | 15 +++++++++++++++"
+ },
+ {
+  "role": "assistant",
+  "content": "In this checkout I can't find a justfile, and the Makefile is still there. I can't confirm what your `just` recipe for fast tests is called. The checkout may be behind, or the change may be on another branch.\n\nThe Makefile's `test-fast` target ran this, and it works without `make`:\n\n```\npytest -m \"not postgres\" -q\n```\n\nThis skips the tests marked `postgres`, which need a real database. The full suite (`pytest -q`) needs one running first, via `docker compose up db`.\n\nIf your justfile has a fast-test recipe, it's probably named `test-fast`, but check with `just --list`. If you'd like, I can add a justfile with these recipes and remove the Makefile.\n\nThe saved \"Test command\" memory still says `make test-fast` and `make test`, so it's out of date. I haven't changed it, because I don't know the final recipe names. Tell me what they are and I'll update it."
+ }
+]

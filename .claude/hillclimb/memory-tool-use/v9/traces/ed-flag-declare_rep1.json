@@ -1,0 +1,154 @@
+[
+ {
+  "role": "user",
+  "content": "Add a new feature flag called bulk-refunds and use it to gate refund() in src/billing/refunds.py."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dc97ba9b-e861-45a2-949f-958d30cf89b6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"098a9d0c-40dc-4908-ad3f-cbd82229da73\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dc97ba9b-e861-45a2-949f-958d30cf89b6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c0073ab8-b60b-4d73-9dca-e28dc5da0bdf\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1a42896d-77f5-4df7-8618-ed79599d5c5e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"ff72650e-6854-405e-9cc2-c85b74abe1a2\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1a42896d-77f5-4df7-8618-ed79599d5c5e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flag usage (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Feature flag usage (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"741c2242-cc03-49de-b22b-8e13413cb72b\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"585faa69-bf23-40cd-9b6d-d6a52336b6c8\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"8bb00d30-95d2-463d-b0d1-0b70696043f7\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"585faa69-bf23-40cd-9b6d-d6a52336b6c8\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"57007a89-330f-43c9-9758-9c443d41e6fb\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0693ced1-22f1-4132-aab8-cd540f16a5c5\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"59c51d61-5011-4a89-8175-b1bf3e5da584\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0693ced1-22f1-4132-aab8-cd540f16a5c5\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a34df2e3-fbee-46e6-861a-729bfa0d6e2a\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3546d82b-1541-4173-8b05-0a56600c400e\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"3195c4a5-8117-49a7-8423-01d019419be8\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3546d82b-1541-4173-8b05-0a56600c400e\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"57675fed-bfa8-4dd7-96cd-138eaccd19b6\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"769a412a-3dcf-4a9b-977e-e3cf75fb6dbc\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"0e58174d-3c70-4bb6-8c13-18fcda4ea3bc\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"769a412a-3dcf-4a9b-977e-e3cf75fb6dbc\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c59049b2-f133-48ca-b9f2-5a3a26809012\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"89bde2f2-3661-4cf9-9aac-20d6cc371285\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"27aa6857-b17b-4f52-b6d3-f8d2802fb6cf\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"89bde2f2-3661-4cf9-9aac-20d6cc371285\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c21b0018-4207-431d-ac1a-5d51a0278eee\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2dee9e0e-6668-4f3b-914b-e1c125b0c7f7\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"eb437c86-0d65-4f45-a09e-0ce5d47d96a7\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2dee9e0e-6668-4f3b-914b-e1c125b0c7f7\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4e0e062c-c454-4410-b9ce-6f193e90003d\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5df732f8-7f58-4ea5-9fc0-a80f7427585c\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"bf18d719-3955-4613-8ac9-6e497e5ee66a\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5df732f8-7f58-4ea5-9fc0-a80f7427585c\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d5f9d04d-f7df-4774-92a0-9d3447257f07\", \"session_id\": \"b6513c98-2e7c-45a1-8ccb-53650bf0ed83\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"feature flag\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\\\"name\\\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f801-9859-7310-a6f2-f6fe31716717\",\"logical\":[],\"physical\":[\"src/flags.py\",\"flags.toml\"],\"provenance\":\"human\",\"score\":0.7889287645993042,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.7889287645993042,\"keyword\":0.9619953583504489,\"relevance\":0.5,\"rerank\":1.6296278238296509,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6128032331574695,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Feature flag usage\",\"tags\":[\"flags\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"flag|FLAG\",\n \"-i\": true,\n \"output_mode\": \"content\",\n \"head_limit\": 50\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "flags.toml:1:[flags]\nsrc/flags.py:4:_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\nsrc/flags.py:8:    return bool(_FLAGS.get(name, False))\nsrc/flags.py:11:def all_flags():\nsrc/flags.py:12:    return dict(_FLAGS)\n.engramdb/memories/feature-flag-usage_01a0f801-9859-7310-a6f2-f6fe31716717.md:6:title: Feature flag usage\n.engramdb/memories/feature-flag-usage_01a0f801-9859-7310-a6f2-f6fe31716717.md:9:# Feature flag usage\n.engramdb/memories/feature-flag-usage_01a0f801-9859-7310-a6f2-f6fe31716717.md:11:**Summary:** Feature flag usage\n.engramdb/memories/feature-flag-usage_01a0f801-9859-7310-a6f2-f6fe31716717.md:15:Feature flags let us ship code dark and turn it on per environment without a deploy. Read a flag only through flags.is_on(\"name\") from src/flags.py, never by reading the TOML file yourself. Flag names are kebab-case, and every flag must be declared in flags.toml with its default value before code reads it, or is_on() returns False silently.\n.engramdb/memories/feature-flag-usage_01a0f801-9859-7310-a6f2-f6fe31716717.md:19:- **Files:** `src/flags.py`, `flags.toml`\n.engramdb/memories/feature-flag-usage_01a0f801-9859-7310-a6f2-f6fe31716717.md:20:- **Tags:** `flags`"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/src/billing/refunds.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom .invoices import Invoice\n2\t\n3\t\n4\tdef refund(invoice: Invoice, amount_cents: int):\n5\t    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\n6\t        raise ValueError(\"refund exceeds invoice total\")\n7\t    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\n8\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"import|is_on\",\n \"path\": \"/tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/src\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/refunds.py:1:from .invoices import Invoice\nsrc/billing/invoices.py:1:from dataclasses import dataclass, field\nsrc/billing/invoices.py:3:import requests\nsrc/billing/invoices.py:4:import structlog\nsrc/billing/money.py:1:from dataclasses import dataclass\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/api/invoices.py:1:from flask import Blueprint, jsonify\nsrc/api/checkout.py:1:from flask import Blueprint, jsonify, request\nsrc/api/errors.py:1:from flask import jsonify\nsrc/flags.py:1:import tomllib\nsrc/flags.py:2:from pathlib import Path\nsrc/flags.py:7:def is_on(name):"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/flags.toml\",\n \"old_string\": \"invoice-pdf-v2 = false\\n\",\n \"new_string\": \"invoice-pdf-v2 = false\\nbulk-refunds = false\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/flags.toml has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/src/billing/refunds.py\",\n \"old_string\": \"from .invoices import Invoice\\n\\n\\ndef refund(invoice: Invoice, amount_cents: int):\\n\",\n \"new_string\": \"from .. import flags\\nfrom .invoices import Invoice\\n\\n\\ndef refund(invoice: Invoice, amount_cents: int):\\n    if not flags.is_on(\\\"bulk-refunds\\\"):\\n        raise RuntimeError(\\\"refunds are disabled: bulk-refunds flag is off\\\")\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-flag-declare-n0gw24rc/ledgerline/src/billing/refunds.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "I added the `bulk-refunds` flag and gated `refund()` on it. I haven't run any tests or imported the module.\n\n- **`flags.toml`**: declared `bulk-refunds = false`. The project's flag convention says a flag must be declared before code reads it, or `is_on()` silently returns False.\n- **`src/billing/refunds.py`**: `refund()` now checks `flags.is_on(\"bulk-refunds\")` first. It imports `flags` with `from .. import flags`, since `src/flags.py` is the only sanctioned way to read flags.\n\nWith the flag off, `refund()` raises `RuntimeError(\"refunds are disabled: bulk-refunds flag is off\")`. You didn't say what the off-state should do, so I chose raising an error. If you'd rather it return `None` or fall back to some existing behaviour, that's a small change.\n\nSince the default is `false`, `refund()` is now disabled everywhere until the flag is turned on. Set it to `true` in `flags.toml` for any environment that should keep issuing refunds."
+ }
+]

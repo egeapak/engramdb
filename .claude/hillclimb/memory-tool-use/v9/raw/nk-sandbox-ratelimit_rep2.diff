@@ -1,0 +1,21 @@
+diff --git a/tests/test_payments.py b/tests/test_payments.py
+index dc6ea9f..8399cb6 100644
+--- a/tests/test_payments.py
++++ b/tests/test_payments.py
+@@ -1,7 +1,11 @@
++import time
++
+ import pytest
+ import requests
+ 
+ SANDBOX = "https://sandbox.payments.example/v1/charges"
++# The sandbox rate-limits at 5 requests/second, so space calls >= 0.2s apart.
++SANDBOX_CALL_INTERVAL = 0.25
+ 
+ 
+ @pytest.mark.integration
+@@ -9,3 +13,4 @@ def test_charges_roundtrip():
+     for amount in (100, 250, 999, 1200):
+         resp = requests.post(SANDBOX, json={"amount_cents": amount}, timeout=10)
+         assert resp.status_code == 201
++        time.sleep(SANDBOX_CALL_INTERVAL)

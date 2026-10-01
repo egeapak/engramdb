@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What is 17 * 23?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b4d6163a-c67c-4e8a-a6f1-31def3709a5b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"9180e753-bfe2-4a61-8f64-58f4c370ed22\", \"session_id\": \"40fb4810-8bb4-46cb-82b3-24e4066e1394\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b4d6163a-c67c-4e8a-a6f1-31def3709a5b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2f5cdfee-b8c5-4019-af6c-1155eb49d4f7\", \"session_id\": \"40fb4810-8bb4-46cb-82b3-24e4066e1394\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3b35af56-2f20-4c30-b27e-2625fde444e0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a8ff8f91-d347-44e3-9d9d-bf3fb3f66890\", \"session_id\": \"40fb4810-8bb4-46cb-82b3-24e4066e1394\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3b35af56-2f20-4c30-b27e-2625fde444e0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3ea388d3-c246-4ebd-81ab-f9083f3c5c58\", \"session_id\": \"40fb4810-8bb4-46cb-82b3-24e4066e1394\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "17 \u00d7 23 = **391**\n\n(17 \u00d7 20 = 340, plus 17 \u00d7 3 = 51, giving 391.)"
+ }
+]

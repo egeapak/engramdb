@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "What's the process for cutting a release?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"45544c1c-1d18-4b8c-ae45-eab3d296e29e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"51c3198f-0cdf-4e2e-aa76-e54909f50e1c\", \"session_id\": \"93b8e68a-3602-447d-80cd-3e4422ffbbe0\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"45544c1c-1d18-4b8c-ae45-eab3d296e29e\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ce3381cc-1de4-4d96-9415-022e776fac0d\", \"session_id\": \"93b8e68a-3602-447d-80cd-3e4422ffbbe0\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a844bd31-2e89-42c2-9ea8-bfe4ebb2c683\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"ffd612a4-9a05-460f-b702-e43a89dcc514\", \"session_id\": \"93b8e68a-3602-447d-80cd-3e4422ffbbe0\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a844bd31-2e89-42c2-9ea8-bfe4ebb2c683\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"65d30677-0cfe-45ac-8e71-a106f7cb5273\", \"session_id\": \"93b8e68a-3602-447d-80cd-3e4422ffbbe0\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release process\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f802-6491-7351-aa6b-397e5b798d71\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.797842604808786,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.797842604808786,\"keyword\":0.9406272973781113,\"relevance\":0.5,\"rerank\":1.8134064674377441,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.6254328430140159,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"We looked at several logging setups during the 2026 observability work and settled on one library for every module so that log processing in production stays uniform. Use structlog everywhere (log = structlog.get_logger()) and never the stdlib logging module. Event keys are snake_case, and identifiers go in keyword fields, not in the message string.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f802-3c8a-7122-b17a-b2dd9df93dd3\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.14554958103223484,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.14554958103223484,\"keyword\":0.0316656545113515,\"relevance\":0.5,\"rerank\":-2.993328094482422,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.34707139396492054,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Logging library choice\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":2}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"release\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\",\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 1 file\n.engramdb/memories/release-process_01a0f802-6491-7351-aa6b-397e5b798d71.md"
+ },
+ {
+  "role": "assistant",
+  "content": "Per the project's stored release convention, releases are fully automated:\n\n1. Make sure what you want to ship is on `main`.\n2. Push a git tag named `vYYYY.MM.N` on `main`. `N` is the release counter within that month, so `v2026.09.2` is the second release of September 2026.\n3. CI then builds the artifacts, runs the full test suite and publishes the release.\n\nDon't publish packages by hand.\n\nThis comes from a single memory, and I found no release scripts, CI config or docs in the repo to check it against. I haven't confirmed the tag format, or whether `N` starts at 0 or 1, against the CI setup. For October 2026, the first tag would probably be `v2026.10.1`."
+ }
+]

@@ -1,0 +1,57 @@
+[
+ {
+  "role": "user",
+  "content": "FYI the release process changed: we now release with `make release`, which tags and publishes for us."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d7b7d5af-e878-466f-b643-d3fa1282871f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"aa274064-14dd-4b7d-9676-7cfb15f90175\", \"session_id\": \"99a5bd7c-4e7b-4407-9a16-5cd569cfea62\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d7b7d5af-e878-466f-b643-d3fa1282871f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"41a465b6-e4f1-4657-a646-0e2273d43a98\", \"session_id\": \"99a5bd7c-4e7b-4407-9a16-5cd569cfea62\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5faab201-a8f7-4f15-80b0-3f051fc5ca02\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"a487a271-d52f-4abb-8660-54a4968ad80b\", \"session_id\": \"99a5bd7c-4e7b-4407-9a16-5cd569cfea62\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5faab201-a8f7-4f15-80b0-3f051fc5ca02\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (1):\\\\n- [convention] Release process (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c408526c-8ade-4cac-a418-ac467b65603d\", \"session_id\": \"99a5bd7c-4e7b-4407-9a16-5cd569cfea62\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"release\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Releases are automated end to end and nobody publishes packages by hand any more. To cut a release, push a git tag in the form vYYYY.MM.N, for example v2026.09.2, on main. CI then builds the artifacts, runs the full test suite and publishes the release; never publish by hand.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f805-df40-7c83-9c57-b96db0c28d10\",\"logical\":[],\"physical\":[\"/\"],\"provenance\":\"human\",\"score\":0.6413544961944578,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.6413544961944578,\"keyword\":0.9919748053762509,\"relevance\":0.5,\"rerank\":0.21413716673851013,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5266322375765423,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Release process\",\"tags\":[\"release\",\"workflow\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"grep -n -A8 '^release' Makefile\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "(Bash completed with no output)"
+ },
+ {
+  "role": "assistant",
+  "content": "The Makefile has no `release` target yet, but you've told me this is the new process, so I'll update the stored memory."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__update",
+  "content": "{\n \"id\": \"01a0f805-df40-7c83-9c57-b96db0c28d10\",\n \"content\": \"Releases are cut with `make release`, which tags and publishes. Per the user (2026-10-01) this replaces the earlier process of manually pushing a vYYYY.MM.N tag on main and letting CI publish. Don't publish packages by hand or push release tags manually.\",\n \"summary\": \"Release process: use `make release` (tags and publishes)\",\n \"details\": \"Previous process (superseded): push git tag vYYYY.MM.N on main, CI builds, tests and publishes. Note: as of 2026-10-01 the repo Makefile has no `release` target in this checkout, so it may live elsewhere or be pending.\",\n \"premise\": \"User stated on 2026-10-01 that releases now use `make release`\",\n \"invalidated_by\": [\n  \"Makefile\"\n ]\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f805-df40-7c83-9c57-b96db0c28d10\",\"updated\":true}"
+ },
+ {
+  "role": "assistant",
+  "content": "I've updated the stored release-process memory. It said to push a `vYYYY.MM.N` tag on `main` and let CI publish. It now says to release with `make release`, which tags and publishes.\n\nThe `Makefile` in this checkout has no `release` target, so I couldn't confirm the command exists. I noted that in the memory. If the target is meant to be added to this repo, I can add it."
+ }
+]

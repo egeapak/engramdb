@@ -1,0 +1,77 @@
+[
+ {
+  "role": "user",
+  "content": "Add a discount field to the Invoice class in src/billing/invoices.py."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e7649ac5-0d2d-4f85-8e0f-09e31ec55ed1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"f76787f5-22f3-4d6f-afc4-eb6abf9798a6\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e7649ac5-0d2d-4f85-8e0f-09e31ec55ed1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"404d05d3-f6f1-408f-ae5f-5057d0ca6a0f\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dc862c3b-eec8-4c24-b722-b64cc1f5cd2c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"efffdf0c-9f6c-42c4-b8c7-81aa10b2c290\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dc862c3b-eec8-4c24-b722-b64cc1f5cd2c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Money representation (source: shared/human)\\\\n  \\\\n- [hazard] finalize() caveat (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] Memories relevant to this prompt:\\\\n\\\\n## Facts (2):\\\\n- [convention] Money representation (source: shared/human)\\\\n  \\\\n- [hazard] finalize() caveat (source: shared/human)\\\\n  \\\",\\\"hookEventName\\\":\\\"UserPromptSubmit\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"602aa062-fd7f-4acd-8f76-3e91bf6a1fad\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4df99520-a43f-42a9-8ff5-4075ce9b6c73\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"6ea533dd-9a45-4da3-a933-79f5d389a6b4\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4df99520-a43f-42a9-8ff5-4075ce9b6c73\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4a135a73-712d-44db-ab05-522470ed966f\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"78f4ab7c-542a-4876-a4d6-304112709dc5\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"uuid\": \"590e3857-8598-458f-865d-dbf28f1fbbdd\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"78f4ab7c-542a-4876-a4d6-304112709dc5\", \"hook_name\": \"PreToolUse:Edit\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6f9f881f-81d7-4384-932b-d26ef74b3c50\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4df0d31d-79e2-4abb-a7f6-8f4ae03741f3\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"uuid\": \"a27bae07-244b-4868-b6a8-11d16aff2f13\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4df0d31d-79e2-4abb-a7f6-8f4ae03741f3\", \"hook_name\": \"PostToolUse:Edit\", \"hook_event\": \"PostToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6450a597-e3ab-4e6f-8d5d-a272bc3a2e85\", \"session_id\": \"92c95f70-8d86-4b9d-9edc-5e26cb21fbfd\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-ed-discount-3xuj56jz/ledgerline/src/billing/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass, field\n2\t\n3\timport requests\n4\timport structlog\n5\t\n6\tlog = structlog.get_logger()\n7\t\n8\tLEDGER_URL = \"https://ledger.internal.acme.example/v1/postings\"\n9\t\n10\t\n11\t@dataclass\n12\tclass Invoice:\n13\t    id: str\n14\t    customer_id: str\n15\t    subtotal_cents: int\n16\t    tax_cents: int = 0\n17\t    ledger_ref: str | None = None\n18\t    lines: list = field(default_factory=list)\n19\t\n20\t\n21\tdef finalize(invoice):\n22\t    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\n23\t    resp.raise_for_status()\n24\t    invoice.ledger_ref = resp.json()[\"ref\"]\n25\t    log.info(\"invoice_finalized\", invoice_id=invoice.id)\n26\t    return invoice\n27\t\n28\t\n29\tdef finalize_once(invoice):\n30\t    if invoice.ledger_ref:\n31\t        return invoice\n32\t    return finalize(invoice)\n33\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"money finalize invoice\",\n \"detail_level\": \"full\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"Invoice finalization talks to the external ledger service and is the most sensitive call in src/billing/invoices.py. The ledger endpoint has no idempotency key, so calling finalize() twice double-posts the invoice to the ledger. Never wrap it in retries. Use finalize_once(), which checks invoice.ledger_ref first and returns early when the invoice was already posted.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f802-fd44-71f1-aff5-f7cbd1981616\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.5474169984214169,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.5474169984214169,\"keyword\":0.25504348398200244,\"relevance\":0.5,\"rerank\":0.7879077196121216,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5589417603310444,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"finalize() caveat\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Billing code moves amounts between invoices, refunds, tax and the ledger, and every one of those paths has been bitten by rounding drift in the past. The rule that came out of that: store and pass every monetary amount as integer cents using the Money type in src/billing/money.py. Never use float for money, not even for intermediate math. New fields that hold an amount end in _cents, for example discount_cents.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f802-f760-72e1-a1a9-65d7a55af0ab\",\"logical\":[],\"physical\":[\"src/billing/\"],\"provenance\":\"human\",\"score\":0.3875391685544305,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3875391685544305,\"keyword\":0.4441625849682992,\"relevance\":0.5,\"rerank\":-0.8204171657562256,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4817668650546948,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Money representation\",\"tags\":[\"billing\",\"money\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"Tax rules came out of a review with the finance team in March 2026 after customers reported invoices that were off by a cent. Tax amounts use banker's rounding (decimal.ROUND_HALF_EVEN), never ROUND_HALF_UP. Round the tax of each line item separately, per line, and then sum the rounded line taxes; never round the invoice total.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f803-193e-7f80-9f1c-c9160ee26219\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.21676167620285064,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.21676167620285064,\"keyword\":0.024870252312011804,\"relevance\":0.5,\"rerank\":-1.8388992547988892,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5338340369307086,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax rounding rule\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"confidence\":0.8,\"content\":\"scripts/export.py writes the monthly invoice reports to the bucket named in the EXPORT_BUCKET environment variable. Be careful in staging: there, EXPORT_BUCKET points at the production bucket, a leftover from the 2025 migration. Never run scripts/export.py against staging without --dry-run, or staging data overwrites the real prod reports.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f803-1e67-7672-857d-a02fb3efe9e3\",\"logical\":[],\"physical\":[\"scripts/export.py\"],\"provenance\":\"human\",\"score\":0.16609884765999838,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.16609884765999838,\"keyword\":0.02295517700613214,\"relevance\":0.5,\"rerank\":-2.6541666984558105,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.43711734812185,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Export script caution\",\"tags\":[\"ops\",\"export\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":4}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Edit",
+  "content": "{\n \"replace_all\": false,\n \"file_path\": \"/tmp/mte-ed-discount-3xuj56jz/ledgerline/src/billing/invoices.py\",\n \"old_string\": \"    tax_cents: int = 0\\n\",\n \"new_string\": \"    tax_cents: int = 0\\n    discount_cents: int = 0\\n\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "The file /tmp/mte-ed-discount-3xuj56jz/ledgerline/src/billing/invoices.py has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+ },
+ {
+  "role": "assistant",
+  "content": "I added `discount_cents: int = 0` to `Invoice` in `src/billing/invoices.py`. I didn't run any tests or other code.\n\n- **Name and type:** The project's money convention says amounts are integer cents and new amount fields end in `_cents`. This matches `subtotal_cents` and `tax_cents`.\n- **Default:** It defaults to 0, so existing `Invoice(...)` calls still work. I put it right after `tax_cents` and before `ledger_ref`. Any caller that passes `ledger_ref` positionally would now bind it to `discount_cents`. I didn't search for such callers.\n- **`finalize()` ignores it:** `finalize()` still posts `subtotal_cents + tax_cents` to the ledger, so a discount has no effect on the posted amount. I left that alone because you only asked for the field. Posting is also the sensitive call, because the ledger has no idempotency key. Do you want `finalize()` to subtract the discount? If so, I'd also need to know whether tax is computed before or after the discount."
+ }
+]
