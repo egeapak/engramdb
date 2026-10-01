@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "Explain what `git rebase --onto` does, with a short example."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fc5d098e-12cf-4ded-9718-c59f5da81bf6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a5deb8a8-a888-4a72-93a8-25a72af8550e\", \"session_id\": \"93c8944d-4841-477e-bf68-6bf00ae713b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fc5d098e-12cf-4ded-9718-c59f5da81bf6\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"48c5220f-b33e-4c21-b635-ee0d8fd9f0e0\", \"session_id\": \"93c8944d-4841-477e-bf68-6bf00ae713b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ded09bbe-a8bb-487e-a8f2-2a44651edcbc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"78c7b9a6-5abc-45cf-b244-55357f39def2\", \"session_id\": \"93c8944d-4841-477e-bf68-6bf00ae713b7\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ded09bbe-a8bb-487e-a8f2-2a44651edcbc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"da6c3e2a-2933-4fc9-a94b-e36936f65cba\", \"session_id\": \"93c8944d-4841-477e-bf68-6bf00ae713b7\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "`git rebase --onto` moves a range of commits onto a new base. You choose exactly which commits move and where they go. A plain `git rebase` can't do that.\n\n## Syntax\n\n```\ngit rebase --onto <newbase> <upstream> [<branch>]\n```\n\n- **`<upstream>`**: commits after this point get moved. This point itself stays put.\n- **`<branch>`**: the last commit to move. It defaults to the current branch.\n- **`<newbase>`**: where the moved commits are replayed.\n\nPut simply, it takes the commits in `upstream..branch` and replays them on top of `newbase`.\n\n## Example: moving a branch off another feature branch\n\nYou branched `feature-b` from `feature-a`, but `feature-b` should have been based on `main`:\n\n```\nmain:       A---B\n                 \\\nfeature-a:        C---D\n                       \\\nfeature-b:              E---F\n```\n\nYou want only `E` and `F` on top of `main`, without `C` and `D`:\n\n```\ngit rebase --onto main feature-a feature-b\n```\n\nResult:\n\n```\nmain:       A---B\n                |\\\nfeature-a:      | C---D\n                 \\\nfeature-b:        E'---F'\n```\n\nGit took the commits in `feature-a..feature-b` (`E` and `F`) and replayed them onto `main`. A plain `git rebase main` from `feature-b` would have moved `C`, `D`, `E` and `F`, because all four are missing from `main`.\n\n## Other common uses\n\n- **Delete commits from the middle of a branch.** `git rebase --onto HEAD~3 HEAD~1` drops the 2nd and 3rd most recent commits and keeps the latest one.\n- **After the base branch was squashed or rebased.** `git rebase --onto main <old-base-sha>` replays only your own commits, so you don't re-apply the parent branch's old commits.\n\nRebasing rewrites commit hashes (`E'` \u2260 `E`). If the branch was already pushed, you'll need `git push --force-with-lease`."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

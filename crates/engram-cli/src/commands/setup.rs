@@ -10,8 +10,9 @@ const ENGRAM_MD_CONTENT: &str = r#"# EngramDB
 
 This project uses EngramDB for persistent agent memory.
 
-- **Expand surfaced memories** — when memories are surfaced at session start
-  or on your prompt, `get` the full content of any relevant to the task.
+- **Expand surfaced memories** — memories surfaced at session start, on your
+  prompt or before an edit carry an `id:`. A preview cut short says so; `get`
+  that id for the full text. Pass the same id to `challenge` or `update`.
 - **Query before answering or modifying** — `query` with `mode: "rank"` for
   context relevance; `mode: "filter"` for specific-term lookup. Declare your
   situation (`situation: "debugging"` or `"design_choice"`) when it fits —
@@ -20,11 +21,17 @@ This project uses EngramDB for persistent agent memory.
   decisions, hazards, or conventions. For decisions, state the premise
   ("because C") and what would invalidate it (`premise`, `invalidated_by`).
   For task-specific choices, set `origin_task` and `generality: "task"`.
+- **Where to save** — project facts, conventions, hazards and decisions go to
+  EngramDB `create`, including when the user says "remember". Claude Code's
+  auto-memory is private to one machine and invisible to `query` and to
+  collaborators; keep it for personal collaboration preferences.
 - **Keep memories honest** — `challenge` contradictions; `verify` a memory
   you've confirmed against the code; prefer `resolve` with `invalidate`
   over `delete` when something *was* true but no longer is (history stays).
 - **Bound your work** — declare `task_current` when starting focused work;
   call `task_complete` when it ships so task-scoped memories retire.
+- **Deferred tools** — if a memory tool is deferred, load it with ToolSearch
+  `select:<tool name>` before calling it.
 "#;
 
 const ENGRAM_MD_REF: &str = "@ENGRAM.md";

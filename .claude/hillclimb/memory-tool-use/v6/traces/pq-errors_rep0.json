@@ -1,0 +1,121 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"abad910c-c776-4ea0-8397-8175d37be23f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"be68e2c9-df72-4d34-bb41-1b9a91d8e982\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"abad910c-c776-4ea0-8397-8175d37be23f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"854d80d4-2a35-499a-a559-58036def4c59\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"3fb7bd1c-aa2f-4d98-9573-a0cb259c736c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"5ccf7488-2d7a-40d1-83e6-d0276d47dbe1\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"3fb7bd1c-aa2f-4d98-9573-a0cb259c736c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b5241eed-36d2-459c-bb25-69bcec84b0ad\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"d4e0c8f9-ad2f-42d6-93e1-16768dbe7fe2\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"b9a51616-54b9-4567-bf7a-18803708e3ee\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"d4e0c8f9-ad2f-42d6-93e1-16768dbe7fe2\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d1ba39f0-f8a6-43af-bfd4-278a2354cf20\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7b85f399-05fb-40f5-b2f3-f86333582486\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"a8af8665-273a-4d69-b767-92a12f967fba\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7b85f399-05fb-40f5-b2f3-f86333582486\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b8aa58bc-e61c-4948-9752-051fd431efa4\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b6c8a0eb-3f4e-45ed-b45a-15f53137bab1\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"f15f67a5-1f97-439f-81d5-a5e6cc286498\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b6c8a0eb-3f4e-45ed-b45a-15f53137bab1\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"427602d3-f253-44f1-8720-d830dd623356\", \"session_id\": \"3c9538b1-7a0c-400b-85a5-5a2a04af5570\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"error response endpoint\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f812-c2c9-72a1-8567-f92c77e386eb\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.2701358501510038,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2701358501510038,\"keyword\":0.2321159167634679,\"relevance\":0.5,\"rerank\":-1.7022178173065186,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5221457014551423,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/api-errors-use-problem-json_01a0f812-c2c9-72a1-8567-f92c77e386eb.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"src/**/*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/__init__.py\nsrc/billing/__init__.py\nsrc/api/__init__.py\nsrc/flags.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/api/checkout.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error|raise|status|problem\",\n \"path\": \"src\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")\nsrc/billing/invoices.py:23:    resp.raise_for_status()\nsrc/billing/tax.py:12:    raise NotImplementedError\nsrc/api/checkout.py:10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nsrc/api/errors.py:4:def problem(status, title, detail=None):\nsrc/api/errors.py:5:    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\nsrc/api/errors.py:9:    resp.status_code = status\nsrc/api/errors.py:10:    resp.mimetype = \"application/problem+json\""
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-hrdxz8u8/ledgerline/src/api/errors.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import jsonify\n2\t\n3\t\n4\tdef problem(status, title, detail=None):\n5\t    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n6\t    if detail:\n7\t        body[\"detail\"] = detail\n8\t    resp = jsonify(body)\n9\t    resp.status_code = status\n10\t    resp.mimetype = \"application/problem+json\"\n11\t    return resp\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-hrdxz8u8/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-errors-hrdxz8u8/ledgerline/src/api/invoices.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify\n2\t\n3\tbp = Blueprint(\"invoices\", __name__)\n4\t\n5\t_INVOICES = {}\n6\t\n7\t\n8\t@bp.get(\"/invoices/<invoice_id>\")\n9\tdef get_invoice(invoice_id):\n10\t    invoice = _INVOICES.get(invoice_id)\n11\t    return jsonify(invoice.__dict__)\n12\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Return an RFC 7807 `application/problem+json` response using the `problem()` helper in `src/api/errors.py:4`. Don't build ad-hoc error dicts with `jsonify`.\n\n```python\nfrom src.api.errors import problem\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    if invoice is None:\n        return problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n    return jsonify(invoice.__dict__)\n```\n\n`problem(status, title, detail=None)`:\n- builds the body `{\"type\": \"about:blank\", \"title\": ..., \"status\": ...}`, and adds `\"detail\"` only if you pass one\n- sets the HTTP status code on the response\n- sets the content type to `application/problem+json`\n\nNeither existing endpoint does this yet:\n- `src/api/invoices.py:11` crashes with a 500 when the invoice doesn't exist, because `invoice` is `None`. It should return the 404 shown above.\n- `src/api/checkout.py:9` raises `KeyError` or `TypeError` on a malformed cart. It should return something like `problem(400, \"Invalid cart\", ...)`.\n\nThe same rule is in the project's EngramDB memory, and I checked it against the current code."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One minor point of friction:\n\n- **`mcp__plugin_engram_memory__verify` was deferred.** After checking the \"API errors use problem+json\" memory (`01a0f812\u2026`) against `src/api/errors.py`, I wanted to mark it verified. But `verify` was one of the deferred tools, so I'd have needed an extra ToolSearch call to load it first. I didn't make that call, so I told you the memory matched the code without recording that check in the store. I'd have wanted `verify` loaded by default alongside `query`, `get`, `create`, `update` and `challenge`, since checking a surfaced memory against the code is a normal part of answering a question. The same applies, to a lesser degree, to `task_current` and `task_complete`, which ENGRAM.md tells agents to use routinely.\n\nEverything else I needed was there. `query` in filter mode found the relevant memory right away. I could also have used `create` to record a hazard that `src/api/invoices.py` and `src/api/checkout.py` don't yet follow the convention. Not doing that was my choice; no tool was missing."
+ }
+]

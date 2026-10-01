@@ -1909,7 +1909,7 @@ fn resolve_session_id() -> String {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards, and when the user asks you to remember something about the project: use this, not Claude Code's file-based auto-memory, which other sessions' queries and collaborators never see. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
     )]
     async fn memory_create(
         &self,
@@ -4066,7 +4066,11 @@ impl ServerHandler for EngramDbServer {
                  to more than the current project — e.g. you are working across a set of \
                  related repos — save it once to a shared store (project=\"group:<name>\" \
                  for that set, or project=\"global\" for everywhere) instead of only the \
-                 current project, so every relevant project surfaces it. Suggested, not required."
+                 current project, so every relevant project surfaces it. Suggested, not required. \
+                 Where to save: project facts, conventions, hazards and decisions go to this \
+                 store with create, including when the user says \"remember\". Claude Code's \
+                 file-based auto-memory is private to one machine and invisible to these \
+                 queries and to collaborators; keep it for personal collaboration preferences."
                 .to_string();
             if let Some(w) = &self.embedding_warning {
                 s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");

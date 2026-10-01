@@ -151,7 +151,8 @@ const REFLECTION_NUDGE: &str =
     "[EngramDB] When you finish the task you were assigned, before handing back: did anything \
 durable about the project, the environment/tooling, or the user's preferences come up — not task \
 minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything \
-that contradicts a memory. Suggested, not required.";
+that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, \
+which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.";
 
 /// Format scored memories with full metadata (for SessionStart).
 ///
@@ -857,6 +858,10 @@ async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>
         Some(fp) => fp,
         None => return Ok(None),
     };
+    if let Some(name) = auto_memory_note_name(input, &file_path, dir) {
+        let context = format!("{AUTO_MEMORY_NOTE_PREFIX} ({name}). {AUTO_MEMORY_NOTE}");
+        return Ok(Some(build_hook_response("PostToolUse", &context)?));
+    }
     let relative_path = relativize_path(&file_path, dir);
     if relative_path.is_empty() {
         return Ok(None);
@@ -1141,6 +1146,31 @@ async fn archive_ending_session(
         }
         Err(e) => tracing::debug!("SessionEnd archive: prune failed (non-fatal): {e}"),
     }
+}
+
+const AUTO_MEMORY_NOTE_PREFIX: &str = "[EngramDB] You saved this to Claude Code's auto-memory";
+const AUTO_MEMORY_NOTE: &str = "Auto-memory is private to this machine and invisible to EngramDB \
+lookups and to collaborators. If it is a project fact, convention, hazard or decision, also record \
+it in EngramDB so every session and teammate gets it; keep auto-memory for personal preferences.";
+
+/// The file name, when this edit wrote a note into Claude Code's auto-memory.
+///
+/// Claude Code keeps auto-memory in `memory/` beside the session transcript
+/// (`<config>/projects/<encoded-cwd>/memory/*.md`, indexed by `MEMORY.md`).
+/// Its system prompt tells the model to save there whenever the user says
+/// "remember", so project knowledge lands where EngramDB never sees it; the
+/// memory-tool-use eval measured that in 16 of 24 Sonnet runs. Only a
+/// project with an EngramDB store gets the note, the index file itself is
+/// skipped, and paths are compared canonicalized, never textually.
+fn auto_memory_note_name(input: &str, file_path: &str, dir: &Path) -> Option<String> {
+    if !dir.join(".engramdb").is_dir() {
+        return None;
+    }
+    let transcript = extract_transcript_path(input)?;
+    let memory_dir = std::fs::canonicalize(Path::new(&transcript).parent()?.join("memory")).ok()?;
+    let file = std::fs::canonicalize(file_path).ok()?;
+    let name = file.file_name()?.to_str()?.to_string();
+    (file.starts_with(&memory_dir) && name.ends_with(".md") && name != "MEMORY.md").then_some(name)
 }
 
 /// Extract `transcript_path`, which every hook event carries.
@@ -2109,6 +2139,76 @@ mod tests {
     }
 
     // --- Integration tests for the new hook events (§8.5) ---
+
+    #[tokio::test]
+    async fn post_tool_use_notes_auto_memory_writes() {
+        let project = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(project.path(), &registry).await.unwrap();
+        // Claude Code's layout: <config>/projects/<enc>/<session>.jsonl and memory/ beside it.
+        let config = TempDir::new().unwrap();
+        let session_dir = config.path().join("projects").join("-enc-project");
+        let memory_dir = session_dir.join("memory");
+        std::fs::create_dir_all(&memory_dir).unwrap();
+        let transcript = session_dir.join("abc.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        let note = memory_dir.join("jobs.md");
+        std::fs::write(&note, "use jobs.enqueue").unwrap();
+        let index = memory_dir.join("MEMORY.md");
+        std::fs::write(&index, "- jobs.md").unwrap();
+        let src = project.path().join("app.py");
+        std::fs::write(&src, "x = 1").unwrap();
+        let event = |path: &Path| {
+            serde_json::json!({
+                "transcript_path": transcript.to_str().unwrap(),
+                "tool_name": "Write",
+                "tool_input": { "file_path": path.to_str().unwrap() }
+            })
+            .to_string()
+        };
+
+        let out = process_post_tool_use(&event(&note), project.path())
+            .await
+            .unwrap()
+            .expect("an auto-memory note gets the routing note");
+        assert!(out.contains(AUTO_MEMORY_NOTE_PREFIX), "{out}");
+        assert!(out.contains("(jobs.md)"), "{out}");
+
+        for silent in [&index, &src] {
+            assert!(
+                process_post_tool_use(&event(silent), project.path())
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{silent:?} must not get the note"
+            );
+        }
+
+        // A project without an EngramDB store gets nothing from this plugin.
+        let bare = TempDir::new().unwrap();
+        assert!(process_post_tool_use(&event(&note), bare.path())
+            .await
+            .unwrap()
+            .is_none());
+
+        // No transcript_path: cannot locate auto-memory, stay silent.
+        let no_transcript = serde_json::json!({
+            "tool_name": "Write",
+            "tool_input": { "file_path": note.to_str().unwrap() }
+        })
+        .to_string();
+        assert!(process_post_tool_use(&no_transcript, project.path())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn reflection_nudge_stays_mcp_agnostic() {
+        for tool in ["query", "create(", "challenge(", "mcp__"] {
+            assert!(!REFLECTION_NUDGE.contains(tool), "nudge names {tool:?}");
+        }
+    }
 
     #[tokio::test]
     async fn post_tool_use_warns_on_watch_match_and_respects_validity() {

@@ -1,0 +1,56 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"eb37157a-5398-42f6-90e0-71a899192a74\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"cc2a04e9-fa3e-4aae-9195-a0de3392eadc\", \"session_id\": \"516cf509-3910-4e65-b47c-0b35dfdaefda\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"eb37157a-5398-42f6-90e0-71a899192a74\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a259e97d-e6e4-4c7f-8ee4-f50bea1e3c39\", \"session_id\": \"516cf509-3910-4e65-b47c-0b35dfdaefda\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"06bc6dac-1564-44cc-b828-2e5e94fa1eea\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"eaebcf6c-0701-4c24-b8ad-9d7a4c4693f7\", \"session_id\": \"516cf509-3910-4e65-b47c-0b35dfdaefda\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"06bc6dac-1564-44cc-b828-2e5e94fa1eea\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8962f9fe-9c8e-4573-9725-e2d89e268024\", \"session_id\": \"516cf509-3910-4e65-b47c-0b35dfdaefda\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API version routes v1 v2\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f816-92b8-7960-9d16-89c5511740f0\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.1615998125908043,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.1615998125908043,\"keyword\":0.052145353357251054,\"relevance\":0.5,\"rerank\":-2.5160467624664307,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4053281813805884,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "assistant",
+  "content": "No conflicting memory exists, so I'll record the decision."
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-01)\",\n \"content\": \"Decided at the 2026-10-01 design review: all public API routes are versioned under /v2 going forward. /v1 is frozen \\u2014 do not add new endpoints or change behavior/contracts of existing /v1 routes. New endpoints and changes to public API go into /v2.\",\n \"premise\": \"While the 2026-10-01 design review decision to freeze /v1 and version under /v2 stands\",\n \"physical\": [\n  \"src/api/\"\n ],\n \"logical\": [\n  \"api.versioning\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"routes\"\n ],\n \"criticality\": 0.8,\n \"epistemic\": \"decision\",\n \"decay_strategy\": \"none\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f816-c4c9-7743-9a2d-fa58922c3ded\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-01)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this decision to the project's EngramDB memory: public API routes now go under `/v2`, and `/v1` is frozen. That means no new endpoints and no changes to existing `/v1` contracts. It's linked to `src/api/`, so it will come up whenever API work starts. No existing memory said anything different."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things were missing or awkward:\n\n1. **A provenance parameter on `create`.** The `/v2` decision came straight from the user, out of their design review. But `create` has no way to say that, so the memory was saved as agent-sourced (the hook now shows \"source: shared/agent\"). The older problem+json memory shows `provenance: \"human\"`, so the store tracks this field, but `create` doesn't let me set it. I would have used something like `provenance: \"human\"` or `\"user-stated\"`. Then later sessions could weigh it as a firm decision from the team, not something an agent worked out.\n\n2. **A rationale field separate from `premise` on `create`.** The user gave the decision but not the reason for it. `premise` is the only place to explain a decision, and the session-start hook prints it after the word \"because\". So my premise (\"while the decision stands\") shows up as the circular \"because While the 2026-10-01 design review decision \u2026 stands.\" I would have used an optional `rationale` field, left empty here, so the hook only says \"because \u2026\" when there's a real reason. `premise` would then only hold what would invalidate the decision."
+ }
+]
