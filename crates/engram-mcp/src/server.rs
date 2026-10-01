@@ -865,6 +865,81 @@ struct ScoredMemoryOutput {
 // Server struct
 // ---------------------------------------------------------------------------
 
+/// Progress of the startup work that `run_stdio` runs *after* the MCP
+/// handshake instead of before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StartupStatus {
+    Pending,
+    Ready,
+    /// Startup failed (for example the worktree's main project could not be
+    /// initialized). Tool calls return this message instead of running
+    /// against a half-set-up project.
+    Failed(String),
+}
+
+impl StartupStatus {
+    /// A receiver that is already `Ready`, for servers whose startup work is
+    /// not deferred (tests, and the per-connection HTTP servers, whose startup
+    /// runs once in `run_sse` before the listener binds).
+    fn ready_receiver() -> tokio::sync::watch::Receiver<StartupStatus> {
+        tokio::sync::watch::channel(StartupStatus::Ready).1
+    }
+}
+
+/// The embedding-model-change warning, and whether the agent has seen it.
+///
+/// The warning used to ride only in the `initialize` instructions. Since the
+/// check that produces it now runs after `initialize` (it resolves the
+/// embedding providers, which can take seconds on a cold start), it is often
+/// not known yet when the instructions are sent. So whichever comes first
+/// delivers it once: the instructions (when the check already finished) or
+/// the first tool result after the check finished.
+#[derive(Debug, Default)]
+struct EmbeddingNotice {
+    warning: std::sync::Mutex<Option<String>>,
+    delivered: std::sync::atomic::AtomicBool,
+}
+
+impl EmbeddingNotice {
+    fn new(warning: Option<String>) -> Self {
+        Self {
+            warning: std::sync::Mutex::new(warning),
+            delivered: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn set(&self, warning: Option<String>) {
+        *self.warning.lock().unwrap_or_else(|e| e.into_inner()) = warning;
+    }
+
+    fn get(&self) -> Option<String> {
+        self.warning
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn mark_delivered(&self) {
+        self.delivered
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// The warning, if there is one and nobody has delivered it yet. Marks it
+    /// delivered.
+    fn take_undelivered(&self) -> Option<String> {
+        let warning = self.get()?;
+        let already = self
+            .delivered
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
+        (!already).then_some(warning)
+    }
+}
+
+/// The text the agent sees for an embedding-model-change warning.
+fn embedding_notice_text(warning: &str) -> String {
+    format!("IMPORTANT — ACTION NEEDED: {warning} Tell the user.")
+}
+
 /// The EngramDB MCP server.
 #[derive(Clone)]
 pub struct EngramDbServer {
@@ -905,12 +980,20 @@ pub struct EngramDbServer {
     /// re-spawns a dead one (rate-limited), so a session self-heals when the
     /// daemon idle-exits or is replaced. The heartbeat task keeps it warm.
     daemon: Arc<engramdb::daemon::DaemonCell>,
-    /// Embedding-model-change warning computed once at daemon startup for
-    /// the primary project, appended to `get_info` instructions so the
-    /// connecting agent surfaces it to the user. `None` = no mismatch /
-    /// not yet evaluated.
-    embedding_warning: Option<String>,
-    #[allow(dead_code)]
+    /// Embedding-model-change warning computed once at startup for the
+    /// primary project, so the connecting agent surfaces it to the user.
+    /// `None` = no mismatch / not yet evaluated.
+    ///
+    /// Shared, because on stdio the check runs in the deferred startup task
+    /// (see [`serve_with_deferred_startup`]) on a clone of this server, after
+    /// `initialize` was already answered. See [`EmbeddingNotice`] for how it
+    /// still reaches the agent.
+    embedding_notice: Arc<EmbeddingNotice>,
+    /// Progress of the startup work deferred past the MCP handshake. Tool
+    /// calls and resource reads wait on it; `initialize`, `server/discover`
+    /// and the list calls do not. Servers built without deferral start
+    /// `Ready`.
+    startup: tokio::sync::watch::Receiver<StartupStatus>,
     tool_router: rmcp::handler::server::tool::ToolRouter<Self>,
 }
 
@@ -957,7 +1040,8 @@ impl EngramDbServer {
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             provider_cache: ops::ProviderCache::new(),
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
-            embedding_warning: None,
+            embedding_notice: Arc::default(),
+            startup: StartupStatus::ready_receiver(),
             tool_router: Self::default_tool_router(),
         })
     }
@@ -1003,7 +1087,8 @@ impl EngramDbServer {
             pid_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             provider_cache: ops::ProviderCache::new(),
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
-            embedding_warning: None,
+            embedding_notice: Arc::default(),
+            startup: StartupStatus::ready_receiver(),
             tool_router: Self::default_tool_router(),
         }
     }
@@ -1624,6 +1709,153 @@ impl EngramDbServer {
                     composition: config.embeddings.composition_id(),
                 });
         Some((mode, ops::embedding_model_report(&store, current).await))
+    }
+
+    /// The startup work for one server process: stats hydration, the
+    /// worktree hierarchy, throttled housekeeping, the embedding-model-change
+    /// check (with the `auto` reindex), then the background model warmup and
+    /// daemon heartbeat.
+    ///
+    /// Slow on a cold start: the model check resolves the embedding
+    /// providers, which spawns the shared daemon or loads ONNX in-process.
+    /// `run_stdio` therefore runs this after the MCP handshake (see
+    /// [`serve_with_deferred_startup`]); `run_sse` runs it before binding.
+    async fn run_startup(&self) -> anyhow::Result<()> {
+        // Hydrate counters by replaying recent events from each project's
+        // LanceDB `stats_events` table. Replay resets a project's counters,
+        // which is one reason tool calls wait for startup to finish.
+        if let Err(e) = engramdb::telemetry::persistence::hydrate_collector(&self.stats).await {
+            tracing::warn!("stats hydrate failed: {e}");
+        }
+        // Detect git worktrees and register/init the main project if needed.
+        self.ensure_hierarchy().await?;
+        // On the main worktree, run throttled housekeeping (orphan cleanup +
+        // a quick store health check). Best-effort: never fails startup.
+        self.maintain_main_project().await;
+        self.check_embedding_model().await;
+        // Load the embedding model in the background now so the first tool
+        // call doesn't pay the ~240ms ONNX session init synchronously.
+        self.spawn_provider_warmup();
+        // Keep the shared daemon resident while this session runs and
+        // self-heal it if it dies/restarts.
+        self.spawn_daemon_heartbeat();
+        Ok(())
+    }
+
+    /// Embedding-model-change check: warn (default), auto-reindex, or — in
+    /// `error` mode — leave the warning so embedding tools hard-fail.
+    ///
+    /// In `auto` mode the warning is published only if the reindex fails, so
+    /// the agent is never told about a mismatch that is already repaired.
+    async fn check_embedding_model(&self) {
+        let Some((mode, report)) = self.embedding_startup_report().await else {
+            return;
+        };
+        if report.status.is_consistent() {
+            return;
+        }
+        if let Some(w) = &report.warning {
+            tracing::warn!("{w}");
+        }
+        if mode == engramdb::types::ReindexOnModelChange::Auto {
+            tracing::warn!(
+                "EngramDB: reindex_on_model_change=auto — re-embedding before serving tool calls…"
+            );
+            match self.auto_reindex_default().await {
+                Ok(()) => {
+                    tracing::warn!("EngramDB: auto-reindex complete.");
+                    return;
+                }
+                Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
+            }
+        }
+        self.embedding_notice.set(report.warning);
+    }
+
+    /// The server's `initialize` / `server/discover` info. The instructions
+    /// carry `embedding_warning` when there is one.
+    fn server_config(&self, embedding_warning: Option<&str>) -> ServerConfig {
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_prompts()
+            .build();
+        // rmcp 1.x marks these result/info structs `#[non_exhaustive]`, so build
+        // them via the provided constructors/builders instead of struct literals.
+        let server_info = Implementation::new("engramdb", env!("CARGO_PKG_VERSION"));
+        let instructions = {
+            let mut s = "Project-scoped persistent memory store for coding agents. \
+                 Stores decisions, hazards, conventions, and context about the codebase. \
+                 IMPORTANT: Query memories (query) before answering project questions, \
+                 investigating workflows, or researching how things work — not only before \
+                 modifying files. Use mode=\"filter\" with a query/logical/path/tags signal \
+                 for specific lookups, mode=\"rank\" for context-aware browsing. \
+                 Store new knowledge after significant discoveries — for decisions, \
+                 state the premise (premise) and what would invalidate them \
+                 (invalidated_by); set epistemic (fact/observation/decision) when it \
+                 differs from the type default, and origin_task + generality=\"task\" \
+                 for task-specific choices. Declare situation on query when debugging \
+                 or weighing a design choice. \
+                 All tools accept an optional `project` parameter (absolute path, 16-char \
+                 project ID, \"global\", or \"group:<name>\") to operate on a different \
+                 store's memories. \
+                 Use project=\"global\" for cross-project memories like personal preferences, \
+                 coding conventions, or knowledge that applies everywhere. \
+                 Use project=\"group:<name>\" to write to or read a named group store shared \
+                 by a set of related projects (set up on the CLI with `engramdb groups \
+                 subscribe <name>`); a project's subscribed groups fan into its queries \
+                 automatically. \
+                 Use include_global=true on query to also merge the everyone/global store. \
+                 Omit `project` to use the current project. \
+                 When you finish the task you were assigned, reflect: if anything durable \
+                 about the project, the environment/tooling, or the user's preferences came \
+                 up (not task minutiae), query existing memories, then create the new ones \
+                 and challenge contradictions. If a durable decision or convention applies \
+                 to more than the current project — e.g. you are working across a set of \
+                 related repos — save it once to a shared store (project=\"group:<name>\" \
+                 for that set, or project=\"global\" for everywhere) instead of only the \
+                 current project, so every relevant project surfaces it. Suggested, not required. \
+                 Where to save: project facts, conventions, hazards and decisions go to this \
+                 store with create, including when the user says \"remember\". Claude Code's \
+                 file-based auto-memory is private to one machine and invisible to these \
+                 queries and to collaborators; keep it for personal collaboration preferences. \
+                 When the user says a stored memory is outdated or wrong, challenge it right \
+                 away with their statement as evidence, even if the code still matches the old \
+                 memory; do not wait for the code to change."
+                .to_string();
+            if let Some(w) = embedding_warning {
+                s.push_str("\n\n");
+                s.push_str(&embedding_notice_text(w));
+            }
+            s
+        };
+        InitializeResult::new(capabilities)
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(server_info)
+            .with_instructions(instructions)
+    }
+
+    /// Wait until the deferred startup work has finished. Returns its error if
+    /// it failed, so a tool never runs against a half-set-up project.
+    async fn await_startup(&self) -> Result<(), rmcp::ErrorData> {
+        let mut status = self.startup.clone();
+        let finished = status
+            .wait_for(|s| *s != StartupStatus::Pending)
+            .await
+            .map(|s| s.clone());
+        match finished {
+            Ok(StartupStatus::Failed(e)) => Err(rmcp::ErrorData::internal_error(
+                format!("EngramDB startup failed: {e}"),
+                None,
+            )),
+            Ok(_) => Ok(()),
+            // The startup task ended without reporting (it was aborted or
+            // panicked).
+            Err(_) => Err(rmcp::ErrorData::internal_error(
+                "EngramDB startup did not finish",
+                None,
+            )),
+        }
     }
 
     /// Re-embed the primary project's memories and stamp the model
@@ -4043,66 +4275,65 @@ fn cache_hints(
 // that `set_always_load` writes.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for EngramDbServer {
-    fn get_info(&self) -> ServerConfig {
-        let capabilities = ServerCapabilities::builder()
-            .enable_tools()
-            .enable_resources()
-            .enable_prompts()
-            .build();
-        // rmcp 1.x marks these result/info structs `#[non_exhaustive]`, so build
-        // them via the provided constructors/builders instead of struct literals.
-        let server_info = Implementation::new("engramdb", env!("CARGO_PKG_VERSION"));
-        let instructions = {
-            let mut s = "Project-scoped persistent memory store for coding agents. \
-                 Stores decisions, hazards, conventions, and context about the codebase. \
-                 IMPORTANT: Query memories (query) before answering project questions, \
-                 investigating workflows, or researching how things work — not only before \
-                 modifying files. Use mode=\"filter\" with a query/logical/path/tags signal \
-                 for specific lookups, mode=\"rank\" for context-aware browsing. \
-                 Store new knowledge after significant discoveries — for decisions, \
-                 state the premise (premise) and what would invalidate them \
-                 (invalidated_by); set epistemic (fact/observation/decision) when it \
-                 differs from the type default, and origin_task + generality=\"task\" \
-                 for task-specific choices. Declare situation on query when debugging \
-                 or weighing a design choice. \
-                 All tools accept an optional `project` parameter (absolute path, 16-char \
-                 project ID, \"global\", or \"group:<name>\") to operate on a different \
-                 store's memories. \
-                 Use project=\"global\" for cross-project memories like personal preferences, \
-                 coding conventions, or knowledge that applies everywhere. \
-                 Use project=\"group:<name>\" to write to or read a named group store shared \
-                 by a set of related projects (set up on the CLI with `engramdb groups \
-                 subscribe <name>`); a project's subscribed groups fan into its queries \
-                 automatically. \
-                 Use include_global=true on query to also merge the everyone/global store. \
-                 Omit `project` to use the current project. \
-                 When you finish the task you were assigned, reflect: if anything durable \
-                 about the project, the environment/tooling, or the user's preferences came \
-                 up (not task minutiae), query existing memories, then create the new ones \
-                 and challenge contradictions. If a durable decision or convention applies \
-                 to more than the current project — e.g. you are working across a set of \
-                 related repos — save it once to a shared store (project=\"group:<name>\" \
-                 for that set, or project=\"global\" for everywhere) instead of only the \
-                 current project, so every relevant project surfaces it. Suggested, not required. \
-                 Where to save: project facts, conventions, hazards and decisions go to this \
-                 store with create, including when the user says \"remember\". Claude Code's \
-                 file-based auto-memory is private to one machine and invisible to these \
-                 queries and to collaborators; keep it for personal collaboration preferences. \
-                 When the user says a stored memory is outdated or wrong, challenge it right \
-                 away with their statement as evidence, even if the code still matches the old \
-                 memory; do not wait for the code to change."
-                .to_string();
-            if let Some(w) = &self.embedding_warning {
-                s.push_str("\n\nIMPORTANT — ACTION NEEDED: ");
-                s.push_str(w);
-                s.push_str(" Tell the user.");
+    /// What `#[tool_handler]` would generate, plus two things: the call waits
+    /// for the deferred startup work, and the first result after the
+    /// embedding-model check carries its warning if `initialize` could not.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        self.await_startup().await?;
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let mut response = self.tool_router.call(tcc).await?;
+        if let CallToolResponse::Complete(result) = &mut response {
+            if let Some(w) = self.embedding_notice.take_undelivered() {
+                result
+                    .content
+                    .push(ContentBlock::text(embedding_notice_text(&w)));
             }
-            s
-        };
-        InitializeResult::new(capabilities)
-            .with_protocol_version(ProtocolVersion::LATEST)
-            .with_server_info(server_info)
-            .with_instructions(instructions)
+        }
+        Ok(response)
+    }
+
+    fn get_info(&self) -> ServerConfig {
+        self.server_config(self.embedding_notice.get().as_deref())
+    }
+
+    /// Same as rmcp's default, except that the instructions and the
+    /// "delivered" mark come from one read of the embedding warning. Reading
+    /// it twice could race the startup task setting it between the reads, and
+    /// mark a warning delivered that the instructions did not carry.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<InitializeResult, rmcp::ErrorData> {
+        context.peer.set_peer_info(request.clone());
+        let warning = self.embedding_notice.get();
+        let mut result = self.negotiate_initialize(&request)?;
+        result.instructions = self.server_config(warning.as_deref()).instructions;
+        if warning.is_some() {
+            self.embedding_notice.mark_delivered();
+        }
+        Ok(result)
+    }
+
+    /// Same as rmcp's default, with the warning handling of
+    /// [`Self::initialize`]: the discover result carries the instructions too.
+    async fn discover(
+        &self,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<DiscoverResult, rmcp::ErrorData> {
+        let warning = self.embedding_notice.get();
+        let result = DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.server_config(warning.as_deref()),
+        );
+        if warning.is_some() {
+            self.embedding_notice.mark_delivered();
+        }
+        Ok(result)
     }
 
     fn list_resources(
@@ -4155,6 +4386,8 @@ impl ServerHandler for EngramDbServer {
             ReadResourceResponse::from(result)
         };
         async move {
+            // Resources read the user's memories: same rule as tool calls.
+            self.await_startup().await?;
             if uri == "memory://index" {
                 let store = self
                     .open_store()
@@ -4263,6 +4496,8 @@ impl ServerHandler for EngramDbServer {
         request: GetPromptRequestParams,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<GetPromptResponse, rmcp::ErrorData> {
+        // Prompts query the user's memories: same rule as tool calls.
+        self.await_startup().await?;
         match request.name.as_str() {
             "memory-session-start" => {
                 let path = request
@@ -4412,18 +4647,22 @@ impl ServerHandler for EngramDbServer {
 // ---------------------------------------------------------------------------
 
 /// Start the MCP server with stdio transport.
+///
+/// **The handshake is answered before any startup work runs.** Claude Code
+/// opens a stdio server with a `server/discover` probe and a short timeout.
+/// The startup work in [`EngramDbServer::run_startup`] resolves the embedding
+/// providers, which on a cold start spawns the shared daemon or loads ONNX
+/// in-process — about 3 s. When that ran before `serve`, nothing read stdin
+/// for those seconds, the probe timed out, and the session lost every tool
+/// (see [`DiscoverProbeFilter`] for why the retry failed too). Now the work
+/// runs in a background task, and tool calls and resource reads wait for it
+/// (see [`serve_with_deferred_startup`]).
 pub async fn run_stdio(
     dir: PathBuf,
     embedding_backend: Option<EmbeddingBackend>,
 ) -> anyhow::Result<()> {
     let stats_cfg = engramdb::types::EngramConfig::default().stats;
     let stats = engramdb::telemetry::StatsCollector::new(stats_cfg.clone());
-
-    // Hydrate counters by replaying recent events from each project's
-    // LanceDB `stats_events` table before serving requests.
-    if let Err(e) = engramdb::telemetry::persistence::hydrate_collector(&stats).await {
-        tracing::warn!("stats hydrate failed: {e}");
-    }
 
     // Drain the collector's persistence channel into the per-project
     // LanceDB tables in the background. Capture the JoinHandle so we can
@@ -4439,51 +4678,35 @@ pub async fn run_stdio(
     });
 
     let mut server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
-    // Detect git worktrees and register/init the main project if needed.
-    server.ensure_hierarchy().await?;
-    // On the main worktree, run throttled housekeeping (orphan cleanup + a
-    // quick store health check). Best-effort: never blocks serving.
-    server.maintain_main_project().await;
-    // Embedding-model-change check: warn (default), auto-reindex, or — in
-    // `error` mode — leave the warning so embedding tools hard-fail.
-    if let Some((mode, report)) = server.embedding_startup_report().await {
-        if !report.status.is_consistent() {
-            if let Some(w) = &report.warning {
-                tracing::warn!("{w}");
-            }
-            server.embedding_warning = report.warning.clone();
-            if mode == engramdb::types::ReindexOnModelChange::Auto {
-                tracing::warn!(
-                    "EngramDB: reindex_on_model_change=auto — re-embedding before serving…"
-                );
-                match server.auto_reindex_default().await {
-                    Ok(()) => {
-                        tracing::warn!("EngramDB: auto-reindex complete.");
-                        server.embedding_warning = None;
-                    }
-                    Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
-                }
-            }
-        }
-    }
-    // Load the embedding model in the background now so the first tool call
-    // doesn't pay the ~240ms ONNX session init synchronously.
+    // Before the handshake, so the first `tools/list` already carries the
+    // alwaysLoad `_meta`. Reading config.toml is cheap; the slow startup work
+    // stays deferred.
     let always_load = server.configured_always_load().await;
     server.set_always_load(&always_load);
-    server.spawn_provider_warmup();
-    // Keep the shared daemon resident while this session runs and self-heal it
-    // if it dies/restarts.
-    server.spawn_daemon_heartbeat();
+    let (stdin, stdout) = rmcp::transport::io::stdio();
+    let transport = DiscoverProbeFilter::new(rmcp::transport::async_rw::AsyncRwTransport::<
+        rmcp::RoleServer,
+        _,
+        _,
+    >::new(stdin, stdout));
+    let (service, startup) = serve_with_deferred_startup(server, transport, |server| async move {
+        server.run_startup().await
+    })
+    .await?;
     // `serve` consumes the server; the running service owns the remaining
     // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
     // both it and the local `stats` so the channel closes and the flush
     // task can finalize before we await it.
-    let service = server.serve(rmcp::transport::io::stdio()).await?;
+    //
     // `waiting` takes ownership and consumes `service` on completion, so by
     // the time it returns the rmcp service has already dropped its
-    // `Arc<StatsCollector>` clone — leaving the local `stats` as the last
-    // Arc holder. Dropping it now closes the channel.
+    // `Arc<StatsCollector>` clone. The startup task holds another clone (it
+    // runs on a clone of the server); stop it if the session ended before it
+    // finished. That leaves the local `stats` as the last Arc holder, so
+    // dropping it closes the channel.
     service.waiting().await?;
+    startup.abort();
+    let _ = startup.await;
     drop(stats);
     if let Some(h) = flush_handle {
         // Safety net: if some Arc clone unexpectedly outlives `stats` the
@@ -4493,6 +4716,163 @@ pub async fn run_stdio(
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
     }
     Ok(())
+}
+
+/// Serve `server` on `transport` while `startup` runs in a background task.
+///
+/// `startup` gets a clone of the server and starts before the handshake, so
+/// the two run concurrently: `initialize` (or `server/discover`), the list
+/// calls and `ping` are answered at once, whatever `startup` is doing. Tool
+/// calls and resource reads wait until `startup` finishes, so they still run
+/// against a fully set-up project, exactly as when startup ran first. If
+/// `startup` fails, those calls return its error instead of running.
+///
+/// Returns once the handshake is done, with the startup task's handle. The
+/// caller aborts it when the session ends.
+async fn serve_with_deferred_startup<T, F, Fut>(
+    mut server: EngramDbServer,
+    transport: T,
+    startup: F,
+) -> anyhow::Result<(
+    rmcp::service::RunningService<rmcp::RoleServer, EngramDbServer>,
+    tokio::task::JoinHandle<()>,
+)>
+where
+    T: rmcp::transport::Transport<rmcp::RoleServer> + 'static,
+    F: FnOnce(EngramDbServer) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    let (status_tx, status_rx) = tokio::sync::watch::channel(StartupStatus::Pending);
+    server.startup = status_rx;
+    let work = startup(server.clone());
+    let startup_task = tokio::spawn(async move {
+        let status = match work.await {
+            Ok(()) => StartupStatus::Ready,
+            Err(e) => {
+                tracing::error!("EngramDB: startup failed: {e:#}");
+                StartupStatus::Failed(format!("{e:#}"))
+            }
+        };
+        // Fails only when every receiver is gone, i.e. nobody is waiting.
+        let _ = status_tx.send(status);
+    });
+    match server.serve(transport).await {
+        Ok(service) => Ok((service, startup_task)),
+        Err(e) => {
+            startup_task.abort();
+            Err(e.into())
+        }
+    }
+}
+
+/// How long [`DiscoverProbeFilter`] waits after a `server/discover` opener for
+/// an `initialize` that shows the probe was abandoned.
+const ABANDONED_PROBE_WINDOW: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// A stdio transport wrapper that drops a `server/discover` probe the client
+/// has already given up on.
+///
+/// **This works around rmcp 3.4.0 behavior.** When the first request on a
+/// connection is anything but `initialize`, rmcp's `serve_server` marks the
+/// whole session as the 2026-07-28 inline lifecycle
+/// (`Peer::require_request_metadata`), and nothing clears that mark. A later
+/// `initialize` on the same connection is answered, but every request after
+/// it is then rejected unless it carries the modern per-request `_meta`
+/// ("request _meta is missing or has malformed required fields:
+/// io.modelcontextprotocol/protocolVersion, …").
+///
+/// That is exactly what a client in "probe, then fall back" mode produces
+/// when the server is slow to read stdin. Claude Code (and rmcp's own
+/// `ClientLifecycleMode::Auto`) sends `server/discover`; on a timeout it sends
+/// a legacy `initialize` on the same pipe. A server that only then starts
+/// reading finds the stale probe first, answers it (the client reports
+/// "Received a response for an unknown message ID" and drops the
+/// connection), and is left expecting modern `_meta` that the legacy client
+/// never sends.
+///
+/// So when the first message is a `server/discover` request, this wrapper
+/// waits up to [`ABANDONED_PROBE_WINDOW`] for the next message. If that is an
+/// `initialize`, the client has abandoned the probe: it is dropped unanswered
+/// (the client stopped waiting for its response) and the session starts on
+/// the legacy lifecycle the client chose. Anything else is delivered in
+/// order behind the probe, so a client that really uses `server/discover`
+/// pays at most the window once.
+///
+/// Serving the handshake before the slow startup work (see [`run_stdio`])
+/// removes the usual cause of a late probe; this covers the rest (an
+/// overloaded machine, a stalled disk).
+struct DiscoverProbeFilter<T> {
+    inner: T,
+    first_checked: bool,
+    queued: Option<ClientJsonRpcMessage>,
+    eof: bool,
+}
+
+impl<T> DiscoverProbeFilter<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            first_checked: false,
+            queued: None,
+            eof: false,
+        }
+    }
+}
+
+fn is_client_request(msg: &ClientJsonRpcMessage, pred: impl Fn(&ClientRequest) -> bool) -> bool {
+    matches!(msg, JsonRpcMessage::Request(req) if pred(&req.request))
+}
+
+impl<T> rmcp::transport::Transport<rmcp::RoleServer> for DiscoverProbeFilter<T>
+where
+    T: rmcp::transport::Transport<rmcp::RoleServer>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: ServerJsonRpcMessage,
+    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        if let Some(msg) = self.queued.take() {
+            return Some(msg);
+        }
+        if self.eof {
+            return None;
+        }
+        let msg = self.inner.receive().await?;
+        if std::mem::replace(&mut self.first_checked, true)
+            || !is_client_request(&msg, |r| matches!(r, ClientRequest::DiscoverRequest(_)))
+        {
+            return Some(msg);
+        }
+        // `receive` is cancel-safe for rmcp's stdio transport (a partial line
+        // stays buffered), so timing it out loses nothing.
+        match tokio::time::timeout(ABANDONED_PROBE_WINDOW, self.inner.receive()).await {
+            Ok(Some(next))
+                if is_client_request(&next, |r| {
+                    matches!(r, ClientRequest::InitializeRequest(_))
+                }) =>
+            {
+                tracing::info!(
+                    "EngramDB: dropping an abandoned server/discover probe; \
+                     the client fell back to initialize"
+                );
+                return Some(next);
+            }
+            Ok(Some(next)) => self.queued = Some(next),
+            Ok(None) => self.eof = true,
+            Err(_elapsed) => {}
+        }
+        Some(msg)
+    }
+
+    fn close(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
 }
 
 /// Configuration for the streamable-HTTP transport.
@@ -4530,9 +4910,6 @@ pub async fn run_sse(
     // server instance. Hydrate once and spawn a single flush task.
     let stats_cfg = engramdb::types::EngramConfig::default().stats;
     let stats = engramdb::telemetry::StatsCollector::new(stats_cfg.clone());
-    if let Err(e) = engramdb::telemetry::persistence::hydrate_collector(&stats).await {
-        tracing::warn!("stats hydrate failed: {e}");
-    }
     let flush_handle = stats.take_receiver().map(|rx| {
         engramdb::telemetry::persistence::spawn_flush_task(
             rx,
@@ -4555,46 +4932,22 @@ pub async fn run_sse(
     // The embedding-model-change policy is evaluated here as well. The
     // per-connection servers built by the factory closure below are
     // short-lived and never run startup logic, so without this every SSE
-    // connection would silently skip the check (`embedding_warning: None`)
+    // connection would silently skip the check (no embedding notice)
     // and `auto` mode would never re-embed. Mirror `run_stdio`: compute the
     // warning (and auto-reindex if requested) exactly once, then seed every
     // per-connection server with the resulting warning. The warmup server
     // shares the process-wide model cache / daemon so the check (and any
     // auto-reindex) reuse the same providers the connections will.
+    //
+    // Unlike stdio, this runs before the listener binds: an HTTP client is
+    // not probing a pipe on a short timeout, and a connection made during
+    // startup would only queue.
     let embedding_warning = {
-        let mut warmup =
-            EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
-                .with_shared_model_caches(provider_cache.clone(), daemon.clone());
-        warmup.ensure_hierarchy().await?;
-        // Same throttled main-worktree housekeeping as the stdio path; runs
-        // once here since per-connection servers share this registry.
-        warmup.maintain_main_project().await;
-        if let Some((mode, report)) = warmup.embedding_startup_report().await {
-            if !report.status.is_consistent() {
-                if let Some(w) = &report.warning {
-                    tracing::warn!("{w}");
-                }
-                warmup.embedding_warning = report.warning.clone();
-                if mode == engramdb::types::ReindexOnModelChange::Auto {
-                    tracing::warn!(
-                        "EngramDB: reindex_on_model_change=auto — re-embedding before serving…"
-                    );
-                    match warmup.auto_reindex_default().await {
-                        Ok(()) => {
-                            tracing::warn!("EngramDB: auto-reindex complete.");
-                            warmup.embedding_warning = None;
-                        }
-                        Err(e) => tracing::warn!("EngramDB: auto-reindex failed: {e}"),
-                    }
-                }
-            }
-        }
-        // Warm the shared model cache / daemon once (after any auto-reindex)
-        // so the first connection's first tool call doesn't pay the load.
-        warmup.spawn_provider_warmup();
-        warmup.spawn_daemon_heartbeat();
+        let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
+            .with_shared_model_caches(provider_cache.clone(), daemon.clone());
+        warmup.run_startup().await?;
         (
-            warmup.embedding_warning.clone(),
+            warmup.embedding_notice.get(),
             warmup.configured_always_load().await,
         )
     };
@@ -4614,7 +4967,9 @@ pub async fn run_sse(
                     EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
                         .map(|s| s.with_shared_model_caches(provider_cache.clone(), daemon.clone()))
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
-                server.embedding_warning = embedding_warning.clone();
+                // A notice per connection: each session's instructions
+                // carry the warning, not only the first one's.
+                server.embedding_notice = Arc::new(EmbeddingNotice::new(embedding_warning.clone()));
                 server.set_always_load(&always_load);
                 Ok(server)
             }
