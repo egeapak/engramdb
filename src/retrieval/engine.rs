@@ -5155,8 +5155,9 @@ mod tests {
     /// file_edit`, `rank_fallback: 0`) injected nothing for a memory at the
     /// default criticality (0.5). Scope, trust and situation multiply its
     /// score to 0.36–0.44, under the 0.45 threshold, even for an exact path
-    /// match. A scoped match now clears on its own relevance; the
-    /// multipliers only order the results.
+    /// match. A close scope match now clears on its own relevance; the
+    /// multipliers only order the results. A broad scope (`/`) still needs
+    /// the full score, or root memories would ride along on every edit.
     #[tokio::test]
     async fn scope_only_rank_keeps_default_criticality_scope_matches() {
         use crate::types::{Epistemic, Memory, MemoryType, Provenance, Situation, Visibility};
@@ -5184,6 +5185,7 @@ mod tests {
             mk("dir fact", &["billing/"], 0.5, Epistemic::Fact),
             mk("other dir", &["payments/"], 0.9, Epistemic::Fact),
             mk("unscoped", &[], 0.9, Epistemic::Fact),
+            mk("root", &["/"], 0.5, Epistemic::Fact),
             mk(
                 "low criticality",
                 &["billing/invoice.py"],
@@ -5219,7 +5221,10 @@ mod tests {
             .memories
             .iter()
             .all(|m| !m.score_breakdown.below_threshold));
-        assert_eq!(result.dropped_below_threshold, 1, "low criticality only");
+        assert_eq!(
+            result.dropped_below_threshold, 2,
+            "low criticality, and the root scope (two levels up) at 0.5"
+        );
     }
 
     /// A logical-only context keeps the stricter rule for unscoped memories:
