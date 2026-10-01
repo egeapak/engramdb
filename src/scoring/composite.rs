@@ -63,6 +63,16 @@ pub struct ScoreBreakdown {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub below_threshold: bool,
 
+    /// Rank mode's threshold value, when it is not `final_score`. Set only for
+    /// scope-only scoring with a path or logical context, to the memory's own
+    /// relevance (criticality × decay, minus any challenge penalty) when its
+    /// scope matches, never below `final_score`. The scope, trust and
+    /// situation multipliers then order the results instead of gating them:
+    /// as a product they kept a default-criticality (0.5) memory scoped to
+    /// the exact file under the threshold, so the file hook injected nothing.
+    #[serde(skip)]
+    pub gate_score: Option<f64>,
+
     /// The final composite score
     pub final_score: f64,
     /// Raw semantic (cosine) similarity score (if available)
@@ -459,13 +469,16 @@ fn composite_score_inner(
     // Apply challenge penalty as flat subtraction, sized per epistemic class
     // (§7.2): observation 0.20 / fact 0.15 / decision 0.05 by default; a
     // legacy `Flat` config value applies to all classes.
-    if target.status == Status::Challenged {
-        score -= config
+    let challenge_penalty = if target.status == Status::Challenged {
+        config
             .retrieval
             .scoring
             .challenge_penalty
-            .penalty_for(target.epistemic);
-    }
+            .penalty_for(target.epistemic)
+    } else {
+        0.0
+    };
+    score -= challenge_penalty;
 
     // Safety clamp to [0, 1]. `f64::clamp` propagates NaN, and `criticality`
     // is parsed from untrusted files with `f64::parse` (which accepts "NaN" /
@@ -478,8 +491,27 @@ fn composite_score_inner(
         0.0
     };
 
+    // Scope-only with context: a memory that matches the scope clears the
+    // threshold on its own relevance. "Matches" is a physical (or logical)
+    // hit under a path, and a related declared logical scope under a
+    // logical-only context — an unscoped memory there only gets the neutral
+    // floor, which is not a match.
+    let scope_only = context.keyword_score.is_none()
+        && context.semantic_score.is_none()
+        && context.query.is_none();
+    let gate_score = (scope_only && has_scope_context).then(|| {
+        let matched = scope_score > 0.0 && (context.path.is_some() || !target.logical.is_empty());
+        let own = relevance - challenge_penalty;
+        if matched && own.is_finite() {
+            own.clamp(0.0, 1.0).max(score)
+        } else {
+            score
+        }
+    });
+
     ScoreBreakdown {
         below_threshold: false,
+        gate_score,
         final_score: score,
         semantic: raw_semantic,
         keyword: raw_keyword,

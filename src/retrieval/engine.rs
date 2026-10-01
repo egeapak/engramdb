@@ -1602,16 +1602,6 @@ impl RetrievalEngine {
         Ok(result)
     }
 
-    /// R2 no-query Rank fast path: score every candidate straight from the
-    /// index projection ([`ScoreTarget`]) and load only the survivors' files.
-    /// Byte-identical to the main `query` path for
-    /// `query.query == None && mode == Rank` — every scoring input is carried
-    /// in the projection (schema v0.2.0), so this only skips the full file load.
-    /// `ctx_path` is the caller's Step-1.5 normalized query path — already
-    /// project-relativized and with `Some("")` collapsed to `None`. Deriving it
-    /// again here from `query.path` once dropped the empty-string collapse, so
-    /// the no-query Rank shape (the SessionStart hook) with `path: ""` zeroed
-    /// every scope multiplier and returned nothing.
     /// Rank mode's relevance cut, on candidates already sorted by score.
     ///
     /// Keeps every candidate at or above `retrieval.relevance_threshold`.
@@ -1633,8 +1623,9 @@ impl RetrievalEngine {
         let fallback = query
             .rank_fallback
             .unwrap_or(self.config.retrieval.rank_fallback);
-        if fallback == 0 || candidates.iter().any(|c| c.score >= threshold) {
-            candidates.retain(|c| c.score >= threshold);
+        let clears = |c: &ScoredCandidate| c.breakdown.gate_score.unwrap_or(c.score) >= threshold;
+        if fallback == 0 || candidates.iter().any(clears) {
+            candidates.retain(clears);
         } else {
             candidates.truncate(fallback);
             for c in candidates.iter_mut() {
@@ -1644,6 +1635,16 @@ impl RetrievalEngine {
         before - candidates.len()
     }
 
+    /// R2 no-query Rank fast path: score every candidate straight from the
+    /// index projection ([`ScoreTarget`]) and load only the survivors' files.
+    /// Byte-identical to the main `query` path for
+    /// `query.query == None && mode == Rank` — every scoring input is carried
+    /// in the projection (schema v0.2.0), so this only skips the full file load.
+    /// `ctx_path` is the caller's Step-1.5 normalized query path — already
+    /// project-relativized and with `Some("")` collapsed to `None`. Deriving it
+    /// again here from `query.path` once dropped the empty-string collapse, so
+    /// the no-query Rank shape (the SessionStart hook) with `path: ""` zeroed
+    /// every scope multiplier and returned nothing.
     async fn rank_scope_only_from_index(
         &self,
         query: &RetrievalQuery,
@@ -5148,6 +5149,98 @@ mod tests {
         assert_eq!(result.memories.len(), 1);
         assert!(!result.memories[0].score_breakdown.below_threshold);
         assert_eq!(result.dropped_below_threshold, 2);
+    }
+
+    /// Regression: the PreToolUse hook (scope-only rank, `situation:
+    /// file_edit`, `rank_fallback: 0`) injected nothing for a memory at the
+    /// default criticality (0.5). Scope, trust and situation multiply its
+    /// score to 0.36–0.44, under the 0.45 threshold, even for an exact path
+    /// match. A scoped match now clears on its own relevance; the
+    /// multipliers only order the results.
+    #[tokio::test]
+    async fn scope_only_rank_keeps_default_criticality_scope_matches() {
+        use crate::types::{Epistemic, Memory, MemoryType, Provenance, Situation, Visibility};
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mk = |summary: &str, physical: &[&str], criticality: f64, epistemic: Epistemic| {
+            let mut m = Memory::new(
+                MemoryType::Context,
+                summary,
+                "body",
+                Provenance::agent("claude"),
+            );
+            m.visibility = Visibility::Shared;
+            m.criticality = criticality;
+            m.epistemic = epistemic;
+            m.physical = physical.iter().map(|p| p.to_string()).collect();
+            m
+        };
+        for m in [
+            mk("exact fact", &["billing/invoice.py"], 0.5, Epistemic::Fact),
+            mk("dir decision", &["billing/"], 0.5, Epistemic::Decision),
+            mk("dir fact", &["billing/"], 0.5, Epistemic::Fact),
+            mk("other dir", &["payments/"], 0.9, Epistemic::Fact),
+            mk("unscoped", &[], 0.9, Epistemic::Fact),
+            mk("low criticality", &["billing/invoice.py"], 0.3, Epistemic::Fact),
+        ] {
+            store.create(&m).await.unwrap();
+        }
+        let engine = RetrievalEngine::new(store, crate::types::EngramConfig::default());
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            rank_fallback: Some(0),
+            path: Some("billing/invoice.py".to_string()),
+            situation: Some(Situation::FileEdit),
+            ..Default::default()
+        };
+        let result = engine.query(&query).await.unwrap();
+        let got: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|m| m.memory.summary.as_str())
+            .collect();
+        assert!(
+            result.memories.iter().all(|m| m.score < 0.45),
+            "premise: every multiplied score is under the threshold: {:?}",
+            result.memories.iter().map(|m| m.score).collect::<Vec<_>>()
+        );
+        assert_eq!(got.len(), 3, "got {got:?}");
+        assert_eq!(got[0], "exact fact", "the exact path match ranks first");
+        assert!(got.contains(&"dir decision") && got.contains(&"dir fact"));
+        assert!(result
+            .memories
+            .iter()
+            .all(|m| !m.score_breakdown.below_threshold));
+        assert_eq!(result.dropped_below_threshold, 1, "low criticality only");
+    }
+
+    /// A logical-only context keeps the stricter rule for unscoped memories:
+    /// the neutral floor is not a scope match, so they still need the full
+    /// multiplied score.
+    #[test]
+    fn scope_only_gate_needs_a_real_scope_match() {
+        use crate::scoring::{composite_score, ScoringContext};
+        use crate::types::{Memory, MemoryType, Provenance};
+
+        let config = crate::types::EngramConfig::default();
+        let now = chrono::Utc::now();
+        let mut m = Memory::new(MemoryType::Context, "s", "b", Provenance::human());
+        m.criticality = 0.8;
+        let logical = vec!["auth".to_string()];
+
+        let unscoped = composite_score(&m, &ScoringContext::scope_only(None, &logical), &config, now);
+        assert_eq!(unscoped.gate_score, Some(unscoped.final_score));
+
+        m.logical = vec!["auth.oauth".to_string()];
+        let related = composite_score(&m, &ScoringContext::scope_only(None, &logical), &config, now);
+        assert!(related.final_score < 0.8);
+        assert!((related.gate_score.unwrap() - 0.8).abs() < 1e-9);
+
+        let no_context = composite_score(&m, &ScoringContext::scope_only(None, &[]), &config, now);
+        assert_eq!(no_context.gate_score, None, "SessionStart shape is unchanged");
     }
 
     #[tokio::test]

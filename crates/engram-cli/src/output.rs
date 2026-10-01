@@ -1977,6 +1977,7 @@ mod tests {
     fn test_score_breakdown() -> ScoreBreakdown {
         ScoreBreakdown {
             below_threshold: false,
+            gate_score: None,
             final_score: 0.75,
             semantic: Some(0.8),
             keyword: None,
