@@ -1,0 +1,112 @@
+[
+ {
+  "role": "user",
+  "content": "How should I represent a currency amount in new billing code?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c15024e4-dfc6-407f-889e-8bff9a018ae7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"d93f3f30-ac9a-42e9-a8d2-adf2875c52af\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c15024e4-dfc6-407f-889e-8bff9a018ae7\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"667d82b8-7c54-4540-9123-87089d830a10\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7371d32a-7b8c-47c4-a285-d53222178209\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"8e117378-d3ad-4c5e-9043-3d767ad6392c\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7371d32a-7b8c-47c4-a285-d53222178209\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"97b7bcca-2d92-4bd4-8a34-dc5032fe979a\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"20c2c66e-3696-49d1-af36-4f0fa3ee4560\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"30cc4a80-5418-4430-bba6-c2d98c0cfbeb\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"20c2c66e-3696-49d1-af36-4f0fa3ee4560\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a1551637-42d2-4726-aa0c-277b1ec5b18e\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"52442031-316b-4da2-815a-e7b154d6df61\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"5dc8ef13-a51a-4fd4-b700-53ed3a98d4e5\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"52442031-316b-4da2-815a-e7b154d6df61\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ca187fae-f0b5-48f1-aad3-b69702f3db1a\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8039d0bc-a4fb-48db-95f5-19857280f15c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"8cf80d15-4df1-4dcf-98e3-372f04c936ed\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8039d0bc-a4fb-48db-95f5-19857280f15c\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fe8832cb-6cce-4ca0-a33d-536ee8ceae3a\", \"session_id\": \"671784a1-6ef0-4407-b3c6-105cecc94274\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"currency amount money representation billing\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)money|amount|currency|cents|decimal\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 14 files\n.engramdb/memories/tax-uses-round-half-even_01a0f880-0b07-7f21-8f52-8cf15e2ef32b.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f87f-f0c6-71e2-ba31-9d5990b39ce0.md\ntests/test_tax.py\ntests/test_payments.py\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nsrc/api/checkout.py\nsrc/billing/tax.py\nsrc/billing/refunds.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nREADME.md"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-money-9_8182gn/ledgerline/.engramdb/memories/money-is-integer-cents-never-float_01a0f87f-f0c6-71e2-ba31-9d5990b39ce0.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f87f-f0c6-71e2-ba31-9d5990b39ce0\n4\ttype: convention\n5\tstatus: Active\n6\ttitle: Money is integer cents, never float\n7\t---\n8\t\n9\t# Money is integer cents, never float\n10\t\n11\t**Summary:** Money is integer cents, never float\n12\t\n13\t## Content\n14\t\n15\tAll monetary amounts are stored and passed as integer cents using the `Money` type in src/billing/money.py. Never use float for money. Field names end in `_cents`.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `src/billing/`\n20\t- **Tags:** `billing`, `money`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T17:25:29.414763649+00:00\n28\t- **Updated:** 2026-10-01T17:25:29.414763649+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T17:25:29.414763649Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.0\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-money-9_8182gn/ledgerline/src/billing/money.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom dataclasses import dataclass\n2\t\n3\t\n4\t@dataclass(frozen=True)\n5\tclass Money:\n6\t    cents: int\n7\t    currency: str = \"USD\"\n8\t\n9\t    def __add__(self, other):\n10\t        assert self.currency == other.currency\n11\t        return Money(self.cents + other.cents, self.currency)\n12\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-money-9_8182gn/ledgerline/.engramdb/memories/tax-uses-round-half-even_01a0f880-0b07-7f21-8f52-8cf15e2ef32b.md\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t---\n2\tversion: 2\n3\tid: 01a0f880-0b07-7f21-8f52-8cf15e2ef32b\n4\ttype: decision\n5\tstatus: Active\n6\ttitle: Tax uses ROUND_HALF_EVEN\n7\t---\n8\t\n9\t# Tax uses ROUND_HALF_EVEN\n10\t\n11\t**Summary:** Tax uses ROUND_HALF_EVEN\n12\t\n13\t## Content\n14\t\n15\tTax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\n16\t\n17\t## Scope\n18\t\n19\t- **Files:** `src/billing/tax.py`\n20\t- **Tags:** `billing`, `tax`\n21\t- **Criticality:** 0.5\n22\t- **Confidence:** 0.8\n23\t\n24\t## Provenance\n25\t\n26\t- **Source:** human\n27\t- **Created:** 2026-10-01T17:25:36.135560665+00:00\n28\t- **Updated:** 2026-10-01T17:25:36.135560665+00:00\n29\t\n30\t<!-- engramdb\n31\tvisibility: Shared\n32\taccessed_at: 2026-10-01T17:25:36.135560665Z\n33\tdecay:\n34\t  strategy: none\n35\t  floor: 0.0\n36\t-->\n37\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"float|Decimal|_cents|Money\\\\(\",\n \"path\": \"/tmp/mte-pq-money-9_8182gn/ledgerline\",\n \"glob\": \"{src,migrations}/**\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "src/billing/refunds.py:4:def refund(invoice: Invoice, amount_cents: int):\nsrc/billing/refunds.py:5:    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/refunds.py:7:    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}\nsrc/billing/invoices.py:15:    subtotal_cents: int\nsrc/billing/invoices.py:16:    tax_cents: int = 0\nsrc/billing/invoices.py:22:    resp = requests.post(LEDGER_URL, json={\"invoice\": invoice.id, \"amount\": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)\nsrc/billing/money.py:11:        return Money(self.cents + other.cents, self.currency)\nsrc/billing/tax.py:1:from decimal import Decimal\nsrc/billing/tax.py:7:        x += line[\"quantity\"] * line[\"unit_cents\"]\nsrc/billing/tax.py:11:def tax_for(amount_cents, rate):\nsrc/api/checkout.py:9:    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\nsrc/api/checkout.py:10:    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nmigrations/0001_create_invoices.sql:1:CREATE TABLE invoices (id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, subtotal_cents BIGINT NOT NULL);\nmigrations/0005_create_refunds.sql:1:CREATE TABLE refunds (id TEXT PRIMARY KEY, invoice_id TEXT REFERENCES invoices(id), refunded_cents BIGINT);\nmigrations/0004_create_lines.sql:1:CREATE TABLE invoice_lines (invoice_id TEXT REFERENCES invoices(id), quantity INT, unit_cents BIGINT);\nmigrations/0002_add_tax.sql:1:ALTER TABLE invoices ADD COLUMN tax_cents BIGINT NOT NULL DEFAULT 0;"
+ },
+ {
+  "role": "assistant",
+  "content": "Use **integer cents**, never `float`. The project's stored convention says so (\"Money is integer cents, never float\"), and the code follows it.\n\n**What to use:**\n- **The `Money` type** in `src/billing/money.py`, a frozen dataclass with `cents: int` and `currency: str = \"USD\"`. Its `__add__` refuses to add two different currencies.\n- **Field and parameter names ending in `_cents`**, like `subtotal_cents`, `tax_cents`, `unit_cents` and `refunded_cents`.\n- **`BIGINT` columns** in migrations, also with the `_cents` suffix. For example: `subtotal_cents BIGINT NOT NULL`.\n\n**Rounding:** if you need fractional math (rates, percentages), compute with `decimal.Decimal`, then round back to whole cents. Tax uses `ROUND_HALF_EVEN` (banker's rounding), as agreed with finance in March 2026. Don't use `ROUND_HALF_UP`. `src/billing/tax.py` is the reference.\n\n**One gap between the convention and the code:** nothing outside `money.py` actually uses `Money`. `Invoice`, `refund()`, `tax_for()` and `checkout.py` all pass bare `int` values with `_cents` names, and the currency is just assumed to be USD.\n\nFor new code:\n- Use `Money` wherever currency could matter, or where you're adding amounts together.\n- Plain `amount_cents: int` is fine if it sits next to existing code that does the same.\n- Either way, don't introduce floats or dollar values like `12.34`.\n\nAlso, `invoices.py:22` sends the ledger a field called just `\"amount\"` (in cents, without the `_cents` suffix). Keep that in mind if your code works with that external contract."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One real problem, and part of it was my own fault.\n\n1. **`query` with `mode: \"rank\"` returned nothing.** I searched for \"currency amount money representation billing\" with `situation: \"design_choice\"`. It came back with `total: 0` and `retrieval_quality: \"full\"`. Yet two memories that matched were sitting in `.engramdb/memories/`: \"Money is integer cents, never float\" and \"Tax uses ROUND_HALF_EVEN\". I only found them by grepping the repo and reading the files directly, which skipped the store's own access tracking.\n   - **What I would have wanted:** rank mode should fall back to keyword matching on `query` when nothing else scores. Or the response should say why it found nothing, for example \"no path or scope given; rank needs `path`/`logical`\" or \"nothing above the score threshold\". Instead, `retrieval_quality: \"full\"` suggested the search had been complete. It was the wrong signal.\n   - **My own share:** I didn't retry with `mode: \"filter\"` (same query, or `tags: [\"money\"]`), and I didn't pass `path: \"src/billing\"`. Either would probably have worked. So this is partly my mistake, but the empty \"full\" result is what made me give up on the tool.\n\n2. **Nothing came up automatically when I asked.** The context said memories are surfaced \"on your prompt\". This prompt was squarely about money representation, but neither memory appeared before I searched. I would have wanted prompt-time surfacing to catch this case, since it's the most direct lookup of a stored convention there could be.\n\n3. **Possibly `verify` and `create`, and these were mine to do.** I confirmed the integer-cents memory against the code, so it was a candidate for `verify`. I also found that the `Money` type isn't actually used anywhere outside `money.py`, which was worth recording with `create`, or flagging on the convention with `update`. Both tools were available, so nothing was missing; I just didn't use them."
+ }
+]
