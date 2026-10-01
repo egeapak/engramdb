@@ -6596,3 +6596,313 @@ fn a_search_hit_bounds_the_metadata_it_replays() {
         summary.chars().count()
     );
 }
+
+// =================================================================
+// Cold start: the handshake must not wait for startup work.
+//
+// `run_stdio` used to resolve the embedding providers (spawn the daemon or
+// load ONNX, ~3 s cold) before it read stdin. Claude Code's discovery probe
+// timed out, its fallback hit the rmcp lifecycle trap that
+// `DiscoverProbeFilter` documents, and the session had no tools.
+// =================================================================
+
+/// Serve `server` the way `run_stdio` does — through `DiscoverProbeFilter`
+/// and `serve_with_deferred_startup` — with `startup` as the startup work.
+fn spawn_deferred_server<Fut>(
+    server: EngramDbServer,
+    server_io: tokio::io::DuplexStream,
+    startup: Fut,
+) -> tokio::task::JoinHandle<anyhow::Result<()>>
+where
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let (read, write) = tokio::io::split(server_io);
+        let transport = DiscoverProbeFilter::new(rmcp::transport::async_rw::AsyncRwTransport::<
+            rmcp::RoleServer,
+            _,
+            _,
+        >::new(read, write));
+        let (service, startup_task) =
+            serve_with_deferred_startup(server, transport, move |_server| startup).await?;
+        service.waiting().await?;
+        startup_task.abort();
+        Ok(())
+    })
+}
+
+/// `initialize` and `tools/list` are answered while the startup work is still
+/// running, and a tool call waits for it to finish instead of running early.
+#[tokio::test]
+async fn initialize_is_answered_before_slow_startup_work_finishes() {
+    let (_dir, server) = setup().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, async move {
+        // Stands in for the cold-start provider resolution: it does not end
+        // until the test says so.
+        let _ = release_rx.await;
+        Ok(())
+    });
+
+    let quick = std::time::Duration::from_secs(5);
+    let client = tokio::time::timeout(quick, rmcp::serve_client((), client_io))
+        .await
+        .expect("initialize must not wait for the startup work")
+        .expect("handshake");
+    let tools = tokio::time::timeout(quick, client.peer().list_tools(None))
+        .await
+        .expect("tools/list must not wait for the startup work")
+        .expect("tools/list");
+    assert!(tools.tools.iter().any(|t| t.name == "create"));
+
+    let peer = client.peer().clone();
+    let mut call = tokio::spawn(async move {
+        peer.call_tool(
+            CallToolRequestParams::new("create").with_arguments(
+                json!({
+                    "type": "decision",
+                    "summary": "Startup runs after the handshake",
+                    "content": "Tool calls wait for it.",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut call)
+            .await
+            .is_err(),
+        "a tool call must wait for the startup work"
+    );
+
+    release_tx.send(()).unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), call)
+        .await
+        .expect("the tool call runs once startup finishes")
+        .unwrap()
+        .expect("tools/call");
+    assert_ne!(result.is_error, Some(true), "create failed: {result:?}");
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A failed startup does not kill the session: the handshake and the tool
+/// list still work, and a tool call reports the startup error.
+#[tokio::test]
+async fn failed_startup_is_reported_by_tool_calls() {
+    let (_dir, server) = setup().await;
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, async {
+        Err(anyhow::anyhow!("main project could not be initialized"))
+    });
+
+    let client = rmcp::serve_client((), client_io).await.expect("handshake");
+    client.peer().list_tools(None).await.expect("tools/list");
+    let err = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("stats").with_arguments(serde_json::Map::new()))
+        .await
+        .expect_err("a tool call after a failed startup must fail");
+    assert!(
+        err.to_string()
+            .contains("main project could not be initialized"),
+        "{err}"
+    );
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// The bytes Claude Code sends to a slow server: a `server/discover` probe it
+/// has already given up on, then a legacy `initialize`, `initialized`, and a
+/// `tools/list` with no per-request `_meta`.
+const ABANDONED_PROBE_SEQUENCE: &str = concat!(
+    r#"{"jsonrpc":"2.0","id":"server-discover-probe-1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+    "\n",
+    r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#,
+    "\n",
+    r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    "\n",
+    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+    "\n",
+);
+
+/// Write `ABANDONED_PROBE_SEQUENCE` in one go (as a pipe holds it after the
+/// client timed out) and return the server's first `count` replies.
+async fn replies_to_abandoned_probe(
+    count: usize,
+    serve: impl FnOnce(tokio::io::DuplexStream) -> tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> Vec<serde_json::Value> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let (client_r, mut client_w) = tokio::io::split(client_io);
+    client_w
+        .write_all(ABANDONED_PROBE_SEQUENCE.as_bytes())
+        .await
+        .unwrap();
+    let server_handle = serve(server_io);
+    let mut lines = BufReader::new(client_r).lines();
+    let mut replies = Vec::new();
+    for _ in 0..count {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(10), lines.next_line())
+            .await
+            .expect("server reply")
+            .unwrap()
+            .expect("server closed the pipe");
+        replies.push(serde_json::from_str(&line).unwrap());
+    }
+    drop(client_w);
+    server_handle.abort();
+    replies
+}
+
+/// With `DiscoverProbeFilter`, the abandoned probe gets no answer (Claude
+/// Code drops the connection on a response to an id it has forgotten) and
+/// the session runs on the legacy lifecycle the client fell back to.
+#[tokio::test]
+async fn abandoned_discover_probe_leaves_a_working_legacy_session() {
+    let (_dir, server) = setup().await;
+    let replies = replies_to_abandoned_probe(2, |io| {
+        spawn_deferred_server(server, io, std::future::ready(Ok(())))
+    })
+    .await;
+    assert_eq!(replies[0]["id"], json!(0), "first reply: {}", replies[0]);
+    assert!(replies[0]["result"]["protocolVersion"].is_string());
+    assert_eq!(replies[1]["id"], json!(1), "second reply: {}", replies[1]);
+    assert!(
+        replies[1]["result"]["tools"].is_array(),
+        "tools/list must succeed without per-request _meta: {}",
+        replies[1]
+    );
+}
+
+/// Pins the rmcp 3.4.0 behavior `DiscoverProbeFilter` works around: without
+/// the filter, the stale probe is answered and the legacy `tools/list` that
+/// follows is rejected for missing `_meta`. If this starts failing, rmcp
+/// fixed it — check whether the filter can go.
+#[tokio::test]
+async fn rmcp_locks_a_discover_opened_session_into_modern_meta() {
+    let (_dir, server) = setup().await;
+    let replies = replies_to_abandoned_probe(3, |io| {
+        tokio::spawn(async move {
+            server.serve(io).await?.waiting().await?;
+            Ok(())
+        })
+    })
+    .await;
+    assert_eq!(replies[0]["id"], json!("server-discover-probe-1"));
+    assert_eq!(replies[1]["id"], json!(0), "initialize is still answered");
+    let rest = format!("{}", replies[2]);
+    assert!(
+        rest.contains("request _meta is missing"),
+        "expected rmcp to reject legacy requests after a discover opener, got {rest}"
+    );
+}
+
+/// A client that really uses `server/discover` is unaffected by the filter.
+#[tokio::test]
+async fn discover_client_still_works_through_the_probe_filter() {
+    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
+
+    let (_dir, server) = setup().await;
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, std::future::ready(Ok(())));
+    let client = ()
+        .serve_with_lifecycle(
+            client_io,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+            },
+        )
+        .await
+        .expect("a 2026-07-28 client must discover the server through the filter");
+    let tools = client.peer().list_tools(None).await.expect("tools/list");
+    assert!(tools.tools.iter().any(|t| t.name == "create"));
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// An embedding-model warning found after `initialize` was answered reaches
+/// the agent on the first tool result, once.
+#[tokio::test]
+async fn late_embedding_warning_rides_the_first_tool_result_once() {
+    let (_dir, server) = setup().await;
+    let notice = Arc::clone(&server.embedding_notice);
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, async move {
+        notice.set(Some("EngramDB: the embedding model changed.".to_string()));
+        Ok(())
+    });
+    let client = rmcp::serve_client((), client_io).await.expect("handshake");
+
+    let text_of = |result: &CallToolResult| -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ContentBlock::Text(TextContent { text, .. }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let first = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("stats").with_arguments(serde_json::Map::new()))
+        .await
+        .expect("tools/call");
+    assert!(
+        text_of(&first).contains("ACTION NEEDED: EngramDB: the embedding model changed."),
+        "{first:?}"
+    );
+    let second = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("stats").with_arguments(serde_json::Map::new()))
+        .await
+        .expect("tools/call");
+    assert!(!text_of(&second).contains("ACTION NEEDED"), "{second:?}");
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A warning already known at `initialize` rides the instructions, and is not
+/// repeated on the first tool result.
+#[tokio::test]
+async fn early_embedding_warning_rides_the_instructions_only() {
+    let (_dir, server) = setup().await;
+    server
+        .embedding_notice
+        .set(Some("EngramDB: the embedding model changed.".to_string()));
+    let (client, server_handle) = duplex_serve(server).await;
+
+    let instructions = client
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .unwrap_or_default();
+    assert!(
+        instructions.contains("ACTION NEEDED: EngramDB: the embedding model changed."),
+        "{instructions}"
+    );
+    let first = client
+        .peer()
+        .call_tool(CallToolRequestParams::new("stats").with_arguments(serde_json::Map::new()))
+        .await
+        .expect("tools/call");
+    assert!(
+        !first.content.iter().any(|c| matches!(
+            c,
+            ContentBlock::Text(TextContent { text, .. }) if text.contains("ACTION NEEDED")
+        )),
+        "{first:?}"
+    );
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
