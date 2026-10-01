@@ -115,13 +115,14 @@ def setup_workspace(tmp, env):
 
 
 def seed_memory(ws, env, m):
-    cmd = ["engramdb", "--format", "json", "add", "--type", m["type"], "--title", m["title"], "--content", m["content"]]
+    cmd = ["engramdb", "add", "--format", "json", "--type", m["type"], "--title", m["title"],
+           "--summary", m["title"], "--content", m["content"]]
     for p in m["paths"]:
-        cmd += ["--path", p]
-    for t in m["tags"]:
-        cmd += ["--tag", t]
+        cmd += ["--physical", p]
+    if m["tags"]:
+        cmd += ["--tags", ",".join(m["tags"])]
     out = sh(cmd, ws, env).stdout
-    return json.loads(out)["id"]
+    return json.loads(out)["message"].split()[-1]
 
 
 def run_claude(prompt, ws, env, args, session_id, resume=False, extra=()):
