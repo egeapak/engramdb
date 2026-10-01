@@ -406,6 +406,12 @@ const DEFAULT_PREVIEW_CHARS: usize = 160;
 
 /// The first entry included gets this multiple of `preview_chars` (x2.5):
 /// spend the budget where retrieval confidence is highest.
+/// A memory and the lines it renders to, as the budgeted formatter builds them.
+type RenderedEntry<'a> = (&'a ScoredMemory, Vec<String>);
+
+/// Shortest body preview worth showing; below this a preview is dropped.
+const MIN_PREVIEW_CHARS: usize = 40;
+
 fn top_preview_chars(preview_chars: usize) -> usize {
     preview_chars * 5 / 2
 }
@@ -427,7 +433,6 @@ fn format_class_context_with_budget(
 
     let mut lines: Vec<String> = vec![header.into()];
     let mut used: usize = header.len();
-    let mut included = 0usize;
     let mut any_preview = false;
     let total = memories.len();
 
@@ -448,6 +453,12 @@ fn format_class_context_with_budget(
         budget
     };
 
+    let entry_len = |entry: &[String]| entry.iter().map(|l| l.len() + 1).sum::<usize>();
+
+    // Pass 1, in render order: every entry's summary line that fits. The
+    // bodies come second, so one long body can never push a later memory
+    // out of the context entirely.
+    let mut sections: Vec<(String, Vec<RenderedEntry>)> = Vec::new();
     for (class, group) in &groups {
         let group_header = format!("\n## {} ({}):", class_header(*class), group.len());
         let group_header_len = group_header.len() + 1; // +1 for join newline
@@ -458,34 +469,83 @@ fn format_class_context_with_budget(
 
         // Emit the header only once an entry from this group actually fits —
         // a header with zero surviving entries is noise, not context.
-        let mut header_emitted = false;
-
+        let mut entries = Vec::new();
         for scored in group {
-            let pending_header = if header_emitted { 0 } else { group_header_len };
-            let chars = if included == 0 {
-                top_preview_chars(preview_chars)
+            let pending_header = if entries.is_empty() {
+                group_header_len
             } else {
-                preview_chars
+                0
             };
-            // With its preview first; then the summary line alone.
-            let candidates = [
-                format_class_entry(scored, Some(chars)),
-                format_class_entry(scored, None),
-            ];
-            let fitting = candidates.into_iter().find(|entry| {
-                let len: usize = entry.iter().map(|l| l.len() + 1).sum();
-                used + pending_header + len <= body_budget
-            });
-            let Some(entry) = fitting else { continue };
-            if !header_emitted {
-                lines.push(group_header.clone());
-                used += group_header_len;
-                header_emitted = true;
+            let entry = format_class_entry(scored, None);
+            let len = entry_len(&entry);
+            if used + pending_header + len > body_budget {
+                continue;
             }
-            any_preview |= entry.len() > 1;
-            used += entry.iter().map(|l| l.len() + 1).sum::<usize>();
+            used += pending_header + len;
+            entries.push((*scored, entry));
+        }
+        if !entries.is_empty() {
+            sections.push((group_header, entries));
+        }
+    }
+    let included: usize = sections.iter().map(|(_, e)| e.len()).sum();
+
+    // Pass 2, best score first: add body previews while the budget lasts.
+    // Every entry gets a normal preview before the best match is extended
+    // to the longer one, which used to go to whichever entry rendered first
+    // (a broader decision ahead of an exact-file hazard, under file_edit's
+    // class order) and starve the rest. A preview that does not fit whole
+    // is cut shorter rather than dropped.
+    if preview_chars > 0 {
+        let mut order: Vec<(usize, usize)> = sections
+            .iter()
+            .enumerate()
+            .flat_map(|(si, (_, e))| (0..e.len()).map(move |ei| (si, ei)))
+            .collect();
+        order.sort_by(|a, b| {
+            let score = |(si, ei): &(usize, usize)| sections[*si].1[*ei].0.score;
+            score(b)
+                .partial_cmp(&score(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let rounds = order
+            .iter()
+            .map(|&slot| (slot, preview_chars, MIN_PREVIEW_CHARS))
+            .chain(
+                order
+                    .first()
+                    .map(|&slot| (slot, top_preview_chars(preview_chars), preview_chars + 1)),
+            )
+            .collect::<Vec<_>>();
+        for ((si, ei), mut chars, min_chars) in rounds {
+            let scored = sections[si].1[ei].0;
+            let current = entry_len(&sections[si].1[ei].1);
+            while chars >= min_chars {
+                let entry = format_class_entry(scored, Some(chars));
+                if entry.len() == 1 {
+                    break; // no body to preview
+                }
+                let len = entry_len(&entry);
+                if len <= current {
+                    break; // already showing at least this much
+                }
+                if used + len - current <= body_budget {
+                    used += len - current;
+                    sections[si].1[ei].1 = entry;
+                    any_preview = true;
+                    break;
+                }
+                // Bytes over budget >= chars to cut, since a char is at least
+                // one byte; `chars` strictly decreases, so this terminates.
+                chars -= (used + len - current - body_budget).max(1).min(chars);
+            }
+        }
+    }
+
+    for (group_header, entries) in sections {
+        lines.push(group_header);
+        for (_, entry) in entries {
             lines.extend(entry);
-            included += 1;
         }
     }
 
@@ -1961,6 +2021,61 @@ mod tests {
             .collect();
         assert_eq!(previews, vec![400, 160], "{ctx}");
         assert!(ctx.contains(PREVIEW_TRUST_NOTE));
+    }
+
+    /// The long preview goes to the best score, not to whichever entry the
+    /// class order renders first.
+    #[test]
+    fn test_longer_preview_follows_score_not_render_order() {
+        let body = "x".repeat(600);
+        let first = Memory::new(MemoryType::Convention, "First", &body, Provenance::human());
+        let second = Memory::new(MemoryType::Convention, "Second", &body, Provenance::human());
+        let mut low = scored(first);
+        low.score = 0.4;
+        let ctx =
+            format_class_context_with_budget("[H]", &[low, scored(second)], 5000, None, None, 160);
+        let previews: Vec<usize> = ctx
+            .lines()
+            .filter(|l| l.starts_with("  x"))
+            .map(|l| l.trim_start().chars().take_while(|c| *c == 'x').count())
+            .collect();
+        assert_eq!(previews, vec![160, 400], "{ctx}");
+    }
+
+    /// Every summary line is placed before any body, and a body that does
+    /// not fit whole is cut shorter instead of dropped. Regression: the
+    /// first entry's long body left the exact-file hazard truncated and the
+    /// next memory with no body at all.
+    #[test]
+    fn test_tight_budget_keeps_every_summary_and_shortens_previews() {
+        let body = "y".repeat(600);
+        let mems: Vec<ScoredMemory> = ["Alpha", "Beta", "Gamma"]
+            .into_iter()
+            .map(|t| {
+                scored(Memory::new(
+                    MemoryType::Convention,
+                    t,
+                    &body,
+                    Provenance::human(),
+                ))
+            })
+            .collect();
+        let ctx = format_class_context_with_budget("[H]", &mems, 1000, None, None, 160);
+        for t in ["Alpha", "Beta", "Gamma"] {
+            assert!(ctx.contains(t), "{t} missing:\n{ctx}");
+        }
+        assert!(!ctx.contains("omitted"), "{ctx}");
+        let previews: Vec<usize> = ctx
+            .lines()
+            .filter(|l| l.starts_with("  y"))
+            .map(|l| l.trim_start().chars().take_while(|c| *c == 'y').count())
+            .collect();
+        assert_eq!(previews.len(), 3, "every entry keeps a body:\n{ctx}");
+        assert!(
+            previews[2] >= MIN_PREVIEW_CHARS && previews[2] < 160,
+            "{previews:?}"
+        );
+        assert!(ctx.len() <= 1000, "{}", ctx.len());
     }
 
     #[test]
