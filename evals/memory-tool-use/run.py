@@ -111,9 +111,31 @@ def case_env(tmp, args):
     return env
 
 
-def setup_workspace(tmp, env):
+def engram_md_text():
+    """ENGRAM.md exactly as `engramdb setup` writes it (read from its source)."""
+    src = (REPO / "crates" / "engram-cli" / "src" / "commands" / "setup.rs").read_text()
+    start = src.index('const ENGRAM_MD_CONTENT: &str = r#"') + len('const ENGRAM_MD_CONTENT: &str = r#"')
+    return src[start:src.index('"#;', start)]
+
+
+def install_engram_md(ws):
+    """Do what `engramdb setup` does for instructions, without its hooks/.mcp.json.
+
+    Running setup itself would also write settings hooks and an .mcp.json,
+    because it cannot see a --plugin-dir plugin, and the case would then load
+    every hook and the MCP server twice.
+    """
+    claude_dir = ws / ".claude"
+    claude_dir.mkdir(exist_ok=True)
+    (claude_dir / "ENGRAM.md").write_text(engram_md_text())
+    (claude_dir / "CLAUDE.md").write_text("@ENGRAM.md\n")
+
+
+def setup_workspace(tmp, env, engram_md=False):
     ws = tmp / "ledgerline"
     shutil.copytree(HERE / "fixture", ws)
+    if engram_md:
+        install_engram_md(ws)
     git = lambda *a: sh(["git", *a], ws, env)
     git("init", "-q", "-b", "main")
     git("remote", "add", "origin", "https://git.example.com/acme/ledgerline.git")
@@ -199,7 +221,7 @@ def run_one(case, rep, args, out_dir):
     attempt = {"prompt_id": case["id"], "rep": rep, "model": args.model, "retries": 0}
     try:
         env = case_env(tmp, args)
-        ws, ids = setup_workspace(tmp, env)
+        ws, ids = setup_workspace(tmp, env, args.engram_md)
         before = grade.snapshot_store(ws, env)
         session_id = str(uuid.uuid4())
         for attempt_no in range(args.max_retries + 1):
@@ -272,6 +294,8 @@ def main():
     ap.add_argument("--debrief-reps", type=int, default=1,
                     help="debrief only reps below this number (default 1: rep 0 only)")
     ap.add_argument("--keep-workspaces", action="store_true")
+    ap.add_argument("--engram-md", action="store_true",
+                    help="add .claude/ENGRAM.md + @ENGRAM.md, as `engramdb setup` does (the README's recommended install)")
     ap.add_argument("--ort-dylib", default=os.environ.get("ORT_DYLIB_PATH", "/tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so"))
     args = ap.parse_args()
 
