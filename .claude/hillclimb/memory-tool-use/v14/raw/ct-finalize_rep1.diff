@@ -1,0 +1,41 @@
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..68541c2
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/invoices.cpython-311.pyc b/src/billing/__pycache__/invoices.cpython-311.pyc
+new file mode 100644
+index 0000000..d61ac77
+Binary files /dev/null and b/src/billing/__pycache__/invoices.cpython-311.pyc differ
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..2e75054 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -18,9 +18,26 @@ class Invoice:
+     lines: list = field(default_factory=list)
+ 
+ 
++LEDGER_MAX_ATTEMPTS = 3
++
++
++def _post_to_ledger(invoice):
++    # Safe to retry: the ledger deduplicates postings on invoice id.
++    for attempt in range(1, LEDGER_MAX_ATTEMPTS + 1):
++        try:
++            resp = requests.post(LEDGER_URL, json={"invoice": invoice.id, "amount": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)
++            resp.raise_for_status()
++            return resp
++        except requests.RequestException as exc:
++            # Only retry transient failures: network errors and 5xx. 4xx won't fix itself.
++            status = getattr(exc.response, "status_code", None)
++            if (status is not None and status < 500) or attempt == LEDGER_MAX_ATTEMPTS:
++                raise
++            log.warning("ledger_post_retry", invoice_id=invoice.id, attempt=attempt, error=str(exc))
++
++
+ def finalize(invoice):
+-    resp = requests.post(LEDGER_URL, json={"invoice": invoice.id, "amount": invoice.subtotal_cents + invoice.tax_cents}, timeout=10)
+-    resp.raise_for_status()
++    resp = _post_to_ledger(invoice)
+     invoice.ledger_ref = resp.json()["ref"]
+     log.info("invoice_finalized", invoice_id=invoice.id)
+     return invoice

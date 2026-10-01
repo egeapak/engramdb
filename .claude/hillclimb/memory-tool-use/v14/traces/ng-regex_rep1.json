@@ -1,0 +1,35 @@
+[
+ {
+  "role": "user",
+  "content": "Write a regex that matches an ISO 8601 date like 2026-10-01."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"fc57485d-8b7a-421a-b04d-e5b1dfab8daf\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"132e9321-ceeb-4a0a-ad8d-da513e5c49f4\", \"session_id\": \"d9a00888-42b9-4dae-8637-c23f75a5b049\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"fc57485d-8b7a-421a-b04d-e5b1dfab8daf\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7e10bc44-6495-4222-a4e3-0bac40946240\", \"session_id\": \"d9a00888-42b9-4dae-8637-c23f75a5b049\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"e8c2e280-fe8b-4131-8cec-aaa79ac739db\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"5213b0c3-c7a8-453c-9296-d7bfdb92200e\", \"session_id\": \"d9a00888-42b9-4dae-8637-c23f75a5b049\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"e8c2e280-fe8b-4131-8cec-aaa79ac739db\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"4870306e-f621-4138-b0d7-1cd97f703bc7\", \"session_id\": \"d9a00888-42b9-4dae-8637-c23f75a5b049\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"regex date ISO 8601 validation\",\n \"max_results\": 5\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "assistant",
+  "content": "Here's a regex for an ISO 8601 calendar date in the `YYYY-MM-DD` format:\n\n```regex\n^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\n```\n\n- `\\d{4}`: a four-digit year\n- `(0[1-9]|1[0-2])`: a month from 01 to 12\n- `(0[1-9]|[12]\\d|3[01])`: a day from 01 to 31\n- `^\u2026$`: the whole string must be the date. Remove these anchors to find dates inside longer text, and use `\\b` in their place if you need word boundaries.\n\nIt matches `2026-10-01`. It rejects `2026-13-01`, `2026-10-32` and `26-10-01`.\n\n**Limitation:** the regex checks the format only, not whether the date exists. It would accept `2026-02-30` and `2026-04-31`. To catch those, also parse the string after it matches. For example, in Python:\n\n```python\nimport re\nfrom datetime import date\n\nISO_DATE = re.compile(r\"^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\")\n\ndef is_iso_date(s: str) -> bool:\n    if not ISO_DATE.match(s):\n        return False\n    try:\n        date.fromisoformat(s)\n        return True\n    except ValueError:\n        return False\n```\n\nIf you only need the shape and don't care about valid month or day ranges, `^\\d{4}-\\d{2}-\\d{2}$` is enough."
+ }
+]

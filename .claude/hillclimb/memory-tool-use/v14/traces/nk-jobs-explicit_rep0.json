@@ -1,0 +1,52 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"75e2af33-19cf-4d93-9daf-f9f23ebca9d0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"4b19d035-6cbb-4ae0-a0fc-733d7c4243b3\", \"session_id\": \"f9d01741-ae89-429c-9ba1-8852e2f41dd4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"75e2af33-19cf-4d93-9daf-f9f23ebca9d0\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"dd2c07ee-3e8a-4748-a602-c8e188ef39d5\", \"session_id\": \"f9d01741-ae89-429c-9ba1-8852e2f41dd4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5825060f-f48e-450b-8923-e9cb4c91764e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"633d3bb7-8353-4c07-8844-02ca3c3d04aa\", \"session_id\": \"f9d01741-ae89-429c-9ba1-8852e2f41dd4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5825060f-f48e-450b-8923-e9cb4c91764e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"83db98da-2f22-4248-8bb1-05ef5c788de5\", \"session_id\": \"f9d01741-ae89-429c-9ba1-8852e2f41dd4\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"background jobs celery enqueue\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must be dispatched via jobs.enqueue(); never call celery directly\",\n \"content\": \"Convention (set by user 2026-10-01): every background job must go through `jobs.enqueue()`. Never call celery directly (no `.delay()`, `.apply_async()`, `send_task`, etc.) when scheduling background work.\",\n \"tags\": [\n  \"jobs\",\n  \"celery\",\n  \"background-jobs\"\n ],\n \"logical\": [\n  \"jobs\"\n ],\n \"criticality\": 0.8\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f8f0-334e-70f2-a40d-c6260493205d\",\"created\":true,\"summary\":\"All background jobs must be dispatched via jobs.enqueue(); never call celery directly\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project convention in EngramDB, so future sessions and collaborators will see it: all background jobs go through `jobs.enqueue()`, never through celery directly (that includes `.delay()`, `.apply_async()` and `send_task`).\n\nI didn't check the code for existing direct celery calls. I can look for any and move them to `jobs.enqueue()` if you want."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Two things were awkward. Neither stopped me from doing the task.\n\n1. **A provenance parameter on `create`** (something like `source: \"user\"` or `stated_by: \"user\"`). The rule came straight from the user, but the injected context labels the memory `source: shared/agent`. With no field for it, I had to write \"set by user 2026-10-01\" into the content text. A proper field would let later sessions tell user-mandated rules apart from conventions an agent inferred. That matters when deciding whether to `challenge` a memory or defer to it.\n\n2. **A code-pattern trigger on `create`/`update`** (something like `trigger_patterns: [\"\\\\.delay\\\\(\", \"\\\\.apply_async\\\\(\", \"send_task\"]`). I'd have used it so the edit-time hook surfaces this memory whenever an edit is about to add a direct celery call. Today `physical` only takes file paths, and I didn't know which files dispatch jobs, so I left it at the default `/`. That means the memory surfaces based on general relevance, not on the exact code it forbids."
+ }
+]

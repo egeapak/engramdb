@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "Write a regex that matches an ISO 8601 date like 2026-10-01."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"5dcf799d-a728-46f6-acb5-fe29ddcc3a9a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"b6cd6f85-ee36-4e4c-aab8-049e7c243abd\", \"session_id\": \"b3debe84-f986-459d-9f31-86da12553bc5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"5dcf799d-a728-46f6-acb5-fe29ddcc3a9a\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"14c1f3ee-d6af-4dcf-bb5b-1ca9880eba44\", \"session_id\": \"b3debe84-f986-459d-9f31-86da12553bc5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"cc69cf84-95a5-4dc9-a715-cf061e919e50\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"afd973aa-2e20-445f-937a-5b9f4219451c\", \"session_id\": \"b3debe84-f986-459d-9f31-86da12553bc5\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"cc69cf84-95a5-4dc9-a715-cf061e919e50\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8a7a8867-03ae-443e-8127-90f27448df08\", \"session_id\": \"b3debe84-f986-459d-9f31-86da12553bc5\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Basic version (checks the format only):\n\n```regex\n^\\d{4}-\\d{2}-\\d{2}$\n```\n\nStricter version, which limits months to 01\u201312 and days to 01\u201331:\n\n```regex\n^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$\n```\n\n- `\\d{4}` is a four-digit year.\n- `(0[1-9]|1[0-2])` is a month from 01 to 12.\n- `(0[1-9]|[12]\\d|3[01])` is a day from 01 to 31.\n- `^` and `$` anchor the match so nothing else can be on either side. Drop them if you're searching for dates inside longer text, and use `\\b` at both ends instead.\n\nBoth match `2026-10-01`. The regex can't tell which months are short or which years are leap years, so it accepts `2026-02-31`. If that matters, parse the date afterwards, for example with `datetime.date.fromisoformat()` in Python or `Date.parse` plus a round-trip check in JavaScript."
+ }
+]

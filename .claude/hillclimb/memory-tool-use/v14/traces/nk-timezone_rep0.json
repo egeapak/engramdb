@@ -1,0 +1,52 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ed8a51d3-af29-4fc2-a82d-385ede021ac9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"62352d2c-900d-419e-aeee-52e5713fcad9\", \"session_id\": \"8288cbc9-3428-4bcb-aae1-75a1694999ea\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ed8a51d3-af29-4fc2-a82d-385ede021ac9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"6a07d2fe-77cb-4d98-8aab-4f89f3664a78\", \"session_id\": \"8288cbc9-3428-4bcb-aae1-75a1694999ea\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"98efe8e9-e47d-4238-a393-0e2e214b82e0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"16972416-6d9c-4bc1-872b-af6b8c042f05\", \"session_id\": \"8288cbc9-3428-4bcb-aae1-75a1694999ea\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"98efe8e9-e47d-4238-a393-0e2e214b82e0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"8a23eeec-e94d-43ac-9a1d-8dc0eda429dd\", \"session_id\": \"8288cbc9-3428-4bcb-aae1-75a1694999ea\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamp timezone UTC\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All DB timestamps are stored in UTC; conversion to the customer's timezone happens only in the API layer\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer (on request input and response output). Persistence, queries, and business logic must work in UTC. Never write a localized timestamp to the database, and never convert to local time below the API layer.\",\n \"logical\": [\n  \"database.timestamps\",\n  \"api.serialization\"\n ],\n \"tags\": [\n  \"timezone\",\n  \"utc\",\n  \"timestamps\",\n  \"database\",\n  \"api\"\n ],\n \"epistemic\": \"decision\",\n \"criticality\": 0.8,\n \"confidence\": 0.95\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f8f0-f9e9-7b31-855b-095070dd1711\",\"created\":true,\"summary\":\"All DB timestamps are stored in UTC; conversion to the customer's timezone happens only in the API layer\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project convention in EngramDB, so other sessions and collaborators will find it when they look up timestamps, timezones or the database layer. It says:\n\n- All database timestamps are stored in UTC.\n- Timestamps are converted to the customer's timezone only in the API layer, on the way in and out.\n- Storage, queries and business logic all work in UTC. Never write local times to the database or convert to local time below the API layer.\n\nNo existing memory covered this, so nothing conflicts with it. I recorded it as a rule you've stated; I didn't check it against the code."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "One thing was missing:\n\n- **A provenance or attribution parameter on `create`.** The memory came straight from the user as a rule they stated. I hadn't checked it against the code. Afterwards the hook context showed it as `source: shared/agent`, which makes it look like something I worked out myself. I'd have wanted a parameter such as `source: \"user\"` or `provenance: \"user-stated\"`, maybe with an optional `verified_against_code: false` flag. I'd have used it so that later sessions see an authoritative team decision, not an agent guess. They would also know it still needs checking against the code, which they could then do with `verify`. The workaround is to put \"per user instruction\" in the content text, but that's free-form and can't be filtered."
+ }
+]

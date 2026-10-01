@@ -1,0 +1,52 @@
+[
+ {
+  "role": "user",
+  "content": "Please record this: all timestamps in the database are stored in UTC, and we convert to the customer's timezone only in the API layer."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7b90cb5e-aae0-4311-b844-3b5b89936b98\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"dd517e45-87b0-48b2-b6a2-a5c6f3e16928\", \"session_id\": \"45f39ff5-1530-4d38-b4f3-e15a1dcd0a7a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7b90cb5e-aae0-4311-b844-3b5b89936b98\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"23f56abd-3a79-4453-8e3e-374bfb0ee1c7\", \"session_id\": \"45f39ff5-1530-4d38-b4f3-e15a1dcd0a7a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a9d1a2b1-4465-48b4-9549-e000c34e5a6e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1d5fdb05-9c0a-4efd-b3b5-27d292eb4d55\", \"session_id\": \"45f39ff5-1530-4d38-b4f3-e15a1dcd0a7a\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a9d1a2b1-4465-48b4-9549-e000c34e5a6e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fbf62e13-6282-4531-b9a4-8f12d36e0684\", \"session_id\": \"45f39ff5-1530-4d38-b4f3-e15a1dcd0a7a\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"timestamps UTC timezone\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer.\",\n \"content\": \"All timestamps in the database are stored in UTC. Conversion to the customer's timezone happens only in the API layer, never in storage or in lower layers.\",\n \"epistemic\": \"decision\",\n \"premise\": \"Customers span multiple timezones and storage must stay timezone-neutral.\",\n \"tags\": [\n  \"timestamps\",\n  \"utc\",\n  \"timezone\",\n  \"api\",\n  \"database\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f906-c926-7a33-abbc-43cf1a23a6a8\",\"created\":true,\"summary\":\"All DB timestamps are stored in UTC; convert to customer timezone only in the API layer.\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Recorded in EngramDB as a project convention: all database timestamps are stored in UTC, and conversion to the customer's timezone happens only in the API layer. No existing memory covered this."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

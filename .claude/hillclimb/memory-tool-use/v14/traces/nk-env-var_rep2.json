@@ -1,0 +1,80 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0ad97e6f-5ff9-4e15-9afc-4422bd1ac16f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a75786f7-d71f-4ac4-9bd8-86ad9e4df62b\", \"session_id\": \"948928af-b6f6-410c-a633-929414bc24e4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0ad97e6f-5ff9-4e15-9afc-4422bd1ac16f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"d603ba50-a295-41c9-bbb9-1ef02057fdb0\", \"session_id\": \"948928af-b6f6-410c-a633-929414bc24e4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0a4650d6-6ff2-41ea-a75c-f05858fabc6e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"0fde4883-74f5-42d4-9f70-2734e5a5e897\", \"session_id\": \"948928af-b6f6-410c-a633-929414bc24e4\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0a4650d6-6ff2-41ea-a75c-f05858fabc6e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"168f0f91-ba6c-4bd6-b21b-24fdb68fbe6f\", \"session_id\": \"948928af-b6f6-410c-a633-929414bc24e4\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payments?_?live|fake.*gateway|gateway|environ|getenv|process\\\\.env\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_db.py:9:    with psycopg.connect(os.environ.get(\"DATABASE_URL\", \"postgresql://ledgerline:ledgerline@localhost/ledgerline_test\")) as conn:\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\ndocker-compose.yml:4:    environment:"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && cat docker-compose.yml; ls -a\",\n \"description\": \"List tracked files and show compose config\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f900-221b-7a81-9ffd-d0ab30d11a67.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f900-0e30-74f3-815d-ef3a4cb4039c.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f8ff-f7d2-7f41-a9c1-e387c4ee3cad.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f8ff-f203-7570-826d-d6842101b04a.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f900-08d3-7ce2-8306-26a301cec45d.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f900-28da-79c1-8cfb-4180a4ab21d6.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f900-0349-75a0-b7d7-0579f271403e.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f900-1b05-7cf2-b00d-b7d7e6760cc8.md\n.engramdb/memories/tax-uses-round-half-even_01a0f900-1456-7802-927f-50e608173da4.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f8ff-fe52-74d3-a300-2f6cd6dc882c.md\nMakefile\nREADME.md\ndocker-compose.yml\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_db.py\ntests/test_payments.py\ntests/test_tax.py\nservices:\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_USER: ledgerline\n      POSTGRES_PASSWORD: ledgerline\n      POSTGRES_DB: ledgerline_test\n    ports:\n      - \"5432:5432\"\n.\n..\n.claude\n.engramdb\n.git\nMakefile\nREADME.md\ndocker-compose.yml\nflags.toml\nmigrations\npyproject.toml\nscripts\nsrc\ntests"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat src/api/checkout.py tests/test_payments.py src/flags.py flags.toml\",\n \"description\": \"Show checkout, payment tests, and flags code\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "from flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\nimport pytest\nimport requests\n\nSANDBOX = \"https://sandbox.payments.example/v1/charges\"\n\n\n@pytest.mark.integration\ndef test_charges_roundtrip():\n    for amount in (100, 250, 999, 1200):\n        resp = requests.post(SANDBOX, json={\"amount_cents\": amount}, timeout=10)\n        assert resp.status_code == 201\nimport tomllib\nfrom pathlib import Path\n\n_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n\n\ndef is_on(name):\n    return bool(_FLAGS.get(name, False))\n\n\ndef all_flags():\n    return dict(_FLAGS)\n[flags]\ninvoice-pdf-v2 = false"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"epistemic\": \"observation\",\n \"summary\": \"The app silently uses a fake payment gateway unless the PAYMENTS_LIVE=1 env var is set\",\n \"content\": \"Unless the environment variable PAYMENTS_LIVE=1 is set, the app quietly uses a fake payment gateway. Nothing warns you or logs it. A developer lost about 2 hours debugging before finding this (reported 2026-10-01). If payment behaviour looks wrong, or charges never reach a real gateway, check PAYMENTS_LIVE first. This switch is a raw env var, not a flags.toml flag read through flags.is_on, so you won't find it by checking feature flags. As of 2026-10-01 the string PAYMENTS_LIVE does not appear anywhere in this repo (src/, tests/, docker-compose.yml, Makefile). The switch probably lives in a dependency or in deployment config, and nobody has found where yet.\",\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"gateway\",\n  \"footgun\"\n ],\n \"logical\": [\n  \"payments\",\n  \"config.env\"\n ],\n \"physical\": [\n  \"src/api/checkout.py\",\n  \"tests/test_payments.py\"\n ],\n \"criticality\": 0.8,\n \"premise\": \"The gateway selection still defaults to fake when PAYMENTS_LIVE is unset\",\n \"confidence\": 0.85\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f900-7433-7fc3-9319-dc7434e4f6a0\",\"created\":true,\"summary\":\"The app silently uses a fake payment gateway unless the PAYMENTS_LIVE=1 env var is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry, two hours is a lot to lose to that. I've saved it as a hazard in the project's shared EngramDB memory, so later sessions and your collaborators will see it whenever they work on payments. The memory says the fake gateway is used unless `PAYMENTS_LIVE=1` is set, that nothing warns you, and to check that variable first when payments look wrong.\n\nThe string `PAYMENTS_LIVE` doesn't appear anywhere in this repo. It's not in `src/`, the tests, `docker-compose.yml` or the `Makefile`. `src/api/checkout.py` only adds up the cart total and never calls a gateway. The switch probably lives in a dependency or in deployment config. That would explain why it was so hard to find: it also isn't in `flags.toml`, which is where feature flags normally live (read through `flags.is_on`). The memory notes that nobody has found where the switch is yet.\n\nIf you'd like this to stop catching people, I could:\n1. Add a short section to the README listing `PAYMENTS_LIVE` and what happens when it's unset.\n2. Log a clear warning at startup when the fake gateway is active, once we find where the switch is.\n\nDo you know where it lives? If so, I'll add that to the memory and can do option 2."
+ }
+]

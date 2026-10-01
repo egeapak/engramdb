@@ -1,0 +1,18 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..d40b691 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -2,10 +2,10 @@ from decimal import Decimal
+ 
+ 
+ def line_total(lines):
+-    x = 0
++    total = 0
+     for line in lines:
+-        x += line["quantity"] * line["unit_cents"]
+-    return x
++        total += line["quantity"] * line["unit_cents"]
++    return total
+ 
+ 
+ def tax_for(amount_cents, rate):

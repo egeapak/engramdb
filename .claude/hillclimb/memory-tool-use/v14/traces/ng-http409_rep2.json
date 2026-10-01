@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"6ea6ed53-62fe-4e21-9b3a-030e38fddb1b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"57834ca9-1518-4490-bc2c-3a66c9fe0051\", \"session_id\": \"eeec7c1f-23b4-4b42-a098-ad1a17b6fb48\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"6ea6ed53-62fe-4e21-9b3a-030e38fddb1b\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c452b20f-e094-4796-8685-ea64d4af1f21\", \"session_id\": \"eeec7c1f-23b4-4b42-a098-ad1a17b6fb48\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7cef57ae-3c83-4b93-b28d-aaf952eb3781\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"2106846c-8eeb-46ce-84d5-0317372ca3bc\", \"session_id\": \"eeec7c1f-23b4-4b42-a098-ad1a17b6fb48\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7cef57ae-3c83-4b93-b28d-aaf952eb3781\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fec0809b-b2f8-4a3c-a38d-904156f0f116\", \"session_id\": \"eeec7c1f-23b4-4b42-a098-ad1a17b6fb48\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the resource on the server. Defined in RFC 9110 \u00a715.5.10.\n\n**Common causes:**\n- **Concurrent edits / optimistic locking:** a client sends an update based on an outdated version, for example with a stale `If-Match` ETag or version number.\n- **Uniqueness violations:** creating a resource that already exists, such as a duplicate username or the same idempotency key used with a different payload.\n- **Invalid state transitions:** acting on a resource that isn't in the right state, like refunding a transaction that was never captured or closing an account that's already closed.\n- **Version-control-style conflicts:** for example, a WebDAV `PUT` or `MKCOL` that conflicts with existing resources.\n\n**Key points:**\n- It's a **client error (4xx)**. The request was well-formed, but it clashes with the server's current state.\n- The client can often fix it by fetching the latest state, resolving the conflict, and retrying. A plain retry of the same request usually won't help.\n- The response body should explain what the conflict is, so the client or user can resolve it.\n\n**How it compares to similar codes:**\n- **400 Bad Request:** the request itself is malformed.\n- **412 Precondition Failed:** a conditional header (`If-Match`, `If-Unmodified-Since`) evaluated to false. Many APIs use 412 for ETag mismatches and 409 for broader state conflicts.\n- **422 Unprocessable Content:** the request is valid but semantically wrong (validation errors), not a conflict with existing state."
+ }
+]

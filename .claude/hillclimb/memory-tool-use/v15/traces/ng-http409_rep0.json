@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f50aa5ac-a3c6-4c82-a93f-547bbc2a8194\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c6e1cbf9-a5aa-4a7f-9a57-2141160fd362\", \"session_id\": \"9fd38ba6-bacf-42c4-9513-e25a79303450\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f50aa5ac-a3c6-4c82-a93f-547bbc2a8194\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"529ee40d-5411-41d9-8c8f-6484b1c1c04f\", \"session_id\": \"9fd38ba6-bacf-42c4-9513-e25a79303450\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8d9ad766-e522-4fc7-a4a3-3f37f9e52fe8\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"bfc237b3-31b6-4374-92e7-db85b49a2bc3\", \"session_id\": \"9fd38ba6-bacf-42c4-9513-e25a79303450\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8d9ad766-e522-4fc7-a4a3-3f37f9e52fe8\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"02f2b449-3138-49cc-9d8f-80004d9a5156\", \"session_id\": \"9fd38ba6-bacf-42c4-9513-e25a79303450\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the target resource.\n\nCommon cases:\n- **Edit conflicts**: the resource changed since the client read it, for example a stale version or ETag mismatch on an update.\n- **Duplicate creation**: trying to create something that already exists, such as a username or unique key.\n- **Invalid state transitions**: for example, cancelling an order that has already shipped.\n\nThe error is usually one the client can resolve. Fetch the latest state, reconcile the differences, and retry. Servers should include a response body that explains the conflict and, ideally, how to fix it.\n\nCompare it with 400, which means the request itself is malformed, and 412, which means a precondition header such as `If-Match` failed. 409 is about a clash with the resource's current state."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

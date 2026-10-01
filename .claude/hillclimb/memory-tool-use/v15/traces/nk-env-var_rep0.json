@@ -1,0 +1,143 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a5780a9e-9143-4f45-82ac-3e84b8859091\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"1a3029af-86db-4151-ae99-f69f704d99ca\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a5780a9e-9143-4f45-82ac-3e84b8859091\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3dfbf491-d4be-4413-b1ba-869a6e52ceaf\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"2c1ee798-f918-4b9d-9b42-0e9f41b0ac95\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"513b6596-0288-44b9-a745-7a720c4944ab\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"2c1ee798-f918-4b9d-9b42-0e9f41b0ac95\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"faa22b31-557a-49ed-bee5-bddabf381a7e\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"430fa0f8-c10d-4630-9878-02e8bff1c8fb\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"46d76a39-e046-4203-8acf-7f14c0a575b8\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"430fa0f8-c10d-4630-9878-02e8bff1c8fb\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c670eabf-f20a-4c2e-bf19-8f1c6e9a69ed\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c1218711-df56-48a3-b5bc-db62cfcfddd0\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"6c91a4b8-a091-460d-bd6a-8fee533b57a2\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c1218711-df56-48a3-b5bc-db62cfcfddd0\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"33432005-94c8-418b-97b1-867f8ba672a1\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c73eb771-bbdc-4e62-ab9b-2b77a67d7151\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"bb012936-9682-41cb-9ea8-55cb39aa0e5a\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c73eb771-bbdc-4e62-ab9b-2b77a67d7151\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c1c91956-96f4-4ba1-a072-8ba859eb5d89\", \"session_id\": \"a41c0a2f-7a98-43dc-9c1d-d27fe2114b76\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Let me look at how that flag is used and check whether it's already recorded."
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-n\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE fake payment gateway\",\n \"situation\": \"debugging\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payments?_?live|fake.?gateway|mock.?gateway|gateway\",\n \"output_mode\": \"content\",\n \"-n\": true,\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Glob",
+  "content": "{\n \"pattern\": \"**/*\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "README.md\nsrc/__init__.py\nflags.toml\nsrc/billing/__init__.py\nsrc/api/__init__.py\nsrc/flags.py\nsrc/billing/money.py\nsrc/billing/invoices.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/api/checkout.py\nmigrations/0005_create_refunds.sql\nmigrations/0004_create_lines.sql\nmigrations/0002_add_tax.sql\nmigrations/0001_create_invoices.sql\nmigrations/0006_index_customer.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0007_add_customers.sql\nscripts/export.py\ntests/test_payments.py\ntests/test_tax.py\ndocker-compose.yml\ntests/test_db.py\npyproject.toml\nMakefile\n.claude/ENGRAM.md\n.git/description\n.git/hooks/pre-applypatch.sample\n.git/hooks/pre-push.sample\n.git/hooks/sendemail-validate.sample\n.git/hooks/fsmonitor-watchman.sample\n.git/hooks/commit-msg.sample\n.git/hooks/post-update.sample\n.git/hooks/update.sample\n.git/hooks/pre-commit.sample\n.git/hooks/pre-rebase.sample\n.git/hooks/prepare-commit-msg.sample\n.git/hooks/push-to-checkout.sample\n.git/hooks/pre-merge-commit.sample\n.claude/CLAUDE.md\n.git/hooks/pre-receive.sample\n.git/hooks/applypatch-msg.sample\n.git/info/exclude\n.git/HEAD\n.git/config\n.git/objects/be/5dee360b70efc822989862e537f76e8798a7e8\n.git/objects/b8/e56392b8c7b52a968f85832e5724f43769daa3\n.git/objects/c2/fa466f510e54e87c58641bf545108dfe5841a0\n.git/objects/50/80f31ef1c5ecf46dddbae16e018ef770ab912e\n.git/objects/7b/dbe3dad8e783b5dde0cfb6ad2b82f05e0b70a4\n.git/objects/3b/493dc42238c7b129a8d522c13e9c288bc03c16\n.git/objects/7f/b32736a750f03693bf03cbd3a5e88d93ab8240\n.git/objects/71/ff1bdccbff2a028c39588d0db62d60641a8180\n.git/objects/a9/e9ba5eb29124b8b82887a69ce9cb274e899971\n.git/objects/ff/4dada24d530c288ab58fca4462c79c20226741\n.git/objects/59/98495966ed0ba9f685bbe7bc2ff189cadb45d9\n.git/objects/e6/9de29bb2d1d6434b8b29ae775ad8c2e48c5391\n.git/objects/69/a9df6ea3226300fb161270a8f8c703cbb0c1f5\n.git/objects/54/3713d0203d41d7894200bb0790fd16d0c7e5c6\n.git/objects/cb/193c838da4ab8a4e01c08623012614739c0f71\n.git/objects/21/f39c6d28fae1a971be89aadadd085f09def1c3\n.git/objects/81/e65b541c819de6c9af33c44b272ebd1c78dfc9\n.git/objects/31/48b5845a16472dd85f5b216bef5a9df20eec02\n.git/objects/0f/d8ca7a029ec73154d8b88853ee6449ee68d1f8\n.git/objects/cd/f05a810d26416912f7e72e4c44f7766450a228\n.git/objects/75/e3de865d0207314b62c3f0c7b9b35ca1a847b2\n.git/objects/6f/a3aef93ac6e988a6d4f0d32a358d758fd5f031\n.git/objects/7f/21856cf1166c1d2759439f8244391ec1b27a37\n.git/objects/57/15132a52c66f3fb604c78ee47d25827428ef8a\n.git/objects/dc/6ea9fe804721ec46781f0b68fdbd91eb102a3a\n.git/objects/2b/3db8e9784a444412b0f4504e3617c8b3aa1d36\n.git/objects/51/7af331e8d083ec863d4ad3dcc413006c634ef9\n.git/objects/44/45ae5a3e48b0d4019329e864f4ab9317a7e30f\n.git/objects/44/2764ce36f31635c127647bcc871cade34dbea7\n.git/objects/f8/1209596ad69b2654fab3af1e12d88e9cc0b42d\n.git/objects/18/72dd9bd64e27e62d622902310bc52f4c7ad851\n.git/objects/4d/03e82f581e4a9aa8bfef590ae3b791dca65971\n.git/objects/7b/5d13f7d1d98044e5c85abd7c24ae268f29b16d\n.engramdb/config.toml\n.engramdb/.gitignore\n.engramdb/memories/money-is-integer-cents-never-float_01a0f906-8dfb-7841-b2ca-4921b4864114.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f906-9211-71d2-ac47-f466aadcd908.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f906-9616-7e61-9071-668852cd6084.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f906-9995-7933-8951-18c6fe40a4cb.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f906-9e69-7fa1-b7b3-6d2ffc41069b.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f906-a3a0-7de3-8dc9-6b619610feaa.md\n.engramdb/memories/tax-uses-round-half-even_01a0f906-a85b-7612-b256-92fad2b4eeef.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f906-ad27-7230-943c-8a57a35b7eea.md\n.engramdb/memories/api-errors-use-problem-json_01a0f906-b122-7741-80f9-b1792671dffc.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f906-b567-71b1-9eb8-ccb87b75dfe7.md\n.engramdb/manifest.toml\n.git/objects/56/74708e2030b2db4182797ce46de7783ba88f94\n.git/objects/6e/1e333395d971e49ea27ba824e67c902697f09b\n.git/objects/ba/f3055fe458e1477cbef52c415673562de4426b\n.git/objects/62/bd9797dbaf0c24afea96dab6b5b5188b47f778\n.git/objects/a9/eb8f2eddb08a317a3e6c346cd7e6c65505aa0c\n.git/objects/05/990a4ee3e37d5688799020442250f9eba2cdc0\n.git/objects/bc/470d6f62f873f5419b036b36ec8917117901f4\n(Showing 100 of 118 matching files; 18 more are not listed. Narrow the pattern or path to see the rest.)"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-g7ww7g8y/ledgerline/src/flags.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\timport tomllib\n2\tfrom pathlib import Path\n3\t\n4\t_FLAGS = tomllib.loads((Path(__file__).parent.parent / \"flags.toml\").read_text())[\"flags\"]\n5\t\n6\t\n7\tdef is_on(name):\n8\t    return bool(_FLAGS.get(name, False))\n9\t\n10\t\n11\tdef all_flags():\n12\t    return dict(_FLAGS)\n13\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-g7ww7g8y/ledgerline/flags.toml\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\t[flags]\n2\tinvoice-pdf-v2 = false\n3\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-nk-env-var-g7ww7g8y/ledgerline/src/api/checkout.py\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tfrom flask import Blueprint, jsonify, request\n2\t\n3\tbp = Blueprint(\"checkout\", __name__)\n4\t\n5\t\n6\t@bp.post(\"/checkout\")\n7\tdef checkout():\n8\t    cart = request.get_json()\n9\t    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n10\t    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n11\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)live|fake|stub|environ|getenv\",\n \"path\": \"/tmp/mte-nk-env-var-g7ww7g8y/ledgerline\",\n \"glob\": \"!.git/**\",\n \"output_mode\": \"content\",\n \"-n\": true\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "tests/test_db.py:9:    with psycopg.connect(os.environ.get(\"DATABASE_URL\", \"postgresql://ledgerline:ledgerline@localhost/ledgerline_test\")) as conn:\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\ndocker-compose.yml:4:    environment:"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"Payments silently use a fake gateway unless PAYMENTS_LIVE=1 is set in the environment\",\n \"content\": \"The app silently falls back to a fake payment gateway unless the env var PAYMENTS_LIVE=1 is set. There is no warning or log, so real charges appear to \\\"work\\\" while nothing hits the real gateway. Reported by the user, who lost about two hours to it. Check this env var first when payments behave oddly or when a deploy or environment seems to be taking no real money.\\n\\nNot verifiable in this checkout: grep finds no PAYMENTS_LIVE, gateway or fake/stub code in src/, and src/api/checkout.py has no payment call yet. The switch may live in code not on this branch, or in deploy config. It is also not in flags.toml or flags.is_on, so it bypasses the feature-flag convention.\",\n \"epistemic\": \"observation\",\n \"premise\": \"The user observed this behaviour firsthand; it has not been confirmed against code in this repo.\",\n \"invalidated_by\": [\n  \"src/flags.py\",\n  \"flags.toml\",\n  \"src/api/checkout.py\"\n ],\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"gotcha\",\n  \"config\"\n ],\n \"criticality\": 0.8\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0f906-ef6a-7090-8e95-d842a227824f\",\"created\":true,\"summary\":\"Payments silently use a fake gateway unless PAYMENTS_LIVE=1 is set in the environment\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Two hours on a silent fallback is a real cost. I've recorded it as a hazard in EngramDB so future sessions see it.\n\nOne thing I couldn't confirm: nothing in this checkout mentions `PAYMENTS_LIVE`. A grep for `gateway`, `fake`, `stub` and `live` finds no gateway code. `src/api/checkout.py` only sums the cart and returns `pending`, and `flags.toml` has just `invoice-pdf-v2`. The switch may be on another branch, in a different service, or in deploy config. The memory says this, so it doesn't read as verified.\n\nIf you want to stop this happening again, these would help:\n- **Fail loudly:** refuse to start, or raise on the first payment call, when `PAYMENTS_LIVE` is unset outside dev or test, instead of falling back quietly.\n- **Log at startup:** one line saying which gateway is active, e.g. `payments gateway=fake (PAYMENTS_LIVE unset)`.\n- **Use the flag system:** move it into `flags.toml` and `flags.is_on`, so it follows the project convention and shows up in `all_flags()`.\n\nIf you point me at where the fallback lives, I can implement any of these."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "Mostly nothing was missing. I could do what I needed with `query` (filter mode) and `create`. There were two small awkward spots:\n\n1. **No way to link related memories.** `create` has `supersedes`, but nothing like a `related_to` or `links` parameter. The new hazard bypasses the existing \"feature flags go through `flags.is_on`\" convention memory. I wanted to connect the two so a reader of either one would see the other. I put that in the prose instead, and I didn't open the flags memory to check its wording. That was my omission, not a tool limit.\n\n2. **`invalidated_by` only takes paths and globs.** This hazard's real invalidation triggers are non-file things: a deploy config change, an environment variable, or a code path on another branch. I listed `src/flags.py`, `flags.toml` and `src/api/checkout.py` as the closest stand-ins. A free-text or non-path trigger, or an `unverified` marker, would have fit better. I used `premise` and `epistemic: observation` to say it was unconfirmed, and that was workable.\n\nI ran only a filter query before writing and skipped a `mode: \"rank\"` browse. That was my choice, not a tool limitation."
+ }
+]

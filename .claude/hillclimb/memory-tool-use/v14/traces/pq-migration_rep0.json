@@ -1,0 +1,95 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"dc8cd5df-9c07-4ef3-b1fd-59b1f98a6a57\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"c2591dcf-6a3c-4857-9932-38d8f8a5eea8\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"dc8cd5df-9c07-4ef3-b1fd-59b1f98a6a57\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"03b127b3-3738-4f84-9c12-94edd71063b7\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"738a77ef-82d3-4e3f-8667-83bbbacaf31c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"078e1b75-9006-4753-a838-95894f673bee\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"738a77ef-82d3-4e3f-8667-83bbbacaf31c\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a636ece8-67e5-46ee-b4a6-99e919605a7d\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"06833613-42a9-4072-97b3-3f8c1deb09c4\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"93ced0e0-38f0-4c93-8831-bcf5679d2de7\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"06833613-42a9-4072-97b3-3f8c1deb09c4\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"a30c8f49-e092-4dc0-9ad5-e627eec59975\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"0f37cb34-54bd-4463-9bf5-78032d6ced38\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"uuid\": \"c7b83b98-b56b-4bfd-b84b-5f745f939767\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"0f37cb34-54bd-4463-9bf5-78032d6ced38\", \"hook_name\": \"PreToolUse:Read\", \"hook_event\": \"PreToolUse\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"071b8a5d-b1e6-4cbd-ab5a-150914ac23ed\", \"session_id\": \"139d47f3-0740-47f7-a61b-3783399332ac\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"migration schema customers column\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"memories\":[{\"confidence\":0.8,\"content\":\"Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f8ee-2709-7dd0-af04-511c26ac0b53\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.3705522614864024,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3705522614864024,\"keyword\":0.10179263046253124,\"relevance\":0.5,\"rerank\":-1.23468017578125,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5286203410437957,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Never edit an applied migration\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -100\",\n \"description\": \"List tracked files\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0f8ee-3acd-7eb0-b7e6-c7d90e5579fe.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0f8ee-2b9f-7e50-81a7-667cd882a527.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0f8ee-1703-75b1-874d-4f7e7b92064a.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0f8ee-1118-7d81-9d62-35d3643c954d.md\n.engramdb/memories/never-edit-an-applied-migration_01a0f8ee-2709-7dd0-af04-511c26ac0b53.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0f8ee-3f3c-7a51-adc3-738dd2a50bfa.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0f8ee-227c-75b3-939e-0b75c7271400.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0f8ee-36ba-7570-a730-e69ba9d1dd79.md\n.engramdb/memories/tax-uses-round-half-even_01a0f8ee-3005-79b2-9735-fc2cfd970d8b.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0f8ee-1d8e-7143-a96a-cd9b9e18764a.md\nMakefile\nREADME.md\ndocker-compose.yml\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_db.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-gc69o5vg/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tCREATE TABLE customers (\n2\t    id TEXT PRIMARY KEY,\n3\t    name TEXT NOT NULL,\n4\t    emial TEXT NOT NULL\n5\t);\n6\t"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"output_mode\": \"content\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".engramdb/memories/never-edit-an-applied-migration_01a0f8ee-2709-7dd0-af04-511c26ac0b53.md:15:Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\nmigrations/0007_add_customers.sql:1:CREATE TABLE customers ("
+ },
+ {
+  "role": "tool_call",
+  "name": "Read",
+  "content": "{\n \"file_path\": \"/tmp/mte-pq-migration-gc69o5vg/ledgerline/migrations/0003_add_ledger_ref.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "1\tALTER TABLE invoices ADD COLUMN ledger_ref TEXT;\n2\t"
+ },
+ {
+  "role": "assistant",
+  "content": "Put it in a new migration file, `migrations/0008_add_customer_phone.sql`. Don't edit `migrations/0007_add_customers.sql`.\n\nThe project's memory store says files in `migrations/` have already been applied in production, so you never edit one. Each change gets a new file with the next 4-digit number. Changing 0007 wouldn't touch databases that have already run it, so production and new environments would end up with different schemas.\n\nFollowing the style of `0003_add_ledger_ref.sql`:\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nLeave the column nullable. A `NOT NULL` column with no default will fail on a table that already has rows. If you need it to be required, add it as nullable, backfill the existing rows, then add the constraint.\n\nI noticed something else while looking: 0007 creates the email column with a typo, as `emial`. If you want to fix that, do it in a migration too (e.g. `ALTER TABLE customers RENAME COLUMN emial TO email;`), either in 0008 or in its own file. Nothing in `src/` references `customers` yet, so no app code would break. Tell me if you want me to create the file."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]
