@@ -4,7 +4,7 @@ Flow: Claude Code with the `engram` plugin (MCP server + hooks) in a small fixtu
 
 ## Labeling policy
 
-- **query**: `yes` = Claude must consult memory (an EngramDB `query`/`get`/`list` call) before it answers, or before its first edit. `no` = Claude must make no EngramDB call. `any` = not graded.
+- **query**: `yes` = Claude must consult memory (an EngramDB `query`/`get`/`list` call) before it answers, or before its first edit. `any` = not graded. A query is never a failure: Claude cannot know a check is unneeded without checking.
 - **create**: `yes` = the store must hold a new memory after the run that contains one of the *create terms*. `no` = no new memory. Checked on the store files (end state), not on the transcript.
 - **revise**: `yes` = Claude must `challenge` or `update` the memory that the user's message contradicts.
 - **facts**: the final answer or the diff must contain at least one of these strings (case-insensitive). This checks that the stored fact was actually used. A hook may have injected it, so it can pass without a `query` call.
@@ -58,14 +58,14 @@ Flow: Claude Code with the `engram` plugin (MCP server + hooks) in a small fixtu
 | ct-just | contradiction | any | any | yes | `just` | We removed the Makefile; tests run with `just test` now. How do I run only the fast tests? |
 | ct-rounding | contradiction | any | any | yes | `HALF_UP` | Finance changed their mind: tax now rounds half-up. Please update src/billing/tax.py accordingly. |
 | ct-release | contradiction | any | any | yes | - | FYI the release process changed: we now release with `make release`, which tags and publishes for us. |
-| ng-tuple | negative | no | no | no | - | What's the difference between a list and a tuple in Python? |
-| ng-regex | negative | no | no | no | - | Write a regex that matches an ISO 8601 date like 2026-10-01. |
-| ng-bankers | negative | no | no | no | - | In general, what is banker's rounding and why do accountants like it? |
-| ng-hello | negative | no | no | no | - | hi! quick sanity check, are you there? |
-| ng-math | negative | no | no | no | - | What is 17 * 23? |
-| ng-http409 | negative | no | no | no | - | What does HTTP status 409 mean? |
-| ng-rebase | negative | no | no | no | - | Explain what `git rebase --onto` does, with a short example. |
-| ng-yaml | negative | no | no | no | - | Convert this JSON to YAML: {"a": 1, "b": [true, null]} |
+| ng-tuple | negative | any | no | no | - | What's the difference between a list and a tuple in Python? |
+| ng-regex | negative | any | no | no | - | Write a regex that matches an ISO 8601 date like 2026-10-01. |
+| ng-bankers | negative | any | no | no | - | In general, what is banker's rounding and why do accountants like it? |
+| ng-hello | negative | any | no | no | - | hi! quick sanity check, are you there? |
+| ng-math | negative | any | no | no | - | What is 17 * 23? |
+| ng-http409 | negative | any | no | no | - | What does HTTP status 409 mean? |
+| ng-rebase | negative | any | no | no | - | Explain what `git rebase --onto` does, with a short example. |
+| ng-yaml | negative | any | no | no | - | Convert this JSON to YAML: {"a": 1, "b": [true, null]} |
 | nc-rename | no_create | any | no | no | - | In src/billing/tax.py, rename the local variable `x` to `total`. |
 | nc-docstring | no_create | any | no | no | - | Add a one-line docstring to every function in src/flags.py. |
 | nc-readme | no_create | any | no | no | - | Fix the spelling mistakes in README.md. |
