@@ -5184,7 +5184,12 @@ mod tests {
             mk("dir fact", &["billing/"], 0.5, Epistemic::Fact),
             mk("other dir", &["payments/"], 0.9, Epistemic::Fact),
             mk("unscoped", &[], 0.9, Epistemic::Fact),
-            mk("low criticality", &["billing/invoice.py"], 0.3, Epistemic::Fact),
+            mk(
+                "low criticality",
+                &["billing/invoice.py"],
+                0.3,
+                Epistemic::Fact,
+            ),
         ] {
             store.create(&m).await.unwrap();
         }
@@ -5231,16 +5236,29 @@ mod tests {
         m.criticality = 0.8;
         let logical = vec!["auth".to_string()];
 
-        let unscoped = composite_score(&m, &ScoringContext::scope_only(None, &logical), &config, now);
+        let unscoped = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &logical),
+            &config,
+            now,
+        );
         assert_eq!(unscoped.gate_score, Some(unscoped.final_score));
 
         m.logical = vec!["auth.oauth".to_string()];
-        let related = composite_score(&m, &ScoringContext::scope_only(None, &logical), &config, now);
+        let related = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &logical),
+            &config,
+            now,
+        );
         assert!(related.final_score < 0.8);
         assert!((related.gate_score.unwrap() - 0.8).abs() < 1e-9);
 
         let no_context = composite_score(&m, &ScoringContext::scope_only(None, &[]), &config, now);
-        assert_eq!(no_context.gate_score, None, "SessionStart shape is unchanged");
+        assert_eq!(
+            no_context.gate_score, None,
+            "SessionStart shape is unchanged"
+        );
     }
 
     #[tokio::test]
