@@ -336,11 +336,13 @@ struct ChallengeInput {
     id: String,
 
     #[schemars(
-        description = "Why the memory is wrong or outdated. The user's own statement (\"we moved off structlog last week\") is enough evidence; code that still matches the old memory does not make it current."
+        description = "Why the memory is wrong or outdated: the user's statement (\"we moved off structlog last week\"), or the line of a file you read that states the opposite. Either is enough evidence. Code that still matches the old memory does not make it current."
     )]
     evidence: String,
 
-    #[schemars(description = "File where evidence was found")]
+    #[schemars(
+        description = "Repo file that contradicts the memory, when the evidence came from one"
+    )]
     source_file: Option<String>,
 
     #[schemars(
@@ -1819,9 +1821,13 @@ impl EngramDbServer {
                  store with create, including when the user says \"remember\". Claude Code's \
                  file-based auto-memory is private to one machine and invisible to these \
                  queries and to collaborators; keep it for personal collaboration preferences. \
-                 When the user says a stored memory is outdated or wrong, challenge it right \
-                 away with their statement as evidence, even if the code still matches the old \
-                 memory; do not wait for the code to change."
+                 Challenge a memory as soon as a source states the opposite: the user saying \
+                 it is outdated (even if the code still matches it), or a file you read: a \
+                 dated doc, a dependency pin, existing code doing what the memory forbids. Do \
+                 not wait for the user to confirm a file-based conflict. Challenge first, then \
+                 work from the newer source and tell the user. Not contradictions: code that \
+                 merely doesn't mention the rule, a narrower memory scoping an exception, a \
+                 one-off or hypothetical request, a memory already marked superseded."
                 .to_string();
             if let Some(w) = embedding_warning {
                 s.push_str("\n\n");
@@ -2639,7 +2645,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "challenge",
-        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as the user tells you a memory is out of date, with their statement as `evidence`, even when the code has not caught up yet: a challenge flags the memory, it does not rewrite it. When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
+        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as a source states the opposite of the memory: the user saying it is out of date (even when the code has not caught up), or a file you read, such as a dated doc, a dependency pin, or existing code using what the memory forbids (pass it as `source_file`). A challenge flags the memory and does not rewrite it, so a file-based conflict needs no confirmation from the user first. Absence is not contradiction: code that does not mention the rule does not count. When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
     )]
     async fn memory_challenge(
         &self,

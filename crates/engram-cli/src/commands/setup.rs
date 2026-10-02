@@ -25,10 +25,12 @@ This project uses EngramDB for persistent agent memory.
   EngramDB `create`, including when the user says "remember". Claude Code's
   auto-memory is private to one machine and invisible to `query` and to
   collaborators; keep it for personal collaboration preferences.
-- **Keep memories honest** — when the user says a memory is outdated, `challenge`
-  it right away with their words as evidence, even if the code still matches
-  the old memory; `update` it (or `create` with `supersedes`) when you know
-  the replacement. `verify` a memory
+- **Keep memories honest** — `challenge` a memory as soon as a source states
+  the opposite: the user saying it is outdated (even if the code still
+  matches it), or a file you read (a dated doc, a dependency pin, existing code
+  doing what it forbids; pass `source_file`). Don't wait for the user to
+  confirm a file-based conflict, and work from the newer source. `update` it
+  (or `create` with `supersedes`) when you know the replacement. `verify` a memory
   you've confirmed against the code; prefer `resolve` with `invalidate`
   over `delete` when something *was* true but no longer is (history stays).
 - **Bound your work** — declare `task_current` when starting focused work;
