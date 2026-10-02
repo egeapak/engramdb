@@ -114,6 +114,8 @@ def parse_events(events):
                     steps.append({"kind": "text", "text": b["text"]})
                 elif b.get("type") == "thinking" and b.get("thinking"):
                     steps.append({"kind": "thinking", "text": b["thinking"]})
+        elif t == "turn":
+            steps.append({"kind": "user", "text": e["prompt"]})
         elif t == "user":
             content = e.get("message", {}).get("content", [])
             for b in content if isinstance(content, list) else []:
@@ -139,7 +141,9 @@ def to_trace(steps, hooks, prompt):
         trace.append({"role": "system", "content": "[hook] " + json.dumps(h)[:4000]})
     thinking = None
     for s in steps:
-        if s["kind"] == "thinking":
+        if s["kind"] == "user":
+            trace.append({"role": "user", "content": s["text"]})
+        elif s["kind"] == "thinking":
             thinking = s["text"]
         elif s["kind"] == "text":
             trace.append({"role": "assistant", "content": s["text"], **({"thinking": thinking} if thinking else {})})
@@ -165,17 +169,25 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     tools = [s for s in steps if s["kind"] == "tool"]
     mem = [(i, memory_op(s["name"]), s) for i, s in enumerate(tools) if memory_op(s["name"])]
     first_edit = next((i for i, s in enumerate(tools) if s["name"] in EDIT_TOOLS), None)
-    answer = final.get("result") or ""
+    # Every turn's answer: a multi-turn case may state its facts early.
+    finals = [e for e in events if e.get("type") == "result"]
+    answer = "\n".join(e.get("result") or "" for e in finals)
     g = {}
 
     if exp["query"] is True:
         g["query_before_act"] = int(any(op in CONSULT and (first_edit is None or i < first_edit) for i, op, _ in mem))
         g["consulted_before_act"] = int(g["query_before_act"] or hook_delivered_body(case, hooks))
-    if exp["facts"]:
-        ok = _contains_any(answer + "\n" + diff, exp["facts"])
+    if exp["facts"] or exp.get("facts_all"):
+        text = answer + "\n" + diff
+        ok = _contains_any(text, exp["facts"]) if exp["facts"] else True
+        # Multi-memory tasks: every group must be matched.
+        ok = ok and all(_contains_any(text, group) for group in exp.get("facts_all", []))
         if case["id"] == "ed-migration-typo":  # the applied migration must stay untouched
             ok = ok and "migrations/0007_add_customers.sql" not in diff
         g["fact_used"] = int(ok)
+    if exp.get("forbidden"):
+        # Diff only: an answer may rightly say "we moved off X".
+        g["no_stale_fact"] = int(not _contains_any(diff, exp["forbidden"]))
 
     new_or_changed = [text for path, (sha, text) in after.items() if before.get(path, (None,))[0] != sha]
     new_files = [p for p in after if p not in before]
@@ -202,7 +214,12 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     graded = [v for k, v in g.items() if k not in NOT_IN_PASS]
     g["pass"] = int(all(graded)) if graded else 1
 
-    usage = final.get("usage", {}) or {}
+    # Summed over turns: each `claude -p` process reports its own usage.
+    usage = {}
+    for e in finals:
+        for k, v in (e.get("usage") or {}).items():
+            if isinstance(v, (int, float)):
+                usage[k] = usage.get(k, 0) + v
     gaps = gap_signals(tools, init, hooks)
     target_title = _target_title(case)
     hook_text = json.dumps(hooks)
@@ -215,9 +232,9 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         "status": "ok",
         "grade": g,
         "memory_calls": len(mem),
-        "cost_usd": final.get("total_cost_usd"),
+        "cost_usd": (sum(e.get("total_cost_usd") or 0 for e in finals) if finals else None),
         "latency_s": round(latency_s, 2),
-        "turns": final.get("num_turns"),
+        "turns": (sum(e.get("num_turns") or 0 for e in finals) if finals else None),
         "hook_hit": (int(bool(target_title) and target_title in hook_text) if case.get("target") else None),
         "in_tokens": (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0)),

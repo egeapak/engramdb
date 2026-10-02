@@ -71,6 +71,10 @@ MEMORY_SERVER_TOOLS = "mcp__plugin_engram_memory"
 FIXTURES = {
     "default": {"seeds": "seed_memories.json", "cases": "cases.jsonl"},
     "vague": {"seeds": "seed_memories_vague.json", "cases": "cases_vague.jsonl"},
+    # Harder cases for hill-climbing once the default set hit its ceiling:
+    # multi-memory tasks, facts buried past the hook preview, superseded and
+    # distractor memories, multi-turn sessions, facts discovered mid-task.
+    "hard": {"seeds": "seed_memories_hard.json", "cases": "cases_hard.jsonl", "dir": "fixture_hard"},
 }
 FIXTURE = {"name": "default"}
 
@@ -145,7 +149,7 @@ def install_engram_md(ws):
 
 def setup_workspace(tmp, env, engram_md=False):
     ws = tmp / "ledgerline"
-    shutil.copytree(HERE / "fixture", ws)
+    shutil.copytree(HERE / FIXTURES[FIXTURE["name"]].get("dir", "fixture"), ws)
     if engram_md:
         install_engram_md(ws)
     git = lambda *a: sh(["git", *a], ws, env)
@@ -156,7 +160,7 @@ def setup_workspace(tmp, env, engram_md=False):
     sh(["engramdb", "init"], ws, env)
     ids = {}
     for m in json.loads((HERE / FIXTURES[FIXTURE["name"]]["seeds"]).read_text()):
-        ids[m["key"]] = seed_memory(ws, env, m)
+        ids[m["key"]] = seed_memory(ws, env, m, ids)
     warm_daemon(ws, env)
     # Commit the seeded store so the end-state diff shows only what the run changed.
     git("-c", "user.name=eval", "-c", "user.email=eval@example.com", "add", "-A")
@@ -186,13 +190,24 @@ def warm_daemon(ws, env):
         proc.wait()
 
 
-def seed_memory(ws, env, m):
+def seed_memory(ws, env, m, ids=None):
     cmd = ["engramdb", "add", "--format", "json", "--type", m["type"], "--title", m["title"],
            "--summary", m["title"], "--content", m["content"]]
     for p in m["paths"]:
         cmd += ["--physical", p]
     if m["tags"]:
         cmd += ["--tags", ",".join(m["tags"])]
+    # Optional fields (hard fixture). `supersedes` names an earlier seed's key.
+    for scope in m.get("logical", []):
+        cmd += ["--logical", scope]
+    if "criticality" in m:
+        cmd += ["--criticality", str(m["criticality"])]
+    if m.get("supersedes"):
+        cmd += ["--supersedes", (ids or {})[m["supersedes"]]]
+    if m.get("premise"):
+        cmd += ["--premise", m["premise"]]
+    for glob in m.get("invalidated_by", []):
+        cmd += ["--invalidated-by", glob]
     out = sh(cmd, ws, env).stdout
     return json.loads(out)["message"].split()[-1]
 
@@ -250,6 +265,15 @@ def run_one(case, rep, args, out_dir):
             session_id = str(uuid.uuid4())
         if result is None:
             raise RuntimeError(f"no result event (exit {code}): {stderr[-1500:]}")
+        # Follow-up turns of a multi-turn case: same session, one at a time.
+        # A marker event lets the grader and the trace show where each starts.
+        for turn in case.get("turns", []):
+            t0 = time.monotonic()
+            t_events, code, stderr = run_claude(turn, ws, env, args, session_id, resume=True)
+            latency += time.monotonic() - t0
+            if not any(e.get("type") == "result" for e in t_events):
+                raise RuntimeError(f"no result event in a follow-up turn (exit {code}): {stderr[-1500:]}")
+            events = events + [{"type": "turn", "prompt": turn}] + t_events
         # The first init event can predate the connection; the last one reflects it.
         init = next((e for e in reversed(events) if e.get("type") == "system" and e.get("subtype") == "init"), {})
         servers = {s["name"]: s.get("status") for s in init.get("mcp_servers", [])}

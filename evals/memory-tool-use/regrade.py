@@ -18,7 +18,8 @@ import grade
 HERE = Path(__file__).resolve().parent
 FLOW_DIR = HERE.parent.parent / ".claude" / "hillclimb" / "memory-tool-use"
 FIXTURES = {"default": ("seed_memories.json", "cases.jsonl"),
-            "vague": ("seed_memories_vague.json", "cases_vague.jsonl")}
+            "vague": ("seed_memories_vague.json", "cases_vague.jsonl"),
+            "hard": ("seed_memories_hard.json", "cases_hard.jsonl")}
 
 
 def regrade(variant):
