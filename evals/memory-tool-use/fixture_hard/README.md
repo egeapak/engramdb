@@ -21,3 +21,4 @@ Install the dependancies with `pip install -e .[dev]`, then run the tests.
 - `services/reporting/` - monthly management reports
 
 Operational procedures are in `docs/runbook.md`.
+Developer notes (local setup, testing) are in `docs/`.
