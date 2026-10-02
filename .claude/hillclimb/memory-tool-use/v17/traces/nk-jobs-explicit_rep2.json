@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "FYI: from now on all background jobs must go through `jobs.enqueue()`; never call celery directly. Please remember that for future sessions."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f7f5b52f-5fc1-4251-8d74-cb208aa8a127\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"bff83920-c93f-4d8e-ac9f-4ba6cfed42a9\", \"session_id\": \"fd36d202-136f-406a-8906-576fccdf20f2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f7f5b52f-5fc1-4251-8d74-cb208aa8a127\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b04de782-82bd-48d6-854f-09ecdeab7ca0\", \"session_id\": \"fd36d202-136f-406a-8906-576fccdf20f2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"39742880-0ce9-47f0-b250-f70a5e0fd821\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1a6a9bf1-eb61-4b7b-939a-c6474b8d9d59\", \"session_id\": \"fd36d202-136f-406a-8906-576fccdf20f2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"39742880-0ce9-47f0-b250-f70a5e0fd821\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"3fde4015-c925-4cef-bd7e-53d3518eebb6\", \"session_id\": \"fd36d202-136f-406a-8906-576fccdf20f2\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"jobs enqueue celery background\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"convention\",\n \"summary\": \"All background jobs must go through jobs.enqueue(); never call celery directly.\",\n \"content\": \"All background jobs must be dispatched via `jobs.enqueue()`. Never call celery directly (e.g. task.delay/apply_async or celery APIs) from application code.\",\n \"tags\": [\n  \"jobs\",\n  \"celery\",\n  \"background-jobs\",\n  \"convention\"\n ],\n \"logical\": [\n  \"jobs\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0fa0c-f855-78e1-af81-71c962952659\",\"created\":true,\"summary\":\"All background jobs must go through jobs.enqueue(); never call celery directly.\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved that to EngramDB as a project convention, so future sessions will see it: all background jobs go through `jobs.enqueue()`, and nothing calls celery directly."
+ }
+]

@@ -1,0 +1,53 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"354ad3df-20a6-40e3-a334-b702f9e68a48\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"cea59ae5-f662-4fcc-8f58-1cff59aee998\", \"session_id\": \"0c9c8e55-036c-45c1-b19e-d9c4eb6bae1f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"354ad3df-20a6-40e3-a334-b702f9e68a48\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5400441f-60ae-4ea6-9dc6-094a4c9676fb\", \"session_id\": \"0c9c8e55-036c-45c1-b19e-d9c4eb6bae1f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"35508ab5-1e7e-4886-a226-315fd53401f2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"810f781a-3978-4e37-bafd-c1b267ae4748\", \"session_id\": \"0c9c8e55-036c-45c1-b19e-d9c4eb6bae1f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"35508ab5-1e7e-4886-a226-315fd53401f2\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e10dfce6-2e5b-4b74-aab6-690925e5cee1\", \"session_id\": \"0c9c8e55-036c-45c1-b19e-d9c4eb6bae1f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"database migration schema customers column\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":7,\"hint\":\"No memory scored above the relevance threshold (0.45). These 3 are the closest weak matches (below_threshold: true); 7 more were dropped. Treat them as leads, not answers; retry with mode \\\"filter\\\" and literal terms to confirm.\",\"memories\":[{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0fa02-70c6-7e10-9e0b-698aa63da0c9\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.3878817733091167,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3878817733091167,\"keyword\":0.11515387521038005,\"relevance\":0.5,\"rerank\":-0.8936935067176819,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5502279463003854,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Never edit an applied migration\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0fa02-8489-7573-be1f-9952414ad6f9\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.21425491370722494,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.21425491370722494,\"relevance\":0.5,\"rerank\":-4.256509780883789,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3446112345636613,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax uses ROUND_HALF_EVEN\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0fa02-50d9-7cf1-9154-9a40aacbf5a4\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.2131947115051746,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2131947115051746,\"relevance\":0.5,\"rerank\":-3.507817029953003,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3132705343885468,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Use structlog, not stdlib logging\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":3}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | head -100\",\n \"description\": \"List tracked files\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0fa02-99b0-7bf0-96c8-f93d1d1a4f00.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0fa02-7a04-7bb0-96bc-8cc3328f7e8b.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0fa02-450e-71d2-880a-ed5061b79551.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0fa02-3d51-7202-b26d-c089c4f05beb.md\n.engramdb/memories/never-edit-an-applied-migration_01a0fa02-70c6-7e10-9e0b-698aa63da0c9.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0fa02-a4cc-76c1-b175-71b3b0e2ff89.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0fa02-5d1a-7e32-b30e-71c5b4c16f87.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0fa02-905d-7dd1-8348-152fd4b07a1f.md\n.engramdb/memories/tax-uses-round-half-even_01a0fa02-8489-7573-be1f-9952414ad6f9.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0fa02-50d9-7cf1-9154-9a40aacbf5a4.md\nMakefile\nREADME.md\ndocker-compose.yml\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_db.py\ntests/test_payments.py\ntests/test_tax.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"cat migrations/0007_add_customers.sql migrations/0006_index_customer.sql; grep -rn -i \\\"migrat\\\\|customer\\\" README.md Makefile src scripts tests | head -30\",\n \"description\": \"Inspect customers migrations and references\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "CREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);\nCREATE INDEX invoices_customer ON invoices(customer_id);\nREADME.md:11:- `migrations/` - the SQL schema migrations\nsrc/billing/invoices.py:14:    customer_id: str"
+ },
+ {
+  "role": "assistant",
+  "content": "Put it in a **new migration file**: `migrations/0008_add_customer_phone.sql`.\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nDon't add it to `migrations/0007_add_customers.sql`, even though that's the file that creates the table. A project memory says files in `migrations/` have already been applied in production and must never be edited. Each change goes in a new file with the next 4-digit number, and the highest one now is `0007`.\n\nA few other things I found:\n\n- **Nullable is the safe default.** Existing customer rows have no phone number, so `NOT NULL` without a default would fail on a populated table. If you need it required, add it as nullable now, backfill, and tighten it in a later migration.\n- **Nothing else needs to change for the schema.** No Python model or other code references the `customers` table. `src/billing/invoices.py` only has a `customer_id: str` field. Any code that reads or writes `phone` would be separate work.\n- **There's a typo in 0007:** the email column is named `emial`. If you want to fix that, do it in its own new migration (`ALTER TABLE customers RENAME COLUMN emial TO email;`), not by editing 0007. Check first whether anything outside this repo already uses the misspelled name.\n\nDo you want me to create the `0008` file?"
+ }
+]

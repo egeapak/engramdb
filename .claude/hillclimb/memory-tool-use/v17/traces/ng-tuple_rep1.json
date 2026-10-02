@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c9f577e8-bfed-47e9-a454-67575c5bad10\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"20bf8299-7a2d-4263-87b9-eb360e8653e7\", \"session_id\": \"78c82d1a-773d-46dc-8c90-c51e41c0e173\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c9f577e8-bfed-47e9-a454-67575c5bad10\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"b059a4e2-7c9b-46f2-a9c7-0720cdc84a80\", \"session_id\": \"78c82d1a-773d-46dc-8c90-c51e41c0e173\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a4ed7a56-f0bf-498d-a454-31b908ab635b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"7481c098-a4c1-4e1f-a9c2-e50113e0baca\", \"session_id\": \"78c82d1a-773d-46dc-8c90-c51e41c0e173\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a4ed7a56-f0bf-498d-a454-31b908ab635b\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"de32030a-f87c-455e-a67d-3099c07243de\", \"session_id\": \"78c82d1a-773d-46dc-8c90-c51e41c0e173\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**Lists** are mutable. **Tuples** are immutable.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` (a single-item tuple needs a trailing comma: `(1,)`) |\n| Mutability | You can add, remove or change items | Fixed after creation |\n| Methods | `append`, `extend`, `pop`, `sort`, etc. | Only `count` and `index` |\n| Hashable | No, so it can't be a dict key or set member | Yes, if all its items are hashable |\n| Memory and speed | Slightly more overhead | Slightly smaller and faster to create |\n\n**When to use each**\n- **List:** a collection that grows, shrinks or gets reordered, usually of items of the same kind, such as a list of transactions.\n- **Tuple:** a fixed record whose positions have meaning, such as `(date, amount, currency)`. Tuples are also what you use for dict keys, for multiple return values, and for data you don't want changed by accident.\n\n```python\nnums = [1, 2, 3]\nnums[0] = 99          # fine\n\npoint = (1, 2)\npoint[0] = 99         # TypeError: 'tuple' object does not support item assignment\n```\n\nA tuple is only shallowly immutable. If it holds a mutable object, that object can still change:\n\n```python\nt = ([1, 2], 3)\nt[0].append(4)        # works: t is now ([1, 2, 4], 3)\n```"
+ }
+]

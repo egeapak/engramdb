@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What's the difference between a list and a tuple in Python?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"628675d3-4221-470f-ad25-e83782486fe9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"a6fbdb19-cda5-4bc8-a602-51a11e277fe8\", \"session_id\": \"6539ce2e-953d-4f3c-831b-3064592c6980\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"628675d3-4221-470f-ad25-e83782486fe9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"1b3e488b-aabb-4c32-ab19-fd7c6743ac24\", \"session_id\": \"6539ce2e-953d-4f3c-831b-3064592c6980\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"44c183a2-f42a-4571-a392-8e17bbdeec5e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"1ff2d3ed-d91f-40ea-aeea-381f2a56228d\", \"session_id\": \"6539ce2e-953d-4f3c-831b-3064592c6980\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"44c183a2-f42a-4571-a392-8e17bbdeec5e\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ae77511f-2786-4e2f-bd7c-a469e7d22f05\", \"session_id\": \"6539ce2e-953d-4f3c-831b-3064592c6980\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**Lists** are mutable; **tuples** are immutable.\n\n| | List | Tuple |\n|---|---|---|\n| Syntax | `[1, 2, 3]` | `(1, 2, 3)` |\n| Mutable | Yes: you can append, remove, or reassign items | No: contents can't change after creation |\n| Hashable | No, so it can't be a dict key or set member | Yes, if all its items are hashable |\n| Performance | Slightly more memory and slower to create | Slightly smaller and faster |\n| Methods | Many (`append`, `sort`, `pop`, ...) | Only `count` and `index` |\n\n**When to use which**\n- **List:** a collection that grows, shrinks, or is reordered, usually of items of the same kind (e.g. a list of user names).\n- **Tuple:** a fixed record where position has meaning (e.g. `(x, y)` coordinates or `(name, age)`). Tuples are also used for dict keys, for returning multiple values from a function, and as a signal that the data shouldn't change.\n\n**Caveat:** a tuple is only shallowly immutable. If it holds a mutable object, such as `([1, 2], 3)`, that inner list can still be modified.\n\nA one-element tuple needs a trailing comma: `(1,)`. Without it, `(1)` is just the integer `1`."
+ }
+]

@@ -1,0 +1,35 @@
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..091fdb6
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..c9dcdaa
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/tax.cpython-311.pyc b/src/billing/__pycache__/tax.cpython-311.pyc
+new file mode 100644
+index 0000000..3e7c09c
+Binary files /dev/null and b/src/billing/__pycache__/tax.cpython-311.pyc differ
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..1fb213f 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_EVEN, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,11 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    """Tax in integer cents for amount_cents at rate (e.g. "0.0825" for 8.25%).
++
++    Rounds with banker's rounding (ROUND_HALF_EVEN) per the finance decision.
++    """
++    if isinstance(rate, float):
++        rate = repr(rate)
++    tax = Decimal(amount_cents) * Decimal(rate)
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))

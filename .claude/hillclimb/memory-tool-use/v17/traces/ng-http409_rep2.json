@@ -1,0 +1,26 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ca9fde6b-c7e4-4355-a245-5d8c32add2c1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"70c48ffd-0d74-4fe7-a461-0fb2c4134602\", \"session_id\": \"85d126ea-4fb2-4b0a-b9f7-17dc40a290b9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ca9fde6b-c7e4-4355-a245-5d8c32add2c1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7d536409-570a-4060-9c2b-5095772fdc0f\", \"session_id\": \"85d126ea-4fb2-4b0a-b9f7-17dc40a290b9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"b3b03921-2c62-480f-9e33-35fd3bbbe0e0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d8fee3c6-608b-4dea-ae52-592d4c3fd25e\", \"session_id\": \"85d126ea-4fb2-4b0a-b9f7-17dc40a290b9\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"b3b03921-2c62-480f-9e33-35fd3bbbe0e0\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"87203882-0426-4095-8f26-b073ed326ebd\", \"session_id\": \"85d126ea-4fb2-4b0a-b9f7-17dc40a290b9\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request can't be completed because it conflicts with the current state of the target resource. The client can often fix the problem and resubmit.\n\nCommon causes:\n- **Edit conflicts:** Two clients update the same resource. The second request is based on a stale version, which is often detected through ETags, `If-Match` headers, or version numbers (optimistic locking).\n- **Uniqueness violations:** You try to create a resource that already exists, such as registering a username or email that's taken.\n- **Invalid state transitions:** The action isn't allowed in the resource's current state. Examples are cancelling an order that has already shipped and deleting a non-empty folder.\n- **Concurrent operations:** Another process holds a lock or is modifying the resource at the same time.\n\nThe response body should explain the conflict and, ideally, how to resolve it. For example, it can include the current version of the resource or the field that collides.\n\n**How it differs from similar codes:**\n- **400** means the request itself is malformed.\n- **412** means a precondition header, such as `If-Match`, failed.\n- **422** means the request is well-formed but semantically invalid.\n- **409** means the request is valid but clashes with the resource's current state.\n\nTo handle a 409, re-fetch the current state, resolve the difference (merge, pick a new identifier, or wait), and retry."
+ }
+]

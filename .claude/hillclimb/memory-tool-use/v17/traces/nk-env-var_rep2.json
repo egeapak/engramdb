@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"7978ba62-19f5-43dc-90f0-b81de57196e1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"6768dbed-bb47-4842-996a-bc9ad5dcdbb0\", \"session_id\": \"aa226589-8830-4725-91dc-0a5901e18550\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"7978ba62-19f5-43dc-90f0-b81de57196e1\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"63ad0e0b-4870-4fde-9113-974c0966636e\", \"session_id\": \"aa226589-8830-4725-91dc-0a5901e18550\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"f49d2ad9-6f63-4426-8151-120e394dbf83\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"477ec4e2-4473-48c6-86e9-986c1225b274\", \"session_id\": \"aa226589-8830-4725-91dc-0a5901e18550\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"f49d2ad9-6f63-4426-8151-120e394dbf83\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c576dd86-546e-4a05-b256-08b3af4e19aa\", \"session_id\": \"aa226589-8830-4725-91dc-0a5901e18550\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)fake|mock|stub|gateway|environ|getenv|process\\\\.env\",\n \"output_mode\": \"content\",\n \"head_limit\": 40\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "docker-compose.yml:4:    environment:\nscripts/export.py:10:    bucket = os.environ.get(\"EXPORT_BUCKET\", \"ledgerline-exports-dev\")\ntests/test_db.py:9:    with psycopg.connect(os.environ.get(\"DATABASE_URL\", \"postgresql://ledgerline:ledgerline@localhost/ledgerline_test\")) as conn:"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"Without PAYMENTS_LIVE=1 in the environment, the app silently falls back to a fake payment gateway, with no warning or log. The user lost about two hours to this. When payments appear to succeed but nothing reaches the real provider, check PAYMENTS_LIVE first.\",\n \"details\": \"Reported by the user on 2026-10-02. A grep of the current checkout found no PAYMENTS_LIVE reference (only EXPORT_BUCKET and DATABASE_URL env reads), so the gateway-selection code was not located. Verify where it lives before relying on specifics.\",\n \"epistemic\": \"observation\",\n \"premise\": \"Gateway selection keys off PAYMENTS_LIVE and defaults to the fake gateway\",\n \"invalidated_by\": [\n  \"docker-compose.yml\"\n ],\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"gotcha\"\n ],\n \"criticality\": 0.7\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0fa0d-cfbb-7590-81b9-cd665bdcb14b\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "That sounds like a miserable two hours. I've saved it to EngramDB as a hazard, so future sessions will see that the fake gateway is the default unless `PAYMENTS_LIVE=1` is set.\n\nI couldn't find `PAYMENTS_LIVE` or any gateway-selection code in this checkout. A grep only turned up `EXPORT_BUCKET` and `DATABASE_URL` reads. The memory says that, so nobody will take it as verified against the code.\n\nIf you point me at where the gateway gets chosen, I can make the fallback fail loudly instead of silently. Options would be a startup warning, or refusing to start without an explicit choice. I can also add `PAYMENTS_LIVE` to `docker-compose.yml` or the docs if that fits your setup."
+ }
+]

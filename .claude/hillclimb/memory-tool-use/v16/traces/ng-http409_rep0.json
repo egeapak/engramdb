@@ -1,0 +1,34 @@
+[
+ {
+  "role": "user",
+  "content": "What does HTTP status 409 mean?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c1e096ad-1fbe-4cdc-8c66-d1b73e32c54f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"6f7d33bc-2cb4-484f-ac7d-fa78b8a530a5\", \"session_id\": \"18a099f4-d5d4-4126-ae13-76232d4f279b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c1e096ad-1fbe-4cdc-8c66-d1b73e32c54f\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"40985537-d945-4395-acb0-f6d26758423a\", \"session_id\": \"18a099f4-d5d4-4126-ae13-76232d4f279b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"620a6f87-6a62-49f0-8eaf-6010bc566bed\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"d4c784fb-cda8-4407-a90d-99dc1c1792e9\", \"session_id\": \"18a099f4-d5d4-4126-ae13-76232d4f279b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"620a6f87-6a62-49f0-8eaf-6010bc566bed\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"f92be3ca-0297-415b-8b95-4f08611a9bbf\", \"session_id\": \"18a099f4-d5d4-4126-ae13-76232d4f279b\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "**HTTP 409 Conflict** means the request couldn't be completed because it conflicts with the current state of the resource on the server. The request is well-formed, but applying it would leave things inconsistent, so the client usually needs to resolve the conflict and try again.\n\n**Common cases:**\n- **Concurrent edits / optimistic locking:** A client updates a resource using an outdated version (for example, an `ETag` or version field that doesn't match), and someone else changed it first.\n- **Uniqueness violations:** Creating something that already exists, like a username or email that's taken, or a duplicate ID.\n- **Invalid state transitions:** For example, cancelling an order that has already shipped, or deleting a resource that other records still depend on.\n- **Version control\u2013style conflicts:** Uploading a file that conflicts with a newer version already on the server.\n\n**How it compares to similar codes:**\n- **400 Bad Request:** The request itself is malformed. With 409, the request is valid but clashes with the server's current state.\n- **412 Precondition Failed:** A conditional header like `If-Match` didn't match. This is often the more precise code for optimistic-locking failures that use ETags.\n- **422 Unprocessable Content:** The content is well-formed but fails validation rules, regardless of current state.\n\n**Best practice:** Include a response body that explains what the conflict is (and ideally the current state or version) so the client can fix it. For example, it can re-fetch the resource, merge the changes, and retry."
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "nothing missing"
+ }
+]

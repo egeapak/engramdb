@@ -1,0 +1,80 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"a01a98d1-8592-4f90-99ec-b0c8c7299bf5\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"52fe78fc-d32c-43fd-ae54-f0363f94f176\", \"session_id\": \"7e6fe621-17a8-437a-b6c6-0a32ccc2aca2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"a01a98d1-8592-4f90-99ec-b0c8c7299bf5\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"73882057-07d2-4911-acfb-a6eb90b9a550\", \"session_id\": \"7e6fe621-17a8-437a-b6c6-0a32ccc2aca2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"662ca862-ed0c-4cee-b190-78604ccc5930\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"bf948057-4eee-49e2-be72-705cb5451e06\", \"session_id\": \"7e6fe621-17a8-437a-b6c6-0a32ccc2aca2\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"662ca862-ed0c-4cee-b190-78604ccc5930\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"c05a14d3-8325-42be-a567-4e61b2784c2d\", \"session_id\": \"7e6fe621-17a8-437a-b6c6-0a32ccc2aca2\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"error response endpoint\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0fa0d-4e5b-7b62-b495-92335c83b3be\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.33317798156111633,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.33317798156111633,\"keyword\":0.23265657470534537,\"relevance\":0.5,\"rerank\":-1.7022178173065186,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5221457014551423,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/api-errors-use-problem-json_01a0fa0d-4e5b-7b62-b495-92335c83b3be.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files && grep -n -i -C3 error src/billing/tax.py src/billing/refunds.py\",\n \"description\": \"List tracked files and show error handling in billing\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\n.engramdb/.gitignore\n.engramdb/config.toml\n.engramdb/manifest.toml\n.engramdb/memories/api-errors-use-problem-json_01a0fa0d-4e5b-7b62-b495-92335c83b3be.md\n.engramdb/memories/feature-flags-go-through-flags-is-on_01a0fa0d-29f4-7dd1-8fdb-25badc0c97d9.md\n.engramdb/memories/invoices-finalize-is-not-idempotent_01a0fa0c-fd05-7f61-b7cd-52fd54e1fd76.md\n.engramdb/memories/money-is-integer-cents-never-float_01a0fa0c-f325-77f2-b20f-a2047e81e5f5.md\n.engramdb/memories/never-edit-an-applied-migration_01a0fa0d-1e98-7410-ba95-c750a5f280c5.md\n.engramdb/memories/release-by-tagging-vyyyy-mm-n_01a0fa0d-5a3c-7342-99e6-83113aa43e31.md\n.engramdb/memories/run-tests-with-make-test-fast_01a0fa0d-14a7-74c2-9f82-6ecea0fc763b.md\n.engramdb/memories/staging-export-bucket-points-at-the-prod-bucket_01a0fa0d-4134-7f41-85f6-9b7972abefb9.md\n.engramdb/memories/tax-uses-round-half-even_01a0fa0d-357f-7d82-8899-c2f4eda63c4a.md\n.engramdb/memories/use-structlog-not-stdlib-logging_01a0fa0d-0670-7d82-8ba6-c58855b9b99a.md\nMakefile\nREADME.md\ndocker-compose.yml\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_db.py\ntests/test_payments.py\ntests/test_tax.py\nsrc/billing/tax.py-9-\nsrc/billing/tax.py-10-\nsrc/billing/tax.py-11-def tax_for(amount_cents, rate):\nsrc/billing/tax.py:12:    raise NotImplementedError\n--\nsrc/billing/refunds.py-3-\nsrc/billing/refunds.py-4-def refund(invoice: Invoice, amount_cents: int):\nsrc/billing/refunds.py-5-    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:\nsrc/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")\nsrc/billing/refunds.py-7-    return {\"invoice_id\": invoice.id, \"refunded_cents\": amount_cents}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"for f in src/api/*.py; do echo \\\"== $f\\\"; cat \\\"$f\\\"; done\",\n \"description\": \"Show the API module sources\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "== src/api/__init__.py\n== src/api/checkout.py\nfrom flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n== src/api/errors.py\nfrom flask import jsonify\n\n\ndef problem(status, title, detail=None):\n    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n    if detail:\n        body[\"detail\"] = detail\n    resp = jsonify(body)\n    resp.status_code = status\n    resp.mimetype = \"application/problem+json\"\n    return resp\n== src/api/invoices.py\nfrom flask import Blueprint, jsonify\n\nbp = Blueprint(\"invoices\", __name__)\n\n_INVOICES = {}\n\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    return jsonify(invoice.__dict__)"
+ },
+ {
+  "role": "tool_call",
+  "name": "ToolSearch",
+  "content": "{\n \"query\": \"select:mcp__plugin_engram_memory__verify\",\n \"max_results\": 1\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ""
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__verify",
+  "content": "{\n \"id\": \"01a0fa0d-4e5b-7b62-b495-92335c83b3be\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0fa0d-4e5b-7b62-b495-92335c83b3be\",\"review_cleared\":false,\"verified\":true}"
+ },
+ {
+  "role": "assistant",
+  "content": "Endpoints here return errors as RFC 7807 `application/problem+json` responses. Build them with the `problem()` helper in `src/api/errors.py:4`, and don't return ad-hoc dicts. That's the convention recorded in the project's EngramDB memory, and I checked that it matches the code.\n\n```python\nfrom src.api.errors import problem\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    if invoice is None:\n        return problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n    return jsonify(invoice.__dict__)\n```\n\n`problem(status, title, detail=None)` returns this body with the given status code and the problem+json content type:\n\n```json\n{\"type\": \"about:blank\", \"title\": \"...\", \"status\": 404, \"detail\": \"...\"}\n```\n\n`detail` is left out when you don't pass one.\n\n**No endpoint uses the helper yet:**\n- **`src/api/invoices.py:10`:** an unknown ID gives `None`, and calling `.__dict__` on it crashes with a 500.\n- **`src/api/checkout.py:8`:** a malformed cart (missing `items`, `unit_cents`, or `quantity`) raises an error and returns a 500. It should be a `problem(400, ...)`.\n- **Domain errors:** for example, `refund()` raises `ValueError(\"refund exceeds invoice total\")` (`src/billing/refunds.py:6`). An endpoint calling it should catch the error and turn it into a `problem(...)` response, probably a 400 or 422.\n\nI can make these fixes if you'd like."
+ }
+]

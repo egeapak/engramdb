@@ -1,0 +1,44 @@
+[
+ {
+  "role": "user",
+  "content": "Decision from today's design review: public API routes are versioned under /v2 from now on, and /v1 is frozen. Keep that in mind going forward."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"77aff06e-76ef-4b9e-9351-a21aa17b08bc\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"29f4b51e-81b0-47c9-9799-4f108dd02b69\", \"session_id\": \"aeade634-fc7c-4ced-814c-4d193686c659\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"77aff06e-76ef-4b9e-9351-a21aa17b08bc\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"2534ec13-3ade-4ddd-baa8-d6faf01e19c1\", \"session_id\": \"aeade634-fc7c-4ced-814c-4d193686c659\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"516b5ef2-aea3-4810-89a0-ef102fe32a81\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"6a4091c5-732a-4905-b841-1d65ebd26cef\", \"session_id\": \"aeade634-fc7c-4ced-814c-4d193686c659\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"516b5ef2-aea3-4810-89a0-ef102fe32a81\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"5f4fdfe9-a39b-4da0-a66f-5f7e5791d8cb\", \"session_id\": \"aeade634-fc7c-4ced-814c-4d193686c659\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"API version routes v1 v2\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"memories\":[{\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0fa11-8ffd-7781-b503-20a1efb2c756\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.24341846530462102,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.24341846530462102,\"keyword\":0.052184908732401857,\"relevance\":0.5,\"rerank\":-2.5160467624664307,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.4053281813805884,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":1}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"decision\",\n \"summary\": \"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-02)\",\n \"content\": \"Decided at the 2026-10-02 design review: all public API routes are versioned under /v2 from now on. /v1 is frozen, so add no new endpoints or behavior changes there. New or changed public endpoints go under /v2.\",\n \"premise\": \"While the 2026-10-02 design-review versioning decision stands (until a /v3 is introduced or /v1 is retired)\",\n \"physical\": [\n  \"src/api/\"\n ],\n \"tags\": [\n  \"api\",\n  \"versioning\",\n  \"routes\"\n ],\n \"criticality\": 0.8,\n \"confidence\": 0.95\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0fa11-ba48-7911-af7f-7d0175dcf006\",\"created\":true,\"summary\":\"Public API routes are versioned under /v2; /v1 is frozen (design review 2026-10-02)\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "I saved this as a project decision in EngramDB, so it will come up in later sessions and for collaborators too. It says public API routes go under `/v2` from now on, and `/v1` is frozen: no new endpoints or behavior changes there. It's tied to `src/api/` and dated to today's design review.\n\nNo existing memory contradicted it. Going forward, I'll put new or changed public endpoints under `/v2` and leave `/v1` alone."
+ }
+]

@@ -1,0 +1,62 @@
+[
+ {
+  "role": "user",
+  "content": "I just found out the hard way that the app silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set. Took me two hours."
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"c3ae5e9f-93ac-4df7-a524-e26fb42674ab\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"ce389cd7-5ff3-47f3-9e7e-6acd49c48923\", \"session_id\": \"1e17f9df-f34f-4ff5-8f83-d13e0cc86275\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"c3ae5e9f-93ac-4df7-a524-e26fb42674ab\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"00760f24-9600-4056-9312-0bea5a4732d6\", \"session_id\": \"1e17f9df-f34f-4ff5-8f83-d13e0cc86275\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8d0aaf64-e74f-4bc5-a2cc-f0727cc378e9\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"69eb4e3e-4326-401a-831c-e67428676c04\", \"session_id\": \"1e17f9df-f34f-4ff5-8f83-d13e0cc86275\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8d0aaf64-e74f-4bc5-a2cc-f0727cc378e9\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"7ed582eb-f1e7-4138-a666-c4c1141d2e9c\", \"session_id\": \"1e17f9df-f34f-4ff5-8f83-d13e0cc86275\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"filter\",\n \"query\": \"PAYMENTS_LIVE payment gateway fake\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":0,\"hint\":\"No memory matched these words. Filter mode needs a keyword, tag or scope match: retry with synonyms or the exact term, or with mode \\\"rank\\\" to browse by meaning.\",\"memories\":[],\"retrieval_quality\":\"full\",\"total\":0}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"PAYMENTS_LIVE\",\n \"output_mode\": \"content\",\n \"-C\": 3\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)payments?_?live|fake.*gateway|gateway\",\n \"output_mode\": \"content\",\n \"-n\": true,\n \"head_limit\": 30\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "No matches found"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__create",
+  "content": "{\n \"type\": \"hazard\",\n \"summary\": \"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\",\n \"content\": \"The app falls back to a fake/stub payment gateway by default and gives no warning or log about it. Real payments only happen when the env var PAYMENTS_LIVE=1 is set. Symptom: payment flows look like they work, but nothing reaches the real gateway. When debugging payments, or when something \\\"works locally but charges nothing\\\", check PAYMENTS_LIVE first. Reported by the user, who lost about 2 hours to this on 2026-10-02. A grep for PAYMENTS_LIVE in the ledgerline checkout turned up nothing, so the check may be in config, deploy env, or a dependency.\",\n \"tags\": [\n  \"payments\",\n  \"env-var\",\n  \"config\",\n  \"silent-fallback\"\n ],\n \"logical\": [\n  \"payments.gateway\",\n  \"config.env\"\n ],\n \"criticality\": 0.8,\n \"epistemic\": \"observation\",\n \"premise\": \"While gateway selection defaults to fake when PAYMENTS_LIVE is not set\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"id\":\"01a0fa06-a790-72c0-a011-c301576db14e\",\"created\":true,\"summary\":\"App silently uses a fake payment gateway unless PAYMENTS_LIVE=1 is set\"}"
+ },
+ {
+  "role": "assistant",
+  "content": "Sorry, that's a nasty one to lose two hours to. I saved it to the project's EngramDB memory as a high-priority warning, so it should come up the next time anyone works on payments here.\n\nI couldn't find where this happens, though. Searching the code for `PAYMENTS_LIVE` and \"gateway\" found nothing, so the check isn't in this repo. It's probably in a dependency, deploy config or an env file outside version control. If you know where it lives, tell me and I'll add the location to the memory.\n\nA memory only helps people using this tool, so it's worth fixing the default too. I can make any of these changes:\n- **Log loudly at startup** when the fake gateway is active, so it's never silent again.\n- **Make it fail closed**: in production, refuse to start unless `PAYMENTS_LIVE` is set one way or the other.\n- **Document it** in the README and `.env.example`.\n\nWant me to do any of these once we've found where the switch is?"
+ }
+]

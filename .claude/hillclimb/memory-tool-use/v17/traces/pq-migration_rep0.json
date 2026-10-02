@@ -1,0 +1,61 @@
+[
+ {
+  "role": "user",
+  "content": "I need to add a `phone` column to customers. Where does that change go?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"8ab62b24-3689-4608-9dab-d5a795e7a7b9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"ad42f657-d308-4806-9ebc-a80d0a5abfd3\", \"session_id\": \"756309f4-f827-49f3-81bd-486574e2a70f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"8ab62b24-3689-4608-9dab-d5a795e7a7b9\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"e3256f7e-8284-4cc0-ac94-2d427925a02a\", \"session_id\": \"756309f4-f827-49f3-81bd-486574e2a70f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"1b140ede-f2cb-43fc-8a56-ba77a2a7bf6d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"086b1a0e-fb3b-443d-8f5a-d6d5ec0c5ee1\", \"session_id\": \"756309f4-f827-49f3-81bd-486574e2a70f\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"1b140ede-f2cb-43fc-8a56-ba77a2a7bf6d\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"995822db-ddac-4d9d-9a1e-112fc8c4732b\", \"session_id\": \"756309f4-f827-49f3-81bd-486574e2a70f\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"customers table schema migration column\",\n \"situation\": \"design_choice\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":7,\"hint\":\"No memory scored above the relevance threshold (0.45). These 3 are the closest weak matches (below_threshold: true); 7 more were dropped. Treat them as leads, not answers; retry with mode \\\"filter\\\" and literal terms to confirm.\",\"memories\":[{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0f9f6-256b-7412-949e-f01caaa9c399\",\"logical\":[],\"physical\":[\"migrations/\"],\"provenance\":\"human\",\"score\":0.3353512085590841,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.3353512085590841,\"keyword\":0.06898541673410859,\"relevance\":0.5,\"rerank\":-1.3939648866653442,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5235709042003346,\"situation_multiplier\":0.92,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Never edit an applied migration\",\"tags\":[\"database\",\"migrations\"],\"type\":\"hazard\",\"visibility\":\"shared\"},{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f9f6-3a12-7121-bd0a-6718c86662c6\",\"logical\":[],\"physical\":[\"src/billing/tax.py\"],\"provenance\":\"human\",\"score\":0.21448215430774098,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.21448215430774098,\"relevance\":0.5,\"rerank\":-4.344640731811523,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.34755338781781087,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Tax uses ROUND_HALF_EVEN\",\"tags\":[\"billing\",\"tax\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0f9f6-10cb-7fb1-9d0c-e3baec31d221\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.21211719089639286,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.21211719089639286,\"relevance\":0.5,\"rerank\":-3.6815104484558105,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.31757849787474823,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Use structlog, not stdlib logging\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":3}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"customers\",\n \"-i\": true,\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 2 files\n.engramdb/memories/never-edit-an-applied-migration_01a0f9f6-256b-7412-949e-f01caaa9c399.md\nmigrations/0007_add_customers.sql"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"ls /tmp/mte-pq-migration-z3acftc_/ledgerline/migrations; cat /tmp/mte-pq-migration-z3acftc_/ledgerline/migrations/0007_add_customers.sql\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "0001_create_invoices.sql\n0002_add_tax.sql\n0003_add_ledger_ref.sql\n0004_create_lines.sql\n0005_create_refunds.sql\n0006_index_customer.sql\n0007_add_customers.sql\nCREATE TABLE customers (\n    id TEXT PRIMARY KEY,\n    name TEXT NOT NULL,\n    emial TEXT NOT NULL\n);"
+ },
+ {
+  "role": "assistant",
+  "content": "The change goes in a new migration file: `migrations/0008_add_customer_phone.sql`.\n\nDon't edit `0007_add_customers.sql`, which is where `customers` is created. Files in `migrations/` are applied in production, and the project has a recorded rule to add a new file with the next 4-digit number instead. The latest is `0007`, so yours is `0008`.\n\n```sql\nALTER TABLE customers ADD COLUMN phone TEXT;\n```\n\nI made the column nullable because existing rows have no phone number. If you want `NOT NULL`, you'd need a default or a backfill.\n\n`0007` also has a typo: the column is named `emial` instead of `email`. That's a separate fix and would need its own migration, such as `0009_fix_customers_email.sql` with a rename. I haven't touched it.\n\nI haven't created the file. Want me to add it?"
+ },
+ {
+  "role": "user",
+  "content": "[debrief, not graded] Evaluation debrief, not part of the task. Do not call any tools; answer in text only.\nLooking back at this session: was there anything you wanted to do with the project's memory store (EngramDB) that its MCP tools, their parameters, the hooks' injected context, or the engramdb commands did not let you do, or made awkward? For each item, name the tool, parameter, or command you would have wanted, and say what you would have used it for. If nothing was missing, answer exactly: nothing missing."
+ },
+ {
+  "role": "assistant",
+  "content": "There was one minor awkwardness, and nothing was missing outright.\n\n- **`query` with `mode: \"rank\"`:** My query was \"customers table schema migration column\". It returned the \"Never edit an applied migration\" hazard flagged `below_threshold: true`, with a score of 0.335 against the 0.45 cutoff. That was the memory that answered the question, and it was ranked as a weak lead. Its keyword score was only 0.069, probably because the memory text says \"migrations/\" and `0008_fix_customers.sql` and doesn't use the words \"column\" or \"schema\". The response's hint suggested retrying with `mode: \"filter\"` and literal terms. I didn't, because the weak match was enough and I confirmed it against the `migrations/` directory. A tool that suggested or ran that filter-mode fallback for me when the top hits are all below threshold would have saved a step. I could already do this by calling `query` again, so it's a convenience.\n\nI also had no reason to create or challenge a memory. The `emial` typo is already visible in `migrations/0007_add_customers.sql`, so storing it would duplicate the code. By the end of the session, `create`, `get`, `query`, `update` and `challenge` were denied or removed, but I had already finished using them."
+ }
+]

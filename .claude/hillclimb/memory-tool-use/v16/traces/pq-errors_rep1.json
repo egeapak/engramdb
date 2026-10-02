@@ -1,0 +1,66 @@
+[
+ {
+  "role": "user",
+  "content": "How should an endpoint here return an error to the client?"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"ff227683-91a6-4544-b1df-3758157f35c3\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"uuid\": \"3ee53e8a-0214-4818-9d29-0cae830a07dc\", \"session_id\": \"67834899-3c7e-45d9-b4e7-bc67bc33560b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"ff227683-91a6-4544-b1df-3758157f35c3\", \"hook_name\": \"SessionStart:startup\", \"hook_event\": \"SessionStart\", \"output\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stdout\": \"{\\\"hookSpecificOutput\\\":{\\\"additionalContext\\\":\\\"[EngramDB] When you finish the task you were assigned, before handing back: did anything durable about the project, the environment/tooling, or the user's preferences come up \\u2014 not task minutiae? If so, review existing EngramDB memories and record the durable ones, and flag anything that contradicts a memory. Project knowledge belongs in EngramDB, not in Claude Code's auto-memory, which other sessions' EngramDB lookups and collaborators never see. Suggested, not required.\\\",\\\"hookEventName\\\":\\\"SessionStart\\\"}}\\n\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"fe6ac261-e9d4-4731-904e-1bb9b54e3a8f\", \"session_id\": \"67834899-3c7e-45d9-b4e7-bc67bc33560b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_started\", \"hook_id\": \"4632ceed-0bae-481e-b4e9-62df5a4bb9cc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"uuid\": \"8b14c69d-02ca-4997-8900-c8d128a81f21\", \"session_id\": \"67834899-3c7e-45d9-b4e7-bc67bc33560b\"}"
+ },
+ {
+  "role": "system",
+  "content": "[hook] {\"type\": \"system\", \"subtype\": \"hook_response\", \"hook_id\": \"4632ceed-0bae-481e-b4e9-62df5a4bb9cc\", \"hook_name\": \"UserPromptSubmit\", \"hook_event\": \"UserPromptSubmit\", \"output\": \"\", \"stdout\": \"\", \"stderr\": \"\", \"exit_code\": 0, \"outcome\": \"success\", \"uuid\": \"ee49542b-01dd-4187-b1ec-5d953674d052\", \"session_id\": \"67834899-3c7e-45d9-b4e7-bc67bc33560b\"}"
+ },
+ {
+  "role": "tool_call",
+  "name": "mcp__plugin_engram_memory__query",
+  "content": "{\n \"mode\": \"rank\",\n \"query\": \"endpoint error response client error handling\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "{\"dropped_below_threshold\":7,\"hint\":\"No memory scored above the relevance threshold (0.45). These 3 are the closest weak matches (below_threshold: true); 7 more were dropped. Treat them as leads, not answers; retry with mode \\\"filter\\\" and literal terms to confirm.\",\"memories\":[{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0fa02-7307-7f22-b9ec-6f97182d65b4\",\"logical\":[],\"physical\":[\"src/api/\"],\"provenance\":\"human\",\"score\":0.31606330295443014,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.31606330295443014,\"keyword\":0.07571264556481415,\"relevance\":0.5,\"rerank\":-2.165609836578369,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.5531728722926341,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"API errors use problem+json\",\"tags\":[\"api\",\"errors\"],\"type\":\"convention\",\"visibility\":\"shared\"},{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.\",\"criticality\":0.5,\"epistemic\":\"decision\",\"id\":\"01a0fa02-2ab6-7333-a9d0-7f00373c738a\",\"logical\":[],\"physical\":[\"src/\"],\"provenance\":\"human\",\"score\":0.23264599452629178,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.23264599452629178,\"relevance\":0.5,\"rerank\":-3.028315305709839,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.3529618879281646,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"Use structlog, not stdlib logging\",\"tags\":[\"logging\"],\"type\":\"decision\",\"visibility\":\"shared\"},{\"below_threshold\":true,\"confidence\":0.8,\"content\":\"`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.\",\"criticality\":0.5,\"epistemic\":\"fact\",\"id\":\"01a0fa02-2003-7d90-a714-b52c7762f7a4\",\"logical\":[],\"physical\":[\"src/billing/invoices.py\"],\"provenance\":\"human\",\"score\":0.2301856855390912,\"score_breakdown\":{\"criticality\":0.5,\"decay\":0.0,\"final_score\":0.2301856855390912,\"relevance\":0.5,\"rerank\":-3.3032288551330566,\"scope\":0.0,\"scope_multiplier\":1.0,\"semantic\":0.36347415376086806,\"situation_multiplier\":1.0,\"trust\":1.0,\"trust_multiplier\":1.0},\"status\":\"active\",\"summary\":\"invoices.finalize() is not idempotent\",\"tags\":[\"billing\",\"ledger\"],\"type\":\"hazard\",\"visibility\":\"shared\"}],\"retrieval_quality\":\"full\",\"total\":3}"
+ },
+ {
+  "role": "tool_call",
+  "name": "Grep",
+  "content": "{\n \"pattern\": \"(?i)error\",\n \"output_mode\": \"files_with_matches\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "Found 3 files\n.engramdb/memories/api-errors-use-problem-json_01a0fa02-7307-7f22-b9ec-6f97182d65b4.md\nsrc/billing/tax.py\nsrc/billing/refunds.py"
+ },
+ {
+  "role": "assistant",
+  "content": "The memory points at `src/api/errors.py`, but grep didn't find that file. Let me check what actually exists."
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"git ls-files | grep -v '^.engramdb' ; grep -rn -i \\\"error\\\\|raise\\\\|status\\\" src/billing/tax.py src/billing/refunds.py\",\n \"description\": \"List tracked files and error handling in billing code\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": ".claude/CLAUDE.md\n.claude/ENGRAM.md\nMakefile\nREADME.md\ndocker-compose.yml\nflags.toml\nmigrations/0001_create_invoices.sql\nmigrations/0002_add_tax.sql\nmigrations/0003_add_ledger_ref.sql\nmigrations/0004_create_lines.sql\nmigrations/0005_create_refunds.sql\nmigrations/0006_index_customer.sql\nmigrations/0007_add_customers.sql\npyproject.toml\nscripts/export.py\nsrc/__init__.py\nsrc/api/__init__.py\nsrc/api/checkout.py\nsrc/api/errors.py\nsrc/api/invoices.py\nsrc/billing/__init__.py\nsrc/billing/invoices.py\nsrc/billing/money.py\nsrc/billing/refunds.py\nsrc/billing/tax.py\nsrc/flags.py\ntests/test_db.py\ntests/test_payments.py\ntests/test_tax.py\nsrc/billing/tax.py:12:    raise NotImplementedError\nsrc/billing/refunds.py:6:        raise ValueError(\"refund exceeds invoice total\")"
+ },
+ {
+  "role": "tool_call",
+  "name": "Bash",
+  "content": "{\n \"command\": \"for f in src/api/*.py; do echo \\\"== $f\\\"; cat \\\"$f\\\"; done\",\n \"description\": \"Show the API module sources\"\n}"
+ },
+ {
+  "role": "tool_result",
+  "content": "== src/api/__init__.py\n== src/api/checkout.py\nfrom flask import Blueprint, jsonify, request\n\nbp = Blueprint(\"checkout\", __name__)\n\n\n@bp.post(\"/checkout\")\ndef checkout():\n    cart = request.get_json()\n    total = sum(item[\"unit_cents\"] * item[\"quantity\"] for item in cart[\"items\"])\n    return jsonify({\"total_cents\": total, \"status\": \"pending\"})\n== src/api/errors.py\nfrom flask import jsonify\n\n\ndef problem(status, title, detail=None):\n    body = {\"type\": \"about:blank\", \"title\": title, \"status\": status}\n    if detail:\n        body[\"detail\"] = detail\n    resp = jsonify(body)\n    resp.status_code = status\n    resp.mimetype = \"application/problem+json\"\n    return resp\n== src/api/invoices.py\nfrom flask import Blueprint, jsonify\n\nbp = Blueprint(\"invoices\", __name__)\n\n_INVOICES = {}\n\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    return jsonify(invoice.__dict__)"
+ },
+ {
+  "role": "assistant",
+  "content": "Return an RFC 7807 `application/problem+json` response built with the helper in `src/api/errors.py`, not a hand-made dict:\n\n```python\nfrom src.api.errors import problem\n\n@bp.get(\"/invoices/<invoice_id>\")\ndef get_invoice(invoice_id):\n    invoice = _INVOICES.get(invoice_id)\n    if invoice is None:\n        return problem(404, \"Invoice not found\", f\"No invoice with id {invoice_id}\")\n    return jsonify(invoice.__dict__)\n```\n\n`problem(status, title, detail=None)` (`src/api/errors.py:4`) returns a Flask response with:\n- body `{\"type\": \"about:blank\", \"title\": ..., \"status\": ..., \"detail\": ...}`, where `detail` is left out if you don't pass it\n- the HTTP status code set to `status`\n- `Content-Type: application/problem+json`\n\nA team memory records this as the project rule: use `problem()` and don't return ad-hoc error dicts. I checked it against the code and it matches.\n\nNo endpoint actually uses the helper yet:\n- **`src/api/invoices.py:10`**: when the invoice ID doesn't exist, `invoice` is `None`, so `invoice.__dict__` raises and the client gets a generic 500 instead of a 404. The example above is the fix.\n- **`src/api/checkout.py:8`**: a request body that is missing or malformed (no `items`, or items without `unit_cents`/`quantity`) causes a `TypeError`/`KeyError` and a 500. It should return `problem(400, \"Invalid cart\", ...)` instead.\n\nI can make both changes if you want."
+ }
+]
