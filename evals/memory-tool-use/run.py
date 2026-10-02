@@ -40,7 +40,9 @@ import grade
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 FLOW_DIR = REPO / ".claude" / "hillclimb" / "memory-tool-use"
-ENGRAMDB_BIN = REPO / "target" / "release"
+# `cargo build --profile eval` (thin LTO, same behavior as release) writes
+# target/eval; MTE_PROFILE=eval picks it up. Default: the release binary.
+ENGRAMDB_BIN = REPO / "target" / os.environ.get("MTE_PROFILE", "release")
 # Per-variant copy of everything the run reads from the repo (binary, plugin
 # files, ENGRAM.md), so a rebuild during a run cannot mix two versions.
 SNAPSHOT = {"bin": ENGRAMDB_BIN, "plugin": REPO, "engram_md": None}

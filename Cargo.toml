@@ -247,6 +247,15 @@ strip = true
 panic = "abort"
 codegen-units = 1
 
+# For eval and hill-climb builds only: the release settings that change what
+# the binary does (opt-level 3, panic = "abort") with a faster link (thin LTO,
+# parallel codegen). Rust does no fast-math, so float results are unchanged;
+# the build takes minutes instead of ~25. Ship with `--release`, not this.
+[profile.eval]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
 # There is deliberately no `[profile.release.package.*]` block. There used to be
 # one: fourteen crates pinned to `opt-level = 3` while the profile itself was
 # `"z"`, which was the only thing standing between the hot paths (TOML
