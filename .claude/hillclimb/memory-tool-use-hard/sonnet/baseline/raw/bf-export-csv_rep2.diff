@@ -1,0 +1,98 @@
+diff --git a/scripts/__pycache__/export.cpython-311.pyc b/scripts/__pycache__/export.cpython-311.pyc
+new file mode 100644
+index 0000000..38b8f91
+Binary files /dev/null and b/scripts/__pycache__/export.cpython-311.pyc differ
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..18f1f5f 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,14 +1,56 @@
+ import argparse
++import csv
+ import os
++from datetime import date
++from pathlib import Path
++
++# Finance's import tool runs with a German locale: ';' delimiter, DD.MM.YYYY dates,
++# UTF-8 without BOM, amounts as integer cents.
++COLUMNS = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++
++def load_finalized_invoices(month):
++    """Finalized invoices of one month (YYYY-MM): dicts with id, customer_id,
++    subtotal_cents, tax_cents and finalized_on (a date).
++
++    TODO: the invoices table has no finalized date/status column yet.
++    """
++    raise NotImplementedError("no finalized date in the invoices schema")
++
++
++def write_csv(invoices, path):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "w", newline="", encoding="utf-8") as f:
++        writer = csv.writer(f, delimiter=";", lineterminator="\n")
++        writer.writerow(COLUMNS)
++        for inv in invoices:
++            subtotal, tax = inv["subtotal_cents"], inv["tax_cents"]
++            writer.writerow([
++                inv["id"],
++                inv["customer_id"],
++                subtotal,
++                tax,
++                subtotal + tax,
++                inv["finalized_on"].strftime("%d.%m.%Y"),
++            ])
++    return path
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=date.today().strftime("%Y-%m"), help="YYYY-MM")
++    parser.add_argument("--out-dir", default="exports", help="local directory to write to")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    print(f"exporting {args.env} {args.month} to {bucket} (dry_run={args.dry_run})")
++    invoices = load_finalized_invoices(args.month)
++    if args.dry_run:
++        print(f"dry run: would write {len(invoices)} invoices")
++        return
++    path = write_csv(invoices, Path(args.out_dir) / args.month / "invoices.csv")
++    print(f"wrote {len(invoices)} invoices to {path}")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..9e54797
+Binary files /dev/null and b/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..1364b99
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,22 @@
++import sys
++from datetime import date
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
++
++import export  # noqa: E402
++
++
++def test_write_csv_matches_finance_format(tmp_path):
++    invoices = [
++        {"id": "inv_1", "customer_id": "c1", "subtotal_cents": 1000, "tax_cents": 190, "finalized_on": date(2026, 9, 3)},
++        {"id": "inv_2", "customer_id": "c2", "subtotal_cents": 0, "tax_cents": 0, "finalized_on": date(2026, 9, 30)},
++    ]
++    path = export.write_csv(invoices, tmp_path / "2026-09" / "invoices.csv")
++    raw = path.read_bytes()
++    assert not raw.startswith(b"\xef\xbb\xbf")
++    assert raw.decode("utf-8").splitlines() == [
++        "invoice_id;customer_id;subtotal;tax;total;finalized_date",
++        "inv_1;c1;1000;190;1190;03.09.2026",
++        "inv_2;c2;0;0;0;30.09.2026",
++    ]

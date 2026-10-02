@@ -1,0 +1,54 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..6990881
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,48 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++# Refunds above this amount need a second approver before they are issued.
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# idempotency key -> (stored_at, body, status)
++_RESPONSES = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency header required", "X-Acme-Idempotency is required")
++
++    # Scope the key to the invoice so the same key cannot replay across invoices.
++    cache_key = (invoice_id, key)
++    stored = _RESPONSES.get(cache_key)
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        return jsonify(stored[1]), stored[2]
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount = payload.get("amount_cents")
++    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer")
++
++    try:
++        result = refund(invoice, amount)
++    except ValueError as exc:
++        return problem(422, "Refund rejected", str(exc))
++
++    body = dict(result)
++    body["status"] = "pending_approval" if amount > APPROVAL_THRESHOLD_CENTS else "issued"
++    _RESPONSES[cache_key] = (time.time(), body, 201)
++    return jsonify(body), 201

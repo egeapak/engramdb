@@ -1,0 +1,67 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..14c5735
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,49 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++# Refunds above this amount need a second approver before they are issued.
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (invoice_id, idempotency key) -> (stored_at, status_code, body)
++_RESPONSES = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency header required", "X-Acme-Idempotency is required")
++
++    stored = _RESPONSES.get((invoice_id, key))
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[2])
++        resp.status_code = stored[1]
++        return resp
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid refund", "amount_cents must be a positive integer")
++
++    try:
++        result = refund(invoice, amount_cents)
++    except ValueError as exc:
++        return problem(422, "Invalid refund", str(exc))
++
++    result["status"] = "pending_approval" if amount_cents > APPROVAL_THRESHOLD_CENTS else "issued"
++    _RESPONSES[(invoice_id, key)] = (time.time(), 201, result)
++    resp = jsonify(result)
++    resp.status_code = 201
++    return resp
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..643ed77 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -14,6 +14,7 @@ class Invoice:
+     customer_id: str
+     subtotal_cents: int
+     tax_cents: int = 0
++    currency: str = "USD"
+     ledger_ref: str | None = None
+     lines: list = field(default_factory=list)
+ 

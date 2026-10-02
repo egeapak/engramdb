@@ -320,6 +320,13 @@ def run_one(case, rep, args, out_dir):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+def snapshot_name(args):
+    """Per flow and variant: two flows run at once may share a variant name."""
+    if args.flow == "memory-tool-use":
+        return args.variant  # the original layout, kept so old variants resume
+    return f"{args.flow.replace('/', '-')}-{args.variant}"
+
+
 def take_snapshot(root, out_dir, settings):
     """Copy the binary and plugin files once per variant; reuse them on resume."""
     root.mkdir(parents=True, exist_ok=True)
@@ -386,7 +393,7 @@ def main():
     flow_dir = REPO / ".claude" / "hillclimb" / args.flow
     out_dir = flow_dir / args.variant
     out_dir.mkdir(parents=True, exist_ok=True)
-    take_snapshot(Path(args.snapshot_root) / args.variant, out_dir,
+    take_snapshot(Path(args.snapshot_root) / snapshot_name(args), out_dir,
                   {"model": args.model, "fixture": args.fixture, "engram_md": args.engram_md})
     (out_dir / "traces").mkdir(parents=True, exist_ok=True)
     (out_dir / "raw").mkdir(exist_ok=True)

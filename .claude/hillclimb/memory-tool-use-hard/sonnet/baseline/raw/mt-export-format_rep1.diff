@@ -1,0 +1,156 @@
+diff --git a/scripts/__pycache__/export.cpython-311.pyc b/scripts/__pycache__/export.cpython-311.pyc
+new file mode 100644
+index 0000000..a285287
+Binary files /dev/null and b/scripts/__pycache__/export.cpython-311.pyc differ
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..36d1169 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,75 @@
++"""Write the month's finalized invoices to a CSV that Finance imports.
++
++Finance's import tool wants comma-separated values,
++ISO (YYYY-MM-DD) dates, UTF-8 without BOM. Amounts are integer cents.
++"""
+ import argparse
++import csv
++import datetime
+ import os
++import sys
++
++COLUMNS = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++# Every finalized invoice of the month exactly once, zero-amount ones included.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE status = 'finalized' AND finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def previous_month(today=None):
++    today = today or datetime.date.today()
++    return (today.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")
++
++
++def month_bounds(month):
++    start = datetime.datetime.strptime(month, "%Y-%m").date()
++    end = (start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
++    return start, end
++
++
++def write_csv(rows, fh):
++    """rows: (id, customer_id, subtotal_cents, tax_cents, finalized_at) tuples."""
++    writer = csv.writer(fh, delimiter=",", lineterminator="\n")
++    writer.writerow(COLUMNS)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%Y-%m-%d")])
++
++
++def fetch_rows(month):
++    import psycopg  # deployed DBs sit behind a transaction-mode pooler (6432)
++
++    start, end = month_bounds(month)
++    with psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+     parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--out-dir", default="exports", help="local directory for exports/<YYYY-MM>/invoices.csv")
+     args = parser.parse_args()
++    month = args.month or previous_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    print(f"exporting {month} for {args.env} to {bucket} (dry_run={args.dry_run})")
++    if args.dry_run:
++        return 0
++    if not os.environ.get("DATABASE_URL"):
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 1
++    rows = fetch_rows(month)
++    path = os.path.join(args.out_dir, month, "invoices.csv")
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    with open(path, "w", encoding="utf-8", newline="") as fh:
++        write_csv(rows, fh)
++    print(f"wrote {len(rows)} invoices to {path}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..9c54313
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..3145bb3
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/currency.cpython-311.pyc b/src/billing/__pycache__/currency.cpython-311.pyc
+new file mode 100644
+index 0000000..8be7cdc
+Binary files /dev/null and b/src/billing/__pycache__/currency.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/tax.cpython-311.pyc b/src/billing/__pycache__/tax.cpython-311.pyc
+new file mode 100644
+index 0000000..ca453a6
+Binary files /dev/null and b/src/billing/__pycache__/tax.cpython-311.pyc differ
+diff --git a/tests/__pycache__/test_currency.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_currency.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..d7e486f
+Binary files /dev/null and b/tests/__pycache__/test_currency.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_db.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_db.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..d016ba7
+Binary files /dev/null and b/tests/__pycache__/test_db.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..8cac2d0
+Binary files /dev/null and b/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_flags.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_flags.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..95d8137
+Binary files /dev/null and b/tests/__pycache__/test_flags.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..6a59b6b
+Binary files /dev/null and b/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..c4b5f19
+Binary files /dev/null and b/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..bb74e50
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,24 @@
++import datetime
++import importlib.util
++import io
++import pathlib
++
++spec = importlib.util.spec_from_file_location("export", pathlib.Path(__file__).parent.parent / "scripts" / "export.py")
++export = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(export)
++
++
++def test_write_csv_uses_finance_format():
++    out = io.StringIO()
++    export.write_csv([("inv_1", "cus_1", 1000, 190, datetime.date(2026, 9, 3)), ("inv_2", "cus_2", 0, 0, datetime.date(2026, 9, 30))], out)
++    assert out.getvalue().splitlines() == [
++        "invoice_id,customer_id,subtotal,tax,total,finalized_date",
++        "inv_1,cus_1,1000,190,1190,2026-09-03",
++        "inv_2,cus_2,0,0,0,2026-09-30",
++    ]
++
++
++def test_month_helpers():
++    assert export.previous_month(datetime.date(2026, 10, 2)) == "2026-09"
++    assert export.previous_month(datetime.date(2026, 1, 2)) == "2025-12"
++    assert export.month_bounds("2026-12") == (datetime.date(2026, 12, 1), datetime.date(2027, 1, 1))

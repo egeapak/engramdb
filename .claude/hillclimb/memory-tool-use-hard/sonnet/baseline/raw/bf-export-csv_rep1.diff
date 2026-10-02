@@ -1,0 +1,119 @@
+diff --git a/migrations/0008_add_finalized_at.sql b/migrations/0008_add_finalized_at.sql
+new file mode 100644
+index 0000000..07c70bb
+--- /dev/null
++++ b/migrations/0008_add_finalized_at.sql
+@@ -0,0 +1,2 @@
++ALTER TABLE invoices ADD COLUMN finalized_at TIMESTAMPTZ;
++CREATE INDEX invoices_finalized_at ON invoices(finalized_at);
+diff --git a/pyproject.toml b/pyproject.toml
+index 1b369e4..8342b72 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -2,7 +2,7 @@
+ name = "ledgerline"
+ version = "2026.9.1"
+ requires-python = ">=3.10"
+-dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32"]
++dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32", "psycopg[binary]>=3.1", "boto3>=1.34"]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8.0"]
+diff --git a/scripts/__pycache__/export.cpython-311.pyc b/scripts/__pycache__/export.cpython-311.pyc
+new file mode 100644
+index 0000000..885fe5a
+Binary files /dev/null and b/scripts/__pycache__/export.cpython-311.pyc differ
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..d5260ae 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,86 @@
+ import argparse
++import csv
++import datetime as dt
++import io
+ import os
++import sys
++
++HEADER = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++# Draft invoices have finalized_at NULL and are excluded. Zero-amount invoices are kept.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def month_bounds(month):
++    """(start, end) UTC datetimes for 'YYYY-MM'; end is exclusive."""
++    start = dt.datetime.strptime(month, "%Y-%m").replace(tzinfo=dt.timezone.utc)
++    end = (start + dt.timedelta(days=32)).replace(day=1)
++    return start, end
++
++
++def previous_month(today=None):
++    today = today or dt.date.today()
++    last = today.replace(day=1) - dt.timedelta(days=1)
++    return last.strftime("%Y-%m")
++
++
++def render_csv(rows):
++    """Finance import format: ';' delimiter, DD.MM.YYYY dates, integer cents, UTF-8 no BOM."""
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=";", lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow(
++            [invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%d.%m.%Y")]
++        )
++    return buf.getvalue().encode("utf-8")
++
++
++def fetch_rows(month):
++    import psycopg
++
++    start, end = month_bounds(month)
++    # Deployed DBs sit behind a transaction-mode pooler: no prepared statements.
++    with psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def upload(bucket, key, data):
++    import boto3
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=data, ContentType="text/csv; charset=utf-8")
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--dry-run", action="store_true", help="build the CSV but do not upload it")
++    parser.add_argument("--output", help="also write the CSV to this local path")
+     args = parser.parse_args()
++
++    month = args.month or previous_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month}/invoices.csv"
++    print(f"exporting {args.env} {month} to {bucket}/{key} (dry_run={args.dry_run})")
++
++    data = render_csv(fetch_rows(month))
++    count = data.count(b"\n") - 1
++    if args.output:
++        with open(args.output, "wb") as f:
++            f.write(data)
++    if args.dry_run:
++        print(f"dry run: {count} invoices, {len(data)} bytes, nothing uploaded")
++        return 0
++    upload(bucket, key, data)
++    print(f"uploaded {count} invoices")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

@@ -1,0 +1,45 @@
+diff --git a/src/billing/currency.py b/src/billing/currency.py
+index 3d11ab4..94d0085 100644
+--- a/src/billing/currency.py
++++ b/src/billing/currency.py
+@@ -1,10 +1,38 @@
+ """Currency conversion for multi-currency invoices."""
++import os
++import xml.etree.ElementTree as ET
+ from decimal import Decimal
+ 
++import requests
++
+ 
+ def fetch_rates(day):
+-    """Return {currency: Decimal rate against USD} for the given date."""
+-    raise NotImplementedError
++    """Return {currency: Decimal rate against USD} for the given date.
++
++    Rates come from the ECB euro reference feed (ECB_FEED_URL, no API key).
++    The feed is EUR-based, so each rate is divided by the EUR/USD rate.
++    """
++    resp = requests.get(os.environ["ECB_FEED_URL"], timeout=10)
++    resp.raise_for_status()
++    wanted = day.isoformat() if hasattr(day, "isoformat") else str(day)
++
++    eur_rates = None
++    for cube in ET.fromstring(resp.content).iter():
++        if cube.tag.rsplit("}", 1)[-1] == "Cube" and cube.get("time") == wanted:
++            eur_rates = {
++                c.get("currency"): Decimal(c.get("rate"))
++                for c in cube
++                if c.get("currency")
++            }
++            break
++    if not eur_rates or "USD" not in eur_rates:
++        raise LookupError(f"no ECB rates for {wanted}")
++
++    usd = eur_rates["USD"]
++    rates = {cur: rate / usd for cur, rate in eur_rates.items()}
++    rates["EUR"] = Decimal(1) / usd
++    rates["USD"] = Decimal(1)
++    return rates
+ 
+ 
+ def convert(amount_cents, rate):

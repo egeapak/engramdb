@@ -1,0 +1,31 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1b369e4..ef0853a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -2,7 +2,7 @@
+ name = "ledgerline"
+ version = "2026.9.1"
+ requires-python = ">=3.10"
+-dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32"]
++dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32", "psycopg[binary]>=3.1"]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8.0"]
+diff --git a/src/db.py b/src/db.py
+new file mode 100644
+index 0000000..0536cb0
+--- /dev/null
++++ b/src/db.py
+@@ -0,0 +1,12 @@
++import os
++
++import psycopg
++
++
++def get_conn() -> psycopg.Connection:
++    """Open a connection to the database named by DATABASE_URL.
++
++    Deployed environments go through a transaction-mode pooler, which breaks
++    server-side prepared statements, so automatic preparation is turned off.
++    """
++    return psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None)

@@ -1,0 +1,85 @@
+diff --git a/scripts/__pycache__/export.cpython-311.pyc b/scripts/__pycache__/export.cpython-311.pyc
+new file mode 100644
+index 0000000..1341f19
+Binary files /dev/null and b/scripts/__pycache__/export.cpython-311.pyc differ
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..c16c29b 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,14 +1,75 @@
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import date
++
++# Finance's accounting tool wants plain comma-separated files with ISO dates.
++DELIMITER = ","
++DATE_FORMAT = "%Y-%m-%d"
++COLUMNS = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++# Finalized = has a ledger_ref (drafts have none). Zero-amount invoices are kept.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at::date
++    FROM invoices
++    WHERE ledger_ref IS NOT NULL
++      AND finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def month_bounds(month):
++    year, mon = (int(p) for p in month.split("-"))
++    start = date(year, mon, 1)
++    end = date(year + (mon == 12), mon % 12 + 1, 1)
++    return start, end
++
++
++def previous_month(today=None):
++    today = today or date.today()
++    return f"{today.year - (today.month == 1)}-{(today.month - 2) % 12 + 1:02d}"
++
++
++def render_csv(rows):
++    """rows: (id, customer_id, subtotal_cents, tax_cents, finalized date). Amounts stay integer cents."""
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(COLUMNS)
++    for invoice_id, customer_id, subtotal, tax, finalized in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized.strftime(DATE_FORMAT)])
++    return buf.getvalue()
++
++
++def fetch_rows(month):
++    import psycopg
++
++    start, end = month_bounds(month)
++    # Deployed DBs sit behind a transaction-mode pooler: no prepared statements.
++    with psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
++    month = args.month or previous_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month}/invoices.csv"
++    print(f"exporting {args.env} {month} to {bucket}/{key} (dry_run={args.dry_run})", file=sys.stderr)
++
++    content = render_csv(fetch_rows(month))
++    if args.dry_run:
++        sys.stdout.write(content)
++        return
++    # UTF-8 without BOM.
++    os.makedirs(os.path.dirname(key), exist_ok=True)
++    with open(key, "w", encoding="utf-8", newline="") as f:
++        f.write(content)
+ 
+ 
+ if __name__ == "__main__":

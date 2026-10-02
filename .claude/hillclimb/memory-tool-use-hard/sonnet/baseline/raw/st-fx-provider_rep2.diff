@@ -1,0 +1,53 @@
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..91f99df
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..30a60da
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/currency.cpython-311.pyc b/src/billing/__pycache__/currency.cpython-311.pyc
+new file mode 100644
+index 0000000..86be276
+Binary files /dev/null and b/src/billing/__pycache__/currency.cpython-311.pyc differ
+diff --git a/src/billing/currency.py b/src/billing/currency.py
+index 3d11ab4..49db772 100644
+--- a/src/billing/currency.py
++++ b/src/billing/currency.py
+@@ -1,10 +1,34 @@
+ """Currency conversion for multi-currency invoices."""
++import os
++import xml.etree.ElementTree as ET
+ from decimal import Decimal
+ 
++import requests
++
+ 
+ def fetch_rates(day):
+-    """Return {currency: Decimal rate against USD} for the given date."""
+-    raise NotImplementedError
++    """Return {currency: Decimal rate against USD} for the given date.
++
++    Rates come from the ECB euro reference feed (URL in ECB_FEED_URL). The
++    feed is EUR-based, so each rate is divided by the feed's USD rate.
++    """
++    resp = requests.get(os.environ["ECB_FEED_URL"], timeout=10)
++    resp.raise_for_status()
++    root = ET.fromstring(resp.content)
++
++    iso = day.isoformat() if hasattr(day, "isoformat") else str(day)
++    eur_rates = None
++    for cube in root.iter():
++        if cube.tag.endswith("Cube") and cube.get("time") == iso:
++            eur_rates = {"EUR": Decimal(1)}
++            for c in cube:
++                eur_rates[c.get("currency")] = Decimal(c.get("rate"))
++            break
++    if eur_rates is None or "USD" not in eur_rates:
++        raise LookupError(f"no ECB rates for {iso}")
++
++    usd = eur_rates.pop("USD")
++    return {cur: rate / usd for cur, rate in eur_rates.items()}
+ 
+ 
+ def convert(amount_cents, rate):

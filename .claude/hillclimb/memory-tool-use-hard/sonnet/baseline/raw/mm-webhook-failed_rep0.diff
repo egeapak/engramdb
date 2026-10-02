@@ -1,0 +1,54 @@
+diff --git a/src/api/webhooks.py b/src/api/webhooks.py
+index c326872..0049ee4 100644
+--- a/src/api/webhooks.py
++++ b/src/api/webhooks.py
+@@ -1,10 +1,48 @@
++import hashlib
++import hmac
++import os
++import time
++
+ from flask import Blueprint, request
+ 
++from src.api.errors import problem
++from src.jobs.queue import enqueue
++
+ bp = Blueprint("webhooks", __name__)
+ 
++MAX_EVENT_AGE_SECONDS = 300
++
++
++def _verified(raw_body):
++    """Check the PSP signature and replay window against the raw body."""
++    secret = os.environ.get("PSP_WEBHOOK_SECRET", "")
++    signature = request.headers.get("Psp-Signature", "")
++    timestamp = request.headers.get("Psp-Timestamp", "")
++    if not secret or not signature:
++        return False
++    try:
++        age = time.time() - float(timestamp)
++    except ValueError:
++        return False
++    if abs(age) > MAX_EVENT_AGE_SECONDS:
++        return False
++    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
++    return hmac.compare_digest(expected, signature)
++
+ 
+ @bp.post("/webhooks/psp")
+ def psp_webhook():
++    # Verify before parsing: the signature covers the raw body.
++    if not _verified(request.get_data()):
++        return problem(401, "Invalid webhook signature")
++
+     event = request.get_json()
+-    # TODO: verify the event, then dispatch on event["type"]
++    if event["type"] == "payment.failed":
++        invoice_id = event["data"]["invoice_id"]
++        # Schedule and dedupe on the invoice: the PSP redelivers webhooks.
++        enqueue(
++            "dunning.schedule_retries",
++            {"invoice_id": invoice_id},
++            dedupe_key=f"dunning:{invoice_id}:schedule",
++        )
+     return "", 204

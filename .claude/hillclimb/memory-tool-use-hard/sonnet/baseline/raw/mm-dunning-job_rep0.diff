@@ -1,0 +1,39 @@
+diff --git a/src/billing/dunning.py b/src/billing/dunning.py
+index 5fd24da..c2f1752 100644
+--- a/src/billing/dunning.py
++++ b/src/billing/dunning.py
+@@ -1,6 +1,31 @@
+ """Follow-up when a customer's payment fails."""
++from datetime import datetime, timedelta, timezone
+ 
++import structlog
+ 
+-def schedule_retries(invoice):
+-    """Plan the payment retries for an invoice whose charge just failed."""
+-    raise NotImplementedError
++from src.jobs.queue import enqueue
++
++log = structlog.get_logger()
++
++# Days after the failure on which to retry the charge (contractual, finance policy FP-12).
++RETRY_DAYS = (1, 3, 7, 14)
++
++
++def schedule_retries(invoice, failed_at=None):
++    """Plan the payment retries for an invoice whose charge just failed.
++
++    Enqueues one `dunning.retry_charge` job per day in RETRY_DAYS. The job for
++    the last attempt carries `final: True`: if it fails too, the handler must mark
++    the invoice `uncollectible` and stop. Handlers must also skip the retry when
++    the invoice has a refund in progress, since that can start after scheduling.
++    """
++    failed_at = failed_at or datetime.now(timezone.utc)
++    last = len(RETRY_DAYS)
++    for attempt, days in enumerate(RETRY_DAYS, start=1):
++        enqueue(
++            "dunning.retry_charge",
++            {"invoice_id": invoice.id, "attempt": attempt, "final": attempt == last},
++            dedupe_key=f"dunning:{invoice.id}:{attempt}",
++            run_at=failed_at + timedelta(days=days),
++        )
++    log.info("dunning_retries_scheduled", invoice_id=invoice.id, customer_id=invoice.customer_id)
