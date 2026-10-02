@@ -1,0 +1,212 @@
+diff --git a/scripts/__init__.py b/scripts/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/scripts/__pycache__/__init__.cpython-311.pyc b/scripts/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..0ed9b54
+Binary files /dev/null and b/scripts/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/scripts/__pycache__/export.cpython-311.pyc b/scripts/__pycache__/export.cpython-311.pyc
+new file mode 100644
+index 0000000..6b397b5
+Binary files /dev/null and b/scripts/__pycache__/export.cpython-311.pyc differ
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..fad1f0d 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,102 @@
++"""Export one month's finalized invoices as the CSV that Finance imports.
++
++Finance's import tool runs with a German locale: semicolon delimiter, dates as
++DD.MM.YYYY, amounts as integer cents, UTF-8 without a BOM. Every finalized
++invoice of the month appears exactly once (zero-amount ones included); drafts
++are excluded.
++"""
+ import argparse
++import csv
++import datetime as dt
+ import os
++import sys
++from dataclasses import dataclass
++from pathlib import Path
++
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++DATE_FORMAT = "%d.%m.%Y"
++
++
++@dataclass(frozen=True)
++class FinalizedInvoice:
++    id: str
++    customer_id: str
++    subtotal_cents: int
++    tax_cents: int
++    finalized_on: dt.date
++
++
++def previous_month(today):
++    first = today.replace(day=1)
++    return (first - dt.timedelta(days=1)).strftime("%Y-%m")
++
++
++def month_bounds(month):
++    start = dt.datetime.strptime(month, "%Y-%m").date()
++    end = (start + dt.timedelta(days=32)).replace(day=1)
++    return start, end
++
++
++def load_finalized_invoices(month):
++    """Finalized (non-draft) invoices whose finalized date falls in `month`."""
++    raise NotImplementedError("invoices has no finalized date column yet; see the export PR notes")
++
++
++def select_month(invoices, month):
++    start, end = month_bounds(month)
++    rows, seen = [], set()
++    for inv in invoices:
++        if not start <= inv.finalized_on < end:
++            continue
++        if inv.id in seen:
++            raise ValueError(f"invoice {inv.id} appears more than once")
++        seen.add(inv.id)
++        rows.append(inv)
++    return sorted(rows, key=lambda inv: (inv.finalized_on, inv.id))
++
++
++def write_csv(invoices, fh):
++    writer = csv.writer(fh, delimiter=";", lineterminator="\n")
++    writer.writerow(HEADER)
++    for inv in invoices:
++        writer.writerow([
++            inv.id,
++            inv.customer_id,
++            int(inv.subtotal_cents),
++            int(inv.tax_cents),
++            int(inv.subtotal_cents) + int(inv.tax_cents),
++            inv.finalized_on.strftime(DATE_FORMAT),
++        ])
++
++
++def export(month, output_dir, invoices, dry_run=False):
++    rows = select_month(invoices, month)
++    path = Path(output_dir) / "exports" / month / "invoices.csv"
++    if not dry_run:
++        path.parent.mkdir(parents=True, exist_ok=True)
++        tmp = path.with_suffix(".csv.tmp")
++        with open(tmp, "w", encoding="utf-8", newline="") as fh:
++            write_csv(rows, fh)
++        tmp.replace(path)
++    return path, rows
+ 
+ 
+-def main():
++def main(argv=None):
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", help="YYYY-MM; defaults to the previous month")
++    parser.add_argument("--output-dir", default=".", help="directory the exports/<YYYY-MM>/invoices.csv tree is written under")
+     parser.add_argument("--dry-run", action="store_true")
+-    args = parser.parse_args()
++    args = parser.parse_args(argv)
++    month = args.month or previous_month(dt.date.today())
++    month_bounds(month)  # validates the format
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    path, rows = export(month, args.output_dir, load_finalized_invoices(month), dry_run=args.dry_run)
++    total = sum(r.subtotal_cents + r.tax_cents for r in rows)
++    verb = "would write" if args.dry_run else "wrote"
++    print(f"{verb} {len(rows)} invoices (total {total} cents) for {month} to {path} [{args.env}, bucket {bucket}]")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/src/__pycache__/__init__.cpython-311.pyc b/src/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..a025055
+Binary files /dev/null and b/src/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/__init__.cpython-311.pyc b/src/billing/__pycache__/__init__.cpython-311.pyc
+new file mode 100644
+index 0000000..4bb891c
+Binary files /dev/null and b/src/billing/__pycache__/__init__.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/currency.cpython-311.pyc b/src/billing/__pycache__/currency.cpython-311.pyc
+new file mode 100644
+index 0000000..727c94e
+Binary files /dev/null and b/src/billing/__pycache__/currency.cpython-311.pyc differ
+diff --git a/src/billing/__pycache__/tax.cpython-311.pyc b/src/billing/__pycache__/tax.cpython-311.pyc
+new file mode 100644
+index 0000000..8a7b0d2
+Binary files /dev/null and b/src/billing/__pycache__/tax.cpython-311.pyc differ
+diff --git a/tests/__pycache__/test_currency.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_currency.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..2cae677
+Binary files /dev/null and b/tests/__pycache__/test_currency.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_db.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_db.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..0725e56
+Binary files /dev/null and b/tests/__pycache__/test_db.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..80225a2
+Binary files /dev/null and b/tests/__pycache__/test_export.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_flags.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_flags.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..3e8cbcb
+Binary files /dev/null and b/tests/__pycache__/test_flags.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..b0eb770
+Binary files /dev/null and b/tests/__pycache__/test_payments.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc b/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc
+new file mode 100644
+index 0000000..4530237
+Binary files /dev/null and b/tests/__pycache__/test_tax.cpython-311-pytest-9.1.1.pyc differ
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..84e6b8b
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,44 @@
++import datetime as dt
++
++import pytest
++
++from scripts.export import FinalizedInvoice, export, previous_month
++
++
++def inv(id, subtotal, tax, day):
++    return FinalizedInvoice(id, "cus_" + id, subtotal, tax, day)
++
++
++def test_writes_finance_format(tmp_path):
++    invoices = [
++        inv("in_2", 0, 0, dt.date(2026, 9, 30)),
++        inv("in_1", 12345, 2346, dt.date(2026, 9, 1)),
++        inv("in_aug", 100, 19, dt.date(2026, 8, 31)),
++        inv("in_oct", 100, 19, dt.date(2026, 10, 1)),
++    ]
++    path, rows = export("2026-09", tmp_path, invoices)
++    assert path == tmp_path / "exports" / "2026-09" / "invoices.csv"
++    raw = path.read_bytes()
++    assert not raw.startswith(b"\xef\xbb\xbf")
++    assert raw.decode("utf-8").splitlines() == [
++        "invoice_id;customer_id;subtotal_cents;tax_cents;total_cents;finalized_date",
++        "in_1;cus_in_1;12345;2346;14691;01.09.2026",
++        "in_2;cus_in_2;0;0;0;30.09.2026",
++    ]
++
++
++def test_dry_run_writes_nothing(tmp_path):
++    path, rows = export("2026-09", tmp_path, [inv("in_1", 1, 0, dt.date(2026, 9, 5))], dry_run=True)
++    assert len(rows) == 1
++    assert not path.exists()
++
++
++def test_duplicate_invoice_is_rejected(tmp_path):
++    dup = inv("in_1", 1, 0, dt.date(2026, 9, 5))
++    with pytest.raises(ValueError):
++        export("2026-09", tmp_path, [dup, dup])
++
++
++def test_previous_month_crosses_year():
++    assert previous_month(dt.date(2026, 1, 2)) == "2025-12"
++    assert previous_month(dt.date(2026, 10, 2)) == "2026-09"
