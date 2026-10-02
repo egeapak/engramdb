@@ -1,0 +1,20 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..8083d20 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import Decimal, ROUND_HALF_EVEN
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,8 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    """Tax in integer cents on amount_cents; rate is a decimal fraction (0.0825)."""
++    if not isinstance(rate, Decimal):
++        rate = Decimal(str(rate))
++    tax = Decimal(amount_cents) * rate
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))

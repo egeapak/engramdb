@@ -1,0 +1,70 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..7a64e8c
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,47 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++_responses = {}  # (invoice_id, key) -> (stored_at, body, status)
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    cache_key = (invoice_id, key)
++    stored = _responses.get(cache_key)
++    if stored and time.time() - stored[0] < _IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[1])
++        resp.status_code = stored[2]
++        return resp
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount = payload.get("amount_cents")
++    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    try:
++        result = refund(invoice, amount)
++    except ValueError as exc:
++        return problem(422, "Refund rejected", str(exc))
++
++    # pending_approval refunds are accepted but not yet issued.
++    status = 201 if result["status"] == "issued" else 202
++    _responses[cache_key] = (time.time(), result, status)
++    resp = jsonify(result)
++    resp.status_code = status
++    return resp
+diff --git a/src/billing/refunds.py b/src/billing/refunds.py
+index 0fd8ca7..0090fc2 100644
+--- a/src/billing/refunds.py
++++ b/src/billing/refunds.py
+@@ -1,7 +1,11 @@
+ from .invoices import Invoice
+ 
++# Refunds above this amount need a second approver (agreed with Finance, June 2026).
++APPROVAL_THRESHOLD_CENTS = 50_000
++
+ 
+ def refund(invoice: Invoice, amount_cents: int):
+     if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
+         raise ValueError("refund exceeds invoice total")
+-    return {"invoice_id": invoice.id, "refunded_cents": amount_cents}
++    status = "pending_approval" if amount_cents > APPROVAL_THRESHOLD_CENTS else "issued"
++    return {"invoice_id": invoice.id, "refunded_cents": amount_cents, "status": status}
