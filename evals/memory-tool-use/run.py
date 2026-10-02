@@ -365,6 +365,8 @@ def main():
     ap.add_argument("--keep-workspaces", action="store_true")
     ap.add_argument("--snapshot-root", default=os.path.join(tempfile.gettempdir(), "mte-snapshots"),
                     help="where per-variant copies of the binary and plugin live")
+    ap.add_argument("--flow", default="memory-tool-use",
+                    help="results directory under .claude/hillclimb/ (the hard set uses memory-tool-use-hard)")
     ap.add_argument("--fixture", choices=sorted(FIXTURES), default="default",
                     help="seeded memories and case set (vague: facts only in memory bodies)")
     ap.add_argument("--engram-md", action="store_true",
@@ -381,13 +383,14 @@ def main():
         want = set(args.cases.split(","))
         cases = [c for c in cases if c["id"] in want]
 
-    out_dir = FLOW_DIR / args.variant
+    flow_dir = REPO / ".claude" / "hillclimb" / args.flow
+    out_dir = flow_dir / args.variant
     out_dir.mkdir(parents=True, exist_ok=True)
     take_snapshot(Path(args.snapshot_root) / args.variant, out_dir,
                   {"model": args.model, "fixture": args.fixture, "engram_md": args.engram_md})
     (out_dir / "traces").mkdir(parents=True, exist_ok=True)
     (out_dir / "raw").mkdir(exist_ok=True)
-    grade.write_state(FLOW_DIR)
+    grade.write_state(flow_dir)
     skip = done_keys(out_dir / "results.jsonl")
     todo = [(c, r) for r in range(args.reps) for c in cases if (c["id"], r) not in skip]
     print(f"{len(todo)} attempts to run ({len(skip)} already done) -> {out_dir}", flush=True)

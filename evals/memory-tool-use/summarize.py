@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Print the RESULTS.md tables from the variants' results.jsonl files."""
 import json
+import os
 import sys
 from pathlib import Path
 
-FLOW = Path(__file__).resolve().parent.parent.parent / ".claude" / "hillclimb" / "memory-tool-use"
+FLOW = (Path(__file__).resolve().parent.parent.parent / ".claude" / "hillclimb"
+        / os.environ.get("MTE_FLOW", "memory-tool-use"))
 METRICS = ["pass", "consulted_before_act", "query_before_act", "explicit_create", "implicit_capture",
            "revise", "no_false_create", "no_spurious_revise", "fact_used", "no_stale_fact"]
 HEAD = ["pass", "consulted", "query first", "explicit create", "implicit capture", "revise",

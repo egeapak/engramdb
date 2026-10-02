@@ -1,0 +1,84 @@
+{
+ "current_round": 0,
+ "reps": 3,
+ "model": "claude-sonnet-5-5",
+ "goal": {
+  "target": "pass",
+  "direction": "higher",
+  "hold": [
+   "no_false_create",
+   "no_spurious_revise",
+   "cost_usd"
+  ]
+ },
+ "approve_each_round": false,
+ "stop": "until plateau: <noise-floor gain on test pass for 3 rounds in a row, or a guardrail regresses outside noise",
+ "train_ids": [
+  "bf-db-pool",
+  "bf-notifier-sandbox",
+  "bf-release-freeze",
+  "dc-flag-owner",
+  "dc-runbook-export",
+  "dc-seed-dev",
+  "ds-fx-rounding",
+  "ds-notifier-flag",
+  "ds-notifier-migration",
+  "mm-dunning-job",
+  "mm-refund-endpoint",
+  "mm-refund-question",
+  "mt-export-format",
+  "mt-refund-after-drift",
+  "mt-reviewer",
+  "nh-ci-idea",
+  "nh-hypothetical-rounding",
+  "nh-offline-today",
+  "nh-print-oneoff",
+  "st-ci-rerun",
+  "st-flask-premise",
+  "st-retention"
+ ],
+ "test_ids": [
+  "bf-export-csv",
+  "bf-ledger-amount",
+  "bf-tax-quebec",
+  "dc-backfill-warning",
+  "dc-fx-fixtures",
+  "dc-ledger-smoke",
+  "ds-notifier-log",
+  "ds-notifier-tests",
+  "ds-reporting-money",
+  "mm-list-invoices",
+  "mm-receipt-email",
+  "mm-webhook-failed",
+  "mt-drift-dunning",
+  "mt-sandbox-region",
+  "mt-warnings-as-errors",
+  "mt-webhook-spec",
+  "nh-already-known",
+  "nh-curious-loguru",
+  "nh-other-project",
+  "nh-user-unsure-rounding",
+  "st-fx-provider",
+  "st-notifier-owner",
+  "st-pdf-premise"
+ ],
+ "harness_paths": [
+  "evals/memory-tool-use/run.py",
+  "evals/memory-tool-use/grade.py",
+  "evals/memory-tool-use/cases_hard.jsonl",
+  "evals/memory-tool-use/seed_memories_hard.json",
+  "evals/memory-tool-use/fixture_hard"
+ ],
+ "scope": {
+  "will_change": [
+   "MCP tool descriptions and instructions (crates/engram-mcp)",
+   "hook logic and rendering (crates/engram-cli/src/commands/hook.rs)",
+   "ENGRAM.md text (setup.rs)",
+   "retrieval and scoring (src/)",
+   "config defaults"
+  ],
+  "wont_touch": [
+   "the eval harness, cases, seeds and fixture during the loop"
+  ]
+ }
+}

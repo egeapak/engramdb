@@ -45,6 +45,7 @@ METRICS = [
     {"id": "no_false_create", "label": "no false create", "kind": "binary"},
     {"id": "revise", "label": "revise", "kind": "binary"},
     {"id": "no_spurious_revise", "label": "no spur. revise", "kind": "binary"},
+    {"id": "no_stale_fact", "label": "no stale fact", "kind": "binary"},
 ]
 PERF_FIELDS = [
     {"id": "memory_calls", "label": "memory calls"},

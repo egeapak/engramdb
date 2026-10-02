@@ -10,13 +10,15 @@ Usage: python3 regrade.py baseline v1 v2 ...   (no args: every variant dir)
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
 import grade
 
 HERE = Path(__file__).resolve().parent
-FLOW_DIR = HERE.parent.parent / ".claude" / "hillclimb" / "memory-tool-use"
+FLOW_DIR = (Path(__file__).resolve().parent.parent.parent / ".claude" / "hillclimb"
+        / os.environ.get("MTE_FLOW", "memory-tool-use"))
 FIXTURES = {"default": ("seed_memories.json", "cases.jsonl"),
             "vague": ("seed_memories_vague.json", "cases_vague.jsonl"),
             "hard": ("seed_memories_hard.json", "cases_hard.jsonl")}
