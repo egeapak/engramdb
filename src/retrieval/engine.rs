@@ -5186,6 +5186,8 @@ mod tests {
             mk("other dir", &["payments/"], 0.9, Epistemic::Fact),
             mk("unscoped", &[], 0.9, Epistemic::Fact),
             mk("root", &["/"], 0.5, Epistemic::Fact),
+            mk("service root", &["services/"], 0.5, Epistemic::Fact),
+            mk("root glob", &["**/*.py"], 0.5, Epistemic::Fact),
             mk(
                 "low criticality",
                 &["billing/invoice.py"],
@@ -5222,9 +5224,23 @@ mod tests {
             .iter()
             .all(|m| !m.score_breakdown.below_threshold));
         assert_eq!(
-            result.dropped_below_threshold, 2,
-            "low criticality, and the root scope (two levels up) at 0.5"
+            result.dropped_below_threshold, 3,
+            "low criticality, and the root-wide `/` and `**/*.py` at 0.5"
         );
+
+        // An ancestor directory matches at any depth: a service-wide memory
+        // reaches a file two levels down.
+        let deep = RetrievalQuery {
+            path: Some("services/notifier/email.py".to_string()),
+            ..query.clone()
+        };
+        let result = engine.query(&deep).await.unwrap();
+        let got: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|m| m.memory.summary.as_str())
+            .collect();
+        assert_eq!(got, vec!["service root"], "{got:?}");
     }
 
     /// A logical-only context keeps the stricter rule for unscoped memories:

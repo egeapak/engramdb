@@ -363,6 +363,19 @@ pub fn composite_score_target_ignore_decay(
     composite_score_inner(target, context, config, now, true)
 }
 
+/// A physical pattern that matches every path: the project root, or a glob
+/// with no directory before its first metacharacter (`**/*.py`).
+fn is_root_wide(pattern: &str) -> bool {
+    let p = pattern.trim();
+    if p.is_empty() || p == "/" {
+        return true;
+    }
+    match p.find(['*', '?', '[', '{']) {
+        Some(pos) => p[..pos].trim_matches('/').is_empty(),
+        None => false,
+    }
+}
+
 fn composite_score_inner(
     target: ScoreTarget<'_>,
     context: &ScoringContext<'_>,
@@ -492,20 +505,34 @@ fn composite_score_inner(
         0.0
     };
 
-    // Scope-only with context: a memory that closely matches the scope
-    // clears the threshold on its own relevance. Under a path, "closely" is
-    // the exact file, its directory, or a sibling file (scope at least
-    // `depth_decay_base`, one level of decay): a broad scope such as `/`
-    // matches every path and must still clear the full score, or every root
-    // memory would ride along on every file edit. Under a logical-only
-    // context it is a related declared logical scope — an unscoped memory
-    // there only gets the neutral floor, which is not a match.
+    // Scope-only with context: a memory whose own scope matches clears the
+    // threshold on its own relevance. Under a path that is any physical
+    // pattern matching the path at any depth (the file, a sibling, an
+    // ancestor directory such as a service root), or a related logical
+    // scope — but not a root-wide pattern (`/`, or a glob with no directory
+    // part): `/` is what a memory saved without paths gets, it matches every
+    // file, and every such memory would otherwise ride along on every file
+    // edit. Under a logical-only context it is a related declared logical
+    // scope — an unscoped memory there only gets the neutral floor, which is
+    // not a match.
     let scope_only = context.keyword_score.is_none()
         && context.semantic_score.is_none()
         && context.query.is_none();
     let gate_score = (scope_only && has_scope_context).then(|| {
-        let matched = if context.path.is_some() {
-            scope_score > 0.0 && scope_score >= config.retrieval.scoring.depth_decay_base - 1e-9
+        let matched = if let Some(path) = context.path {
+            let scoring = &config.retrieval.scoring;
+            let physical = target.physical.iter().any(|p| {
+                !is_root_wide(p)
+                    && crate::scope::physical::proximity(
+                        std::slice::from_ref(p),
+                        path,
+                        scoring.depth_decay_base,
+                        scoring.depth_decay_floor,
+                    ) > 0.0
+            });
+            let logical = !context.logical.is_empty()
+                && crate::scope::logical::proximity(target.logical, context.logical) > 0.0;
+            scope_score > 0.0 && (physical || logical)
         } else {
             scope_score > 0.0 && !target.logical.is_empty()
         };
