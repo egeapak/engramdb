@@ -42,6 +42,7 @@ METRICS = [
     {"id": "fact_used", "label": "fact used", "kind": "binary"},
     {"id": "explicit_create", "label": "expl. create", "kind": "binary"},
     {"id": "implicit_capture", "label": "impl. capture", "kind": "binary"},
+    {"id": "costly_capture", "label": "costly capture", "kind": "binary"},
     {"id": "no_false_create", "label": "no false create", "kind": "binary"},
     {"id": "revise", "label": "revise", "kind": "binary"},
     {"id": "no_spurious_revise", "label": "no spur. revise", "kind": "binary"},
@@ -56,6 +57,7 @@ PERF_FIELDS = [
     {"id": "in_tokens", "label": "in tok"},
     {"id": "out_tokens", "label": "out tok"},
     {"id": "wrote_auto_memory", "label": "auto-mem write"},
+    {"id": "failed_tool_calls", "label": "failed calls"},
 ]
 
 
@@ -192,9 +194,17 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
 
     new_or_changed = [text for path, (sha, text) in after.items() if before.get(path, (None,))[0] != sha]
     new_files = [p for p in after if p not in before]
+    failed_calls = sum(1 for s in tools if s["result"]["is_error"])
     if exp["create"] is True:
         captured = any(_contains_any(t, exp["create_terms"]) for t in new_or_changed)
-        g["implicit_capture" if "implicit" in case["tags"] else "explicit_create"] = int(captured)
+        if "costly" in case["tags"]:
+            # A fact found mid-task must be saved only when finding it was
+            # costly: two or more failed tool calls in this run. Found at
+            # once, saving it is the agent's call and is not graded.
+            if failed_calls >= 2:
+                g["costly_capture"] = int(captured)
+        else:
+            g["implicit_capture" if "implicit" in case["tags"] else "explicit_create"] = int(captured)
     elif exp["create"] is False:
         g["no_false_create"] = int(not new_files)
 
@@ -241,6 +251,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
                       + usage.get("cache_creation_input_tokens", 0)),
         "out_tokens": usage.get("output_tokens"),
         "wrote_auto_memory": int(bool(gaps["auto_memory_writes"])),
+        "failed_tool_calls": failed_calls,
         "usage": usage,
         "meta": {"gaps": gaps, "model_usage": final.get("modelUsage"),
                  "claude_code_version": init.get("claude_code_version")},

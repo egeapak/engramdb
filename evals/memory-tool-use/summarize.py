@@ -7,9 +7,9 @@ from pathlib import Path
 
 FLOW = (Path(__file__).resolve().parent.parent.parent / ".claude" / "hillclimb"
         / os.environ.get("MTE_FLOW", "memory-tool-use"))
-METRICS = ["pass", "consulted_before_act", "query_before_act", "explicit_create", "implicit_capture",
+METRICS = ["pass", "consulted_before_act", "query_before_act", "explicit_create", "implicit_capture", "costly_capture",
            "revise", "no_false_create", "no_spurious_revise", "fact_used", "no_stale_fact"]
-HEAD = ["pass", "consulted", "query first", "explicit create", "implicit capture", "revise",
+HEAD = ["pass", "consulted", "query first", "explicit create", "implicit capture", "costly capture", "revise",
         "no false create", "no spurious revise", "fact used", "no stale fact", "revise (repo neutral)", "revise (repo disagrees)"]
 
 

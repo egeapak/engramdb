@@ -183,3 +183,31 @@ class Null(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _costly_case():
+    return {"id": "dc-x", "tags": ["discovered", "implicit", "costly"], "prompt": "p",
+            "expect": {"query": None, "create": True, "revise": None, "facts": [],
+                       "create_terms": ["TZ=UTC"]}}
+
+
+def _events_with_failures(n):
+    events = [{"type": "system", "subtype": "init"}]
+    for i in range(n + 1):
+        events.append({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": "make test"}}]}})
+        events.append({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": "x", "is_error": i < n}]}})
+    events.append({"type": "result", "result": "done", "usage": {}})
+    return events
+
+
+def test_costly_capture_graded_only_after_two_failures():
+    after = {"m.md": ("b", "remember TZ=UTC for tests")}
+    row, _ = grade.grade_case(_costly_case(), _events_with_failures(2), "", {}, after, {}, 1.0)
+    assert row["grade"]["costly_capture"] == 1 and row["grade"]["pass"] == 1
+    row, _ = grade.grade_case(_costly_case(), _events_with_failures(2), "", {}, {}, {}, 1.0)
+    assert row["grade"]["costly_capture"] == 0 and row["grade"]["pass"] == 0
+    row, _ = grade.grade_case(_costly_case(), _events_with_failures(1), "", {}, {}, {}, 1.0)
+    assert "costly_capture" not in row["grade"] and row["grade"]["pass"] == 1
+    assert row["failed_tool_calls"] == 1
