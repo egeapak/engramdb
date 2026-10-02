@@ -113,6 +113,11 @@
    "kind": "binary"
   },
   {
+   "id": "costly_capture",
+   "label": "costly capture",
+   "kind": "binary"
+  },
+  {
    "id": "no_false_create",
    "label": "no false create",
    "kind": "binary"
@@ -167,6 +172,10 @@
   {
    "id": "wrote_auto_memory",
    "label": "auto-mem write"
+  },
+  {
+   "id": "failed_tool_calls",
+   "label": "failed calls"
   }
  ]
 }
