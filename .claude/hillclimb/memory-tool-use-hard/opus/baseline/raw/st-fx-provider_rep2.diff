@@ -1,0 +1,51 @@
+diff --git a/src/billing/currency.py b/src/billing/currency.py
+index 3d11ab4..f15aed2 100644
+--- a/src/billing/currency.py
++++ b/src/billing/currency.py
+@@ -1,10 +1,44 @@
+ """Currency conversion for multi-currency invoices."""
++import os
++import xml.etree.ElementTree as ET
+ from decimal import Decimal
+ 
++import requests
++
++# ECB euro reference rates (eurofxref XML). No API key needed.
++ECB_NS = {"ecb": "http://www.ecb.int/vocabulary/2002-08-01/eurofxref"}
++
+ 
+ def fetch_rates(day):
+-    """Return {currency: Decimal rate against USD} for the given date."""
+-    raise NotImplementedError
++    """Return {currency: Decimal rate against USD} for the given date.
++
++    The ECB feed quotes units of each currency per 1 EUR, so USD cross rates
++    are derived by dividing by the USD rate. The ECB does not publish on
++    weekends or TARGET holidays; in that case the most recent publication on
++    or before ``day`` is used.
++    """
++    resp = requests.get(os.environ["ECB_FEED_URL"], timeout=10)
++    resp.raise_for_status()
++    root = ET.fromstring(resp.content)
++
++    wanted = str(day)  # accepts a date or an ISO "YYYY-MM-DD" string
++    days = {
++        cube.get("time"): cube
++        for cube in root.iterfind(".//ecb:Cube[@time]", ECB_NS)
++        if cube.get("time") <= wanted
++    }
++    if not days:
++        raise LookupError(f"no ECB rates published on or before {wanted}")
++    cube = days[max(days)]
++
++    per_eur = {
++        c.get("currency"): Decimal(c.get("rate"))
++        for c in cube.iterfind("ecb:Cube[@currency]", ECB_NS)
++    }
++    usd_per_eur = per_eur.pop("USD")
++    rates = {code: rate / usd_per_eur for code, rate in per_eur.items()}
++    rates["EUR"] = 1 / usd_per_eur
++    return rates
+ 
+ 
+ def convert(amount_cents, rate):

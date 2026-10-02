@@ -1,0 +1,115 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..91d6da1
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,109 @@
++"""Purge invoices older than the retention period.
++
++Dry-run by default: reports what would be deleted and writes nothing. Pass
++--execute to actually delete.
++
++An invoice is eligible when it was finalized more than RETENTION_DAYS ago and
++it has no open refund. Drafts (finalized_at IS NULL) are never purged. Its
++lines and settled refunds are deleted with it, one short transaction per batch.
++"""
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta, timezone
++
++import structlog
++
++log = structlog.get_logger()
++
++# Defined by legal in days (10 years since the 2026 tax audit); do not derive from years.
++RETENTION_DAYS = 3650
++
++# Larger batches hold invoices row locks long enough to time out checkout (INC-2291).
++MAX_SAFE_BATCH = 500
++
++# A refund in any other state (pending_approval, NULL, anything new) counts as open.
++SETTLED_REFUND_STATUSES = ("issued",)
++
++ELIGIBLE_SQL = """
++    SELECT i.id
++    FROM invoices i
++    WHERE i.finalized_at IS NOT NULL
++      AND i.finalized_at < %(cutoff)s
++      AND NOT EXISTS (
++          SELECT 1 FROM refunds r
++          WHERE r.invoice_id = i.id
++            AND (r.status IS NULL OR r.status <> ALL(%(settled)s))
++      )
++    ORDER BY i.finalized_at, i.id
++"""
++
++
++def cutoff_utc(now=None):
++    # finalized_at is stored as naive UTC; compute in UTC regardless of host TZ.
++    now = now or datetime.now(timezone.utc)
++    return (now - timedelta(days=RETENTION_DAYS)).replace(tzinfo=None)
++
++
++def connect(dsn):
++    import psycopg
++
++    # Deployed DBs sit behind a transaction-mode pooler: no server-side prepared statements.
++    return psycopg.connect(dsn, prepare_threshold=None)
++
++
++def dry_run(conn, params):
++    with conn.transaction():
++        ids = [row[0] for row in conn.execute(ELIGIBLE_SQL, params)]
++    log.info("purge_dry_run", eligible=len(ids), cutoff=params["cutoff"].isoformat(), sample=ids[:20])
++    return len(ids)
++
++
++def purge(conn, params, batch_size):
++    total = 0
++    while True:
++        with conn.transaction():
++            ids = [
++                row[0]
++                for row in conn.execute(
++                    ELIGIBLE_SQL + " LIMIT %(limit)s FOR UPDATE OF i SKIP LOCKED",
++                    {**params, "limit": batch_size},
++                )
++            ]
++            if not ids:
++                break
++            lines = conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ANY(%s)", (ids,)).rowcount
++            refunds = conn.execute("DELETE FROM refunds WHERE invoice_id = ANY(%s)", (ids,)).rowcount
++            invoices = conn.execute("DELETE FROM invoices WHERE id = ANY(%s)", (ids,)).rowcount
++        total += invoices
++        log.info("purge_batch", invoices=invoices, lines=lines, refunds=refunds, first_id=ids[0], last_id=ids[-1])
++    log.info("purge_done", invoices=total, cutoff=params["cutoff"].isoformat())
++    return total
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    args = parser.parse_args()
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"--batch-size must be between 1 and {MAX_SAFE_BATCH}", file=sys.stderr)
++        return 3
++    dsn = os.environ.get("DATABASE_URL")
++    if not dsn:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    params = {"cutoff": cutoff_utc(), "settled": list(SETTLED_REFUND_STATUSES)}
++    with connect(dsn) as conn:
++        if not args.execute:
++            n = dry_run(conn, params)
++            print(f"dry run: {n} invoice(s) finalized before {params['cutoff']:%Y-%m-%d} would be purged; "
++                  f"re-run with --execute to delete")
++            return 0
++        purge(conn, params, args.batch_size)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

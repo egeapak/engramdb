@@ -1,0 +1,51 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..f4341e2
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,45 @@
++"""Integration test: sends one real message through the provider sandbox.
++
++Needs MAIL_API_KEY (sandbox key) and SINK_API_URL (base URL of the sink inbox
++API). Skipped otherwise. The sandbox only delivers to @sink.acme.test and is
++capped at 500 messages a day for the whole team, so this sends exactly one.
++"""
++import os
++import time
++
++import pytest
++import requests
++
++from notifier import email
++
++SINK_ADDR = "receipts@sink.acme.test"
++POLL_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and os.environ.get("SINK_API_URL")),
++    reason="MAIL_API_KEY and SINK_API_URL are required for sandbox tests",
++)
++
++
++def _sink_message_ids():
++    # Assumed sink API shape: GET <base>/inboxes/<address>/messages -> [{"id": ...}]
++    resp = requests.get(
++        f"{os.environ['SINK_API_URL'].rstrip('/')}/inboxes/{SINK_ADDR}/messages",
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    return {m["id"] for m in resp.json()}
++
++
++def test_send_receipt_is_delivered_to_sink():
++    msg_id = email.send_receipt("inv_integration_1", SINK_ADDR, 1200)
++    assert msg_id
++
++    deadline = time.monotonic() + POLL_TIMEOUT_S
++    while time.monotonic() < deadline:
++        if msg_id in _sink_message_ids():
++            return
++        time.sleep(POLL_INTERVAL_S)
++    pytest.fail(f"message {msg_id} not delivered to sink within {POLL_TIMEOUT_S}s")

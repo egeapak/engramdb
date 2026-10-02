@@ -1,0 +1,61 @@
+diff --git a/src/api/webhooks.py b/src/api/webhooks.py
+index c326872..67ff943 100644
+--- a/src/api/webhooks.py
++++ b/src/api/webhooks.py
+@@ -1,10 +1,54 @@
++import hashlib
++import hmac
++import os
++import time
++
++import structlog
+ from flask import Blueprint, request
+ 
++from src.api import errors
++from src.jobs import queue
++
+ bp = Blueprint("webhooks", __name__)
++log = structlog.get_logger()
++
++MAX_EVENT_AGE_SECONDS = 300
++
++
++def _verify_psp_request():
++    """Check the PSP signature and timestamp; return True if the request is authentic."""
++    secret = os.environ.get("PSP_WEBHOOK_SECRET")
++    signature = request.headers.get("Psp-Signature")
++    timestamp = request.headers.get("Psp-Timestamp")
++    if not secret or not signature or not timestamp:
++        return False
+ 
++    try:
++        sent_at = int(timestamp)
++    except ValueError:
++        return False
++    if abs(time.time() - sent_at) > MAX_EVENT_AGE_SECONDS:
++        return False
+ 
+-@bp.post("/webhooks/psp")
++    expected = hmac.new(secret.encode(), request.get_data(), hashlib.sha256).hexdigest()
++    return hmac.compare_digest(expected, signature)
++
++
++@bp.route("/webhooks/psp", methods=["POST"])
+ def psp_webhook():
++    if not _verify_psp_request():
++        log.warning("psp_webhook_rejected")
++        return errors.problem(401, "Invalid webhook signature")
++
+     event = request.get_json()
+-    # TODO: verify the event, then dispatch on event["type"]
++
++    if event["type"] == "payment.failed":
++        invoice_id = event["data"]["invoice_id"]
++        queue.enqueue(
++            "dunning.schedule_retries",
++            {"invoice_id": invoice_id},
++            dedupe_key=f"dunning:{invoice_id}:{event['id']}",
++        )
++        log.info("payment_failed_retries_enqueued", invoice_id=invoice_id, event_id=event["id"])
++
+     return "", 204

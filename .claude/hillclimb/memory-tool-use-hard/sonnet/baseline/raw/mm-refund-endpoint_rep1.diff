@@ -1,0 +1,63 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..e56d7ab
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,57 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++# Refunds above this amount need a second approver (decision with Finance, June 2026).
++APPROVAL_THRESHOLD_CENTS = 50_000
++
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (invoice_id, idempotency key) -> (stored_at, status_code, body)
++_IDEMPOTENT_RESPONSES = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency header required", "X-Acme-Idempotency is required")
++
++    now = time.time()
++    stored = _IDEMPOTENT_RESPONSES.get((invoice_id, key))
++    if stored and now - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[2])
++        resp.status_code = stored[1]
++        return resp
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer")
++
++    if amount_cents > APPROVAL_THRESHOLD_CENTS:
++        # Must not be issued directly; refund() is called once a second person approves.
++        status_code = 202
++        body = {"invoice_id": invoice.id, "amount_cents": amount_cents, "status": "pending_approval"}
++    else:
++        try:
++            result = refund(invoice, amount_cents)
++        except ValueError as exc:
++            return problem(422, "Refund rejected", str(exc))
++        status_code = 201
++        body = {**result, "status": "issued"}
++
++    _IDEMPOTENT_RESPONSES[(invoice_id, key)] = (now, status_code, body)
++    resp = jsonify(body)
++    resp.status_code = status_code
++    return resp

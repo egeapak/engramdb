@@ -1,0 +1,89 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..804868d 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,82 @@
+ import argparse
++import csv
+ import os
++import sys
++from datetime import datetime
++from pathlib import Path
++
++# Finance's import tool runs with a German locale: ";" delimiter, DD.MM.YYYY dates,
++# UTF-8 without BOM, integer cents.
++DELIMITER = ";"
++DATE_FORMAT = "%d.%m.%Y"
++HEADER = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++# finalized_at is stored as naive UTC; the window is built from plain datetimes
++# so the host's time zone never enters into it. Drafts have no finalized_at.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at IS NOT NULL AND finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def default_month(today=None):
++    today = today or datetime.utcnow()
++    year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
++    return f"{year:04d}-{month:02d}"
++
++
++def month_window(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_invoices(database_url, start, end):
++    import psycopg
++
++    # Deployed databases sit behind a transaction-mode pooler: no prepared statements.
++    with psycopg.connect(database_url, prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def write_csv(path, rows):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "w", newline="", encoding="utf-8") as f:
++        writer = csv.writer(f, delimiter=DELIMITER, lineterminator="\n")
++        writer.writerow(HEADER)
++        for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++            writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax,
++                             finalized_at.strftime(DATE_FORMAT)])
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--output-dir", default=os.environ.get("EXPORT_DIR", "var/exports"),
++                        help="directory the exports/<YYYY-MM>/invoices.csv tree is written under")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    month = args.month or default_month()
++    start, end = month_window(month)
++    print(f"exporting {args.env} {month} to {bucket} (dry_run={args.dry_run})")
++
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 1
++    rows = fetch_invoices(database_url, start, end)
++    path = Path(args.output_dir) / "exports" / month / "invoices.csv"
++    if args.dry_run:
++        print(f"would write {len(rows)} finalized invoices to {path} (nothing written)")
++        return 0
++    write_csv(path, rows)
++    print(f"wrote {len(rows)} finalized invoices to {path}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

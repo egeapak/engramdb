@@ -1,0 +1,80 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..508f0c7
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,45 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from . import errors
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# idempotency key -> (stored_at, body, status)
++_RESPONSES = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return errors.problem(428, "Idempotency key required", "Send an X-Acme-Idempotency header.")
++
++    now = time.time()
++    stored = _RESPONSES.get(key)
++    if stored and now - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        _, body, status = stored
++        return jsonify(body), status
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return errors.problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return errors.problem(400, "Invalid amount", "amount_cents must be a positive integer.")
++
++    try:
++        body = refund(invoice, amount_cents)
++    except ValueError as exc:
++        return errors.problem(422, "Refund rejected", str(exc))
++
++    status = 202 if body["status"] == "pending_approval" else 201
++    _RESPONSES[key] = (now, body, status)
++    return jsonify(body), status
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..17d6429 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -15,6 +15,7 @@ class Invoice:
+     subtotal_cents: int
+     tax_cents: int = 0
+     ledger_ref: str | None = None
++    currency: str = "USD"
+     lines: list = field(default_factory=list)
+ 
+ 
+diff --git a/src/billing/refunds.py b/src/billing/refunds.py
+index 0fd8ca7..bbc435e 100644
+--- a/src/billing/refunds.py
++++ b/src/billing/refunds.py
+@@ -1,7 +1,11 @@
+ from .invoices import Invoice
+ 
++# Refunds above this need a second approver in the admin tool.
++APPROVAL_THRESHOLD_CENTS = 50_000
++
+ 
+ def refund(invoice: Invoice, amount_cents: int):
+     if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
+         raise ValueError("refund exceeds invoice total")
+-    return {"invoice_id": invoice.id, "refunded_cents": amount_cents}
++    status = "pending_approval" if amount_cents > APPROVAL_THRESHOLD_CENTS else "issued"
++    return {"invoice_id": invoice.id, "refunded_cents": amount_cents, "status": status}

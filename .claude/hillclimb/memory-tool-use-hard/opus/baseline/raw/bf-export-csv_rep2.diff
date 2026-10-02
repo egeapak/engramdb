@@ -1,0 +1,131 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..a72ce23 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,92 @@
++"""Export one month's finalized invoices as the CSV that Finance imports."""
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import date, datetime, timezone
++
++# Finance's import tool runs with a German locale: semicolon delimiter, DD.MM.YYYY dates.
++DELIMITER = ";"
++DATE_FORMAT = "%d.%m.%Y"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# finalized_at is stored as naive UTC, so the window is compared against naive UTC bounds.
++QUERY = """
++SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++FROM invoices
++WHERE finalized_at IS NOT NULL
++  AND finalized_at >= %s AND finalized_at < %s
++ORDER BY finalized_at, id
++"""
++
++
++def previous_month(today=None):
++    today = today or datetime.now(timezone.utc).date()
++    first = today.replace(day=1)
++    return (first.replace(year=first.year - 1, month=12) if first.month == 1
++            else first.replace(month=first.month - 1)).strftime("%Y-%m")
++
++
++def month_window(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def to_csv(rows):
++    """rows: (id, customer_id, subtotal_cents, tax_cents, finalized_at) tuples."""
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=DELIMITER, lineterminator="\r\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        subtotal, tax = int(subtotal), int(tax)
++        finalized = finalized_at.date() if isinstance(finalized_at, datetime) else finalized_at
++        if not isinstance(finalized, date):
++            raise ValueError(f"invoice {invoice_id} has no usable finalized_at")
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized.strftime(DATE_FORMAT)])
++    return buf.getvalue()
++
++
++def fetch_rows(database_url, start, end):
++    import psycopg
++
++    # Deployed environments go through a transaction-mode pooler: no server-side prepared statements.
++    with psycopg.connect(database_url, prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
+ 
+ 
+ def main():
+-    parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
++    parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", help="YYYY-MM (default: previous month, UTC)")
++    parser.add_argument("--output", help="CSV path (default: exports/<YYYY-MM>/invoices.csv)")
++    parser.add_argument("--dry-run", action="store_true", help="print the CSV summary, write nothing")
+     args = parser.parse_args()
++
++    month = args.month or previous_month()
++    start, end = month_window(month)
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    output = args.output or os.path.join("exports", month, "invoices.csv")
++
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    rows = fetch_rows(database_url, start, end)
++    data = to_csv(rows)
++    print(f"exporting {args.env} {month}: {len(rows)} finalized invoices "
++          f"(bucket={bucket}, output={output}, dry_run={args.dry_run})")
++    if args.dry_run:
++        return 0
++
++    os.makedirs(os.path.dirname(output) or ".", exist_ok=True)
++    # UTF-8 without BOM; newline="" so the csv module's \r\n is written verbatim.
++    with open(output, "w", encoding="utf-8", newline="") as f:
++        f.write(data)
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..68b0f50
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,24 @@
++from datetime import date, datetime
++
++from scripts.export import month_window, previous_month, to_csv
++
++
++def test_csv_format_for_finance_import():
++    rows = [
++        ("inv_1", "cus_1", 10000, 1900, datetime(2026, 9, 3, 23, 30)),
++        ("inv_2", "cus_2", 0, 0, datetime(2026, 9, 30, 0, 0)),
++    ]
++    assert to_csv(rows) == (
++        "invoice_id;customer_id;subtotal_cents;tax_cents;total_cents;finalized_date\r\n"
++        "inv_1;cus_1;10000;1900;11900;03.09.2026\r\n"
++        "inv_2;cus_2;0;0;0;30.09.2026\r\n"
++    )
++
++
++def test_month_window_wraps_year():
++    assert month_window("2026-12") == (datetime(2026, 12, 1), datetime(2027, 1, 1))
++
++
++def test_previous_month():
++    assert previous_month(date(2026, 10, 2)) == "2026-09"
++    assert previous_month(date(2027, 1, 2)) == "2026-12"

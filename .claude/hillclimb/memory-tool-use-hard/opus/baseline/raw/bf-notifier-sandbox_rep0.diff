@@ -1,0 +1,69 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..d10356f
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,63 @@
++"""Sends a real receipt through the email provider's sandbox account.
++
++Needs MAIL_API_KEY (the sandbox key from the dev secrets store) and
++MAIL_SINK_URL (the sink inbox API base URL); skipped otherwise.
++
++The sandbox accepts mail to any address with a 202 but only delivers to the
++@sink.acme.test domain, so the recipient must live there or the delivery
++check can never pass. The sandbox is capped at 500 messages a day for the
++whole team: this test sends exactly one.
++"""
++import os
++import time
++import uuid
++from unittest import mock
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and os.environ.get("MAIL_SINK_URL")),
++    reason="needs MAIL_API_KEY (sandbox) and MAIL_SINK_URL",
++)
++
++SINK_ADDR = "receipts@sink.acme.test"
++DELIVERY_TIMEOUT_S = 60
++POLL_INTERVAL_S = 2
++
++
++def _sink_messages():
++    resp = requests.get(
++        f"{os.environ['MAIL_SINK_URL'].rstrip('/')}/inboxes/{SINK_ADDR}/messages",
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    return resp.json()["messages"]
++
++
++def _wait_for_delivery(message_id):
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    while time.monotonic() < deadline:
++        for msg in _sink_messages():
++            if msg["id"] == message_id:
++                return msg
++        time.sleep(POLL_INTERVAL_S)
++    pytest.fail(f"message {message_id} not delivered to {SINK_ADDR} "
++                f"within {DELIVERY_TIMEOUT_S}s")
++
++
++def test_send_receipt_is_delivered():
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:12]}"
++    # render() has no templates yet; stub it with a body carrying the
++    # invoice id so the delivered message can be matched to this run.
++    body = f"<p>Receipt for {invoice_id}: 1200</p>"
++    with mock.patch.object(email, "render", return_value=body):
++        message_id = email.send_receipt(invoice_id, SINK_ADDR, 1200)
++
++    assert message_id
++    delivered = _wait_for_delivery(message_id)
++    assert delivered["subject"] == "Your receipt"
++    assert invoice_id in delivered["html"]

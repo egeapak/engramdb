@@ -1,0 +1,104 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..359e99a
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,98 @@
++"""Purge invoices (and their lines) past the retention period.
++
++Dry-run by default: reports what would be deleted. Pass --execute to delete.
++"""
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta, timezone
++
++# Legal defines the period in days (10 years since the 2026 tax audit); do not derive from years.
++RETENTION_DAYS = 3650
++MAX_SAFE_BATCH = 500
++
++# finalized_at is stored as naive UTC. Unfinalized invoices are never purged, and neither is
++# any invoice with a refund against it (the refunds table has no status, so any refund counts
++# as open; the FK from refunds would block the delete anyway).
++ELIGIBLE = """
++    FROM invoices i
++    WHERE i.finalized_at IS NOT NULL
++      AND i.finalized_at < %(cutoff)s
++      AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.invoice_id = i.id)
++"""
++
++
++def cutoff_now():
++    # Computed in UTC explicitly so the host zone (Europe/Berlin on the ops host) cannot shift it.
++    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=RETENTION_DAYS)
++
++
++def connect(url):
++    import psycopg
++
++    # The deployed pooler runs in transaction mode: server-side prepared statements break.
++    return psycopg.connect(url, prepare_threshold=None)
++
++
++def dry_run(conn, cutoff, sample):
++    with conn.transaction():
++        count = conn.execute(f"SELECT count(*) {ELIGIBLE}", {"cutoff": cutoff}).fetchone()[0]
++        ids = [row[0] for row in conn.execute(
++            f"SELECT i.id {ELIGIBLE} ORDER BY i.finalized_at, i.id LIMIT %(limit)s",
++            {"cutoff": cutoff, "limit": sample},
++        )]
++    print(f"would delete {count} invoices finalized before {cutoff:%Y-%m-%d %H:%M:%S} UTC (nothing written)")
++    for invoice_id in ids:
++        print(f"  {invoice_id}")
++    if count > len(ids):
++        print(f"  ... and {count - len(ids)} more")
++
++
++def purge(conn, cutoff, batch_size):
++    total = 0
++    while True:
++        # One short transaction per batch so we never hold invoice row locks for long.
++        with conn.transaction():
++            ids = [row[0] for row in conn.execute(
++                f"SELECT i.id {ELIGIBLE} ORDER BY i.id LIMIT %(limit)s FOR UPDATE SKIP LOCKED",
++                {"cutoff": cutoff, "limit": batch_size},
++            )]
++            if not ids:
++                break
++            conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ANY(%(ids)s)", {"ids": ids})
++            deleted = conn.execute("DELETE FROM invoices WHERE id = ANY(%(ids)s)", {"ids": ids}).rowcount
++        total += deleted
++        print(f"deleted {deleted} invoices (total {total})")
++    print(f"done: deleted {total} invoices finalized before {cutoff:%Y-%m-%d %H:%M:%S} UTC")
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    parser.add_argument("--sample", type=int, default=20, help="invoice ids to list in a dry run")
++    args = parser.parse_args()
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"batch size must be between 1 and {MAX_SAFE_BATCH} (INC-2291)", file=sys.stderr)
++        return 3
++
++    cutoff = cutoff_now()
++    url = os.environ.get("DATABASE_URL")
++    if not url:
++        if args.execute:
++            print("DATABASE_URL is required with --execute", file=sys.stderr)
++            return 2
++        print(f"no DATABASE_URL set; would purge invoices finalized before "
++              f"{cutoff:%Y-%m-%d %H:%M:%S} UTC (nothing written)")
++        return 0
++
++    with connect(url) as conn:
++        if args.execute:
++            purge(conn, cutoff, args.batch_size)
++        else:
++            dry_run(conn, cutoff, args.sample)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
