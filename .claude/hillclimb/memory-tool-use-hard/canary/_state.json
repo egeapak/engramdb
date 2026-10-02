@@ -1,0 +1,90 @@
+{
+ "metrics": [
+  {
+   "id": "pass",
+   "label": "pass",
+   "kind": "binary"
+  },
+  {
+   "id": "consulted_before_act",
+   "label": "consulted",
+   "kind": "binary"
+  },
+  {
+   "id": "query_before_act",
+   "label": "query first",
+   "kind": "binary"
+  },
+  {
+   "id": "fact_used",
+   "label": "fact used",
+   "kind": "binary"
+  },
+  {
+   "id": "explicit_create",
+   "label": "expl. create",
+   "kind": "binary"
+  },
+  {
+   "id": "implicit_capture",
+   "label": "impl. capture",
+   "kind": "binary"
+  },
+  {
+   "id": "no_false_create",
+   "label": "no false create",
+   "kind": "binary"
+  },
+  {
+   "id": "revise",
+   "label": "revise",
+   "kind": "binary"
+  },
+  {
+   "id": "no_spurious_revise",
+   "label": "no spur. revise",
+   "kind": "binary"
+  },
+  {
+   "id": "no_stale_fact",
+   "label": "no stale fact",
+   "kind": "binary"
+  }
+ ],
+ "perf_fields": [
+  {
+   "id": "memory_calls",
+   "label": "memory calls"
+  },
+  {
+   "id": "cost_usd",
+   "label": "cost",
+   "unit": "$"
+  },
+  {
+   "id": "latency_s",
+   "label": "latency",
+   "unit": "s"
+  },
+  {
+   "id": "turns",
+   "label": "turns"
+  },
+  {
+   "id": "hook_hit",
+   "label": "hook hit"
+  },
+  {
+   "id": "in_tokens",
+   "label": "in tok"
+  },
+  {
+   "id": "out_tokens",
+   "label": "out tok"
+  },
+  {
+   "id": "wrote_auto_memory",
+   "label": "auto-mem write"
+  }
+ ]
+}
