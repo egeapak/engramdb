@@ -1,0 +1,113 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..8047334 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,105 @@
++"""Export one month's finalized invoices as the CSV Finance imports.
++
++Format is fixed by Finance's import tool (German locale): `;` delimiter,
++dates as DD.MM.YYYY, amounts in integer cents, UTF-8 without a BOM.
++"""
+ import argparse
++import csv
+ import os
++import sqlite3
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# Drafts have no finalized_at. finalized_at is stored as naive UTC.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at IS NOT NULL AND finalized_at >= {p} AND finalized_at < {p}
++    ORDER BY finalized_at, id
++"""
++
++
++def previous_month():
++    today = datetime.now(timezone.utc)
++    return f"{today.year - 1}-12" if today.month == 1 else f"{today.year}-{today.month - 1:02d}"
++
++
++def month_window(month):
++    """[start, end) of the month as naive UTC datetimes, independent of the host zone."""
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_invoices(start, end):
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg
++
++        # Deployed envs go through a transaction-mode pooler: no prepared statements.
++        with psycopg.connect(url, prepare_threshold=None) as conn:
++            return conn.execute(QUERY.format(p="%s"), (start, end)).fetchall()
++    if not DEV_DB.exists():
++        raise SystemExit(f"no DATABASE_URL set and {DEV_DB.relative_to(ROOT)} missing; run scripts/migrate_dev.py")
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        return conn.execute(QUERY.format(p="?"), (start.isoformat(" "), end.isoformat(" "))).fetchall()
++    finally:
++        conn.close()
++
++
++def to_rows(invoices):
++    rows = []
++    for invoice_id, customer_id, subtotal, tax, finalized_at in invoices:
++        if isinstance(finalized_at, str):
++            finalized_at = datetime.fromisoformat(finalized_at)
++        subtotal, tax = int(subtotal), int(tax or 0)
++        rows.append([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%d.%m.%Y")])
++    return rows
++
++
++def write_csv(path, rows):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    tmp = path.with_suffix(".csv.tmp")
++    with open(tmp, "w", encoding="utf-8", newline="") as f:
++        writer = csv.writer(f, delimiter=";")
++        writer.writerow(HEADER)
++        writer.writerows(rows)
++    os.replace(tmp, path)
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month, UTC)")
++    parser.add_argument("--out", type=Path, default=None,
++                        help="output file (default: var/<env>/exports/<YYYY-MM>/invoices.csv)")
++    parser.add_argument("--dry-run", action="store_true", help="query and summarize, write nothing")
+     args = parser.parse_args()
++
++    month = args.month or previous_month()
++    start, end = month_window(month)
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month}/invoices.csv"
++    out = args.out or ROOT / "var" / args.env / key
++
++    rows = to_rows(fetch_invoices(start, end))
++    total = sum(r[4] for r in rows)
++    print(f"{args.env} {month}: {len(rows)} finalized invoices, total {total} cents "
++          f"(target s3://{bucket}/{key})")
++    if args.dry_run:
++        print("dry run: nothing written")
++        return 0
++    write_csv(out, rows)
++    print(f"wrote {out}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

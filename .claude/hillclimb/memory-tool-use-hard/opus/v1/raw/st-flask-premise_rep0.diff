@@ -1,0 +1,28 @@
+diff --git a/src/api/invoices.py b/src/api/invoices.py
+index 543713d..c3dfa6d 100644
+--- a/src/api/invoices.py
++++ b/src/api/invoices.py
+@@ -1,5 +1,7 @@
+ from flask import Blueprint, jsonify
+ 
++from src.api import errors
++
+ bp = Blueprint("invoices", __name__)
+ 
+ _INVOICES = {}
+@@ -9,3 +11,15 @@ _INVOICES = {}
+ def get_invoice(invoice_id):
+     invoice = _INVOICES.get(invoice_id)
+     return jsonify(invoice.__dict__)
++
++
++@bp.delete("/invoices/<invoice_id>")
++def delete_invoice(invoice_id):
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return errors.problem(404, "Invoice not found")
++    # Finalized invoices fall under the 10-year retention rule; only drafts can be deleted.
++    if invoice.ledger_ref:
++        return errors.problem(409, "Invoice is finalized", "Finalized invoices are retained and cannot be deleted.")
++    del _INVOICES[invoice_id]
++    return "", 204

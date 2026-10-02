@@ -1,0 +1,55 @@
+diff --git a/src/api/webhooks.py b/src/api/webhooks.py
+index c326872..7e70365 100644
+--- a/src/api/webhooks.py
++++ b/src/api/webhooks.py
+@@ -1,10 +1,49 @@
++import hashlib
++import hmac
++import os
++import time
++
+ from flask import Blueprint, request
+ 
++from src.api import errors
++
+ bp = Blueprint("webhooks", __name__)
+ 
++PSP_TIMESTAMP_TOLERANCE_SECONDS = 120
++
++
++def _verify_psp_request():
++    """Return None if the request is authentic, else a short reason."""
++    secret = os.environ.get("PSP_WEBHOOK_SECRET")
++    if not secret:
++        return "webhook secret is not configured"
++
++    signature = request.headers.get("Psp-Signature", "")
++    timestamp = request.headers.get("Psp-Signature-Timestamp", "")
++    if not signature or not timestamp:
++        return "missing signature headers"
++
++    try:
++        sent_at = int(timestamp)
++    except ValueError:
++        return "malformed timestamp"
++    if abs(time.time() - sent_at) > PSP_TIMESTAMP_TOLERANCE_SECONDS:
++        return "timestamp outside tolerance"
++
++    expected = hmac.new(
++        secret.encode(), request.get_data(cache=True), hashlib.sha256
++    ).hexdigest()
++    if not hmac.compare_digest(expected, signature):
++        return "signature mismatch"
++    return None
++
+ 
+ @bp.post("/webhooks/psp")
+ def psp_webhook():
++    reason = _verify_psp_request()
++    if reason:
++        return errors.problem(401, "Invalid webhook signature", reason)
++
+     event = request.get_json()
+-    # TODO: verify the event, then dispatch on event["type"]
++    # TODO: dispatch on event["type"]
+     return "", 204

@@ -220,7 +220,8 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
                              for path, (sha, _) in after.items()) if target else False
         g["revise"] = int(hit or target_changed)
     elif exp["revise"] is False:
-        g["no_spurious_revise"] = int(not revise_calls)
+        g["no_spurious_revise"] = int(all(_revises_stale_only(s["input"], seeded_ids)
+                                          for s in revise_calls))
 
     graded = [v for k, v in g.items() if k not in NOT_IN_PASS]
     g["pass"] = int(all(graded)) if graded else 1
@@ -253,7 +254,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         "wrote_auto_memory": int(bool(gaps["auto_memory_writes"])),
         "failed_tool_calls": failed_calls,
         "usage": usage,
-        "meta": {"gaps": gaps, "model_usage": final.get("modelUsage"),
+        "meta": {"gaps": gaps, "seeded_ids": seeded_ids, "model_usage": final.get("modelUsage"),
                  "claude_code_version": init.get("claude_code_version")},
     }
     return row, to_trace(steps, hooks, case["prompt"])
@@ -319,6 +320,60 @@ def _ids_match(target, tool_input, other_ids):
     return False
 
 
+def stale_keys():
+    """Seeds the fixture contradicts by design (`"stale": true`), plus every
+    seed a later seed supersedes. Revising one of these is never spurious."""
+    seeds = _seeds()
+    return ({k for k, m in seeds.items() if m.get("stale")}
+            | {m["supersedes"] for m in seeds.values() if m.get("supersedes")})
+
+
+def _revises_stale_only(tool_input, seeded_ids):
+    """True when every seeded memory this revision names is stale by design.
+    A revision that names no seeded memory at all counts as spurious."""
+    stale = stale_keys()
+    # The target fields only: `evidence` may quote the id of the newer
+    # memory that shows this one is stale.
+    target = {k: tool_input[k] for k in ("id", "supersedes") if k in tool_input}
+    named = [k for k, i in seeded_ids.items()
+             if _ids_match(i, target, [o for o in seeded_ids.values() if o != i])]
+    return bool(named) and all(k in stale for k in named)
+
+
+def seeded_ids_from_events(events):
+    """Rebuild seed key -> id for a stored run from its own events. Hook
+    entries render `] <title> (id: <id>`; tool results are JSON objects that
+    carry `id` with `title` or `summary`. Used to re-grade runs recorded
+    before rows kept the mapping."""
+    titles = {m["title"]: k for k, m in _seeds().items()}
+    found = {}
+
+    def walk(v):
+        if isinstance(v, dict):
+            mid = v.get("id")
+            name = v.get("title") or v.get("summary")
+            if isinstance(mid, str) and name in titles:
+                found.setdefault(titles[name], mid)
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+        elif isinstance(v, str):
+            s = v.strip()
+            if s[:1] in "{[":
+                try:
+                    walk(json.loads(s))
+                except ValueError:
+                    pass
+            for m in re.finditer(r"\] (.+?) \(id: ([0-9a-f-]{36})", v):
+                if m.group(1) in titles:
+                    found.setdefault(titles[m.group(1)], m.group(2))
+
+    walk(events)
+    return found
+
+
 _SEED_FILE = Path(__file__).parent / "seed_memories.json"
 _TITLES = None
 
@@ -329,11 +384,15 @@ def set_seed_file(path):
     _SEED_FILE, _TITLES = Path(path), None
 
 
-def _target_seed(case):
+def _seeds():
     global _TITLES
     if _TITLES is None:
         _TITLES = {m["key"]: m for m in json.loads(_SEED_FILE.read_text())}
-    return _TITLES.get(case.get("target"))
+    return _TITLES
+
+
+def _target_seed(case):
+    return _seeds().get(case.get("target"))
 
 
 def _target_title(case):

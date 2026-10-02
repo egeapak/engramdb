@@ -1,0 +1,119 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..4e3fd48
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,113 @@
++"""Delete finalized invoices (and their lines) that are past the retention period.
++
++Dry-run by default: reports what would be purged and writes nothing. Pass
++--execute to actually delete.
++
++    DATABASE_URL=postgresql://... python scripts/purge_invoices.py
++    DATABASE_URL=postgresql://... python scripts/purge_invoices.py --execute
++"""
++import argparse
++import os
++import sys
++
++import structlog
++
++log = structlog.get_logger()
++
++# Since the 2026 tax audit: 10 years after finalization. Legal defines the
++# period in days, so keep this as a literal day count.
++RETENTION_DAYS = 3650
++
++# Larger batches hold invoices row locks long enough to time out checkout (INC-2291).
++MAX_SAFE_BATCH = 500
++
++# finalized_at is stored as naive UTC, so the cutoff is computed in the database
++# in UTC rather than from the host clock (the ops host runs in Europe/Berlin).
++#
++# An invoice with any refund is never purged: the refunds table has no status
++# column, so an open refund cannot be told apart from a settled one.
++SELECT_EXPIRED = """
++    SELECT i.id
++    FROM invoices i
++    WHERE i.finalized_at IS NOT NULL
++      AND i.finalized_at < (now() AT TIME ZONE 'UTC') - make_interval(days => %(days)s)
++      AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.invoice_id = i.id)
++      AND i.id > %(after)s
++    ORDER BY i.id
++    LIMIT %(limit)s
++"""
++
++LOCK_STILL_EXPIRED = """
++    SELECT i.id
++    FROM invoices i
++    WHERE i.id = ANY(%(ids)s)
++      AND i.finalized_at < (now() AT TIME ZONE 'UTC') - make_interval(days => %(days)s)
++      AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.invoice_id = i.id)
++    FOR UPDATE OF i
++"""
++DELETE_LINES = "DELETE FROM invoice_lines WHERE invoice_id = ANY(%(ids)s)"
++DELETE_INVOICES = "DELETE FROM invoices WHERE id = ANY(%(ids)s) RETURNING id"
++
++
++def connect(url):
++    import psycopg
++
++    # Deployed environments go through a transaction-mode pooler on 6432:
++    # server-side prepared statements must be off.
++    return psycopg.connect(url, prepare_threshold=None, autocommit=False)
++
++
++def purge(conn, batch_size, execute):
++    """Walk expired invoices in id order, one short transaction per batch."""
++    after = ""
++    matched = deleted = 0
++    while True:
++        with conn.transaction():
++            ids = [r[0] for r in conn.execute(
++                SELECT_EXPIRED, {"days": RETENTION_DAYS, "after": after, "limit": batch_size},
++            ).fetchall()]
++            if not ids:
++                break
++            matched += len(ids)
++            after = ids[-1]
++            if execute:
++                # Lock the rows, then re-check: a refund may have been created since
++                # the select. Once locked, new refunds (FK on invoices) wait for us.
++                locked = [r[0] for r in conn.execute(
++                    LOCK_STILL_EXPIRED, {"ids": ids, "days": RETENTION_DAYS},
++                ).fetchall()]
++                conn.execute(DELETE_LINES, {"ids": locked})
++                gone = [r[0] for r in conn.execute(DELETE_INVOICES, {"ids": locked}).fetchall()]
++                deleted += len(gone)
++                log.info("invoices_purged", count=len(gone), first_id=ids[0], last_id=ids[-1])
++            else:
++                log.info("invoices_would_purge", count=len(ids), first_id=ids[0], last_id=ids[-1])
++    return matched, deleted
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    args = parser.parse_args()
++
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"--batch-size must be between 1 and {MAX_SAFE_BATCH}", file=sys.stderr)
++        return 3
++    url = os.environ.get("DATABASE_URL")
++    if not url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    log.info("purge_started", retention_days=RETENTION_DAYS, batch_size=args.batch_size, execute=args.execute)
++    with connect(url) as conn:
++        matched, deleted = purge(conn, args.batch_size, args.execute)
++    if args.execute:
++        log.info("purge_finished", matched=matched, deleted=deleted)
++    else:
++        log.info("purge_dry_run_finished", would_delete=matched)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

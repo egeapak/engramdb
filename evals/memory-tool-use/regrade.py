@@ -48,6 +48,11 @@ def regrade(variant):
                 grade.memory_op(s["name"]) in grade.CONSULT and (first_edit is None or i < first_edit)
                 for i, s in enumerate(tools)))
             g["consulted_before_act"] = int(g["query_before_act"] or grade.hook_delivered_body(case, hooks))
+        if case["expect"].get("revise") is False:
+            seeded = row["meta"].get("seeded_ids") or grade.seeded_ids_from_events(events)
+            revs = [s for s in tools if grade.memory_op(s["name"])
+                    and grade._is_revision(grade.memory_op(s["name"]), s["input"])]
+            g["no_spurious_revise"] = int(all(grade._revises_stale_only(s["input"], seeded) for s in revs))
         graded = [v for k, v in g.items() if k not in grade.NOT_IN_PASS and k != "pass"]
         g["pass"] = int(all(graded)) if graded else 1
         changed += g != row["grade"]

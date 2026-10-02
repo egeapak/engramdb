@@ -1,0 +1,76 @@
+diff --git a/src/api/invoices.py b/src/api/invoices.py
+index 543713d..7e197bf 100644
+--- a/src/api/invoices.py
++++ b/src/api/invoices.py
+@@ -1,11 +1,70 @@
+-from flask import Blueprint, jsonify
++import base64
++import binascii
++
++from flask import Blueprint, jsonify, request
++
++from src.api import errors
+ 
+ bp = Blueprint("invoices", __name__)
+ 
+ _INVOICES = {}
+ 
++DEFAULT_PAGE_SIZE = 50
++MAX_PAGE_SIZE = 250
++
++
++def _money(cents, ccy="USD"):
++    return {"minor": cents, "ccy": ccy}
++
++
++def _encode_cursor(invoice_id):
++    return base64.urlsafe_b64encode(invoice_id.encode()).decode()
++
++
++def _decode_cursor(cursor):
++    return base64.b64decode(cursor.encode(), altchars=b"-_", validate=True).decode()
++
++
++def _invoice_summary(invoice):
++    return {
++        "id": invoice.id,
++        "customer_id": invoice.customer_id,
++        "subtotal": _money(invoice.subtotal_cents),
++        "tax": _money(invoice.tax_cents),
++        "total": _money(invoice.subtotal_cents + invoice.tax_cents),
++    }
++
+ 
+ @bp.get("/invoices/<invoice_id>")
+ def get_invoice(invoice_id):
+     invoice = _INVOICES.get(invoice_id)
+     return jsonify(invoice.__dict__)
++
++
++@bp.get("/customers/<customer_id>/invoices")
++def list_customer_invoices(customer_id):
++    try:
++        page_size = int(request.args.get("page_size", DEFAULT_PAGE_SIZE))
++    except ValueError:
++        return errors.problem(400, "Invalid page_size", "page_size must be an integer")
++    if not 1 <= page_size <= MAX_PAGE_SIZE:
++        return errors.problem(400, "Invalid page_size", f"page_size must be between 1 and {MAX_PAGE_SIZE}")
++
++    after = None
++    cursor = request.args.get("cursor")
++    if cursor:
++        try:
++            after = _decode_cursor(cursor)
++        except (binascii.Error, UnicodeDecodeError):
++            return errors.problem(400, "Invalid cursor")
++
++    invoices = sorted(
++        (inv for inv in _INVOICES.values() if inv.customer_id == customer_id),
++        key=lambda inv: inv.id,
++    )
++    if after is not None:
++        invoices = [inv for inv in invoices if inv.id > after]
++
++    page = invoices[:page_size]
++    next_cursor = _encode_cursor(page[-1].id) if len(invoices) > page_size else None
++    return jsonify({"items": [_invoice_summary(inv) for inv in page], "next_cursor": next_cursor})

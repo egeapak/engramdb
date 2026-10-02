@@ -98,7 +98,8 @@
   "tags": [
    "ops",
    "export"
-  ]
+  ],
+  "stale": true
  },
  {
   "key": "errors",
@@ -530,7 +531,8 @@
   "invalidated_by": [
    "flags.toml",
    "src/billing/pdf.py"
-  ]
+  ],
+  "stale": true
  },
  {
   "key": "flask_routes",
@@ -550,7 +552,8 @@
   "premise": "while production pins Flask 1.x",
   "invalidated_by": [
    "pyproject.toml"
-  ]
+  ],
+  "stale": true
  },
  {
   "key": "notifier_logging",
