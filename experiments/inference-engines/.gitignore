@@ -1,0 +1,6 @@
+/target
+/target-*
+/models
+# Per-engine result files carry every vector (~0.5 MB each); summary.md and
+# build.tsv are the committed record.
+/results/*.json
