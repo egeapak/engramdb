@@ -1,0 +1,72 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..9bc4cec
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,66 @@
++"""Sends one real receipt through the email provider's sandbox account.
++
++Needs MAIL_API_KEY (the sandbox key from the dev secrets store, never the
++production key) and MAIL_SINK_URL (base URL of the sink inbox API).
++
++The sandbox answers 202 for every recipient but only delivers to the
++@sink.acme.test domain, so the test sends there and reads the message back
++from the sink inbox. It sends a single message: the sandbox is capped at
++500 messages a day for the whole team.
++"""
++import os
++import time
++import uuid
++from unittest import mock
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = [
++    pytest.mark.integration,
++    pytest.mark.skipif(
++        not (os.environ.get("MAIL_API_KEY") and os.environ.get("MAIL_SINK_URL")),
++        reason="needs MAIL_API_KEY (sandbox) and MAIL_SINK_URL",
++    ),
++]
++
++DELIVERY_TIMEOUT_S = 60
++POLL_INTERVAL_S = 2
++
++
++def _wait_for_message(to_addr):
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    while time.monotonic() < deadline:
++        resp = requests.get(
++            f"{os.environ['MAIL_SINK_URL'].rstrip('/')}/messages",
++            params={"to": to_addr},
++            timeout=10,
++        )
++        resp.raise_for_status()
++        messages = resp.json()
++        if messages:
++            return messages
++        time.sleep(POLL_INTERVAL_S)
++    pytest.fail(f"no message delivered to the sink within {DELIVERY_TIMEOUT_S}s")
++
++
++def test_send_receipt_is_delivered():
++    # A unique recipient per run, so earlier runs' messages can't satisfy the check.
++    to_addr = f"receipts-{uuid.uuid4().hex[:12]}@sink.acme.test"
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:8]}"
++
++    # render() is still a stub (raises NotImplementedError); stand in for it
++    # until templates are wired up. Everything after rendering is real.
++    body = f"<p>Receipt for {invoice_id}: 1200</p>"
++    with mock.patch.object(email, "render", return_value=body):
++        message_id = email.send_receipt(invoice_id, to_addr, 1200)
++
++    assert message_id
++
++    messages = _wait_for_message(to_addr)
++    assert len(messages) == 1
++    delivered = messages[0]
++    assert delivered["subject"] == "Your receipt"
++    assert invoice_id in delivered["html"]

@@ -1,0 +1,97 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..4c17652 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,86 @@
++"""Export the finalized invoices of one month as the CSV that Finance imports."""
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import datetime, timedelta
+ 
++# Finance's current accounting tool wants plain comma-separated files with ISO dates.
++DELIMITER = ","
++DATE_FORMAT = "%Y-%m-%d"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
+ 
+-def main():
+-    parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++    "WHERE finalized_at IS NOT NULL AND finalized_at >= %s AND finalized_at < %s "
++    "ORDER BY finalized_at, id"
++)
++
++
++def default_month(today=None):
++    """The previous month, as YYYY-MM (the cron runs on the 2nd)."""
++    first = (today or datetime.utcnow()).replace(day=1)
++    return (first - timedelta(days=1)).strftime("%Y-%m")
++
++
++def month_window(month):
++    # finalized_at is stored as naive UTC; see docs/ops/backfills.md
++    if os.environ.get("TZ") != "UTC":
++        raise RuntimeError(f"month window for {month} is ambiguous (zone not pinned); run with TZ=UTC")
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_rows(start, end):
++    import psycopg  # imported lazily so --help and tests don't need a database
++
++    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def render_csv(rows):
++    """rows: (id, customer_id, subtotal_cents, tax_cents, finalized_at). Returns UTF-8 bytes, no BOM."""
++    buf = io.StringIO(newline="")
++    writer = csv.writer(buf, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime(DATE_FORMAT)])
++    return buf.getvalue().encode("utf-8")
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
+-    args = parser.parse_args()
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--dry-run", action="store_true", help="write the CSV to stdout, upload nothing")
++    args = parser.parse_args(argv)
++
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    if args.env == "staging" and not args.dry_run:
++        # staging's EXPORT_BUCKET points at the production bucket
++        print("refusing to export from staging without --dry-run", file=sys.stderr)
++        return 2
++
++    month = args.month or default_month()
++    start, end = month_window(month)
++    if not os.environ.get("DATABASE_URL"):
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    data = render_csv(fetch_rows(start, end))
++    key = f"exports/{month}/invoices.csv"
++    print(f"exporting {args.env} {month} to {bucket}/{key} (dry_run={args.dry_run})", file=sys.stderr)
++    if args.dry_run:
++        sys.stdout.write(data.decode("utf-8"))
++        return 0
++
++    import boto3  # imported lazily; only needed for the real upload
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=data, ContentType="text/csv; charset=utf-8")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

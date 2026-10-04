@@ -1,0 +1,210 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..1a18f2d
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,90 @@
++import time
++import uuid
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from src.billing.refunds import refund
++
++from . import errors
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++_REFUNDS = {}
++_IDEMPOTENCY = {}
++
++
++def _money(cents, ccy):
++    return {"minor": cents, "ccy": ccy}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return errors.problem(428, "Idempotency key required", "Send an X-Acme-Idempotency header.")
++
++    stored = _IDEMPOTENCY.get(key)
++    if stored and time.time() - stored["at"] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored["body"])
++        resp.status_code = stored["status"]
++        return resp
++
++    actor_id = request.headers.get("X-Acme-Actor-Id")
++    if not actor_id:
++        return errors.problem(401, "Actor required", "Send an X-Acme-Actor-Id header.")
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return errors.problem(404, "Invoice not found")
++
++    body = request.get_json(silent=True) or {}
++    amount = body.get("amount")
++    if not isinstance(amount, dict) or type(amount.get("minor")) is not int:
++        return errors.problem(422, "Invalid amount", 'Send amount as {"minor": <int>, "ccy": "<code>"}.')
++    if amount.get("ccy") != invoice.currency:
++        return errors.problem(422, "Currency mismatch", f"Invoice is in {invoice.currency}.")
++
++    already = sum(r["refunded_cents"] for r in _REFUNDS.values() if r["invoice_id"] == invoice_id)
++    try:
++        result = refund(invoice, amount["minor"], already_refunded_cents=already)
++    except ValueError as exc:
++        return errors.problem(422, "Refund rejected", str(exc))
++
++    refund_id = str(uuid.uuid4())
++    _REFUNDS[refund_id] = result
++
++    if result["status"] == "issued":
++        log.info(
++            "ledger.refund_issued",
++            refund_id=refund_id,
++            invoice_id=invoice_id,
++            customer_id=invoice.customer_id,
++            amount_cents=result["refunded_cents"],
++            actor_id=actor_id,
++        )
++    else:
++        log.info(
++            "refund_pending_approval",
++            refund_id=refund_id,
++            invoice_id=invoice_id,
++            customer_id=invoice.customer_id,
++            amount_cents=result["refunded_cents"],
++            actor_id=actor_id,
++        )
++
++    response_body = {
++        "id": refund_id,
++        "invoice_id": invoice_id,
++        "amount": _money(result["refunded_cents"], invoice.currency),
++        "status": result["status"],
++    }
++    _IDEMPOTENCY[key] = {"at": time.time(), "status": 201, "body": response_body}
++    resp = jsonify(response_body)
++    resp.status_code = 201
++    return resp
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..643ed77 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -14,6 +14,7 @@ class Invoice:
+     customer_id: str
+     subtotal_cents: int
+     tax_cents: int = 0
++    currency: str = "USD"
+     ledger_ref: str | None = None
+     lines: list = field(default_factory=list)
+ 
+diff --git a/src/billing/refunds.py b/src/billing/refunds.py
+index 0fd8ca7..ff3cdf0 100644
+--- a/src/billing/refunds.py
++++ b/src/billing/refunds.py
+@@ -1,7 +1,13 @@
+ from .invoices import Invoice
+ 
++# Refunds above this need a second approver in the admin tool (agreed with Finance, June 2026).
++APPROVAL_THRESHOLD_CENTS = 50_000
+ 
+-def refund(invoice: Invoice, amount_cents: int):
+-    if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
++
++def refund(invoice: Invoice, amount_cents: int, already_refunded_cents: int = 0):
++    if amount_cents <= 0:
++        raise ValueError("refund amount must be positive")
++    if amount_cents + already_refunded_cents > invoice.subtotal_cents + invoice.tax_cents:
+         raise ValueError("refund exceeds invoice total")
+-    return {"invoice_id": invoice.id, "refunded_cents": amount_cents}
++    status = "pending_approval" if amount_cents > APPROVAL_THRESHOLD_CENTS else "issued"
++    return {"invoice_id": invoice.id, "refunded_cents": amount_cents, "status": status}
+diff --git a/tests/test_refunds_api.py b/tests/test_refunds_api.py
+new file mode 100644
+index 0000000..1f14d17
+--- /dev/null
++++ b/tests/test_refunds_api.py
+@@ -0,0 +1,75 @@
++import pytest
++from flask import Flask
++
++from src.api import refunds as refunds_api
++from src.api.invoices import _INVOICES
++from src.billing.invoices import Invoice
++
++
++@pytest.fixture
++def client():
++    app = Flask(__name__)
++    app.register_blueprint(refunds_api.bp)
++    _INVOICES.clear()
++    refunds_api._REFUNDS.clear()
++    refunds_api._IDEMPOTENCY.clear()
++    _INVOICES["inv_1"] = Invoice(id="inv_1", customer_id="cus_1", subtotal_cents=90_000, tax_cents=10_000)
++    return app.test_client()
++
++
++def post(client, minor, key="k1", ccy="USD", invoice_id="inv_1", actor="usr_1"):
++    headers = {}
++    if key:
++        headers["X-Acme-Idempotency"] = key
++    if actor:
++        headers["X-Acme-Actor-Id"] = actor
++    return client.post(f"/invoices/{invoice_id}/refunds", json={"amount": {"minor": minor, "ccy": ccy}}, headers=headers)
++
++
++def test_small_refund_is_issued(client):
++    resp = post(client, 50_000)
++    assert resp.status_code == 201
++    assert resp.json["status"] == "issued"
++    assert resp.json["amount"] == {"minor": 50_000, "ccy": "USD"}
++
++
++def test_large_refund_needs_approval(client):
++    resp = post(client, 50_001)
++    assert resp.status_code == 201
++    assert resp.json["status"] == "pending_approval"
++
++
++def test_missing_idempotency_key(client):
++    resp = post(client, 100, key=None)
++    assert resp.status_code == 428
++    assert resp.mimetype == "application/problem+json"
++
++
++def test_replays_same_key(client):
++    first = post(client, 100)
++    second = post(client, 100)
++    assert second.status_code == 201
++    assert second.json == first.json
++    assert len(refunds_api._REFUNDS) == 1
++
++
++def test_missing_actor(client):
++    assert post(client, 100, actor=None).status_code == 401
++
++
++def test_unknown_invoice(client):
++    assert post(client, 100, invoice_id="nope").status_code == 404
++
++
++def test_currency_mismatch(client):
++    assert post(client, 100, ccy="EUR").status_code == 422
++
++
++def test_cumulative_refunds_capped_at_total(client):
++    assert post(client, 60_000, key="a").status_code == 201
++    assert post(client, 40_001, key="b").status_code == 422
++    assert post(client, 40_000, key="c").status_code == 201
++
++
++def test_rejects_non_positive(client):
++    assert post(client, 0).status_code == 422

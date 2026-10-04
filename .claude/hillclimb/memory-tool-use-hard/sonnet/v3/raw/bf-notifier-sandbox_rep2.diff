@@ -1,0 +1,54 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..722d030
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,48 @@
++"""Sends one real receipt through the provider sandbox and reads it back from the sink.
++
++The sandbox silently drops (202, never delivers) anything not addressed to
++@sink.acme.test, and is capped at 500 messages/day for the whole team, so this
++sends exactly one message.
++
++Run from services/notifier:
++    MAIL_API_KEY=... MAIL_SINK_INBOX_URL=... \
++        python -m pytest --import-mode=importlib -m integration tests/test_email_integration.py
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = pytest.mark.integration
++
++SINK_INBOX_URL = os.environ.get("MAIL_SINK_INBOX_URL")  # sink inbox API, see provider docs
++DELIVERY_TIMEOUT_S = 30
++
++
++@pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and SINK_INBOX_URL),
++    reason="needs sandbox MAIL_API_KEY and MAIL_SINK_INBOX_URL",
++)
++def test_send_receipt_is_delivered_to_sink():
++    # Unique mailbox per run so we only ever match our own message.
++    to_addr = f"receipts+{uuid.uuid4().hex[:8]}@sink.acme.test"
++
++    msg_id = email.send_receipt("inv_integration", to_addr, 1200)
++    assert msg_id
++
++    headers = {"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"}
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    delivered = []
++    while time.monotonic() < deadline and not delivered:
++        resp = requests.get(SINK_INBOX_URL, params={"to": to_addr}, headers=headers, timeout=10)
++        resp.raise_for_status()
++        delivered = resp.json().get("messages", [])
++        if not delivered:
++            time.sleep(2)
++
++    assert delivered, f"{msg_id} was not delivered to {to_addr} within {DELIVERY_TIMEOUT_S}s"
++    assert delivered[0]["subject"] == "Your receipt"

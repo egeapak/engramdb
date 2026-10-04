@@ -296,6 +296,21 @@ fn class_header(class: Epistemic) -> &'static str {
 /// the source keeps repo-shipped text distinguishable from the user's own
 /// notes, because shared memories arrive with a git clone. All stored text
 /// is defanged before it is injected.
+/// The condition a fact or observation depends on, as a check to make
+/// before following it. A decision states its premise as its rationale
+/// ("because …") instead. With the body shown in full, nothing else prompts
+/// a look at the code before following a memory whose premise has lapsed:
+/// the `get` a cut preview caused used to be that moment.
+fn premise_clause(m: &engramdb::types::Memory) -> String {
+    match m.valid_while.as_ref().and_then(|v| v.premise.as_deref()) {
+        Some(premise) if !premise.trim().is_empty() => format!(
+            " — holds only while {}: check that before following it",
+            defang(premise)
+        ),
+        _ => String::new(),
+    }
+}
+
 fn format_class_entry(scored: &ScoredMemory, preview_chars: Option<usize>) -> Vec<String> {
     let m = &scored.memory;
     let tail = trailer(m);
@@ -329,6 +344,7 @@ fn format_class_entry(scored: &ScoredMemory, preview_chars: Option<usize>) -> Ve
                 line.push_str(&format!(", verified {}", v.format("%Y-%m-%d")));
             }
             line.push_str(&format!("; {})", tail));
+            line.push_str(&premise_clause(m));
             line
         }
         Epistemic::Fact => {
@@ -337,6 +353,7 @@ fn format_class_entry(scored: &ScoredMemory, preview_chars: Option<usize>) -> Ve
                 line.push_str(&format!(" (verified {})", v.format("%Y-%m-%d")));
             }
             line.push_str(&format!(" ({})", tail));
+            line.push_str(&premise_clause(m));
             line
         }
     };
@@ -2155,6 +2172,28 @@ mod tests {
             "{previews:?}"
         );
         assert!(ctx.len() <= 1000, "{}", ctx.len());
+    }
+
+    #[test]
+    fn test_fact_with_premise_shows_it_as_a_check() {
+        use engramdb::types::Validity;
+        let mut m = Memory::new(
+            MemoryType::Convention,
+            "Use the old decorator",
+            "body",
+            Provenance::human(),
+        );
+        m.valid_while = Some(Validity {
+            premise: Some("prod pins v1".to_string()),
+            ..Default::default()
+        });
+        let line = &format_class_entry(&scored(m.clone()), None)[0];
+        assert!(
+            line.contains("holds only while prod pins v1: check that before following it"),
+            "{line}"
+        );
+        m.valid_while = None;
+        assert!(!format_class_entry(&scored(m), None)[0].contains("holds only while"));
     }
 
     #[test]

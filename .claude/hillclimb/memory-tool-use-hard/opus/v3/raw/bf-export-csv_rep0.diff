@@ -1,0 +1,110 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..348c084 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,100 @@
++"""Export one month's finalized invoices as the CSV that Finance imports."""
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++# Finance's import tool runs with a German locale and rejects anything else.
++DELIMITER = ";"
++DATE_FORMAT = "%d.%m.%Y"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# finalized_at is stored as naive UTC; drafts have no finalized_at and are excluded.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at IS NOT NULL AND finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def previous_month(now=None):
++    now = now or datetime.now(timezone.utc)
++    return f"{now.year - 1}-12" if now.month == 1 else f"{now.year}-{now.month - 1:02d}"
++
++
++def month_window(month):
++    """Naive-UTC [start, end) bounds, matching how finalized_at is stored."""
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_invoices(database_url, start, end):
++    import psycopg
++
++    # Deployed environments go through a transaction-mode pooler: no prepared statements,
++    # and keep the transaction to this one read.
++    with psycopg.connect(database_url, prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def render_csv(rows):
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(HEADER)
++    seen = set()
++    for invoice_id, customer_id, subtotal_cents, tax_cents, finalized_at in rows:
++        if invoice_id in seen:
++            raise ValueError(f"invoice {invoice_id} returned twice")
++        seen.add(invoice_id)
++        subtotal_cents, tax_cents = int(subtotal_cents), int(tax_cents)
++        writer.writerow([
++            invoice_id,
++            customer_id,
++            subtotal_cents,
++            tax_cents,
++            subtotal_cents + tax_cents,
++            finalized_at.strftime(DATE_FORMAT),
++        ])
++    return buf.getvalue()
+ 
+ 
+ def main():
+-    parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
++    parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: the previous month in UTC)")
++    parser.add_argument("--out-dir", default=".", help="root under which exports/<YYYY-MM>/invoices.csv is written")
++    parser.add_argument("--dry-run", action="store_true", help="query and report, but write nothing")
+     args = parser.parse_args()
+-    bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++
++    month = args.month or previous_month()
++    start, end = month_window(month)
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    rows = fetch_invoices(database_url, start, end)
++    content = render_csv(rows)
++    key = Path("exports") / month / "invoices.csv"
++
++    if args.dry_run:
++        print(f"[dry run] {args.env}: {len(rows)} finalized invoices for {month}; "
++              f"would write {key}")
++        return 0
++
++    path = Path(args.out_dir) / key
++    path.parent.mkdir(parents=True, exist_ok=True)
++    # UTF-8 without a BOM; newline="" so the csv line endings are written as-is.
++    with open(path, "w", encoding="utf-8", newline="") as f:
++        f.write(content)
++    print(f"{args.env}: wrote {len(rows)} finalized invoices for {month} to {path}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

@@ -1,0 +1,103 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..7834588
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,85 @@
++import time
++import uuid
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from src.billing.refunds import refund as compute_refund
++
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# key -> (stored_at, body, status); in-memory like _INVOICES
++_REPLAYS = {}
++
++
++def _money(cents, currency):
++    return {"minor": cents, "ccy": currency}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    actor_id = request.headers.get("X-Actor-Id")
++    if not actor_id:
++        return problem(401, "Unauthenticated", "Send the X-Actor-Id header.")
++
++    now = time.time()
++    replay_key = (invoice_id, key)
++    stored = _REPLAYS.get(replay_key)
++    if stored and now - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[1])
++        resp.status_code = stored[2]
++        return resp
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    try:
++        compute_refund(invoice, amount_cents)
++    except ValueError as exc:
++        return problem(422, "Refund exceeds invoice total", str(exc))
++
++    refund_id = str(uuid.uuid4())
++    if amount_cents > APPROVAL_THRESHOLD_CENTS:
++        status = "pending_approval"
++        event = "ledger.refund_requested"
++    else:
++        status = "issued"
++        event = "ledger.refund_issued"
++
++    log.info(
++        event,
++        actor_id=actor_id,
++        refund_id=refund_id,
++        invoice_id=invoice.id,
++        customer_id=invoice.customer_id,
++        amount_cents=amount_cents,
++    )
++
++    body = {
++        "id": refund_id,
++        "invoice_id": invoice.id,
++        "amount": _money(amount_cents, invoice.currency),
++        "status": status,
++    }
++    _REPLAYS[replay_key] = (now, body, 201)
++    resp = jsonify(body)
++    resp.status_code = 201
++    return resp
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..643ed77 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -14,6 +14,7 @@ class Invoice:
+     customer_id: str
+     subtotal_cents: int
+     tax_cents: int = 0
++    currency: str = "USD"
+     ledger_ref: str | None = None
+     lines: list = field(default_factory=list)
+ 

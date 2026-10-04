@@ -1,0 +1,23 @@
+diff --git a/src/api/invoices.py b/src/api/invoices.py
+index 543713d..44ee89f 100644
+--- a/src/api/invoices.py
++++ b/src/api/invoices.py
+@@ -1,5 +1,7 @@
+ from flask import Blueprint, jsonify
+ 
++from .errors import problem
++
+ bp = Blueprint("invoices", __name__)
+ 
+ _INVOICES = {}
+@@ -9,3 +11,10 @@ _INVOICES = {}
+ def get_invoice(invoice_id):
+     invoice = _INVOICES.get(invoice_id)
+     return jsonify(invoice.__dict__)
++
++
++@bp.route("/invoices/<invoice_id>", methods=["DELETE"])
++def delete_invoice(invoice_id):
++    if _INVOICES.pop(invoice_id, None) is None:
++        return problem(404, "Invoice not found", f"No invoice with id {invoice_id}")
++    return "", 204

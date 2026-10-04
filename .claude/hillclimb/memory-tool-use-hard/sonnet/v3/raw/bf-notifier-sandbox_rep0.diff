@@ -1,0 +1,67 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..f54b2cd
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,61 @@
++"""Sends one real receipt through the email provider sandbox and reads it back.
++
++The sandbox only delivers to @sink.acme.test (anything else is accepted with a
++202 and silently dropped), and it is capped at 500 messages/day for the whole
++team, so this sends exactly one message.
++
++Needs:
++  MAIL_API_KEY    sandbox key from the dev secrets store
++  SINK_INBOX_URL  messages endpoint of the sink inbox API; queried with
++                  ?to=<address> and expected to return a JSON list of
++                  messages carrying an "id" (adjust _fetch_delivered if the
++                  real response shape differs)
++
++Run from services/notifier:
++  python -m pytest --import-mode=importlib tests/test_email_integration.py
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and os.environ.get("SINK_INBOX_URL")),
++    reason="MAIL_API_KEY and SINK_INBOX_URL must be set for sandbox tests",
++)
++
++DELIVERY_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++
++def _fetch_delivered(to_addr):
++    resp = requests.get(
++        os.environ["SINK_INBOX_URL"], params={"to": to_addr}, timeout=10
++    )
++    resp.raise_for_status()
++    return resp.json()
++
++
++def test_send_receipt_is_delivered_to_sink_inbox():
++    # Unique local part so reruns and teammates' tests can't satisfy this one.
++    to_addr = f"receipts+{uuid.uuid4().hex[:12]}@sink.acme.test"
++
++    msg_id = email.send_receipt("inv_integration", to_addr, 1200)
++    assert msg_id
++
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    delivered = []
++    while time.monotonic() < deadline:
++        delivered = _fetch_delivered(to_addr)
++        if delivered:
++            break
++        time.sleep(POLL_INTERVAL_S)
++
++    assert any(m.get("id") == msg_id for m in delivered), (
++        f"message {msg_id} not found in sink inbox for {to_addr} "
++        f"after {DELIVERY_TIMEOUT_S}s"
++    )

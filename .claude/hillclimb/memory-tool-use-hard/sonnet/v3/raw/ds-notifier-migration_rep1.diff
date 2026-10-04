@@ -1,0 +1,12 @@
+diff --git a/services/notifier/migrations/202609011200_create_outbox.sql b/services/notifier/migrations/202609011200_create_outbox.sql
+index 79c6093..ab3c5bc 100644
+--- a/services/notifier/migrations/202609011200_create_outbox.sql
++++ b/services/notifier/migrations/202609011200_create_outbox.sql
+@@ -1,6 +1,6 @@
+ CREATE TABLE outbox (
+     id TEXT PRIMARY KEY,
+     template TEXT NOT NULL,
+-    recipent TEXT NOT NULL,
++    recipient TEXT NOT NULL,
+     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+ );

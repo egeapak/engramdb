@@ -1,0 +1,100 @@
+diff --git a/migrations/0008_add_finalized_at.sql b/migrations/0008_add_finalized_at.sql
+new file mode 100644
+index 0000000..7d1200c
+--- /dev/null
++++ b/migrations/0008_add_finalized_at.sql
+@@ -0,0 +1 @@
++ALTER TABLE invoices ADD COLUMN finalized_at TIMESTAMPTZ;
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..020664f 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,14 +1,87 @@
+ import argparse
++import csv
++import io
+ import os
++from datetime import date, datetime, timezone
++
++import structlog
++
++log = structlog.get_logger()
++
++# Finance's current accounting tool wants plain comma-separated files with ISO dates.
++DELIMITER = ","
++DATE_FORMAT = "%Y-%m-%d"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++QUERY = """
++SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++FROM invoices
++WHERE finalized_at IS NOT NULL AND finalized_at >= %s AND finalized_at < %s
++ORDER BY finalized_at, id
++"""
++
++
++def month_bounds(month):
++    start = datetime(month.year, month.month, 1, tzinfo=timezone.utc)
++    end = datetime(month.year + month.month // 12, month.month % 12 + 1, 1, tzinfo=timezone.utc)
++    return start, end
++
++
++def previous_month(today):
++    return date(today.year - (today.month == 1), (today.month - 2) % 12 + 1, 1)
++
++
++def fetch_invoices(conn, month):
++    start, end = month_bounds(month)
++    with conn.cursor() as cur:
++        cur.execute(QUERY, (start, end))
++        return cur.fetchall()
++
++
++def render_csv(rows):
++    # newline="" semantics: let the csv module own line endings.
++    buf = io.StringIO(newline="")
++    writer = csv.writer(buf, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(HEADER)
++    for inv_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([inv_id, customer_id, subtotal, tax, subtotal + tax,
++                         finalized_at.astimezone(timezone.utc).strftime(DATE_FORMAT)])
++    return buf.getvalue()
++
++
++def connect():
++    import psycopg
++
++    # Deployed DBs sit behind a transaction-mode pooler: no prepared statements.
++    return psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None)
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", help="YYYY-MM (default: previous month)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
++    if args.month:
++        month = datetime.strptime(args.month, "%Y-%m").date()
++    else:
++        month = previous_month(date.today())
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month:%Y-%m}/invoices.csv"
++    print(f"exporting {args.env} {month:%Y-%m} to {bucket}/{key} (dry_run={args.dry_run})")
++
++    with connect() as conn:
++        rows = fetch_invoices(conn, month)
++    body = render_csv(rows).encode("utf-8")  # UTF-8, no BOM
++    log.info("invoice_export_rendered", env=args.env, month=f"{month:%Y-%m}", invoices=len(rows))
++
++    if args.dry_run:
++        print(f"dry run: would upload {len(body)} bytes, {len(rows)} invoices")
++        return
++    import boto3
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=body, ContentType="text/csv; charset=utf-8")
++    print(f"uploaded {len(rows)} invoices")
+ 
+ 
+ if __name__ == "__main__":

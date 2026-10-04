@@ -5,3 +5,6 @@ Why (measured on v2): cache reads are 77-83% of cost, so turns are the lever. Ab
 Prediction: gets 1.4-1.7 -> ~0.3 per case; memory-only turns -1 per case; cost -8 to -13% (Opus 0.245 -> ~0.215, 80% interval 0.200-0.235; Sonnet 0.118 -> ~0.104, 0.097-0.113); hook text per case not higher than v2 (6.2k / 7.0k chars).
 Falsifier: if memory-only turns drop by less than 0.5 per case, the lever is dead.
 Gates (pre-registered): pass within 3 runs of v2 (whole and test), guardrails within 3 runs, cost at least 5% lower, mechanism visible.
+
+Result (pre-registered gates vs v2): mechanism confirmed on both models (gets 1.4-1.7 -> 0.1 per case, memory-only turns 2.1 -> 0.4-0.75, turns -1.5 to -2.0). Cost: Opus -5.2% (0.2448 -> 0.2320), Sonnet -11.8% (0.1180 -> 0.1041). Quality: Opus 130 -> 129 (passes); Sonnet 133 -> 129, outside the 3-run band (fails), all on train: st-flask-premise 3/3 -> 0/3, mm-dunning-job 2/3 -> 0/3.
+Cause (st-flask-premise, train trace): with the body shown in full, Sonnet followed the memory's stale premise ("production pins Flask 1.1") instead of fetching it, grepping the repo and challenging it as it did in v2. The `get` a cut preview caused was also the moment Claude verified a memory. Verdict: not adopted as is; v4 adds the premise to fact and observation lines as a check to make.

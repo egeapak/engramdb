@@ -1,0 +1,93 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..c1d5acf
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,87 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# idempotency key -> (stored_at, body, status_code)
++_IDEMPOTENT_RESPONSES = {}
++
++
++def _money(cents, ccy="USD"):
++    return {"minor": cents, "ccy": ccy}
++
++
++@bp.route("/invoices/<invoice_id>/refunds", methods=["POST"])
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Precondition Required", "X-Acme-Idempotency header is required")
++
++    stored = _IDEMPOTENT_RESPONSES.get((invoice_id, key))
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[1])
++        resp.status_code = stored[2]
++        return resp
++
++    actor_id = request.headers.get("X-Actor-Id")
++    if not actor_id:
++        return problem(400, "Bad Request", "X-Actor-Id header is required")
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Not Found", "invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount = payload.get("amount_cents")
++    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
++        return problem(422, "Unprocessable Entity", "amount_cents must be a positive integer")
++
++    if amount > APPROVAL_THRESHOLD_CENTS:
++        # Large refunds need a second approver; do not issue directly.
++        if amount > invoice.subtotal_cents + invoice.tax_cents:
++            return problem(422, "Unprocessable Entity", "refund exceeds invoice total")
++        status = "pending_approval"
++    else:
++        try:
++            refund(invoice, amount)
++        except ValueError as exc:
++            return problem(422, "Unprocessable Entity", str(exc))
++        status = "issued"
++
++    body = {
++        "invoice_id": invoice.id,
++        "amount": _money(amount),
++        "status": status,
++    }
++    if status == "issued":
++        log.info(
++            "ledger.refund_issued",
++            actor_id=actor_id,
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            amount_cents=amount,
++        )
++    else:
++        log.info(
++            "ledger.refund_requested",
++            actor_id=actor_id,
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            amount_cents=amount,
++        )
++
++    _IDEMPOTENT_RESPONSES[(invoice_id, key)] = (time.time(), body, 201)
++    resp = jsonify(body)
++    resp.status_code = 201
++    return resp

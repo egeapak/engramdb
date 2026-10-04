@@ -1,0 +1,114 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..b084bff
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,96 @@
++import time
++import uuid
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from src.billing.refunds import refund as compute_refund
++
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++_REFUNDS = {}
++_IDEMPOTENT_RESPONSES = {}
++
++
++def _money(cents, currency):
++    return {"minor": cents, "ccy": currency}
++
++
++def _replay(key):
++    stored = _IDEMPOTENT_RESPONSES.get(key)
++    if stored is None:
++        return None
++    stored_at, body, status = stored
++    if time.time() - stored_at > IDEMPOTENCY_TTL_SECONDS:
++        del _IDEMPOTENT_RESPONSES[key]
++        return None
++    resp = jsonify(body)
++    resp.status_code = status
++    return resp
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    idem_key = request.headers.get("X-Acme-Idempotency")
++    if not idem_key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    actor_id = request.headers.get("X-Actor-Id")
++    if not actor_id:
++        return problem(400, "Actor required", "Send the X-Actor-Id header.")
++
++    scoped_key = (invoice_id, idem_key)
++    replayed = _replay(scoped_key)
++    if replayed is not None:
++        return replayed
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    try:
++        result = compute_refund(invoice, amount_cents)
++    except ValueError as exc:
++        return problem(422, "Refund not allowed", str(exc))
++
++    if amount_cents > APPROVAL_THRESHOLD_CENTS:
++        status = "pending_approval"
++        event = "ledger.refund_requested"
++    else:
++        status = "issued"
++        event = "ledger.refund_issued"
++
++    refund_id = str(uuid.uuid4())
++    _REFUNDS[refund_id] = {**result, "id": refund_id, "status": status}
++    log.info(
++        event,
++        refund_id=refund_id,
++        invoice_id=invoice.id,
++        customer_id=invoice.customer_id,
++        amount_cents=amount_cents,
++        actor_id=actor_id,
++    )
++
++    body = {
++        "id": refund_id,
++        "invoice_id": invoice.id,
++        "amount": _money(amount_cents, invoice.currency),
++        "status": status,
++    }
++    _IDEMPOTENT_RESPONSES[scoped_key] = (time.time(), body, 201)
++    resp = jsonify(body)
++    resp.status_code = 201
++    return resp
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..17d6429 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -15,6 +15,7 @@ class Invoice:
+     subtotal_cents: int
+     tax_cents: int = 0
+     ledger_ref: str | None = None
++    currency: str = "USD"
+     lines: list = field(default_factory=list)
+ 
+ 

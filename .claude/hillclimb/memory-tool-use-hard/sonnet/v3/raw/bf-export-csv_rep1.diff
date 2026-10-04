@@ -1,0 +1,98 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..6d17185 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,91 @@
++"""Export the month's finalized invoices as the CSV Finance imports."""
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import datetime
++
++COLUMNS = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++
++def month_window(month):
++    # finalized_at is stored as naive UTC, so build the window directly in UTC
++    # instead of depending on the host zone; see docs/ops/backfills.md
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def default_month():
++    # the cron runs on the 2nd and exports the previous month
++    now = datetime.utcnow()
++    return f"{now.year - 1}-12" if now.month == 1 else f"{now.year}-{now.month - 1:02d}"
++
++
++def fetch_rows(database_url, start, end):
++    import psycopg
++
++    # one short read-only query; deployed environments go through the pooler
++    with psycopg.connect(database_url) as conn:
++        return conn.execute(
++            "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++            "WHERE finalized_at >= %s AND finalized_at < %s ORDER BY finalized_at, id",
++            (start, end),
++        ).fetchall()
++
++
++def render_csv(rows):
++    """Semicolon-delimited, integer cents, DD.MM.YYYY dates, as the German-locale import requires."""
++    buf = io.StringIO(newline="")
++    writer = csv.writer(buf, delimiter=";", lineterminator="\n")
++    writer.writerow(COLUMNS)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%d.%m.%Y")])
++    return buf.getvalue()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--output", help="also write the CSV to this local path")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
++
++    if args.env == "staging" and not args.dry_run:
++        # staging's EXPORT_BUCKET points at the production bucket
++        print("refusing to run against staging without --dry-run", file=sys.stderr)
++        return 1
++
++    month = args.month or default_month()
++    start, end = month_window(month)
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month}/invoices.csv"
++    print(f"exporting {args.env} {month} to {bucket}/{key} (dry_run={args.dry_run})")
++
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 1
++
++    rows = fetch_rows(database_url, start, end)
++    data = render_csv(rows)
++    print(f"{len(rows)} finalized invoices, total {sum(r[2] + r[3] for r in rows)} cents")
++
++    if args.output:
++        with open(args.output, "w", encoding="utf-8", newline="") as f:  # utf-8, no BOM
++            f.write(data)
++    if args.dry_run:
++        print("dry run: nothing uploaded")
++        return 0
++
++    import boto3
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=data.encode("utf-8"), ContentType="text/csv")
++    print(f"uploaded s3://{bucket}/{key}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

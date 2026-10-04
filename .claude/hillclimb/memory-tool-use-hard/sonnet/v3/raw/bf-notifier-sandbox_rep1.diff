@@ -1,0 +1,66 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..8fae3d1
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,60 @@
++"""Integration test: sends a real email through the provider sandbox.
++
++Needs MAIL_API_KEY (sandbox key from the dev secrets store) and
++SINK_INBOX_URL (the sink inbox API's list-messages endpoint for the
++receipts@sink.acme.test mailbox). Skipped when either is missing.
++
++The sandbox silently drops mail to anything outside @sink.acme.test, and is
++capped at 500 messages/day for the whole team, so this sends exactly one.
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = pytest.mark.integration
++
++SINK_ADDR = "receipts@sink.acme.test"
++POLL_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++
++@pytest.fixture(autouse=True)
++def _require_sandbox():
++    for var in ("MAIL_API_KEY", "SINK_INBOX_URL"):
++        if not os.environ.get(var):
++            pytest.skip(f"{var} not set")
++
++
++def _find_message(inbox_url, invoice_id):
++    deadline = time.monotonic() + POLL_TIMEOUT_S
++    while time.monotonic() < deadline:
++        resp = requests.get(
++            inbox_url,
++            headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++            params={"to": SINK_ADDR},
++            timeout=10,
++        )
++        resp.raise_for_status()
++        # Assumes the sink API returns {"messages": [{"id", "subject", "html"}, ...]}
++        for msg in resp.json().get("messages", []):
++            if invoice_id in msg.get("html", ""):
++                return msg
++        time.sleep(POLL_INTERVAL_S)
++    return None
++
++
++def test_send_receipt_is_delivered_to_sink():
++    # Unique id so we only match the message this run sent.
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:12]}"
++
++    message_id = email.send_receipt(invoice_id, SINK_ADDR, 1200)
++
++    assert message_id
++    msg = _find_message(os.environ["SINK_INBOX_URL"], invoice_id)
++    assert msg is not None, f"{invoice_id} not delivered to {SINK_ADDR} within {POLL_TIMEOUT_S}s"
++    assert msg["subject"] == "Your receipt"
