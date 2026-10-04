@@ -1697,11 +1697,11 @@ pub struct HooksConfig {
 
 impl HooksConfig {
     fn default_prompt_context_budget() -> usize {
-        1500
+        3000
     }
 
     fn default_preview_chars() -> usize {
-        160
+        1000
     }
 }
 
@@ -2357,7 +2357,7 @@ mod tests {
         let parsed: EngramConfig = toml::from_str("").unwrap();
         assert_eq!(parsed.epistemic, EpistemicConfig::default());
         assert_eq!(parsed.hooks, HooksConfig::default());
-        assert_eq!(parsed.hooks.prompt_context_budget, 1500);
+        assert_eq!(parsed.hooks.prompt_context_budget, 3000);
         assert!(parsed.hooks.class_order.is_none());
         assert_eq!(parsed.content, ContentConfig::default());
     }

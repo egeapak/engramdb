@@ -3,13 +3,15 @@
  "reps": 3,
  "model": "claude-sonnet-5-5",
  "goal": {
-  "target": "pass",
-  "direction": "higher",
+  "target": "cost_usd",
+  "direction": "lower",
   "hold": [
+   "pass",
    "no_false_create",
-   "no_spurious_revise",
-   "cost_usd"
-  ]
+   "no_spurious_revise"
+  ],
+  "incumbent": "v2",
+  "phase": "cost climb, started after the pass climb plateaued at round 2"
  },
  "approve_each_round": false,
  "stop": "until plateau: <noise-floor gain on test pass for 3 rounds in a row, or a guardrail regresses outside noise",
@@ -182,5 +184,13 @@
   "round": 2,
   "whole": "133/135",
   "test": "68/69"
+ },
+ "cost_gates": {
+  "quality_band": "whole-set and test pass each at most 3 runs below v2; no_false_create and no_spurious_revise at most 3 runs below v2",
+  "cost_margin": "at least 5% lower $/case than v2 (noise bar ~2.5-2.8%)",
+  "mechanism": "the predicted mechanism shows in the telemetry (e.g. fewer get calls and memory-only turns)",
+  "stop": "two consecutive rounds fail to beat the incumbent beyond noise, or 3 rounds",
+  "pricing_basis": "total_cost_usd reported by Claude Code per run (cache-adjusted)",
+  "incumbent_cost_per_case": 0.118
  }
 }

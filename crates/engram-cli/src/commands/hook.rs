@@ -412,6 +412,11 @@ const DEFAULT_PREVIEW_CHARS: usize = 160;
 /// A memory and the lines it renders to, as the budgeted formatter builds them.
 type RenderedEntry<'a> = (&'a ScoredMemory, Vec<String>);
 
+/// UserPromptSubmit injects this many memories, from a pool of up to
+/// `PROMPT_POOL` so that memories this session already has can be replaced.
+const PROMPT_MAX_RESULTS: usize = 5;
+const PROMPT_POOL: usize = 10;
+
 /// PreToolUse injects this many memories, chosen from a gated pool of up to
 /// `PRE_TOOL_USE_POOL` by nearest enclosing scope.
 const PRE_TOOL_USE_MAX_RESULTS: usize = 5;
@@ -679,7 +684,8 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
     // ancestor-scoped ones are not re-injected on each edit; SessionStart and
     // `query` still surface them.
     let current_task = session_task_for(input, dir);
-    let mut memories = suppress_task_scoped(result.memories, current_task.as_deref());
+    let memories = suppress_task_scoped(result.memories, current_task.as_deref());
+    let mut memories = drop_already_shown(memories, input, dir);
     memories.sort_by_key(|sm| {
         engramdb::scope::physical::enclosing_depth(&sm.memory.physical, &relative_path)
             .unwrap_or(usize::MAX)
@@ -704,6 +710,7 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         class_order.as_deref(),
         engine.config().hooks.preview_chars,
     );
+    record_shown(&memories, &context, input, dir);
     let json = build_hook_response("PreToolUse", &context)?;
     Ok(Some(json))
 }
@@ -809,6 +816,10 @@ async fn process_session_start(
     if let Some(hint) = hint {
         context.push_str(&hint);
     }
+    // A new, cleared or compacted context holds nothing the earlier hooks
+    // injected: start the record over from what this injection shows.
+    forget_shown(input, dir);
+    record_shown(&memories, &context, input, dir);
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
 }
@@ -881,6 +892,48 @@ fn extract_session_id(input: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Drop the memories this session's hooks already injected: the
+/// conversation still holds them, and a repeat is re-read on every later
+/// turn for nothing (see `engramdb::storage::hook_seen`).
+fn drop_already_shown(memories: Vec<ScoredMemory>, input: &str, dir: &Path) -> Vec<ScoredMemory> {
+    let Some(session_id) = extract_session_id(input) else {
+        return memories;
+    };
+    let seen = engramdb::storage::hook_seen::seen_ids(dir, &session_id);
+    if seen.is_empty() {
+        return memories;
+    }
+    memories
+        .into_iter()
+        .filter(|sm| !seen.contains(&sm.memory.id))
+        .collect()
+}
+
+/// Record the memories `context` actually rendered (an entry the budget left
+/// out was not shown, so a later hook may still show it).
+fn record_shown(memories: &[ScoredMemory], context: &str, input: &str, dir: &Path) {
+    let Some(session_id) = extract_session_id(input) else {
+        return;
+    };
+    let ids: Vec<String> = memories
+        .iter()
+        .filter(|sm| context.contains(&format!("id: {}", sm.memory.id)))
+        .map(|sm| sm.memory.id.clone())
+        .collect();
+    if let Err(e) = engramdb::storage::hook_seen::mark_seen(dir, &session_id, &ids) {
+        tracing::debug!("hook record write failed (non-fatal): {e}");
+    }
+}
+
+/// Forget what this session's hooks injected: its context was reset.
+fn forget_shown(input: &str, dir: &Path) {
+    if let Some(session_id) = extract_session_id(input) {
+        if let Err(e) = engramdb::storage::hook_seen::clear_seen(dir, &session_id) {
+            tracing::debug!("hook record clear failed (non-fatal): {e}");
+        }
+    }
+}
+
 /// Extract the submitted prompt text from a UserPromptSubmit event.
 fn extract_prompt(input: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(input).ok()?;
@@ -915,7 +968,8 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
     let query = RetrievalQuery {
         mode: RetrievalMode::Filter,
         query: Some(prompt),
-        max_results: Some(5),
+        // Room to replace memories this session already has (dropped below).
+        max_results: Some(PROMPT_POOL),
         include_expired: Some(false),
         // Content, not Summary: Summary makes the engine clear `content`, and
         // the body preview below then rendered as an empty line.
@@ -934,6 +988,8 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
 
     let current_task = session_task_for(input, dir);
     let memories = suppress_task_scoped(result.memories, current_task.as_deref());
+    let mut memories = drop_already_shown(memories, input, dir);
+    memories.truncate(PROMPT_MAX_RESULTS);
     if memories.is_empty() {
         return Ok(None);
     }
@@ -948,6 +1004,7 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
         class_order.as_deref(),
         engine.config().hooks.preview_chars,
     );
+    record_shown(&memories, &context, input, dir);
     let json = build_hook_response("UserPromptSubmit", &context)?;
     Ok(Some(json))
 }
@@ -1074,6 +1131,8 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
         return Ok(());
     }
 
+    forget_shown(&input, dir);
+    engramdb::storage::hook_seen::prune_stale(dir);
     let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
         Ok(t) => t,
         Err(e) => {
@@ -1307,9 +1366,12 @@ memory create tool.";
 /// Run the PreCompact hook handler (§8.5.4): inject a short static reminder.
 /// Same additionalContext contract as the other hooks; if the runtime
 /// ignores it for PreCompact events, the output is harmlessly dropped.
-pub async fn run_hook_pre_compact(_dir: &Path) -> Result<()> {
+pub async fn run_hook_pre_compact(dir: &Path) -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
+    // Compaction drops the injected memories from the context, so the hooks
+    // may show them again.
+    forget_shown(&input, dir);
     let json = build_hook_response("PreCompact", PRE_COMPACT_REMINDER)?;
     println!("{}", json);
     Ok(())
@@ -2716,6 +2778,38 @@ mod tests {
         }
         assert!(!ctx.contains("Sibling hazard"), "{ctx}");
         assert!(!ctx.contains("Project-wide hazard"), "{ctx}");
+    }
+
+    /// Within one session the file hook injects each memory once: the
+    /// conversation keeps it, and a repeat is re-read on every later turn.
+    /// A new session, or the same one after compaction, sees it again.
+    #[tokio::test]
+    async fn test_pre_tool_use_injects_each_memory_once_per_session() {
+        let (temp_dir, _store) = setup_store_with_memories().await;
+        let dir = temp_dir.path();
+        let input = |session: &str| {
+            serde_json::json!({
+                "session_id": session,
+                "tool_name": "Read",
+                "tool_input": { "file_path": dir.join("src/main.rs").to_str().unwrap() }
+            })
+            .to_string()
+        };
+        let run = |input: String| async move {
+            let store = MemoryStore::open(dir).await.unwrap();
+            process_hook_input(&input, dir, store).await.unwrap()
+        };
+        let first = run(input("sess-a")).await.expect("first edit injects");
+        assert!(first.contains("Use async everywhere"), "{first}");
+        assert!(
+            run(input("sess-a")).await.is_none(),
+            "already shown in sess-a"
+        );
+        let other = run(input("sess-b")).await.expect("another session");
+        assert!(other.contains("Use async everywhere"), "{other}");
+        forget_shown(&input("sess-a"), dir);
+        let again = run(input("sess-a")).await.expect("after compaction");
+        assert!(again.contains("Use async everywhere"), "{again}");
     }
 
     #[tokio::test]

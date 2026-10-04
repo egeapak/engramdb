@@ -13,6 +13,7 @@ pub mod conversation_index;
 pub mod digest;
 pub mod error;
 pub mod harvest_state;
+pub mod hook_seen;
 pub mod lance_index;
 pub mod manifest;
 pub mod memory_file;
