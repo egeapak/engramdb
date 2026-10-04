@@ -1,0 +1,23 @@
+diff --git a/tests/test_refunds.py b/tests/test_refunds.py
+new file mode 100644
+index 0000000..1b8daff
+--- /dev/null
++++ b/tests/test_refunds.py
+@@ -0,0 +1,17 @@
++import pytest
++
++from src.billing.invoices import Invoice
++from src.billing.refunds import refund
++
++
++def test_refund_rejects_amount_over_invoice_total():
++    invoice = Invoice(id="inv_1", customer_id="cus_1", subtotal_cents=1000, tax_cents=100)
++
++    with pytest.raises(ValueError, match="refund exceeds invoice total"):
++        refund(invoice, 1101)
++
++
++def test_refund_allows_full_invoice_total():
++    invoice = Invoice(id="inv_1", customer_id="cus_1", subtotal_cents=1000, tax_cents=100)
++
++    assert refund(invoice, 1100) == {"invoice_id": "inv_1", "refunded_cents": 1100}

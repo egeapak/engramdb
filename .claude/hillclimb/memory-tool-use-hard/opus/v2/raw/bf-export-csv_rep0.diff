@@ -1,0 +1,144 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..5409f03 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,96 @@
++"""Export one month's finalized invoices as the CSV that Finance imports.
++
++Format is fixed by Finance's import tool (German locale): semicolon-delimited,
++dates as DD.MM.YYYY, amounts as integer cents, UTF-8 without a BOM.
++"""
+ import argparse
++import csv
+ import os
++import sqlite3
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++
++def previous_month(now=None):
++    now = now or datetime.now(timezone.utc)
++    return f"{now.year - 1}-12" if now.month == 1 else f"{now.year}-{now.month - 1:02d}"
++
++
++def month_window(month):
++    # finalized_at is stored as naive UTC, so the bounds are naive UTC too.
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def connect():
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg
++        return psycopg.connect(url), "%s"
++    return sqlite3.connect(DEV_DB), "?"
++
++
++def fetch_invoices(conn, placeholder, start, end):
++    """Finalized invoices with finalized_at in [start, end), including zero-amount ones; drafts have no finalized_at."""
++    sql = (
++        "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++        f"WHERE finalized_at IS NOT NULL AND finalized_at >= {placeholder} AND finalized_at < {placeholder} "
++        "ORDER BY id"
++    )
++    params = (start, end) if placeholder == "%s" else (start.isoformat(" "), end.isoformat(" "))
++    return conn.execute(sql, params).fetchall()
++
++
++def to_row(invoice_id, customer_id, subtotal_cents, tax_cents, finalized_at):
++    if isinstance(finalized_at, str):
++        finalized_at = datetime.fromisoformat(finalized_at)
++    return [
++        invoice_id,
++        customer_id,
++        int(subtotal_cents),
++        int(tax_cents),
++        int(subtotal_cents) + int(tax_cents),
++        finalized_at.strftime("%d.%m.%Y"),
++    ]
++
++
++def write_csv(invoices, fh):
++    writer = csv.writer(fh, delimiter=";")
++    writer.writerow(HEADER)
++    for inv in invoices:
++        writer.writerow(to_row(*inv))
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=previous_month(), help="YYYY-MM (default: previous month, UTC)")
++    parser.add_argument("--out", type=Path, help="output file (default: exports/<YYYY-MM>/invoices.csv)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    out = args.out or Path("exports") / args.month / "invoices.csv"
++    start, end = month_window(args.month)
++
++    conn, placeholder = connect()
++    with conn:
++        invoices = fetch_invoices(conn, placeholder, start, end)
++    print(f"exporting {len(invoices)} invoices for {args.month} ({args.env}, bucket {bucket}) to {out} "
++          f"(dry_run={args.dry_run})")
++    if args.dry_run:
++        return 0
++
++    out.parent.mkdir(parents=True, exist_ok=True)
++    with out.open("w", encoding="utf-8", newline="") as fh:
++        write_csv(invoices, fh)
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..0e44de6
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,35 @@
++import io
++import sqlite3
++
++from scripts import export
++
++
++def _db():
++    conn = sqlite3.connect(":memory:")
++    conn.execute("CREATE TABLE invoices (id TEXT PRIMARY KEY, customer_id TEXT, subtotal_cents BIGINT, "
++                 "tax_cents BIGINT DEFAULT 0, finalized_at TIMESTAMP)")
++    conn.executemany("INSERT INTO invoices VALUES (?, ?, ?, ?, ?)", [
++        ("inv_2", "cus_1", 0, 0, "2026-09-30 23:59:59"),
++        ("inv_1", "cus_1", 10000, 1900, "2026-09-01 00:00:00"),
++        ("inv_draft", "cus_2", 500, 95, None),
++        ("inv_aug", "cus_2", 500, 95, "2026-08-31 23:00:00"),
++        ("inv_oct", "cus_2", 500, 95, "2026-10-01 00:00:00"),
++    ])
++    return conn
++
++
++def test_exports_month_finalized_invoices_in_finance_format():
++    start, end = export.month_window("2026-09")
++    invoices = export.fetch_invoices(_db(), "?", start, end)
++    buf = io.StringIO(newline="")
++    export.write_csv(invoices, buf)
++    assert buf.getvalue() == (
++        "invoice_id;customer_id;subtotal_cents;tax_cents;total_cents;finalized_date\r\n"
++        "inv_1;cus_1;10000;1900;11900;01.09.2026\r\n"
++        "inv_2;cus_1;0;0;0;30.09.2026\r\n"
++    )
++
++
++def test_month_window_wraps_december():
++    start, end = export.month_window("2026-12")
++    assert (start.year, start.month, end.year, end.month) == (2026, 12, 2027, 1)

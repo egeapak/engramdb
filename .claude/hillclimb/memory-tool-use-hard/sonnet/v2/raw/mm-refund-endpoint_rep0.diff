@@ -1,0 +1,70 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..5c1fbb2
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,64 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++log = structlog.get_logger()
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (invoice_id, idempotency key) -> (stored_at, body, status_code)
++_REPLAYS = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency header required", "Send an X-Acme-Idempotency header.")
++
++    stored = _REPLAYS.get((invoice_id, key))
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        return jsonify(stored[1]), stored[2]
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if isinstance(amount_cents, bool) or not isinstance(amount_cents, int) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    try:
++        result = refund(invoice, amount_cents)
++    except ValueError as exc:
++        return problem(422, "Refund rejected", str(exc))
++
++    # Refunds above the threshold need a second approver before they are issued.
++    needs_approval = amount_cents > APPROVAL_THRESHOLD_CENTS
++    status = "pending_approval" if needs_approval else "issued"
++    event = "ledger.refund_requested" if needs_approval else "ledger.refund_issued"
++    log.info(
++        event,
++        invoice_id=invoice.id,
++        customer_id=invoice.customer_id,
++        amount_cents=amount_cents,
++        status=status,
++        actor_id=request.headers.get("X-Actor-Id"),
++    )
++
++    body = {
++        "invoice_id": result["invoice_id"],
++        "status": status,
++        "refunded": {"minor": result["refunded_cents"], "ccy": "USD"},
++    }
++    code = 202 if needs_approval else 201
++    _REPLAYS[(invoice_id, key)] = (time.time(), body, code)
++    return jsonify(body), code
