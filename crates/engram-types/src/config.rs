@@ -3383,8 +3383,9 @@ weight = 0.7
         // A pool splits the cores so sessions never compete for them.
         assert_eq!(EmbeddingsConfig::session_intra_threads(2, 4), Some(2));
         assert_eq!(EmbeddingsConfig::session_intra_threads(4, 8), Some(2));
-        assert_eq!(EmbeddingsConfig::session_intra_threads(3, 8), Some(2)); // floor
-                                                                            // Never zero, even for a pool larger than the core count.
+        // Integer division floors.
+        assert_eq!(EmbeddingsConfig::session_intra_threads(3, 8), Some(2));
+        // Never zero, even for a pool larger than the core count.
         assert_eq!(EmbeddingsConfig::session_intra_threads(4, 2), Some(1));
         assert_eq!(EmbeddingsConfig::session_intra_threads(2, 0), Some(1));
         // The auto-sized pool (cores/2) never oversubscribes: a pool of one
