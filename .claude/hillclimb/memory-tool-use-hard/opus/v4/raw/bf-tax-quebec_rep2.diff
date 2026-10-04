@@ -1,0 +1,53 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..078349c 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_EVEN, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,12 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    tax = Decimal(amount_cents) * Decimal(str(rate))
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
++
++
++def invoice_tax(lines, rate, region):
++    # Quebec (QST) must show tax per line, so round each line then sum.
++    if region == "CA-QC":
++        return sum(tax_for(line_total([line]), rate) for line in lines)
++    return tax_for(line_total(lines), rate)
+diff --git a/tests/test_tax.py b/tests/test_tax.py
+index 75e3de8..e3830a6 100644
+--- a/tests/test_tax.py
++++ b/tests/test_tax.py
+@@ -3,3 +3,24 @@ from src.billing.tax import line_total
+ 
+ def test_line_total():
+     assert line_total([{"quantity": 2, "unit_cents": 150}]) == 300
++
++
++def test_invoice_tax_on_subtotal():
++    from src.billing.tax import invoice_tax
++
++    lines = [{"quantity": 1, "unit_cents": 50}, {"quantity": 1, "unit_cents": 50}]
++    # 100 * 0.05 = 5.0; per-line would be 2 + 2 (2.5 rounds half-even to 2)
++    assert invoice_tax(lines, 0.05, "US-TX") == 5
++
++
++def test_invoice_tax_quebec_per_line():
++    from src.billing.tax import invoice_tax
++
++    lines = [{"quantity": 1, "unit_cents": 50}, {"quantity": 1, "unit_cents": 50}]
++    assert invoice_tax(lines, 0.05, "CA-QC") == 4
++
++
++def test_invoice_tax_exempt_is_zero():
++    from src.billing.tax import invoice_tax
++
++    assert invoice_tax([{"quantity": 3, "unit_cents": 999}], 0, "US-CA") == 0

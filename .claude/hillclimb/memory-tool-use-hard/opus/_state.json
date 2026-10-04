@@ -1,5 +1,5 @@
 {
- "current_round": 2,
+ "current_round": 4,
  "reps": 3,
  "model": "claude-opus-5-5",
  "goal": {
@@ -10,7 +10,7 @@
    "no_false_create",
    "no_spurious_revise"
   ],
-  "incumbent": "v2",
+  "incumbent": "v4",
   "phase": "cost climb, started after the pass climb plateaued at round 2"
  },
  "approve_each_round": false,
@@ -181,10 +181,9 @@
   }
  ],
  "best": {
-  "round": 1,
-  "whole": "132/135",
-  "test": "68/69",
-  "note": "v2 130/135 within noise; kept for Sonnet"
+  "round": 4,
+  "basis": "cost climb incumbent; passed all three gates vs v2",
+  "whole": "128/135 (test 65/69)"
  },
  "cost_gates": {
   "quality_band": "whole-set and test pass each at most 3 runs below v2; no_false_create and no_spurious_revise at most 3 runs below v2",
@@ -192,6 +191,6 @@
   "mechanism": "the predicted mechanism shows in the telemetry (e.g. fewer get calls and memory-only turns)",
   "stop": "two consecutive rounds fail to beat the incumbent beyond noise, or 3 rounds",
   "pricing_basis": "total_cost_usd reported by Claude Code per run (cache-adjusted)",
-  "incumbent_cost_per_case": 0.245
+  "incumbent_cost_per_case": 0.2313
  }
 }

@@ -1,0 +1,91 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..8fbc184 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,82 @@
++"""Export the month's finalized invoices as the CSV Finance imports."""
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import datetime, timezone
++
++# Finance's accounting tool takes plain comma-separated files with ISO dates.
++DELIMITER = ","
++DATE_FORMAT = "%Y-%m-%d"
++HEADER = ["invoice_id", "customer_id", "subtotal", "tax", "total", "finalized_date"]
++
++# finalized_at is stored as naive UTC (docs/ops/backfills.md), so the window is
++# built from naive datetimes and never depends on the host's zone.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE ledger_ref IS NOT NULL AND finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def month_window(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def previous_month(now=None):
++    now = now or datetime.now(timezone.utc)
++    year, month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
++    return f"{year:04d}-{month:02d}"
++
++
++def render_csv(rows):
++    """rows: (id, customer_id, subtotal_cents, tax_cents, finalized_at). Amounts stay integer cents."""
++    out = io.StringIO()
++    writer = csv.writer(out, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime(DATE_FORMAT)])
++    return out.getvalue()
++
++
++def fetch_rows(month):
++    import psycopg  # deferred: only needed when actually reading the database
++
++    start, end = month_window(month)
++    # The deployed pooler runs in transaction mode: no server-side prepared statements.
++    with psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
+ 
+ 
+ def main():
+-    parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
++    parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--dry-run", action="store_true", help="print the CSV instead of uploading it")
+     args = parser.parse_args()
++    month = args.month or previous_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month}/invoices.csv"
++    print(f"exporting {args.env} {month} to {bucket}/{key} (dry_run={args.dry_run})", file=sys.stderr)
++
++    if not os.environ.get("DATABASE_URL"):
++        print("no DATABASE_URL set; nothing exported", file=sys.stderr)
++        return 1
++    # UTF-8 without a BOM
++    body = render_csv(fetch_rows(month)).encode("utf-8")
++    if args.dry_run:
++        sys.stdout.write(body.decode("utf-8"))
++        return 0
++
++    import boto3  # deferred, as above
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=body, ContentType="text/csv; charset=utf-8")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

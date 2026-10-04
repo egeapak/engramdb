@@ -1,0 +1,75 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..847374c
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,69 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (invoice_id, idempotency key) -> (stored_at, status_code, body)
++_REPLAYS = {}
++
++
++def _money(cents):
++    # TODO: Invoice carries no currency yet; USD is assumed.
++    return {"minor": cents, "ccy": "USD"}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    now = time.time()
++    stored = _REPLAYS.get((invoice_id, key))
++    if stored and now - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        return jsonify(stored[2]), stored[1]
++
++    actor_id = request.headers.get("X-Actor-Id")
++    if not actor_id:
++        return problem(400, "Actor required", "Send the X-Actor-Id header.")
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount = payload.get("amount_cents")
++    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    if amount > invoice.subtotal_cents + invoice.tax_cents:
++        return problem(422, "Refund exceeds invoice total")
++
++    if amount > APPROVAL_THRESHOLD_CENTS:
++        # Large refunds need a second approver in the admin tool; do not issue.
++        status, code = "pending_approval", 202
++    else:
++        refund(invoice, amount)
++        status, code = "issued", 201
++        log.info(
++            "ledger.refund_issued",
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            amount_cents=amount,
++            actor_id=actor_id,
++        )
++
++    body = {"invoice_id": invoice.id, "status": status, "amount": _money(amount)}
++    _REPLAYS[(invoice_id, key)] = (now, code, body)
++    return jsonify(body), code

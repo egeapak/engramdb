@@ -1,0 +1,64 @@
+diff --git a/services/notifier/tests/test_email_sandbox.py b/services/notifier/tests/test_email_sandbox.py
+new file mode 100644
+index 0000000..fd8fa5f
+--- /dev/null
++++ b/services/notifier/tests/test_email_sandbox.py
+@@ -0,0 +1,58 @@
++"""Integration test: sends one real message through the provider sandbox.
++
++Needs MAIL_API_KEY (sandbox key) and SINK_INBOX_URL (the sink inbox API's
++message-listing endpoint, taken from the provider docs). Skipped otherwise.
++
++The sandbox answers 202 but silently drops mail to anything outside
++@sink.acme.test, so we send to a sink address and read it back. It is capped
++at 500 messages/day for the whole team: this test sends exactly one.
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and os.environ.get("SINK_INBOX_URL")),
++    reason="MAIL_API_KEY and SINK_INBOX_URL are required for sandbox tests",
++)
++
++DELIVERY_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++
++def _find_message(to_addr, invoice_id):
++    resp = requests.get(
++        os.environ["SINK_INBOX_URL"],
++        params={"to": to_addr},
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    messages = resp.json()
++    if isinstance(messages, dict):
++        messages = messages.get("messages", [])
++    return next((m for m in messages if invoice_id in str(m)), None)
++
++
++def test_send_receipt_is_delivered_to_sink():
++    # Unique per run so we never match a message from an earlier run.
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:12]}"
++    to_addr = "receipts@sink.acme.test"
++
++    message_id = email.send_receipt(invoice_id, to_addr, 1200)
++    assert message_id
++
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    message = None
++    while message is None and time.monotonic() < deadline:
++        message = _find_message(to_addr, invoice_id)
++        if message is None:
++            time.sleep(POLL_INTERVAL_S)
++
++    assert message is not None, f"{invoice_id} not delivered to {to_addr} in {DELIVERY_TIMEOUT_S}s"
++    assert message.get("subject") == "Your receipt"

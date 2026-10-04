@@ -1,0 +1,19 @@
+diff --git a/src/db.py b/src/db.py
+new file mode 100644
+index 0000000..e703ae5
+--- /dev/null
++++ b/src/db.py
+@@ -0,0 +1,13 @@
++import os
++
++import psycopg
++
++
++def get_conn() -> psycopg.Connection:
++    """Open a psycopg connection from DATABASE_URL.
++
++    Deployed environments connect through a transaction-mode pooler (port 6432),
++    where server-side prepared statements fail, so automatic preparing is off.
++    Keep transactions short; session state does not survive between them.
++    """
++    return psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None)

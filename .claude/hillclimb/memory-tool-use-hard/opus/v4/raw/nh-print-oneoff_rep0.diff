@@ -1,0 +1,12 @@
+diff --git a/src/billing/refunds.py b/src/billing/refunds.py
+index 0fd8ca7..78a275f 100644
+--- a/src/billing/refunds.py
++++ b/src/billing/refunds.py
+@@ -2,6 +2,7 @@ from .invoices import Invoice
+ 
+ 
+ def refund(invoice: Invoice, amount_cents: int):
++    print(f"DEBUG refund amount_cents={amount_cents}")
+     if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
+         raise ValueError("refund exceeds invoice total")
+     return {"invoice_id": invoice.id, "refunded_cents": amount_cents}

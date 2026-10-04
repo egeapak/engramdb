@@ -1,0 +1,30 @@
+diff --git a/services/reporting/reports/monthly.py b/services/reporting/reports/monthly.py
+index d1fba58..d9f19b8 100644
+--- a/services/reporting/reports/monthly.py
++++ b/services/reporting/reports/monthly.py
+@@ -5,3 +5,25 @@ from decimal import Decimal
+ def load_rows(month):
+     """Rows for one month: dicts with customer_id, currency and total_cents."""
+     raise NotImplementedError("reads from the billing warehouse")
++
++
++def revenue_by_customer(rows):
++    """Total revenue per customer, as Decimal major units keyed by customer_id.
++
++    Amounts in different currencies cannot be added, so a customer with rows
++    in more than one currency raises ValueError.
++    """
++    totals = {}
++    currencies = {}
++    for row in rows:
++        customer_id = row["customer_id"]
++        currency = currencies.setdefault(customer_id, row["currency"])
++        if row["currency"] != currency:
++            raise ValueError(
++                f"customer {customer_id} has revenue in both {currency} and {row['currency']}"
++            )
++        totals[customer_id] = totals.get(customer_id, Decimal(0)) + Decimal(row["total_cents"]) / 100
++    return {
++        customer_id: total.quantize(Decimal("0.0001"))
++        for customer_id, total in totals.items()
++    }

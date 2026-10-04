@@ -1,0 +1,102 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..e52217f
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,96 @@
++"""Delete invoices (and their lines) that are past the retention period.
++
++Dry-run by default: reports what would be deleted. Pass --execute to delete.
++"""
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta, timezone
++
++import structlog
++
++log = structlog.get_logger()
++
++# Legal defines the period in days (10 years since the 2026 tax audit); do not
++# derive it from years.
++RETENTION_DAYS = 3650
++MAX_SAFE_BATCH = 500
++
++# refunds has no status column, so any refund row is treated as possibly open
++# and its invoice is kept. Invoices that were never finalized are never purged.
++ELIGIBLE = """
++    SELECT i.id FROM invoices i
++    WHERE i.finalized_at IS NOT NULL
++      AND i.finalized_at < %(cutoff)s
++      AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.invoice_id = i.id)
++"""
++
++
++def retention_cutoff(now=None):
++    # finalized_at is stored as naive UTC; compute in UTC regardless of host zone
++    now = now or datetime.now(timezone.utc)
++    return (now - timedelta(days=RETENTION_DAYS)).astimezone(timezone.utc).replace(tzinfo=None)
++
++
++def connect(url):
++    import psycopg
++
++    # Deployed environments go through a transaction-mode pooler: no
++    # server-side prepared statements.
++    return psycopg.connect(url, prepare_threshold=None)
++
++
++def count_eligible(conn, cutoff):
++    with conn.transaction():
++        return conn.execute(f"SELECT count(*) FROM ({ELIGIBLE}) e", {"cutoff": cutoff}).fetchone()[0]
++
++
++def purge_batch(conn, cutoff, batch_size):
++    # One short transaction per batch to keep row locks brief (INC-2291).
++    with conn.transaction():
++        ids = [row[0] for row in conn.execute(
++            f"{ELIGIBLE} ORDER BY i.finalized_at LIMIT %(limit)s FOR UPDATE OF i SKIP LOCKED",
++            {"cutoff": cutoff, "limit": batch_size},
++        )]
++        if not ids:
++            return []
++        conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ANY(%(ids)s)", {"ids": ids})
++        conn.execute("DELETE FROM invoices WHERE id = ANY(%(ids)s)", {"ids": ids})
++    return ids
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    args = parser.parse_args()
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"batch size must be between 1 and {MAX_SAFE_BATCH}", file=sys.stderr)
++        return 3
++
++    cutoff = retention_cutoff()
++    url = os.environ.get("DATABASE_URL")
++    if not url:
++        print(f"no DATABASE_URL set; would purge invoices finalized before {cutoff:%Y-%m-%d %H:%M} UTC "
++              f"({RETENTION_DAYS} days) with no refunds (nothing deleted)")
++        return 0 if not args.execute else 2
++
++    with connect(url) as conn:
++        eligible = count_eligible(conn, cutoff)
++        if not args.execute:
++            print(f"dry run: {eligible} invoices finalized before {cutoff:%Y-%m-%d %H:%M} UTC "
++                  f"would be purged; re-run with --execute to delete")
++            log.info("invoices.purge_dry_run", eligible=eligible, cutoff=cutoff.isoformat())
++            return 0
++
++        purged = 0
++        while ids := purge_batch(conn, cutoff, args.batch_size):
++            purged += len(ids)
++            log.info("invoices.purged_batch", count=len(ids), invoice_ids=ids)
++        print(f"purged {purged} invoices finalized before {cutoff:%Y-%m-%d %H:%M} UTC")
++        log.info("invoices.purge_completed", purged=purged, cutoff=cutoff.isoformat())
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

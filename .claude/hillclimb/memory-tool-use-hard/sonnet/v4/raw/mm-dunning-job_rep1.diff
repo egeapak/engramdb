@@ -1,0 +1,28 @@
+diff --git a/src/billing/dunning.py b/src/billing/dunning.py
+index 5fd24da..3731e84 100644
+--- a/src/billing/dunning.py
++++ b/src/billing/dunning.py
+@@ -1,6 +1,20 @@
+ """Follow-up when a customer's payment fails."""
+ 
++from datetime import date, timedelta
+ 
+-def schedule_retries(invoice):
+-    """Plan the payment retries for an invoice whose charge just failed."""
+-    raise NotImplementedError
++# Days after the failure on which the charge is retried (finance policy FP-12).
++RETRY_DAYS = (1, 3, 7, 14)
++
++
++def schedule_retries(invoice, failed_at=None):
++    """Plan the payment retries for an invoice whose charge just failed.
++
++    Returns the dates on which to retry, per FP-12: days 1, 3, 7 and 14 after
++    the failure. If the final retry also fails the caller must mark the invoice
++    `uncollectible` and stop. An invoice with a refund in progress is never
++    retried, so it gets an empty schedule.
++    """
++    if getattr(invoice, "refund_in_progress", False):
++        return []
++    failed_at = failed_at or date.today()
++    return [failed_at + timedelta(days=d) for d in RETRY_DAYS]

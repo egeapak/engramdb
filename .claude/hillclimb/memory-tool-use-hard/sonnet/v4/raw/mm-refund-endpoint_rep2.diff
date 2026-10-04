@@ -1,0 +1,95 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..5bc5163
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,89 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++# Refunds above this amount need a second approver (agreed with Finance, June 2026).
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (invoice_id, key) -> (stored_at, body, status)
++_IDEMPOTENT_RESPONSES = {}
++
++
++def _money(cents, ccy="USD"):
++    return {"minor": cents, "ccy": ccy}
++
++
++def _respond(body, status):
++    resp = jsonify(body)
++    resp.status_code = status
++    return resp
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    now = time.time()
++    cached = _IDEMPOTENT_RESPONSES.get((invoice_id, key))
++    if cached and now - cached[0] < IDEMPOTENCY_TTL_SECONDS:
++        return _respond(cached[1], cached[2])
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if isinstance(amount_cents, bool) or not isinstance(amount_cents, int) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    actor_id = request.headers.get("X-Actor-Id", "unknown")
++
++    if amount_cents > APPROVAL_THRESHOLD_CENTS:
++        # Not issued directly: a second person approves it in the admin tool.
++        body = {
++            "invoice_id": invoice.id,
++            "refunded": _money(amount_cents),
++            "status": "pending_approval",
++        }
++        status = 202
++        log.info(
++            "ledger.refund_pending_approval",
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            amount_cents=amount_cents,
++            actor_id=actor_id,
++        )
++    else:
++        try:
++            result = refund(invoice, amount_cents)
++        except ValueError as exc:
++            return problem(422, "Refund rejected", str(exc))
++        body = {
++            "invoice_id": result["invoice_id"],
++            "refunded": _money(result["refunded_cents"]),
++            "status": "issued",
++        }
++        status = 201
++        log.info(
++            "ledger.refund_issued",
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            amount_cents=amount_cents,
++            actor_id=actor_id,
++        )
++
++    _IDEMPOTENT_RESPONSES[(invoice_id, key)] = (now, body, status)
++    return _respond(body, status)
