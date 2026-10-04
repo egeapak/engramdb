@@ -1,6 +1,8 @@
 /target
 /target-*
 /models
-# Per-engine result files carry every vector (~0.5 MB each); summary.md and
-# build.tsv are the committed record.
-/results/*.json
+# Per-engine result files carry every vector (~0.5 MB each), and the logs are
+# build noise; summary.md and build.tsv are the committed record.
+/results*/*.json
+/results*/*.log
+/results*.log

@@ -22,7 +22,11 @@ impl CandleEngine {
         )?;
         // SAFETY: the file is not modified while mapped.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[dir.join("model.safetensors")], DType::F32, &device)?
+            VarBuilder::from_mmaped_safetensors(
+                &[dir.join("model.safetensors")],
+                DType::F32,
+                &device,
+            )?
         };
         let model = BertModel::load(vb, &config)?;
         Ok(Self { model, device })

@@ -9,7 +9,9 @@
 use crate::common::{Batch, Engine, HIDDEN};
 use anyhow::{anyhow, Result};
 use burn::module::Module;
-use burn::nn::transformer::{TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput};
+use burn::nn::transformer::{
+    TransformerEncoder, TransformerEncoderConfig, TransformerEncoderInput,
+};
 use burn::nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig};
 use burn::prelude::*;
 use burn_store::{KeyRemapper, ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore};
@@ -78,7 +80,12 @@ impl<B: Backend> Bert<B> {
         }
     }
 
-    fn forward(&self, ids: Tensor<B, 2, Int>, types: Tensor<B, 2, Int>, mask: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    fn forward(
+        &self,
+        ids: Tensor<B, 2, Int>,
+        types: Tensor<B, 2, Int>,
+        mask: Tensor<B, 2, Int>,
+    ) -> Tensor<B, 3> {
         let [batch, seq] = ids.dims();
         let device = ids.device();
         let pos = Tensor::<B, 1, Int>::arange(0..seq as i64, &device)
@@ -150,11 +157,9 @@ impl Engine for BurnEngine {
         let t = |v: &[i64]| {
             Tensor::<B, 2, Int>::from_data(TensorData::new(v.to_vec(), shape), &self.device)
         };
-        let out = self.model.forward(
-            t(&b.input_ids),
-            t(&b.token_type_ids),
-            t(&b.attention_mask),
-        );
+        let out = self
+            .model
+            .forward(t(&b.input_ids), t(&b.token_type_ids), t(&b.attention_mask));
         debug_assert_eq!(out.dims()[2], HIDDEN);
         out.into_data()
             .into_vec::<f32>()

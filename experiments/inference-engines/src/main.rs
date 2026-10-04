@@ -107,7 +107,9 @@ fn load_engine(name: &str, models: &Path) -> Result<(Box<dyn Engine>, PathBuf)> 
                 "model.onnx"
             };
             let path = models.join("xenova/onnx").join(file);
-            let threads = std::env::var("ENGINE_THREADS").ok().and_then(|v| v.parse().ok());
+            let threads = std::env::var("ENGINE_THREADS")
+                .ok()
+                .and_then(|v| v.parse().ok());
             Ok((Box::new(engine_ort::OrtEngine::load(&path, threads)?), path))
         }
         #[cfg(feature = "burn-flex")]
@@ -263,7 +265,9 @@ fn bench(name: &str, models: &Path, data: &Path, out: &Path) -> Result<()> {
         engine: name.to_string(),
         weights: weights.display().to_string(),
         weights_bytes,
-        threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        threads: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
         load_ms,
         first_call_ms,
         rss_start_mib: rss_start,
@@ -399,12 +403,22 @@ fn compare(data: &Path, out: &Path) -> Result<()> {
     push(&mut md, "| Engine | Load (ms) | First call (ms) | Query p50 / p95 (ms) | Doc p50 / p95 (ms) | Batch-16 p50 (ms) | Cores busy (batch) | Corpus (docs/s) |".into());
     push(&mut md, "|---|---:|---:|---:|---:|---:|---:|---:|".into());
     for r in &reports {
-        push(&mut md, format!(
-            "| {} | {:.0} | {:.1} | {:.2} / {:.2} | {:.1} / {:.1} | {:.1} | {:.1} | {:.1} |",
-            r.engine, r.load_ms, r.first_call_ms, r.query_single.p50_ms, r.query_single.p95_ms,
-            r.doc_single.p50_ms, r.doc_single.p95_ms, r.batch16.p50_ms, r.batch16_cores_busy,
-            r.corpus_docs_per_sec
-        ));
+        push(
+            &mut md,
+            format!(
+                "| {} | {:.0} | {:.1} | {:.2} / {:.2} | {:.1} / {:.1} | {:.1} | {:.1} | {:.1} |",
+                r.engine,
+                r.load_ms,
+                r.first_call_ms,
+                r.query_single.p50_ms,
+                r.query_single.p95_ms,
+                r.doc_single.p50_ms,
+                r.doc_single.p95_ms,
+                r.batch16.p50_ms,
+                r.batch16_cores_busy,
+                r.corpus_docs_per_sec
+            ),
+        );
     }
     push(&mut md, "\n## Memory and size\n".into());
     push(&mut md, "| Engine | RSS after load (MiB) | Peak RSS (MiB) | Weights file (MiB) | Binary (MiB) | Clean release build (s) |".into());
@@ -418,21 +432,35 @@ fn compare(data: &Path, out: &Path) -> Result<()> {
             .get(family)
             .map(|(s, b)| (format!("{s:.0}"), format!("{:.1}", mib(*b))))
             .unwrap_or(("–".into(), "–".into()));
-        push(&mut md, format!(
-            "| {} | {:.0} | {:.0} | {:.1} | {} | {} |",
-            r.engine, r.rss_after_load_mib, r.peak_rss_end_mib, mib(r.weights_bytes), bytes, secs
-        ));
+        push(
+            &mut md,
+            format!(
+                "| {} | {:.0} | {:.0} | {:.1} | {} | {} |",
+                r.engine,
+                r.rss_after_load_mib,
+                r.peak_rss_end_mib,
+                mib(r.weights_bytes),
+                bytes,
+                secs
+            ),
+        );
     }
     if let Some((s, b)) = builds.get("baseline") {
-        push(&mut md, format!(
-            "\nBaseline binary with no engine (tokenizer + harness only): {:.1} MiB, {s:.0} s.",
-            mib(*b)
-        ));
+        push(
+            &mut md,
+            format!(
+                "\nBaseline binary with no engine (tokenizer + harness only): {:.1} MiB, {s:.0} s.",
+                mib(*b)
+            ),
+        );
     }
-    push(&mut md, format!(
-        "\n## Agreement and quality (reference: {})\n",
-        reports[reference].engine
-    ));
+    push(
+        &mut md,
+        format!(
+            "\n## Agreement and quality (reference: {})\n",
+            reports[reference].engine
+        ),
+    );
     push(&mut md, "| Engine | Mean cosine | Min cosine | P@1 | R@5 | MRR@10 | nDCG@10 | Determinism (distinct / trials) |".into());
     push(&mut md, "|---|---:|---:|---:|---:|---:|---:|---:|".into());
     let rf = &reports[reference];
@@ -447,17 +475,30 @@ fn compare(data: &Path, out: &Path) -> Result<()> {
         let mean = cos.iter().sum::<f64>() / cos.len() as f64;
         let min = cos.iter().cloned().fold(f64::INFINITY, f64::min);
         let q = retrieval_quality(r, &ds);
-        push(&mut md, format!(
-            "| {} | {:.6} | {:.6} | {:.3} | {:.3} | {:.3} | {:.3} | {} / {} |",
-            r.engine, mean, min, q.p1, q.r5, q.mrr10, q.ndcg10,
-            r.determinism.distinct_vectors, r.determinism.trials
-        ));
+        push(
+            &mut md,
+            format!(
+                "| {} | {:.6} | {:.6} | {:.3} | {:.3} | {:.3} | {:.3} | {} / {} |",
+                r.engine,
+                mean,
+                min,
+                q.p1,
+                q.r5,
+                q.mrr10,
+                q.ndcg10,
+                r.determinism.distinct_vectors,
+                r.determinism.trials
+            ),
+        );
     }
     let r0 = &reports[0];
-    push(&mut md, format!(
-        "\n{} threads available; mean document length {:.0} tokens (max {}).",
-        r0.threads, r0.mean_doc_tokens, MAX_TOKENS
-    ));
+    push(
+        &mut md,
+        format!(
+            "\n{} threads available; mean document length {:.0} tokens (max {}).",
+            r0.threads, r0.mean_doc_tokens, MAX_TOKENS
+        ),
+    );
     print!("{md}");
     std::fs::write(out.join("summary.md"), &md)?;
     Ok(())
