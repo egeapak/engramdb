@@ -305,7 +305,7 @@ So switching trades one external library for a 7–13× slowdown on
 embeddings and a 7–15× slowdown on the reranker, NLI and T5 (imported fp32
 vs the shipped quantized files). Compared with the daemon's current
 misconfigured pool (see the side finding), the embedding gap shrank to
-1.5–3×; with the pool fixed it is back to roughly 3–5×.
+1.5–3×; with the pool fixed (default pool of 2) it is back to about 5× (492 vs 92 queries/s, 68.8 vs 14 doc/s).
 
 ### Not measured yet
 
