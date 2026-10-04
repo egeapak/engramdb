@@ -208,7 +208,15 @@ Best configuration per engine under concurrent load (4–8 callers):
 - Single-caller latency does not improve with pooling for any engine (the
   pool only adds parallel capacity).
 
-### Side finding: today's daemon pool is misconfigured on this machine
+### Side finding: the daemon pool was misconfigured (fixed)
+
+**Fixed** on this branch: pooled embedding sessions now get
+`cores / pool_size` threads each (`EmbeddingsConfig::session_intra_threads`).
+Measured through the production path (`examples/embed_pool_bench.rs`, pool
+of 2 on this machine): 1 caller 99.7 → 227 queries/s and 21.3 → 34.9 doc/s;
+8 callers 236 → 492 queries/s and 28.9 → 68.8 doc/s; doc p99 at 8 callers
+676 → 312 ms. A single session (the CLI) is unchanged. The original
+analysis follows.
 
 The daemon's default (pool = `cores/2` = 2, ORT default threads per session)
 is the *worst* ORT configuration measured here:
@@ -296,9 +304,8 @@ Build time, build-time downloads and crate count are deliberately ignored.
 So switching trades one external library for a 7–13× slowdown on
 embeddings and a 7–15× slowdown on the reranker, NLI and T5 (imported fp32
 vs the shipped quantized files). Compared with the daemon's current
-misconfigured pool (see the side finding), the embedding gap shrinks to
-1.5–3×, but fixing that pool is a free ~4× gain for ONNX Runtime that widens
-the gap again.
+misconfigured pool (see the side finding), the embedding gap shrank to
+1.5–3×; with the pool fixed it is back to roughly 3–5×.
 
 ### Not measured yet
 
