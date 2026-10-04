@@ -1,0 +1,94 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..42b0f42
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,59 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from src.api.errors import problem
++from src.api.invoices import _INVOICES
++from src.billing.refunds import refund
++
++bp = Blueprint("refunds", __name__)
++log = structlog.get_logger()
++
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (invoice_id, idempotency key) -> (stored_at, body, status)
++_RESPONSES = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send an X-Acme-Idempotency header.")
++
++    stored = _RESPONSES.get((invoice_id, key))
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        _, body, status = stored
++        return jsonify(body), status
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_minor")
++    actor_id = payload.get("actor_id")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_minor must be a positive integer.")
++    if not actor_id:
++        return problem(422, "Missing actor", "actor_id is required.")
++
++    try:
++        result = refund(invoice, amount_cents)
++    except ValueError as exc:
++        return problem(422, "Refund not allowed", str(exc))
++
++    if result["status"] == "issued":
++        log.info("ledger.refund_issued", invoice_id=invoice.id, amount_cents=amount_cents, actor_id=actor_id)
++    else:
++        log.info("refund_pending_approval", invoice_id=invoice.id, amount_cents=amount_cents, actor_id=actor_id)
++
++    body = {
++        "invoice_id": invoice.id,
++        "amount": {"minor": result["refunded_cents"], "ccy": invoice.currency},
++        "status": result["status"],
++    }
++    status = 201 if result["status"] == "issued" else 202
++    _RESPONSES[(invoice_id, key)] = (time.time(), body, status)
++    return jsonify(body), status
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..643ed77 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -14,6 +14,7 @@ class Invoice:
+     customer_id: str
+     subtotal_cents: int
+     tax_cents: int = 0
++    currency: str = "USD"
+     ledger_ref: str | None = None
+     lines: list = field(default_factory=list)
+ 
+diff --git a/src/billing/refunds.py b/src/billing/refunds.py
+index 0fd8ca7..6ae2d72 100644
+--- a/src/billing/refunds.py
++++ b/src/billing/refunds.py
+@@ -1,7 +1,11 @@
+ from .invoices import Invoice
+ 
++# Refunds above this need a second approver in the admin tool (Finance, June 2026).
++APPROVAL_THRESHOLD_CENTS = 50_000
++
+ 
+ def refund(invoice: Invoice, amount_cents: int):
+     if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
+         raise ValueError("refund exceeds invoice total")
+-    return {"invoice_id": invoice.id, "refunded_cents": amount_cents}
++    status = "pending_approval" if amount_cents > APPROVAL_THRESHOLD_CENTS else "issued"
++    return {"invoice_id": invoice.id, "refunded_cents": amount_cents, "status": status}

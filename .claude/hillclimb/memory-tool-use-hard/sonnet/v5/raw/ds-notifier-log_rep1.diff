@@ -1,0 +1,24 @@
+diff --git a/services/notifier/notifier/email.py b/services/notifier/notifier/email.py
+index 0627713..741fe34 100644
+--- a/services/notifier/notifier/email.py
++++ b/services/notifier/notifier/email.py
+@@ -1,10 +1,18 @@
++import logging
++
+ from .provider import send
+ from .render import render
+ 
++log = logging.getLogger(__name__)
++
+ 
+ def send_receipt(invoice_id, to_addr, total_minor):
+     body = render("receipt", invoice_id=invoice_id, total_minor=total_minor)
+-    return send(to_addr, "Your receipt", body)
++    try:
++        return send(to_addr, "Your receipt", body)
++    except Exception:
++        log.exception("receipt_send_failed", extra={"invoice_id": invoice_id})
++        raise
+ 
+ 
+ def send_payment_reminder(invoice_id, to_addr):

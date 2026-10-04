@@ -1,0 +1,49 @@
+diff --git a/services/notifier/templates/receipt.mjml b/services/notifier/templates/receipt.mjml
+new file mode 100644
+index 0000000..fe31e35
+--- /dev/null
++++ b/services/notifier/templates/receipt.mjml
+@@ -0,0 +1,11 @@
++<mjml>
++  <mj-body>
++    <mj-section>
++      <mj-column>
++        <mj-text font-size="20px">Your receipt</mj-text>
++        <mj-text>Thanks for your payment. Invoice {{ invoice_id }} has been finalized.</mj-text>
++        <mj-text>Total: {{ total_minor }} (minor currency units)</mj-text>
++      </mj-column>
++    </mj-section>
++  </mj-body>
++</mjml>
+diff --git a/services/notifier/templates/receipt.txt b/services/notifier/templates/receipt.txt
+new file mode 100644
+index 0000000..314428f
+--- /dev/null
++++ b/services/notifier/templates/receipt.txt
+@@ -0,0 +1,5 @@
++Your receipt
++
++Thanks for your payment. Invoice {{ invoice_id }} has been finalized.
++
++Total: {{ total_minor }} (minor currency units)
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..0e2ca16 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
+ import requests
+ import structlog
+ 
++from src.jobs.queue import enqueue
++
+ log = structlog.get_logger()
+ 
+ LEDGER_URL = "https://ledger.internal.acme.example/v1/postings"
+@@ -29,4 +31,6 @@ def finalize(invoice):
+ def finalize_once(invoice):
+     if invoice.ledger_ref:
+         return invoice
+-    return finalize(invoice)
++    finalize(invoice)
++    enqueue("invoices.send_receipt", {"invoice_id": invoice.id}, dedupe_key=f"receipt:{invoice.id}")
++    return invoice

@@ -1,0 +1,83 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..182dc71
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,77 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++# Refunds above this need a second approver in the admin tool.
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# idempotency key -> (stored_at, body, status)
++_REPLAYS = {}
++
++
++def _money(cents, currency="USD"):
++    return {"minor": cents, "ccy": currency}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    replay_key = (invoice_id, key)
++    stored = _REPLAYS.get(replay_key)
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[1])
++        resp.status_code = stored[2]
++        return resp
++
++    actor_id = request.headers.get("X-Actor-Id")
++    if not actor_id:
++        return problem(401, "Unauthenticated", "Send the X-Actor-Id header.")
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid amount", "amount_cents must be a positive integer.")
++
++    try:
++        if amount_cents > APPROVAL_THRESHOLD_CENTS:
++            # Not issued here; validate the cap only (refund() is what issues).
++            if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
++                raise ValueError("refund exceeds invoice total")
++            status = "pending_approval"
++        else:
++            refund(invoice, amount_cents)
++            status = "issued"
++    except ValueError as exc:
++        return problem(422, "Refund rejected", str(exc))
++
++    if status == "issued":
++        log.info(
++            "ledger.refund_issued",
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            amount_cents=amount_cents,
++            actor_id=actor_id,
++        )
++
++    body = {"invoice_id": invoice.id, "refunded": _money(amount_cents), "status": status}
++    _REPLAYS[replay_key] = (time.time(), body, 201)
++    resp = jsonify(body)
++    resp.status_code = 201
++    return resp

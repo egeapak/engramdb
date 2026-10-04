@@ -1,0 +1,77 @@
+diff --git a/src/api/webhooks.py b/src/api/webhooks.py
+index c326872..93f7e5f 100644
+--- a/src/api/webhooks.py
++++ b/src/api/webhooks.py
+@@ -1,10 +1,69 @@
++import hashlib
++import hmac
++import os
++import time
++
++import structlog
+ from flask import Blueprint, request
+ 
++from src.api import errors
++from src.jobs import queue
++
+ bp = Blueprint("webhooks", __name__)
++log = structlog.get_logger()
++
++# Reject events older than this to stop replays of captured requests.
++MAX_EVENT_AGE_SECONDS = 300
++
++
++def _verify_signature():
++    """Check the PSP signature and timestamp; return True if the request is genuine."""
++    secret = os.environ.get("PSP_WEBHOOK_SECRET")
++    signature = request.headers.get("Psp-Signature", "")
++    timestamp = request.headers.get("Psp-Timestamp", "")
++    if not secret or not signature:
++        return False
++    try:
++        sent_at = int(timestamp)
++    except ValueError:
++        return False
++    if abs(time.time() - sent_at) > MAX_EVENT_AGE_SECONDS:
++        return False
++    expected = hmac.new(
++        secret.encode(), request.get_data(), hashlib.sha256
++    ).hexdigest()
++    return hmac.compare_digest(expected, signature)
++
++
++def _handle_payment_failed(event):
++    invoice_id = (event.get("data") or {}).get("invoice_id")
++    if not invoice_id:
++        return errors.problem(400, "Bad Request", "payment.failed event has no invoice_id")
++    # The PSP redelivers webhooks; keying on the event id drops duplicates of
++    # the same failure while still letting a later, distinct failure through.
++    queue.enqueue(
++        "dunning.schedule_retries",
++        {"invoice_id": invoice_id},
++        dedupe_key=f"dunning:{invoice_id}:{event['id']}",
++    )
++    log.info("payment_failed_retry_enqueued", invoice_id=invoice_id, event_id=event["id"])
++    return "", 204
++
++
++_HANDLERS = {
++    "payment.failed": _handle_payment_failed,
++}
+ 
+ 
+ @bp.post("/webhooks/psp")
+ def psp_webhook():
+-    event = request.get_json()
+-    # TODO: verify the event, then dispatch on event["type"]
+-    return "", 204
++    if not _verify_signature():
++        return errors.problem(401, "Unauthorized", "invalid webhook signature")
++    event = request.get_json(silent=True)
++    if not isinstance(event, dict) or "id" not in event or "type" not in event:
++        return errors.problem(400, "Bad Request", "malformed webhook event")
++    handler = _HANDLERS.get(event["type"])
++    if handler is None:
++        # Acknowledge event types we don't act on so the PSP stops redelivering.
++        return "", 204
++    return handler(event)

@@ -1,0 +1,50 @@
+diff --git a/src/billing/currency.py b/src/billing/currency.py
+index 3d11ab4..5f00daf 100644
+--- a/src/billing/currency.py
++++ b/src/billing/currency.py
+@@ -1,10 +1,43 @@
+ """Currency conversion for multi-currency invoices."""
++import os
++import xml.etree.ElementTree as ET
+ from decimal import Decimal
+ 
++import requests
++
++# The ECB euro reference feed (eurofxref XML). Rates are quoted per 1 EUR.
++ECB_FEED_URL = os.environ.get("ECB_FEED_URL")
++
+ 
+ def fetch_rates(day):
+-    """Return {currency: Decimal rate against USD} for the given date."""
+-    raise NotImplementedError
++    """Return {currency: Decimal rate against USD} for the given date.
++
++    Uses the ECB reference rates published for `day`, or the most recent
++    publication before it (the ECB does not publish on weekends or TARGET
++    holidays). The feed is EUR-based, so each rate is divided by the USD rate
++    to get units of that currency per 1 USD.
++    """
++    if not ECB_FEED_URL:
++        raise RuntimeError("ECB_FEED_URL is not configured")
++    resp = requests.get(ECB_FEED_URL, timeout=10)
++    resp.raise_for_status()
++    root = ET.fromstring(resp.content)
++
++    wanted = day.isoformat() if hasattr(day, "isoformat") else str(day)
++    best = None
++    for cube in root.iter():
++        if cube.tag.endswith("Cube") and "time" in cube.attrib:
++            published = cube.attrib["time"]
++            if published <= wanted and (best is None or published > best.attrib["time"]):
++                best = cube
++    if best is None:
++        raise LookupError(f"no ECB rates published on or before {wanted}")
++
++    eur_rates = {c.attrib["currency"]: Decimal(c.attrib["rate"]) for c in best}
++    usd_per_eur = eur_rates.pop("USD")
++    rates = {code: rate / usd_per_eur for code, rate in eur_rates.items()}
++    rates["EUR"] = 1 / usd_per_eur
++    return rates
+ 
+ 
+ def convert(amount_cents, rate):

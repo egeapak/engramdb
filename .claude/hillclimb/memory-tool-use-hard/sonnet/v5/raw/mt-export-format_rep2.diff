@@ -1,0 +1,84 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..1f04f21 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,77 @@
++"""Export the finalized invoices of one month to a CSV for Finance's import tool."""
+ import argparse
++import csv
++import io
+ import os
++import sys
++from datetime import datetime
++
++COLUMNS = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++    "WHERE finalized_at >= %s AND finalized_at < %s ORDER BY finalized_at, id"
++)
++
++
++def month_window(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    # finalized_at is stored as naive UTC; see docs/ops/backfills.md
++    if os.environ.get("TZ") != "UTC":
++        raise RuntimeError(f"month window for {month} is ambiguous (zone not pinned); run with TZ=UTC")
++    return start, end
++
++
++def previous_month(today):
++    return f"{today.year - 1}-12" if today.month == 1 else f"{today.year}-{today.month - 1:02d}"
++
++
++def render_csv(rows):
++    """rows: (id, customer_id, subtotal_cents, tax_cents, finalized_at). Finance's import needs
++    ',' delimiters and YYYY-MM-DD dates; amounts are integer cents."""
++    out = io.StringIO()
++    writer = csv.writer(out, lineterminator="\n")
++    writer.writerow(COLUMNS)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%Y-%m-%d")])
++    return out.getvalue()
++
++
++def fetch_rows(start, end):
++    import psycopg  # imported lazily: only needed when actually reading the database
++
++    with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", help="YYYY-MM (default: previous month)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    month = args.month or previous_month(datetime.utcnow())
++    key = f"exports/{month}/invoices.csv"
++    print(f"exporting {args.env} {month} to s3://{bucket}/{key} (dry_run={args.dry_run})")
++
++    start, end = month_window(month)
++    if not os.environ.get("DATABASE_URL"):
++        print("no DATABASE_URL set; nothing exported", file=sys.stderr)
++        return 1
++    rows = fetch_rows(start, end)
++    body = render_csv(rows)
++    if args.dry_run:
++        print(f"dry run: {len(rows)} invoices, nothing written")
++        return 0
++
++    import boto3  # imported lazily, like psycopg
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=body.encode("utf-8"), ContentType="text/csv")
++    print(f"wrote {len(rows)} invoices to s3://{bucket}/{key}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

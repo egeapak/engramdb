@@ -1,0 +1,75 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..687f921 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,14 +1,69 @@
+ import argparse
++import csv
++import io
+ import os
++from datetime import datetime
++
++COLUMNS = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# finalized_at is stored as naive UTC; the window is half-open so each invoice lands in exactly one month.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def month_window(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def default_month(today=None):
++    """The previous calendar month (the cron runs on the 2nd)."""
++    today = today or datetime.utcnow()
++    return f"{today.year - 1}-12" if today.month == 1 else f"{today.year}-{today.month - 1:02d}"
++
++
++def fetch_rows(month):
++    import psycopg
++
++    start, end = month_window(month)
++    # The pooler runs in transaction mode, so server-side prepared statements must be off.
++    with psycopg.connect(os.environ["DATABASE_URL"], prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def render_csv(rows):
++    """Finance import format: ',' delimiter, YYYY-MM-DD dates, integer cents, UTF-8 without BOM."""
++    buf = io.StringIO(newline="")
++    writer = csv.writer(buf, lineterminator="\n")
++    writer.writerow(COLUMNS)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%Y-%m-%d")])
++    return buf.getvalue()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=default_month(), help="YYYY-MM (default: previous month)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{args.month}/invoices.csv"
++    print(f"exporting {args.env} to {bucket}/{key} (dry_run={args.dry_run})")
++
++    rows = fetch_rows(args.month)
++    body = render_csv(rows)
++    print(f"{len(rows)} finalized invoices for {args.month}")
++    if args.dry_run:
++        return
++    import boto3
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=body.encode("utf-8"), ContentType="text/csv; charset=utf-8")
+ 
+ 
+ if __name__ == "__main__":
