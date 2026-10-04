@@ -38,6 +38,9 @@ struct Report {
     query_single: Latency,
     doc_single: Latency,
     batch16: Latency,
+    /// CPU seconds / wall seconds over the batch-16 loop.
+    #[serde(default)]
+    batch16_cores_busy: f64,
     corpus_docs_per_sec: f64,
     mean_doc_tokens: f64,
     determinism: Determinism,
@@ -188,11 +191,13 @@ fn bench(name: &str, models: &Path, data: &Path, out: &Path) -> Result<()> {
 
     // --- Batch of 16 documents (reindex path) -----------------------------
     let mut samples = Vec::new();
+    let (cpu0, wall0) = (cpu_secs(), Instant::now());
     for _ in 0..iters * 4 {
         let t = Instant::now();
         embed(engine.as_mut(), &tok, &doc_refs[..16])?;
         samples.push(ms(t));
     }
+    let batch16_cores_busy = (cpu_secs() - cpu0) / wall0.elapsed().as_secs_f64();
     let batch16 = Latency::from_samples(samples);
     eprintln!("[{name}] batch16 p50 {:.2} ms", batch16.p50_ms);
 
@@ -268,6 +273,7 @@ fn bench(name: &str, models: &Path, data: &Path, out: &Path) -> Result<()> {
         query_single,
         doc_single,
         batch16,
+        batch16_cores_busy,
         corpus_docs_per_sec,
         mean_doc_tokens,
         determinism,
@@ -390,13 +396,14 @@ fn compare(data: &Path, out: &Path) -> Result<()> {
         md.push('\n');
     };
     push(&mut md, "## Speed\n".into());
-    push(&mut md, "| Engine | Load (ms) | First call (ms) | Query p50 / p95 (ms) | Doc p50 / p95 (ms) | Batch-16 p50 (ms) | Corpus (docs/s) |".into());
-    push(&mut md, "|---|---:|---:|---:|---:|---:|---:|".into());
+    push(&mut md, "| Engine | Load (ms) | First call (ms) | Query p50 / p95 (ms) | Doc p50 / p95 (ms) | Batch-16 p50 (ms) | Cores busy (batch) | Corpus (docs/s) |".into());
+    push(&mut md, "|---|---:|---:|---:|---:|---:|---:|---:|".into());
     for r in &reports {
         push(&mut md, format!(
-            "| {} | {:.0} | {:.1} | {:.2} / {:.2} | {:.1} / {:.1} | {:.1} | {:.1} |",
+            "| {} | {:.0} | {:.1} | {:.2} / {:.2} | {:.1} / {:.1} | {:.1} | {:.1} | {:.1} |",
             r.engine, r.load_ms, r.first_call_ms, r.query_single.p50_ms, r.query_single.p95_ms,
-            r.doc_single.p50_ms, r.doc_single.p95_ms, r.batch16.p50_ms, r.corpus_docs_per_sec
+            r.doc_single.p50_ms, r.doc_single.p95_ms, r.batch16.p50_ms, r.batch16_cores_busy,
+            r.corpus_docs_per_sec
         ));
     }
     push(&mut md, "\n## Memory and size\n".into());

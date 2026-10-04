@@ -6,6 +6,7 @@
 #   SKIP_BUILD=1 ./run.sh    # reuse binaries from a previous run
 #   BUILD_ONLY=1 ./run.sh    # timed builds only
 #   ENGINES="ort-u8 candle" ./run.sh
+#   OUT=results-1thread ENGINE_THREADS=1 RAYON_NUM_THREADS=1 SKIP_BUILD=1 ./run.sh
 #
 # Env passed through to the bench: ITERS (default 3), PROBE_TRIALS (30),
 # PROBE_LOAD_THREADS (4), ENGINE_THREADS (ORT intra-op threads; unset = ORT
@@ -15,7 +16,8 @@ cd "$(dirname "$0")"
 
 FAMILIES="baseline ort burn-flex burn-ndarray candle"
 ENGINES="${ENGINES:-ort-u8 ort-f32 burn-flex burn-ndarray candle}"
-mkdir -p results
+OUT="${OUT:-results}"
+mkdir -p results "$OUT"
 
 family_of() { case "$1" in ort-*) echo ort ;; *) echo "$1" ;; esac; }
 bin_of() { echo "target-$1/release/inference-engines"; }
@@ -41,7 +43,7 @@ export ORT_DYLIB_PATH="${ORT_DYLIB_PATH:-$PWD/$ORT_SO}"
 
 for e in $ENGINES; do
   echo "== bench $e" >&2
-  "$(bin_of "$(family_of "$e")")" bench "$e"
+  "$(bin_of "$(family_of "$e")")" bench "$e" --out "$OUT"
 done
 
-"$(bin_of baseline)" compare
+"$(bin_of baseline)" compare --out "$OUT"

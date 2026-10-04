@@ -188,6 +188,20 @@ pub fn rss_mib() -> (f64, f64) {
     (field("VmRSS:"), field("VmHWM:"))
 }
 
+/// Process CPU time (user + system) in seconds, from `/proc/self/stat`.
+/// Divided by wall time it gives the number of cores an engine kept busy.
+pub fn cpu_secs() -> f64 {
+    let Ok(s) = std::fs::read_to_string("/proc/self/stat") else {
+        return 0.0;
+    };
+    // Fields after the parenthesised command name; utime/stime are 14 and 15.
+    let rest = s.rsplit_once(')').map(|(_, r)| r).unwrap_or("");
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let ticks = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    // Linux USER_HZ is 100 on every mainstream configuration.
+    (ticks(11) + ticks(12)) / 100.0
+}
+
 pub fn cosine(a: &[f32], b: &[f32]) -> f64 {
     let dot: f64 = a.iter().zip(b).map(|(x, y)| (*x as f64) * (*y as f64)).sum();
     let na: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
