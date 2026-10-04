@@ -1653,11 +1653,9 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    /// The tools a session needs to read, record and flag memories. `update`
-    /// is left deferred: its schema is the second largest and it is rarely
-    /// called, while `challenge` (pinned) and `create` with `supersedes`
-    /// also revise a memory. Every pinned schema is re-read on every turn.
-    pub const DEFAULT_ALWAYS_LOAD: [&'static str; 4] = ["query", "get", "create", "challenge"];
+    /// The tools a session needs to read, record and correct memories.
+    pub const DEFAULT_ALWAYS_LOAD: [&'static str; 5] =
+        ["query", "get", "create", "update", "challenge"];
 
     fn default_always_load() -> Vec<String> {
         Self::DEFAULT_ALWAYS_LOAD

@@ -74,7 +74,7 @@ struct CreateInput {
     supersedes: Option<Vec<String>>,
 
     #[schemars(
-        description = "Group or global shares only: the project/group ids that see this memory. Omit for the whole group. Advisory, not access control."
+        description = "Audience for a group/global share: the project ids and/or group ids the memory is scoped to in cross-store fan-in. Omit for whole-group visibility. Only meaningful when writing into a group (project: \"group:<name>\") or the global store; inert on a project-local memory. Advisory scoping, NOT a confidentiality boundary — a direct query of the shared store still returns it."
     )]
     audience: Option<Vec<String>>,
 
@@ -101,7 +101,9 @@ struct CreateInput {
     #[schemars(description = "'project' (default) or 'task' (binding only within origin_task).")]
     generality: Option<String>,
 
-    #[schemars(description = "RFC3339 time the claim became true; only to backdate.")]
+    #[schemars(
+        description = "Valid-time start (RFC3339): when the claim became true in the world. Only to backdate; defaults to creation time."
+    )]
     valid_from: Option<String>,
 
     #[schemars(description = "Decay: none|linear|exponential|step")]
@@ -119,11 +121,13 @@ struct CreateInput {
     #[schemars(description = "Optional human-readable title for the memory file")]
     title: Option<String>,
 
-    #[schemars(description = "keyword|t5|none; default from config.")]
+    #[schemars(
+        description = "Title generation strategy: keyword|t5|none. Defaults to the project's [title].strategy config (t5 unless overridden)."
+    )]
     title_strategy: Option<String>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -187,7 +191,7 @@ struct QueryInput {
     include_global: Option<bool>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -198,7 +202,7 @@ struct GetInput {
     id: String,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -255,7 +259,7 @@ struct UpdateInput {
     supersedes: Option<Vec<String>>,
 
     #[schemars(
-        description = "Group or global shares only: the project/group ids that see this memory. Omit to keep; [] for the whole group."
+        description = "Set the per-memory audience (project/group ids) for a group/global share. Omit to leave unchanged; pass an empty list to clear it to whole-group visibility. Only meaningful on a memory in a group/global store."
     )]
     audience: Option<Vec<String>>,
 
@@ -282,7 +286,9 @@ struct UpdateInput {
     #[schemars(description = "'project' (default) or 'task' (binding only within origin_task).")]
     generality: Option<String>,
 
-    #[schemars(description = "RFC3339 time the claim became true; only to backdate.")]
+    #[schemars(
+        description = "Valid-time start (RFC3339): when the claim became true in the world. Only to backdate; defaults to creation time."
+    )]
     valid_from: Option<String>,
 
     #[schemars(
@@ -308,7 +314,7 @@ struct UpdateInput {
     decay_floor: Option<f64>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -319,7 +325,7 @@ struct DeleteInput {
     id: String,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -340,7 +346,7 @@ struct ChallengeInput {
     source_file: Option<String>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -369,7 +375,7 @@ struct ReviewInput {
     stale_after_days: Option<u64>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -396,7 +402,7 @@ struct ResolveInput {
     superseded_by: Option<String>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -407,7 +413,7 @@ struct VerifyInput {
     id: String,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -420,7 +426,7 @@ struct TaskCurrentInput {
     task: Option<String>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -431,7 +437,7 @@ struct TaskCompleteInput {
     task: String,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -445,7 +451,7 @@ struct CompressCandidatesInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -468,7 +474,7 @@ struct CompressApplyInput {
     tags: Option<Vec<String>>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -482,7 +488,7 @@ struct GcInput {
     threshold: Option<f64>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -506,7 +512,7 @@ struct ReindexInput {
     force: Option<bool>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -543,7 +549,7 @@ struct ListInput {
     limit: Option<usize>,
 
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
 }
@@ -551,7 +557,7 @@ struct ListInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StatsInput {
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
     #[schemars(
@@ -564,7 +570,7 @@ struct StatsInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ConfigInput {
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
     #[schemars(
@@ -577,7 +583,7 @@ struct ConfigInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct DoctorInput {
     #[schemars(
-        description = "Target store; omit for the current project. Also \"global\", \"group:<name>\", a 16-char project ID, or an absolute path."
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
     #[schemars(
