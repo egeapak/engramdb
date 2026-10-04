@@ -1032,9 +1032,11 @@ impl Default for RerankConfig {
 ///
 /// `strategy` selects how a memory's title is derived when the caller
 /// doesn't supply one explicitly:
-/// - `keyword` (default): RAKE keyword extraction — in-process, no model,
-///   negligible cost; never cached/pooled.
-/// - `t5`: abstractive T5-small summarization. The model session is
+/// - `keyword`: RAKE keyword extraction — in-process, no model,
+///   negligible cost; never cached/pooled. This is [`TitleStrategy`]'s own
+///   `Default`, which the one-shot CLI uses.
+/// - `t5` (config default, see [`default_title_strategy`]): abstractive
+///   T5-small summarization. The model session is
 ///   expensive (encoder + decoder ONNX init), so when this is configured
 ///   the daemon / MCP server loads it **once** into the provider bundle
 ///   (and pools it) instead of rebuilding it on every `create`.

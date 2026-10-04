@@ -862,7 +862,7 @@ fn onnx_backend_benchmarks(c: &mut Criterion) {
     let nli_repo = EngramConfig::default().nli.model;
 
     for (label, backend) in backends {
-        // --- Embeddings (all-MiniLM-L6-v2) ---
+        // --- Embeddings (default model: all-MiniLM-L12-v2 uint8) ---
         if let Some(provider) = OnnxProvider::try_new_on(backend) {
             group.bench_function(BenchmarkId::new("embed_single", label), |b| {
                 b.to_async(&rt)
