@@ -1,5 +1,5 @@
 {
- "current_round": 0,
+ "current_round": 1,
  "reps": 3,
  "model": "claude-opus-5-5",
  "goal": {
@@ -177,5 +177,10 @@
    "id": "failed_tool_calls",
    "label": "failed calls"
   }
- ]
+ ],
+ "best": {
+  "round": 1,
+  "whole": "132/135",
+  "test": "68/69"
+ }
 }
