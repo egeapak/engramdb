@@ -296,6 +296,37 @@ fn is_parent_directory(pattern: &str, current_path: &str) -> bool {
     }
 }
 
+/// Depth from the nearest pattern that *encloses* `current_path`: the file
+/// itself (0), its directory (1), each ancestor above (2, 3, …). `None` when
+/// nothing encloses it. Unlike [`proximity`], a pattern naming a sibling file
+/// does not enclose (it is about that other file), and neither does a
+/// root-wide pattern (`/`, `**/*.py`), which encloses every path.
+pub fn enclosing_depth(patterns: &[String], current_path: &str) -> Option<usize> {
+    patterns
+        .iter()
+        .filter_map(|p| {
+            let p = p.trim();
+            if p.is_empty() || p == "/" {
+                return None;
+            }
+            if p == current_path {
+                return Some(0);
+            }
+            let dir = if is_glob_pattern(p) {
+                let base = p[..p.find(['*', '?', '[', '{'])?].trim_end_matches('/');
+                if base.is_empty() || !cached_matcher(p)?.is_match(current_path) {
+                    return None;
+                }
+                base
+            } else {
+                p
+            };
+            is_parent_directory(dir, current_path)
+                .then(|| directory_depth_from_parent(dir, current_path))
+        })
+        .min()
+}
+
 fn extract_directory(path: &str) -> &str {
     if let Some(pos) = path.rfind('/') {
         &path[..pos]
@@ -306,6 +337,24 @@ fn extract_directory(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enclosing_depth_skips_siblings_and_root_wide() {
+        let d = |s: &[&str]| {
+            super::enclosing_depth(
+                &s.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
+                "src/api/orders.rs",
+            )
+        };
+        assert_eq!(d(&["src/api/orders.rs"]), Some(0));
+        assert_eq!(d(&["src/api/"]), Some(1));
+        assert_eq!(d(&["src/api"]), Some(1));
+        assert_eq!(d(&["src/"]), Some(2));
+        assert_eq!(d(&["src/**/*.rs"]), Some(2));
+        assert_eq!(d(&["src/api/other.rs"]), None);
+        assert_eq!(d(&["/", "**/*.rs"]), None);
+        assert_eq!(d(&["src/api/other.rs", "src/"]), Some(2));
+    }
+
     use super::*;
 
     const BASE: f64 = 0.82;
