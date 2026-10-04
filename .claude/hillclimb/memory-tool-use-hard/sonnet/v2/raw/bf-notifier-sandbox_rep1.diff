@@ -1,0 +1,63 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..712dac3
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,57 @@
++"""Integration test: sends one real email through the provider sandbox.
++
++The sandbox is capped at 500 messages/day for the whole team and silently drops
++anything not addressed to @sink.acme.test, so this sends a single message to a
++sink address and reads it back from the sink inbox API.
++
++Needs MAIL_API_KEY (sandbox key from the dev secrets store) and SINK_INBOX_URL
++(the sink inbox API endpoint from the provider's docs). Skipped otherwise.
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++SINK_DOMAIN = "sink.acme.test"
++POLL_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and os.environ.get("SINK_INBOX_URL")),
++    reason="MAIL_API_KEY and SINK_INBOX_URL are required for sandbox tests",
++)
++
++
++def _fetch_sink_messages(to_addr):
++    resp = requests.get(
++        os.environ["SINK_INBOX_URL"],
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        params={"to": to_addr},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    return resp.json()
++
++
++def test_send_receipt_is_delivered_to_sink():
++    # Unique per run so reruns never match an earlier message.
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:12]}"
++    to_addr = f"receipts+{invoice_id}@{SINK_DOMAIN}"
++
++    message_id = email.send_receipt(invoice_id, to_addr, 1200)
++    assert message_id
++
++    deadline = time.monotonic() + POLL_TIMEOUT_S
++    delivered = []
++    while time.monotonic() < deadline:
++        delivered = [m for m in _fetch_sink_messages(to_addr) if m.get("id") == message_id]
++        if delivered:
++            break
++        time.sleep(POLL_INTERVAL_S)
++
++    assert delivered, f"message {message_id} not in sink inbox after {POLL_TIMEOUT_S}s"
++    assert delivered[0].get("subject") == "Your receipt"

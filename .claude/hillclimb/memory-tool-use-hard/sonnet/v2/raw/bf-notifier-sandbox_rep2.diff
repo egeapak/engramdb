@@ -1,0 +1,64 @@
+diff --git a/services/notifier/tests/test_email_sandbox.py b/services/notifier/tests/test_email_sandbox.py
+new file mode 100644
+index 0000000..b7409a8
+--- /dev/null
++++ b/services/notifier/tests/test_email_sandbox.py
+@@ -0,0 +1,58 @@
++"""Integration test: sends one real email through the provider sandbox.
++
++Needs MAIL_API_KEY (sandbox key from the dev secrets store) and SINK_INBOX_URL
++(base URL of the sink inbox API). Skipped otherwise.
++
++The sandbox is capped at 2 msg/s and 500 msg/day for the whole team, and it
++silently drops mail to anything outside @sink.acme.test, so this sends exactly
++one message to a sink address and reads it back.
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++SINK_INBOX_URL = os.environ.get("SINK_INBOX_URL")
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and SINK_INBOX_URL),
++    reason="MAIL_API_KEY and SINK_INBOX_URL are required for sandbox tests",
++)
++
++POLL_ATTEMPTS = 15
++POLL_INTERVAL_S = 2
++
++
++def _find_message(to_addr, message_id):
++    # Assumed response shape: a JSON list of messages with "id" and "to".
++    # Adjust to the provider's sink inbox docs if it differs.
++    resp = requests.get(
++        SINK_INBOX_URL,
++        params={"to": to_addr},
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    return next((m for m in resp.json() if m.get("id") == message_id), None)
++
++
++def test_send_receipt_is_delivered_to_sink_inbox():
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:8]}"
++    to_addr = "receipts@sink.acme.test"
++
++    message_id = email.send_receipt(invoice_id, to_addr, 1200)
++    assert message_id
++
++    message = None
++    for _ in range(POLL_ATTEMPTS):
++        message = _find_message(to_addr, message_id)
++        if message:
++            break
++        time.sleep(POLL_INTERVAL_S)
++
++    assert message is not None, f"{message_id} was not delivered to {to_addr}"
++    assert message.get("subject") == "Your receipt"

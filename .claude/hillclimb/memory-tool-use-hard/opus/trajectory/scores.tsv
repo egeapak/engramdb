@@ -1,46 +1,46 @@
-id	split	baseline	v1
-mm-webhook-failed	test	1.000	1.000
-mm-dunning-job	train	1.000	1.000
-mm-refund-endpoint	train	1.000	1.000
-mm-refund-question	train	1.000	1.000
-mm-list-invoices	test	1.000	1.000
-mm-receipt-email	test	1.000	1.000
-bf-ledger-amount	test	1.000	1.000
-bf-export-csv	test	1.000	1.000
-bf-tax-quebec	test	1.000	1.000
-bf-db-pool	train	1.000	1.000
-bf-release-freeze	train	1.000	1.000
-bf-notifier-sandbox	train	1.000	1.000
-st-ci-rerun	train	1.000	1.000
-st-fx-provider	test	1.000	1.000
-st-notifier-owner	test	1.000	1.000
-st-retention	train	0.667	1.000
-st-pdf-premise	test	0.333	1.000
-st-flask-premise	train	0.000	1.000
-ds-notifier-log	test	1.000	1.000
-ds-reporting-money	test	1.000	1.000
-ds-notifier-migration	train	1.000	1.000
-ds-notifier-flag	train	1.000	1.000
-ds-notifier-tests	test	1.000	1.000
-ds-fx-rounding	train	0.667	0.333
-mt-reviewer	train	1.000	1.000
-mt-warnings-as-errors	test	1.000	1.000
-mt-drift-dunning	test	1.000	1.000
-mt-webhook-spec	test	1.000	1.000
-mt-sandbox-region	test	1.000	1.000
-mt-refund-after-drift	train	1.000	1.000
-dc-backfill-tz	test	1.000	0.667
-mt-export-format	train	1.000	1.000
-dc-fx-fixtures	train	1.000	1.000
-dc-runbook-export	train	0.000	1.000
-dc-ledger-smoke	test	1.000	1.000
-dc-golden-statements	test	1.000	1.000
-dc-seed-dev	train	1.000	1.000
-nh-print-oneoff	train	1.000	1.000
-nh-curious-loguru	test	1.000	1.000
-nh-hypothetical-rounding	train	1.000	1.000
-nh-offline-today	train	1.000	1.000
-nh-other-project	test	1.000	1.000
-nh-user-unsure-rounding	test	1.000	1.000
-nh-already-known	test	1.000	1.000
-nh-ci-idea	train	1.000	1.000
+id	split	baseline	v1	v2
+mm-webhook-failed	test	1.000	1.000	1.000
+mm-dunning-job	train	1.000	1.000	1.000
+mm-refund-endpoint	train	1.000	1.000	1.000
+mm-refund-question	train	1.000	1.000	1.000
+mm-list-invoices	test	1.000	1.000	1.000
+mm-receipt-email	test	1.000	1.000	1.000
+bf-ledger-amount	test	1.000	1.000	1.000
+bf-export-csv	test	1.000	1.000	0.667
+bf-tax-quebec	test	1.000	1.000	1.000
+bf-db-pool	train	1.000	1.000	1.000
+bf-release-freeze	train	1.000	1.000	1.000
+bf-notifier-sandbox	train	1.000	1.000	1.000
+st-ci-rerun	train	1.000	1.000	1.000
+st-fx-provider	test	1.000	1.000	1.000
+st-notifier-owner	test	1.000	1.000	1.000
+st-retention	train	0.667	1.000	0.333
+st-pdf-premise	test	0.333	1.000	0.667
+st-flask-premise	train	0.000	1.000	0.667
+ds-notifier-log	test	1.000	1.000	1.000
+ds-reporting-money	test	1.000	1.000	1.000
+ds-notifier-migration	train	1.000	1.000	1.000
+ds-notifier-flag	train	1.000	1.000	1.000
+ds-notifier-tests	test	1.000	1.000	1.000
+ds-fx-rounding	train	0.667	0.333	1.000
+mt-reviewer	train	1.000	1.000	1.000
+mt-warnings-as-errors	test	1.000	1.000	1.000
+mt-drift-dunning	test	1.000	1.000	1.000
+mt-webhook-spec	test	1.000	1.000	1.000
+mt-sandbox-region	test	1.000	1.000	1.000
+mt-refund-after-drift	train	1.000	1.000	1.000
+dc-backfill-tz	test	1.000	0.667	1.000
+mt-export-format	train	1.000	1.000	1.000
+dc-fx-fixtures	train	1.000	1.000	1.000
+dc-runbook-export	train	0.000	1.000	1.000
+dc-ledger-smoke	test	1.000	1.000	1.000
+dc-golden-statements	test	1.000	1.000	1.000
+dc-seed-dev	train	1.000	1.000	1.000
+nh-print-oneoff	train	1.000	1.000	1.000
+nh-curious-loguru	test	1.000	1.000	1.000
+nh-hypothetical-rounding	train	1.000	1.000	1.000
+nh-offline-today	train	1.000	1.000	1.000
+nh-other-project	test	1.000	1.000	1.000
+nh-user-unsure-rounding	test	1.000	1.000	1.000
+nh-already-known	test	1.000	1.000	1.000
+nh-ci-idea	train	1.000	1.000	1.000
