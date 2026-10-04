@@ -307,6 +307,24 @@ vs the shipped quantized files). Compared with the daemon's current
 misconfigured pool (see the side finding), the embedding gap shrank to
 1.5–3×; with the pool fixed (default pool of 2) it is back to about 5× (492 vs 92 queries/s, 68.8 vs 14 doc/s).
 
+### GPU (not pursued)
+
+Burn (`metal` via `wgpu`) and Candle (`metal`) can use the GPU on macOS
+with no added runtime dependency. CUDA paths add the NVIDIA driver and
+CUDA libraries, and Linux `vulkan` needs a loader plus a CPU fallback.
+
+GPU was not pursued, for these reasons:
+
+- The EngramDB workload is mostly many small single queries. A 10-token
+  query is hundreds of small kernels, and the launch cost per kernel can be
+  larger than the work. ORT on CPU does such a query in about 3 ms.
+- ONNX Runtime already has a GPU path on macOS (the `coreml` feature). It
+  was slower than the CPU for this workload when tried on a Mac.
+- Burn and Candle GPU paths run fp32 only, so the int8 gain is lost there too.
+
+A GPU would help only large batches, such as a full reindex. That case is
+rare and is not worth a second inference stack.
+
 ### Not measured yet
 
 - Burn 0.22 (pre-release); `burn-cpu` and int8 kernels may improve there.
