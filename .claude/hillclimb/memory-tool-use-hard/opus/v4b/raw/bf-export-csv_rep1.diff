@@ -1,0 +1,115 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..35310a3 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,107 @@
++"""Export one month's finalized invoices as the CSV that Finance imports.
++
++Format is dictated by Finance's import tool (German locale): `;` delimiter,
++dates as DD.MM.YYYY, integer cents without currency symbol, UTF-8 without BOM.
++Columns: invoice id, customer id, subtotal, tax, total, finalized date.
++"""
+ import argparse
++import csv
+ import os
++import sys
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++
++import structlog
++
++log = structlog.get_logger()
++
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# finalized_at is stored as naive UTC (see docs/ops/backfills.md), so the window
++# is compared as naive UTC datetimes and never derived from the host's zone.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at IS NOT NULL
++      AND finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def previous_month():
++    first_of_this_month = datetime.now(timezone.utc).replace(day=1)
++    return (first_of_this_month - timedelta(days=1)).strftime("%Y-%m")
++
++
++def month_window(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_invoices(database_url, start, end):
++    import psycopg
++
++    # One short read-only query; don't hold a pooled connection longer than needed.
++    with psycopg.connect(database_url) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def to_row(invoice_id, customer_id, subtotal_cents, tax_cents, finalized_at):
++    subtotal_cents = int(subtotal_cents)
++    tax_cents = int(tax_cents)
++    return [
++        invoice_id,
++        customer_id,
++        subtotal_cents,
++        tax_cents,
++        subtotal_cents + tax_cents,
++        finalized_at.strftime("%d.%m.%Y"),
++    ]
++
++
++def write_csv(path, rows):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    # utf-8 (not utf-8-sig) so no BOM is written.
++    with open(path, "w", encoding="utf-8", newline="") as f:
++        writer = csv.writer(f, delimiter=";")
++        writer.writerow(HEADER)
++        writer.writerows(rows)
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month, UTC)")
++    parser.add_argument("--out", default=None, help="output path (default: exports/<YYYY-MM>/invoices.csv)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
+-    bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++
++    month = args.month or previous_month()
++    start, end = month_window(month)
++    out = Path(args.out or f"exports/{month}/invoices.csv")
++
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    rows = [to_row(*r) for r in fetch_invoices(database_url, start, end)]
++    ids = [r[0] for r in rows]
++    if len(ids) != len(set(ids)):
++        print(f"refusing to export {month}: duplicate invoice ids in result", file=sys.stderr)
++        return 1
++    total_cents = sum(r[4] for r in rows)
++
++    if args.dry_run:
++        print(f"[dry-run] would write {len(rows)} invoices (total {total_cents} cents) for {month} to {out}")
++        return 0
++
++    write_csv(out, rows)
++    log.info("invoice_export_written", env=args.env, month=month, path=str(out), invoices=len(rows), total_cents=total_cents)
++    print(f"wrote {len(rows)} invoices (total {total_cents} cents) for {month} to {out}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

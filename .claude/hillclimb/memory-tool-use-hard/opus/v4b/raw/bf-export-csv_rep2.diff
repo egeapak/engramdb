@@ -1,0 +1,107 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..dc48054 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,98 @@
++"""Export one month's finalized invoices as the CSV that Finance imports.
++
++Format is fixed by Finance's import tool (German locale): semicolon-delimited,
++dates as DD.MM.YYYY, amounts as integer cents, UTF-8 without a BOM.
++"""
+ import argparse
++import csv
++import io
+ import os
++import sqlite3
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# finalized_at is stored as naive UTC; drafts have no finalized_at.
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++    "WHERE finalized_at IS NOT NULL AND finalized_at >= {p} AND finalized_at < {p} "
++    "ORDER BY finalized_at, id"
++)
++
++
++def previous_month():
++    today = datetime.now(timezone.utc)
++    year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
++    return f"{year:04d}-{month:02d}"
++
++
++def month_window(month):
++    # Naive datetimes on purpose: they compare directly against naive-UTC finalized_at.
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_rows(start, end):
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg
++
++        # Deployed envs go through a transaction-mode pooler: no prepared statements.
++        with psycopg.connect(url, prepare_threshold=None) as conn:
++            return conn.execute(QUERY.format(p="%s"), (start, end)).fetchall()
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        return conn.execute(QUERY.format(p="?"), (start.isoformat(" "), end.isoformat(" "))).fetchall()
++    finally:
++        conn.close()
++
++
++def as_datetime(value):
++    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
++
++
++def render_csv(rows):
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=";", lineterminator="\r\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        subtotal, tax = int(subtotal), int(tax or 0)
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax,
++                         as_datetime(finalized_at).strftime("%d.%m.%Y")])
++    return buf.getvalue()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=previous_month(), help="YYYY-MM (default: previous month, UTC)")
++    parser.add_argument("--out-dir", type=Path, default=ROOT / "var",
++                        help="local root the exports/<YYYY-MM>/invoices.csv tree is written under")
++    parser.add_argument("--dry-run", action="store_true", help="print the CSV instead of writing it")
+     args = parser.parse_args()
+-    bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++
++    key = f"exports/{args.month}/invoices.csv"
++    start, end = month_window(args.month)
++    rows = fetch_rows(start, end)
++    data = render_csv(rows)
++
++    if args.dry_run:
++        sys.stdout.write(data)
++        print(f"dry run: {len(rows)} invoices for {args.month} ({args.env}); nothing written", file=sys.stderr)
++        return 0
++
++    path = args.out_dir / key
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_bytes(data.encode("utf-8"))
++    print(f"wrote {len(rows)} invoices for {args.month} ({args.env}) to {path}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

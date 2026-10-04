@@ -1,0 +1,108 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..7b85c29
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,102 @@
++"""Purge invoices (and their lines) that are past the retention period.
++
++Dry-run by default: reports what would be deleted. Pass --execute to delete.
++
++Retention is counted from finalization. Drafts (finalized_at IS NULL) are never
++purged, and neither is any invoice that still has a refund against it.
++"""
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta, timezone
++
++import structlog
++
++log = structlog.get_logger()
++
++# Legal defines the period in days (10 years since the 2026 tax audit);
++# do not derive it from years.
++RETENTION_DAYS = 3650
++
++# Larger batches hold invoices row locks long enough to time out checkout
++# (INC-2291), and long transactions starve the pooler.
++MAX_SAFE_BATCH = 500
++
++# The schema has no refund status, so any refund row counts as open and
++# blocks the purge.
++ELIGIBLE = """
++    FROM invoices i
++    WHERE i.finalized_at IS NOT NULL
++      AND i.finalized_at < %(cutoff)s
++      AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.invoice_id = i.id)
++"""
++
++PURGE_BATCH = f"""
++    WITH batch AS (
++        SELECT i.id {ELIGIBLE}
++        ORDER BY i.finalized_at
++        LIMIT %(limit)s
++        FOR UPDATE SKIP LOCKED
++    ), lines AS (
++        DELETE FROM invoice_lines WHERE invoice_id IN (SELECT id FROM batch)
++    )
++    DELETE FROM invoices WHERE id IN (SELECT id FROM batch)
++    RETURNING id
++"""
++
++
++def retention_cutoff(now=None):
++    # finalized_at is stored as naive UTC (docs/ops/backfills.md); compute the
++    # cutoff in UTC regardless of the host's zone.
++    now = now or datetime.now(timezone.utc)
++    return (now - timedelta(days=RETENTION_DAYS)).replace(tzinfo=None)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    parser.add_argument("--max-batches", type=int, default=None, help="stop after this many batches")
++    args = parser.parse_args()
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"--batch-size must be between 1 and {MAX_SAFE_BATCH}", file=sys.stderr)
++        return 3
++
++    cutoff = retention_cutoff()
++    dsn = os.environ.get("DATABASE_URL")
++    if not dsn:
++        print(f"no DATABASE_URL set; would purge invoices finalized before {cutoff:%Y-%m-%d %H:%M:%S} UTC "
++              f"(retention {RETENTION_DAYS} days, nothing deleted)")
++        return 0
++
++    import psycopg
++
++    # The deployed pooler runs in transaction mode: no server-side prepared statements.
++    with psycopg.connect(dsn, prepare_threshold=None) as conn:
++        if not args.execute:
++            count = conn.execute(f"SELECT count(*) {ELIGIBLE}", {"cutoff": cutoff}).fetchone()[0]
++            conn.rollback()
++            log.info("purge_invoices_dry_run", cutoff=cutoff.isoformat(), retention_days=RETENTION_DAYS,
++                     eligible=count)
++            print(f"dry run: {count} invoices finalized before {cutoff:%Y-%m-%d} would be purged; "
++                  f"re-run with --execute to delete")
++            return 0
++
++        total = batches = 0
++        while args.max_batches is None or batches < args.max_batches:
++            # One short transaction per batch.
++            with conn.transaction():
++                ids = [row[0] for row in conn.execute(PURGE_BATCH, {"cutoff": cutoff, "limit": args.batch_size})]
++            if not ids:
++                break
++            batches += 1
++            total += len(ids)
++            log.info("purge_invoices_batch", batch=batches, deleted=len(ids), invoice_ids=ids)
++        log.info("purge_invoices_done", cutoff=cutoff.isoformat(), retention_days=RETENTION_DAYS,
++                 deleted=total, batches=batches)
++        print(f"purged {total} invoices finalized before {cutoff:%Y-%m-%d} in {batches} batches")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

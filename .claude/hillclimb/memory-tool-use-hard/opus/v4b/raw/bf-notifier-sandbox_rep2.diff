@@ -1,0 +1,70 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..0b16298
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,64 @@
++"""Sends a real receipt through the email provider's sandbox account.
++
++Needs MAIL_API_KEY (sandbox key from the dev secrets store) and
++MAIL_SINK_URL (base URL of the sink inbox API). The sandbox accepts mail
++for any recipient but only delivers to the @sink.acme.test domain, so the
++test sends there and reads the message back from the sink.
++
++The sandbox is capped at 500 messages a day for the whole team: this
++test sends exactly one message per run.
++"""
++import os
++import time
++import uuid
++from unittest import mock
++
++import pytest
++import requests
++
++from notifier import email
++
++SINK_RECIPIENT = "receipts@sink.acme.test"
++DELIVERY_TIMEOUT_S = 60
++POLL_INTERVAL_S = 2
++
++pytestmark = [
++    pytest.mark.integration,
++    pytest.mark.skipif(
++        not (os.environ.get("MAIL_API_KEY") and os.environ.get("MAIL_SINK_URL")),
++        reason="needs MAIL_API_KEY and MAIL_SINK_URL for the provider sandbox",
++    ),
++]
++
++
++def _wait_for_message(message_id):
++    sink_url = os.environ["MAIL_SINK_URL"].rstrip("/")
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    while time.monotonic() < deadline:
++        resp = requests.get(
++            f"{sink_url}/messages",
++            headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++            params={"to": SINK_RECIPIENT},
++            timeout=10,
++        )
++        resp.raise_for_status()
++        for message in resp.json()["messages"]:
++            if message["id"] == message_id:
++                return message
++        time.sleep(POLL_INTERVAL_S)
++    pytest.fail(f"message {message_id} not delivered to the sink within {DELIVERY_TIMEOUT_S}s")
++
++
++def test_send_receipt_is_delivered():
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:12]}"
++    # render() is not implemented yet; stub only the body so the provider
++    # call itself is real.
++    body = f"<p>Receipt for {invoice_id}: 1200</p>"
++    with mock.patch.object(email, "render", return_value=body):
++        message_id = email.send_receipt(invoice_id, SINK_RECIPIENT, 1200)
++
++    message = _wait_for_message(message_id)
++
++    assert message["to"] == SINK_RECIPIENT
++    assert message["subject"] == "Your receipt"
++    assert invoice_id in message["html"]

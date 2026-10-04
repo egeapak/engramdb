@@ -1,0 +1,35 @@
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..1d46fd0 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,4 +1,4 @@
+-from decimal import Decimal
++from decimal import ROUND_HALF_EVEN, Decimal
+ 
+ 
+ def line_total(lines):
+@@ -9,4 +9,6 @@ def line_total(lines):
+ 
+ 
+ def tax_for(amount_cents, rate):
+-    raise NotImplementedError
++    # Banker's rounding, per finance (March 2026). str() keeps float rates exact.
++    tax = Decimal(amount_cents) * Decimal(str(rate))
++    return int(tax.quantize(Decimal(1), rounding=ROUND_HALF_EVEN))
+diff --git a/tests/test_tax.py b/tests/test_tax.py
+index 75e3de8..33fccaa 100644
+--- a/tests/test_tax.py
++++ b/tests/test_tax.py
+@@ -3,3 +3,12 @@ from src.billing.tax import line_total
+ 
+ def test_line_total():
+     assert line_total([{"quantity": 2, "unit_cents": 150}]) == 300
++
++
++def test_tax_for_rounds_half_even():
++    from src.billing.tax import tax_for
++
++    assert tax_for(1000, 0.0825) == 82  # 82.5 -> 82 (even)
++    assert tax_for(1400, 0.0825) == 116  # 115.5 -> 116 (even)
++    assert tax_for(1000, 0.0826) == 83
++    assert tax_for(1000, 0) == 0

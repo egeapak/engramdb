@@ -192,5 +192,14 @@
   "stop": "two consecutive rounds fail to beat the incumbent beyond noise, or 3 rounds",
   "pricing_basis": "total_cost_usd reported by Claude Code per run (cache-adjusted)",
   "incumbent_cost_per_case": 0.2313
+ },
+ "confirm": {
+  "variants": [
+   "v4",
+   "v4b"
+  ],
+  "cost_per_case": "0.2313 (-5.5% vs v2, -2.4% vs baseline)",
+  "pass": "129.0/135, test 65.5/69",
+  "verdict": "v4 confirmed as the final configuration"
  }
 }
