@@ -7,12 +7,13 @@
 //! `compare` reads every result file and writes `results/summary.md`.
 
 mod common;
-#[cfg(any(feature = "burn-flex", feature = "burn-ndarray"))]
+#[cfg(any(feature = "burn-flex", feature = "burn-ndarray", feature = "burn-cpu"))]
 mod engine_burn;
 #[cfg(feature = "candle")]
 mod engine_candle;
 #[cfg(feature = "ort")]
 mod engine_ort;
+mod pool;
 
 use anyhow::{bail, Context, Result};
 use common::*;
@@ -75,10 +76,14 @@ fn main() -> Result<()> {
             let engine = args.get(1).context("bench <engine>")?;
             bench(engine, &models, &data, &out)
         }
+        Some("pool") => {
+            let engine = args.get(1).context("pool <engine>")?;
+            pool_bench(engine, &models, &data, &out)
+        }
         Some("compare") => compare(&data, &out),
         _ => bail!(
-            "usage: inference-engines bench <ort-u8|ort-f32|burn-flex|burn-ndarray|candle> \
-             [--models DIR] [--data FILE] [--out DIR]\n       inference-engines compare [--out DIR]"
+            "usage: inference-engines bench <ort-u8|ort-f32|burn-flex|burn-ndarray|burn-cpu|candle> \
+             [--models DIR] [--data FILE] [--out DIR]\n       inference-engines pool <engine> [same flags]\n       inference-engines compare [--out DIR]"
         ),
     }
 }
@@ -122,6 +127,17 @@ fn load_engine(name: &str, models: &Path) -> Result<(Box<dyn Engine>, PathBuf)> 
         }
         #[cfg(all(feature = "burn-ndarray", not(feature = "burn-flex")))]
         "burn-ndarray" => {
+            let dir = models.join("st");
+            Ok((
+                Box::new(engine_burn::BurnEngine::load(&dir)?),
+                dir.join("model.safetensors"),
+            ))
+        }
+        #[cfg(all(
+            feature = "burn-cpu",
+            not(any(feature = "burn-flex", feature = "burn-ndarray"))
+        ))]
+        "burn-cpu" => {
             let dir = models.join("st");
             Ok((
                 Box::new(engine_burn::BurnEngine::load(&dir)?),
@@ -293,6 +309,111 @@ fn bench(name: &str, models: &Path, data: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+fn env_list(name: &str, default: &[usize]) -> Vec<usize> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect())
+        .unwrap_or_else(|| default.to_vec())
+}
+
+fn pool_bench(name: &str, models: &Path, data: &Path, out: &Path) -> Result<()> {
+    let ds = load_dataset(data)?;
+    let tok = load_tokenizer(&models.join("xenova/tokenizer.json"))?;
+    let docs: Vec<String> = ds.memories.iter().map(|m| m.doc()).collect();
+    let queries: Vec<String> = ds.queries.iter().map(|q| q.text.clone()).collect();
+    let sweep = pool::Sweep {
+        pool_sizes: env_list("POOL_SIZES", &[1, 2, 4]),
+        caller_counts: env_list("POOL_CALLERS", &[1, 2, 4, 8]),
+        window: std::time::Duration::from_secs_f64(
+            std::env::var("POOL_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4.0),
+        ),
+    };
+    let load = || load_engine(name, models).map(|(e, _)| e);
+    let report = pool::run(name, &load, tok, queries, docs, &sweep)?;
+    std::fs::create_dir_all(out)?;
+    let path = out.join(format!("pool-{name}.json"));
+    std::fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
+    eprintln!("[{name}] wrote {}", path.display());
+    Ok(())
+}
+
+fn pool_section(out: &Path) -> Result<String> {
+    let mut reports: Vec<pool::PoolReport> = Vec::new();
+    for name in ORDER {
+        if let Ok(b) = std::fs::read(out.join(format!("pool-{name}.json"))) {
+            reports.push(serde_json::from_slice(&b)?);
+        }
+    }
+    if reports.is_empty() {
+        return Ok(String::new());
+    }
+    let mut md = String::from("\n## Daemon pool throughput\n\n");
+    md.push_str(&format!(
+        "Threads per session: {}. Requests are one text each; latency includes waiting for a free session.\n",
+        reports[0].threads_per_session
+    ));
+    for wl in ["query", "doc"] {
+        md.push_str(&format!(
+            "\n### `{wl}` workload: requests/s (p50 / p99 ms)\n\n| Engine | Pool | "
+        ));
+        let callers: Vec<usize> = {
+            let mut c: Vec<usize> = reports[0].points.iter().map(|p| p.callers).collect();
+            c.sort();
+            c.dedup();
+            c
+        };
+        for c in &callers {
+            md.push_str(&format!("{c} caller{} | ", if *c == 1 { "" } else { "s" }));
+        }
+        md.push_str("Cores busy (max callers) |\n|---|---:|");
+        md.push_str(&"---:|".repeat(callers.len() + 1));
+        md.push('\n');
+        for r in &reports {
+            let mut pools: Vec<usize> = r.points.iter().map(|p| p.pool).collect();
+            pools.dedup();
+            for p in pools {
+                md.push_str(&format!("| {} | {p} | ", r.engine));
+                let mut busy = 0.0;
+                for c in &callers {
+                    if let Some(pt) = r
+                        .points
+                        .iter()
+                        .find(|x| x.pool == p && x.callers == *c && x.workload == wl)
+                    {
+                        md.push_str(&format!(
+                            "{:.1} ({:.0} / {:.0}) | ",
+                            pt.req_per_sec, pt.p50_ms, pt.p99_ms
+                        ));
+                        busy = pt.cores_busy;
+                    } else {
+                        md.push_str("– | ");
+                    }
+                }
+                md.push_str(&format!("{busy:.1} |\n"));
+            }
+        }
+    }
+    md.push_str("\n### RSS after building the pool (MiB)\n\n| Engine | ");
+    let pools: Vec<usize> = reports[0].rss_by_pool.iter().map(|(p, _)| *p).collect();
+    for p in &pools {
+        md.push_str(&format!("Pool {p} | "));
+    }
+    md.push_str("\n|---|");
+    md.push_str(&"---:|".repeat(pools.len()));
+    md.push('\n');
+    for r in &reports {
+        md.push_str(&format!("| {} | ", r.engine));
+        for (_, rss) in &r.rss_by_pool {
+            md.push_str(&format!("{rss:.0} | "));
+        }
+        md.push('\n');
+    }
+    Ok(md)
+}
+
 // ---------------------------------------------------------------------------
 // compare
 // ---------------------------------------------------------------------------
@@ -371,7 +492,14 @@ fn read_build_info(out: &Path) -> BTreeMap<String, (f64, u64)> {
     m
 }
 
-const ORDER: [&str; 5] = ["ort-u8", "ort-f32", "burn-flex", "burn-ndarray", "candle"];
+const ORDER: [&str; 6] = [
+    "ort-u8",
+    "ort-f32",
+    "burn-flex",
+    "burn-ndarray",
+    "burn-cpu",
+    "candle",
+];
 
 fn compare(data: &Path, out: &Path) -> Result<()> {
     let ds = load_dataset(data)?;
@@ -383,7 +511,14 @@ fn compare(data: &Path, out: &Path) -> Result<()> {
         }
     }
     if reports.is_empty() {
-        bail!("no result files in {}", out.display());
+        // Pool-only output directory.
+        let md = pool_section(out)?;
+        if md.is_empty() {
+            bail!("no result files in {}", out.display());
+        }
+        print!("{md}");
+        std::fs::write(out.join("summary.md"), &md)?;
+        return Ok(());
     }
     // Reference for numerical agreement: ONNX Runtime fp32 (same weights and
     // precision as the Burn/Candle runs, so any gap is the engine).
@@ -499,6 +634,7 @@ fn compare(data: &Path, out: &Path) -> Result<()> {
             r0.threads, r0.mean_doc_tokens, MAX_TOKENS
         ),
     );
+    md.push_str(&pool_section(out)?);
     print!("{md}");
     std::fs::write(out.join("summary.md"), &md)?;
     Ok(())

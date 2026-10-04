@@ -23,7 +23,7 @@ pub struct Batch {
 }
 
 /// The forward pass is the only thing an engine provides.
-pub trait Engine {
+pub trait Engine: Send {
     /// Returns `last_hidden_state` flattened as `[batch, seq, HIDDEN]`.
     fn forward(&mut self, batch: &Batch) -> Result<Vec<f32>>;
 }

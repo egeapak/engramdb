@@ -19,6 +19,10 @@ ort = ["dep:ort"]
 # `std,simd,multi-threads` on.
 burn-flex = ["dep:burn", "dep:burn-store", "burn/flex", "dep:burn-flex"]
 burn-ndarray = ["dep:burn", "dep:burn-store", "burn/ndarray", "dep:burn-ndarray"]
+# CubeCL CPU backend: kernels JIT-compiled through MLIR/LLVM, with fusion and
+# autotune (its defaults). The build script downloads a prebuilt LLVM 20 and
+# links it statically.
+burn-cpu = ["dep:burn", "dep:burn-store", "burn/cpu", "dep:burn-cpu"]
 candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
 
 [dependencies]
@@ -34,6 +38,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["ndarray
 burn = { version = "=0.21.0", default-features = false, features = ["std"], optional = true }
 burn-flex = { version = "=0.21.0", optional = true }
 burn-ndarray = { version = "=0.21.0", optional = true }
+burn-cpu = { version = "=0.21.0", optional = true }
 burn-store = { version = "=0.21.0", default-features = false, features = ["std", "safetensors"], optional = true }
 
 candle-core = { version = "=0.11.0", optional = true }

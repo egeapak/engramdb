@@ -22,6 +22,11 @@ use std::path::Path;
 pub type B = burn::backend::Flex;
 #[cfg(all(feature = "burn-ndarray", not(feature = "burn-flex")))]
 pub type B = burn::backend::NdArray;
+#[cfg(all(
+    feature = "burn-cpu",
+    not(any(feature = "burn-flex", feature = "burn-ndarray"))
+))]
+pub type B = burn::backend::Cpu;
 
 #[derive(Deserialize)]
 struct HfConfig {
