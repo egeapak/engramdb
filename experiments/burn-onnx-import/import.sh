@@ -54,7 +54,8 @@ burn = { version = "=0.21.0", default-features = false, features = ["std", "flex
 burn-flex = "=0.21.0"
 burn-store = { version = "=0.21.0", features = ["std", "burnpack"] }
 TOML
-  printf 'pub mod model {\n    include!("%s");\n}\n' "$(realpath "$rs")" > "gen/$name/crate/src/lib.rs"
+  # Generated code is no_std-style and names `alloc::` directly.
+  printf 'extern crate alloc;\n\npub mod model {\n    include!("%s");\n}\n' "$(realpath "$rs")" > "gen/$name/crate/src/lib.rs"
   if (cd "gen/$name/crate" && cargo check -q --release --target-dir ../../../target) > "logs/$name.check.log" 2>&1; then
     stage=compiles; err=""
   else

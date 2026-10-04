@@ -155,6 +155,9 @@ What it means in EngramDB terms:
 
 ### Size and build cost
 
+(For the decision, only the runtime rows matter: binary size, external
+library, weights. Build time and crate count are recorded for completeness.)
+
 | | Baseline | ORT | Burn Flex | Burn NdArray | Candle |
 |---|---:|---:|---:|---:|---:|
 | Binary (MiB, stripped) | 1.9 | 3.7 | 5.7 | 6.1 | 5.0 |
@@ -171,19 +174,135 @@ What it means in EngramDB terms:
 
 ### Verdict for Phase 1
 
-- **Burn Flex is the best pure-Rust option** here: faster than Candle on
-  every speed row, lowest peak memory. Burn NdArray is not competitive.
-- **Neither is a drop-in replacement on speed.** Burn Flex is 6–11× slower
-  than the shipped uint8 model, and 4–6× slower than ONNX Runtime at the same
-  precision. Quality and determinism are not the problem.
-- The removal of the external dependency is real and complete for this model.
-  Whether it is worth the speed cost depends on how much the `create` and
-  `reindex` paths matter, and on Phase 2 (reranker, NLI, T5), which have no
-  ready Burn ports at all.
+See "Overall verdict" at the end, which also covers the pool sweep,
+`burn-cpu` and the `burn-onnx` imports.
+
+## Daemon pool throughput (`pool.sh`)
+
+Mirrors `PooledEmbeddingProvider`: N independent sessions, each behind a
+`std::sync::Mutex` (as production), requests handed out round-robin; C caller
+threads each send one text per request for a 4 s window. Two runs: each
+engine's default threads per session (what the daemon does), and 1 thread per
+session. Raw tables: `results-pool/summary.md`, `results-pool-1thread/summary.md`.
+
+Best configuration per engine under concurrent load (4–8 callers):
+
+| Engine | Best config | Queries/s | Docs/s | RSS at that pool size (MiB) |
+|---|---|---:|---:|---:|
+| ORT uint8 | pool 4, 1 thread each | 1,199 | 101 | 257 |
+| ORT fp32 | pool 4, 1 thread each | 281 | 43 | 618 |
+| Candle | pool 4, 1 thread each | 104 | 15.0 | 533 |
+| Burn Flex | pool 4 | 92 | 14.0 | 576–595 |
+| Burn NdArray | pool 4 | 46 | 7.0 | 554 |
+| *ORT uint8, daemon default today (pool 2, default threads)* | | *246–270* | *20–28* | *159* |
+
+- **Against the best ORT setup, Burn Flex is 13× slower on queries and 7×
+  slower on documents.** Against ORT at the same precision (fp32) it is 3×
+  slower on both.
+- **Pools help the pure-Rust engines** more than they help a single call:
+  Burn Flex goes from 31 to 92 queries/s (pool 1 → 4), because its per-call
+  overhead is serial and independent sessions run it in parallel. Candle
+  behaves the same.
+- **Memory scales linearly with pool size** for every engine; fp32 engines
+  pay ~145 MiB per extra session, ORT uint8 ~55 MiB.
+- Single-caller latency does not improve with pooling for any engine (the
+  pool only adds parallel capacity).
+
+### Side finding: today's daemon pool is misconfigured on this machine
+
+The daemon's default (pool = `cores/2` = 2, ORT default threads per session)
+is the *worst* ORT configuration measured here:
+
+- 1 caller: 27 doc/s vs 56 doc/s for a single session (p50 36 ms vs 18 ms).
+- 4–8 callers: 246–270 queries/s and 20–28 doc/s, vs 1,199 and 101 with
+  4 sessions × 1 thread.
+
+Each pooled session keeps ORT's default thread pool, so sessions compete for
+the same cores, and idle sessions' spinning threads slow the active one. The
+NLI/T5 pools already cap `pool × intra_threads ≤ cores`; the embedding pool
+does not (`crates/engram-models/src/embeddings/pool.rs` doc comment). The
+earlier measurement that motivated `cores/2` was on 8-core Apple Silicon and
+was not reproduced here, so re-measure there before changing the policy.
+
+## `burn-cpu` (CubeCL, MLIR/LLVM JIT)
+
+**Runtime dependencies.** LLVM is *not* needed at runtime: the
+`tracel-llvm-bundler` build script downloads a prebuilt LLVM 20.1.4 + MLIR
+archive from `github.com/tracel-ai/tracel-llvm` releases (checksum-verified)
+and links it statically. The finished binary needs only `libc`, `libm`,
+`libgcc_s` and **`libstdc++`** (GLIBCXX ≥ 3.4.30, i.e. GCC 12+ on Linux) —
+one more system library than Burn Flex, which needs none beyond libc. The
+binary is **125 MiB** (vs 5.7 MiB for Burn Flex).
+
+(Sandbox note: the bundler's `reqwest`/rustls download fails on the web
+sandbox's proxy CA, like `ort` and `hf-hub`. Pre-place
+`linux-x64.tar.xz` and `linux-x64.checksums.json` from the release in
+`~/.cache/tracel/` as `tracel-llvm-20.1.4-7-<name>` and build with
+`TRACEL_LLVM_BUNDLER_SKIP_CHECKSUM_DOWNLOAD=1`; checksums are still verified.)
+
+**Runtime side effect.** CubeCL writes an autotune cache to the *project's*
+`target/` directory by default — it walks up from the current directory to
+the nearest `Cargo.toml`. A shipped `engramdb` run inside a user's Rust
+repository would write `target/autotune/` into that repository. It is
+configurable (`CacheConfig`), but the default is wrong for a shipped binary.
+
+**Speed: not usable in 0.21.** `probe burn-cpu` (one 9-token query, repeated):
+
+| | Burn Flex | burn-cpu (default) | burn-cpu, `CUBECL_AUTOTUNE_LEVEL=minimal` | burn-cpu without fusion |
+|---|---:|---:|---:|---:|
+| Load | 246 ms | 352 ms | 449 ms | 390 ms |
+| First call | 27 ms | **341 s** | **527 s** | **361 s** |
+| Later identical calls | 25–31 ms | **~21 s** | **~19–21 s** | **~20 s** |
+| RSS | 157 MiB | **4.9 GiB** | **5.1 GiB** | **5.0 GiB** |
+
+- The first call compiles and autotunes every kernel (minutes). Each new
+  sequence length is a new shape, so this repeats for new input lengths.
+- The steady-state cost is the **matmul kernel**: CubeCL's profiler shows 98
+  matmul launches per call averaging 523 ms each, while every other kernel
+  type (fused elementwise, reductions, copies) takes 0.2–5 ms. Turning off
+  fusion (`burn-cpu-nofusion` feature) or autotune changes nothing, so it is
+  the CPU matmul implementation in this release.
+- The full `bench` could not complete one round of 48 queries in 12 minutes,
+  so `burn-cpu` has no row in the Phase 1 tables.
+
+## Overall verdict (runtime dependencies and runtime speed only)
+
+Build time, build-time downloads and crate count are deliberately ignored.
+
+| Option | Runtime dependencies | Speed vs shipped ORT uint8 (single call / best pool) | Models it can run |
+|---|---|---|---|
+| ONNX Runtime (today) | external `libonnxruntime.so` (21 MiB, API ≥ 24) the user must install; startup probe; a bad build corrupts quantized vectors (R6/R9) | 1× | all four, quantized |
+| **Burn Flex** | **none beyond libc** | **8× / 13× slower** (queries), **7× / 7× slower** (documents) | hand-written BERT: embeddings. Via burn-onnx (fp32): embeddings, reranker, T5 (full-prefix decode). NLI panics on Flex |
+| Candle (CPU, pure Rust) | none beyond libc | 10× / 12× slower (queries), 11× / 7× slower (documents) | BERT here; upstream also has XLM-R, DeBERTa-v2, T5 (not tested) |
+| Burn NdArray | none beyond libc | 36× / 26× slower (queries) | as Flex, and NLI works (deprecated backend) |
+| burn-cpu (CubeCL) | `libstdc++` (GCC 12+); 125 MiB binary; writes autotune cache into the user's `target/` | **~7,000× slower** (≈20 s per query, minutes for the first call, 5 GiB RAM) | not usable in 0.21 |
+
+1. **The runtime-dependency goal is achievable.** Burn Flex and Candle need
+   nothing beyond libc, and every EngramDB model family has an fp32 route
+   that produces the same numbers as ONNX Runtime (embeddings, reranker,
+   NLI, T5 — see `../burn-onnx-import`).
+2. **The runtime-speed goal is not.** No pure-Rust engine comes close. The
+   gap has two parts: ~3× from slower fp32 kernels and per-op overhead
+   (Burn Flex vs ORT fp32, with both pooled), and ~2–4× more from losing
+   int8 (ORT uint8 vs ORT fp32). Burn has no integer matmul, so the second
+   part cannot be recovered in Burn today.
+3. **The `burn-onnx` route is not production-safe yet.** None of the shipped
+   quantized files import; the fp32 DeBERTa graph panics on Flex; and the
+   KV-cache T5 decoder is silently wrong. Imported models are also slower
+   than hand-written ones.
+4. **burn-cpu is not an option in 0.21** (matmul kernel), and it would add
+   `libstdc++` and a 125 MiB binary.
+
+So switching trades one external library for a 7–13× slowdown on
+embeddings and a 7–15× slowdown on the reranker, NLI and T5 (imported fp32
+vs the shipped quantized files). Compared with the daemon's current
+misconfigured pool (see the side finding), the embedding gap shrinks to
+1.5–3×, but fixing that pool is a free ~4× gain for ONNX Runtime that widens
+the gap again.
 
 ### Not measured yet
 
-- Throughput with the daemon's session pool (`cores/2` sessions).
-- Burn 0.22 (pre-release) and the LLVM-based `burn-cpu` backend.
-- Candle with MKL (adds a native dependency, so out of scope for the goal).
+- Burn 0.22 (pre-release); `burn-cpu` and int8 kernels may improve there.
+- Candle's XLM-R / DeBERTa-v2 / T5 implementations.
+- Candle with MKL or Accelerate (adds a native dependency, against the goal).
 - macOS / Apple Silicon (ORT uses CoreML there; Burn Flex has an AMX path).

@@ -7,7 +7,12 @@
 //! `compare` reads every result file and writes `results/summary.md`.
 
 mod common;
-#[cfg(any(feature = "burn-flex", feature = "burn-ndarray", feature = "burn-cpu"))]
+#[cfg(any(
+    feature = "burn-flex",
+    feature = "burn-ndarray",
+    feature = "burn-cpu",
+    feature = "burn-cpu-nofusion"
+))]
 mod engine_burn;
 #[cfg(feature = "candle")]
 mod engine_candle;
@@ -80,6 +85,10 @@ fn main() -> Result<()> {
             let engine = args.get(1).context("pool <engine>")?;
             pool_bench(engine, &models, &data, &out)
         }
+        Some("probe") => {
+            let engine = args.get(1).context("probe <engine>")?;
+            probe(engine, &models, &data)
+        }
         Some("compare") => compare(&data, &out),
         _ => bail!(
             "usage: inference-engines bench <ort-u8|ort-f32|burn-flex|burn-ndarray|burn-cpu|candle> \
@@ -134,10 +143,10 @@ fn load_engine(name: &str, models: &Path) -> Result<(Box<dyn Engine>, PathBuf)> 
             ))
         }
         #[cfg(all(
-            feature = "burn-cpu",
+            any(feature = "burn-cpu", feature = "burn-cpu-nofusion"),
             not(any(feature = "burn-flex", feature = "burn-ndarray"))
         ))]
-        "burn-cpu" => {
+        "burn-cpu" | "burn-cpu-nofusion" => {
             let dir = models.join("st");
             Ok((
                 Box::new(engine_burn::BurnEngine::load(&dir)?),
@@ -154,6 +163,43 @@ fn load_engine(name: &str, models: &Path) -> Result<(Box<dyn Engine>, PathBuf)> 
         }
         other => bail!("engine `{other}` is not compiled into this binary (check --features)"),
     }
+}
+
+/// Per-call latency for repeated identical inputs, then for inputs of new
+/// lengths. Separates one-time costs (JIT compile, autotune, allocation) from
+/// steady-state speed, which `bench` mixes for engines that compile per shape.
+fn probe(name: &str, models: &Path, data: &Path) -> Result<()> {
+    let ds = load_dataset(data)?;
+    let tok = load_tokenizer(&models.join("xenova/tokenizer.json"))?;
+    let t = Instant::now();
+    let (mut engine, _) = load_engine(name, models)?;
+    eprintln!("[{name}] load {:.0} ms, RSS {:.0} MiB", ms(t), rss_mib().0);
+    let q = ds.queries[0].text.as_str();
+    for i in 1..=env_usize("PROBE_REPEATS", 10) {
+        let t = Instant::now();
+        embed(engine.as_mut(), &tok, &[q])?;
+        eprintln!(
+            "[{name}] same query, call {i}: {:.1} ms (RSS {:.0} MiB)",
+            ms(t),
+            rss_mib().0
+        );
+    }
+    // New sequence lengths: each is a new shape for a shape-specializing JIT.
+    for m in ds.memories.iter().take(env_usize("PROBE_SHAPES", 5)) {
+        let doc = m.doc();
+        let len = encode(&tok, &[doc.as_str()])?.seq;
+        for call in 1..=2 {
+            let t = Instant::now();
+            embed(engine.as_mut(), &tok, &[doc.as_str()])?;
+            eprintln!(
+                "[{name}] doc {} ({len} tokens), call {call}: {:.1} ms (RSS {:.0} MiB)",
+                m.id,
+                ms(t),
+                rss_mib().0
+            );
+        }
+    }
+    Ok(())
 }
 
 fn bench(name: &str, models: &Path, data: &Path, out: &Path) -> Result<()> {

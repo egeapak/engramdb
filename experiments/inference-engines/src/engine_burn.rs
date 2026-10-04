@@ -23,7 +23,7 @@ pub type B = burn::backend::Flex;
 #[cfg(all(feature = "burn-ndarray", not(feature = "burn-flex")))]
 pub type B = burn::backend::NdArray;
 #[cfg(all(
-    feature = "burn-cpu",
+    any(feature = "burn-cpu", feature = "burn-cpu-nofusion"),
     not(any(feature = "burn-flex", feature = "burn-ndarray"))
 ))]
 pub type B = burn::backend::Cpu;
