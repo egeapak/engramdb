@@ -1,0 +1,62 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..9fb5d24
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,56 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# key -> (stored_at, body, status_code)
++_IDEMPOTENCY = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency header required", "X-Acme-Idempotency is required")
++
++    cache_key = (invoice_id, key)
++    stored = _IDEMPOTENCY.get(cache_key)
++    if stored and time.time() - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        resp = jsonify(stored[1])
++        resp.status_code = stored[2]
++        return resp
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount_cents = payload.get("amount_cents")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return problem(422, "Invalid refund", "amount_cents must be a positive integer")
++
++    try:
++        result = dict(refund(invoice, amount_cents))
++    except ValueError as exc:
++        return problem(422, "Invalid refund", str(exc))
++
++    # Refunds above the threshold need a second approver before being issued.
++    if amount_cents > APPROVAL_THRESHOLD_CENTS:
++        result["status"] = "pending_approval"
++        status_code = 202
++    else:
++        result["status"] = "issued"
++        status_code = 201
++
++    _IDEMPOTENCY[cache_key] = (time.time(), result, status_code)
++    resp = jsonify(result)
++    resp.status_code = status_code
++    return resp
