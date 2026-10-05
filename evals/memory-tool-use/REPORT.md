@@ -119,7 +119,7 @@ Tags: **[REQUIRED]** fixes something broken; **[TUNE]** is a measured judgment c
     - `preview_chars` goes from 160 to 1000, and `prompt_context_budget` from 1500 to 3000.
     - A fact's premise is shown as a check (cost rounds, v4).
 12. Merged from master: the stdio handshake is answered before slow startup work (the cold-start fix). It kept working with the pinned-tool code.
-13. **[TUNE]** ENGRAM.md tells Claude to save a discovery that cost effort, without offering first (capture round v6). Only ENGRAM.md changed; the MCP server instructions still use the older generic wording.
+13. **[TUNE]** ENGRAM.md tells Claude to save a discovery that cost effort, without offering first (capture round v6). The MCP server instructions and the `create` description carry the same wording (v7p). That second part has no measured benefit for Sonnet; it is kept for consistency.
 
 The eval itself lives in `evals/memory-tool-use/`:
 - the runner;
@@ -208,9 +208,20 @@ The gates were written down before the run (`v6/change.md`). All passed.
   - **Check (v6f):** the 6 touched cases, 3 runs per model, pass 36/36, with no false creates.
 - **Caveat:** the v4/v4b baselines ran on the pre-fix fixture for `st-retention`, `mm-dunning-job` and the costly cases, so those cases are not compared like for like.
 
+**Plugin-only check (v7p).** The same rule was added to the MCP server instructions and the `create` tool description, then measured **without** ENGRAM.md (a plugin-only install). Gates were pre-registered in `v7p/change.md`.
+
+| | Sonnet | Opus |
+|---|---|---|
+| Saves, graded costly runs (6 cases × 10) | **1/12 (gate ≥ 50%: fail)** | 5/5 (gate ≥ 80%: pass) |
+| No false create, `nh-*` and `ds-*` × 3 | 42/42 | 42/42 |
+
+- **The MCP text alone does not move Sonnet.** ENGRAM.md, which is loaded through CLAUDE.md, does (v6: 14/17).
+- **The aligned text is kept for consistency.** It causes no false creates and costs nothing measurable, but it has no measured benefit.
+- **Reaching plugin-only Sonnet users needs another channel.** See "What I would try next".
+
 ## What I would try next
 
-- **Align the MCP instructions with ENGRAM.md.** The server's instructions and the `create` tool description still say "after discovering patterns, decisions, or hazards". A user who installs the plugin without `engramdb setup` gets no ENGRAM.md, so the v6 gain does not reach them. Measure it with the plugin-only install on the costly cases.
+- **A save prompt at the moment of discovery, for plugin-only installs.** MCP text did not reach Sonnet (v7p: 1/12). A PostToolUse hook on Bash can see a failed command followed by a success of the same command, and add one line at that point: "That took more than one try. If the cause is not documented, save it with `create`." Measure it plugin-only on the costly cases, with `nh-*` and `ds-*` as the false-create guardrail.
 - **Fewer turns, not shorter text.** The remaining memory turns are 0.5–0.8 per case, mostly `query` and `challenge`. Cost work should look there or at task turns, not at prompt length (see v5).
 - **File hook on Bash reads.** Consider running the PreToolUse file hook for paths read with Bash `cat`/`sed`/`head`. It is fragile (shell parsing), so measure it on `mm-dunning-job` first.
 - **A third, harder set.** Many more memories (100+), long sessions with compaction, and cross-module tasks. The hard set saturated after two rounds.

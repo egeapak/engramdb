@@ -1,0 +1,18 @@
+diff --git a/src/billing/currency.py b/src/billing/currency.py
+index 3d11ab4..8b6cd60 100644
+--- a/src/billing/currency.py
++++ b/src/billing/currency.py
+@@ -1,5 +1,5 @@
+ """Currency conversion for multi-currency invoices."""
+-from decimal import Decimal
++from decimal import ROUND_FLOOR, Decimal
+ 
+ 
+ def fetch_rates(day):
+@@ -9,4 +9,5 @@ def fetch_rates(day):
+ 
+ def convert(amount_cents, rate):
+     """Convert an amount in minor units with a Decimal rate; returns minor units."""
+-    raise NotImplementedError
++    # Treasury: round toward negative infinity so we never credit more than the rate allows.
++    return int((Decimal(amount_cents) * rate).to_integral_value(rounding=ROUND_FLOOR))

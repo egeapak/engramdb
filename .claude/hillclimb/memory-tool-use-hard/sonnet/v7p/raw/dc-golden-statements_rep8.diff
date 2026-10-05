@@ -1,0 +1,40 @@
+diff --git a/src/billing/statements.py b/src/billing/statements.py
+index 93109cc..23d28d9 100644
+--- a/src/billing/statements.py
++++ b/src/billing/statements.py
+@@ -1,8 +1,9 @@
+ """Plain-text customer statements."""
+ 
+ 
+-def format_cents(cents):
+-    return f"{cents // 100}.{cents % 100:02d}"
++def format_cents(cents, thousands=False):
++    sep = "," if thousands else ""
++    return f"{cents // 100:{sep}}.{cents % 100:02d}"
+ 
+ 
+ def render_statement(customer_id, invoices):
+@@ -11,5 +12,5 @@ def render_statement(customer_id, invoices):
+     for inv in invoices:
+         lines.append(f"  {inv['id']:<12} {format_cents(inv['total_cents']):>12}")
+         total += inv["total_cents"]
+-    lines.append(f"  {'TOTAL':<12} {format_cents(total):>12}")
++    lines.append(f"  {'TOTAL':<12} {format_cents(total, thousands=True):>12}")
+     return "\n".join(lines) + "\n"
+diff --git a/tests/golden/MANIFEST b/tests/golden/MANIFEST
+index d001217..c8c2527 100644
+--- a/tests/golden/MANIFEST
++++ b/tests/golden/MANIFEST
+@@ -1 +1 @@
+-7d7d102620d1f84a7ea61722632275fcbd62947e384e8d45f2809fabdf1ce426  statement_basic.txt
++76b6243771c4db8e726f58a963c95b417da6d5f20fe743ff75abd967fbcb85a6  statement_basic.txt
+diff --git a/tests/golden/statement_basic.txt b/tests/golden/statement_basic.txt
+index 94d007a..689183c 100644
+--- a/tests/golden/statement_basic.txt
++++ b/tests/golden/statement_basic.txt
+@@ -1,4 +1,4 @@
+ Statement for cus_1
+   inv_1             1234.56
+   inv_2               99.05
+-  TOTAL             1333.61
++  TOTAL            1,333.61
