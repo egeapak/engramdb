@@ -107,9 +107,10 @@ Each costly case was checked end to end without Claude, on a fresh copy of
 | dc-seed-dev | `python scripts/seed_dev.py` → exit 1 "refusing to run … Set LEDGERLINE_ENV=dev" | `LEDGERLINE_ENV=dev …` → exit 1 "seed failed: demo data did not load" | `python scripts/migrate_dev.py` (applied 3 migrations) then seed → "loaded 12 demo invoices and 3 refunds" |
 | dc-golden-statements (separator added) | `python -m pytest tests/test_statements.py` → golden diff `1,234.56` vs `1234.56` | hand-edit the golden → `AssertionError: golden integrity check failed (statement_basic.txt)` | `python scripts/regen_goldens.py` → `1 passed` |
 
-On a pristine copy, `make test-fast` errors on `tests/test_currency.py` with the
-`FileNotFoundError`. That is deliberate, but `mt-sandbox-region` turn 1 ("run the fast
-suite") will report it as broken.
+The runner generates the FX fixtures for every case except `dc-fx-fixtures`, as a
+checkout where the generator ran once would have them. Without that, every task that runs
+the tests (`ds-fx-rounding`, `mt-sandbox-region`) hit the same discovery, and the capture
+round (v6) saved it there as a false create.
 
 **negative_hard (nh-, 8).** Prompts that look like they should change memory but must
 not: a one-off print() instead of structlog, a hypothetical rounding change, curiosity

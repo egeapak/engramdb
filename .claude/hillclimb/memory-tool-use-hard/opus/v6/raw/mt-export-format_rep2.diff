@@ -1,0 +1,130 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..471714a 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,88 @@
++"""Export a month's finalized invoices as the CSV Finance imports into their accounting tool."""
+ import argparse
++import csv
+ import os
++import sys
++import time
++from datetime import date, timedelta
++from pathlib import Path
++
++sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
++from src.billing.periods import month_window  # noqa: E402
++
++# Finance's accounting tool imports plain comma-separated files with ISO dates.
++DELIMITER = ","
++DATE_FORMAT = "%Y-%m-%d"
++HEADER = ("invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date")
++
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def previous_month(today=None):
++    today = today or date.today()
++    return (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")
++
++
++def export_path(month):
++    return f"exports/{month}/invoices.csv"
++
++
++def write_csv(rows, f):
++    """Write invoice rows (id, customer_id, subtotal_cents, tax_cents, finalized_at) to f."""
++    writer = csv.writer(f, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow((invoice_id, customer_id, int(subtotal), int(tax), int(subtotal) + int(tax),
++                         finalized_at.strftime(DATE_FORMAT)))
++
++
++def fetch_rows(database_url, start, end):
++    import psycopg
++
++    with psycopg.connect(database_url) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
+ 
+ 
+ def main():
+-    parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
++    parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: the previous month)")
++    parser.add_argument("--out-dir", default="var", help="local directory the export path is written under")
++    parser.add_argument("--dry-run", action="store_true", help="print the CSV instead of writing it")
+     args = parser.parse_args()
++
++    # Billing months are UTC; month_window refuses to run in any other local timezone.
++    os.environ["TZ"] = "UTC"
++    time.tzset()
++    month = args.month or previous_month()
++    start, end = month_window(month)
++
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++    rows = fetch_rows(database_url, start, end)
++
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = export_path(month)
++    if args.dry_run:
++        write_csv(rows, sys.stdout)
++        print(f"dry run: {len(rows)} invoices for {month}, would write {bucket}/{key}", file=sys.stderr)
++        return 0
++
++    path = Path(args.out_dir) / bucket / key
++    path.parent.mkdir(parents=True, exist_ok=True)
++    # UTF-8 without a BOM (not utf-8-sig).
++    with open(path, "w", encoding="utf-8", newline="") as f:
++        write_csv(rows, f)
++    print(f"exported {len(rows)} invoices for {month} ({args.env}) to {path}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..7347788
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,27 @@
++import io
++from datetime import date, datetime
++
++from scripts.export import export_path, previous_month, write_csv
++
++
++def test_write_csv_uses_finance_import_format():
++    rows = [
++        ("inv_1", "cus_1", 1000, 190, datetime(2026, 9, 3, 14, 5)),
++        ("inv_2", "cus_2", 0, 0, datetime(2026, 9, 30, 23, 59)),
++    ]
++    out = io.StringIO()
++    write_csv(rows, out)
++    assert out.getvalue() == (
++        "invoice_id,customer_id,subtotal_cents,tax_cents,total_cents,finalized_date\n"
++        "inv_1,cus_1,1000,190,1190,2026-09-03\n"
++        "inv_2,cus_2,0,0,0,2026-09-30\n"
++    )
++
++
++def test_previous_month_wraps_the_year():
++    assert previous_month(date(2026, 10, 2)) == "2026-09"
++    assert previous_month(date(2027, 1, 2)) == "2026-12"
++
++
++def test_export_path():
++    assert export_path("2026-09") == "exports/2026-09/invoices.csv"

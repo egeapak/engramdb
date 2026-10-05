@@ -153,7 +153,7 @@ def install_engram_md(ws):
     (claude_dir / "CLAUDE.md").write_text("@ENGRAM.md\n")
 
 
-def runtime_state(ws):
+def runtime_state(ws, case_id=None):
     """Leave git-ignored state in var/ that the costly discovered cases depend on.
 
     None of it is in the repo, so reading the code first does not reveal it.
@@ -165,6 +165,10 @@ def runtime_state(ws):
       looks missing until it runs with --format v1.
     - dc-search-index-cache: token shards cached by an older tokenizer.
       build_search_index.py rejects them until it runs with --clear-cache.
+    - Every other case gets the generated FX fixtures, as a checkout where
+      scripts/gen_fx_fixtures.py ran once would. Only dc-fx-fixtures starts
+      without them; otherwise every task that runs the tests (ds-fx-rounding,
+      mt-sandbox-region) hits the same discovery.
     """
     var = ws / "var"
     var.mkdir()
@@ -181,15 +185,17 @@ def runtime_state(ws):
     (var / "cache" / "search").mkdir(parents=True)
     for i in range(3):
         (var / "cache" / "search" / f"shard-{i:03d}.json").write_text(json.dumps({"tokenizer": 2, "tokens": []}))
+    if case_id != "dc-fx-fixtures":
+        subprocess.run([sys.executable, "scripts/gen_fx_fixtures.py"], cwd=ws, check=True, capture_output=True)
 
 
-def setup_workspace(tmp, env, engram_md=False):
+def setup_workspace(tmp, env, engram_md=False, case_id=None):
     ws = tmp / "ledgerline"
     shutil.copytree(HERE / FIXTURES[FIXTURE["name"]].get("dir", "fixture"), ws)
     if engram_md:
         install_engram_md(ws)
     if FIXTURE["name"] == "hard":
-        runtime_state(ws)
+        runtime_state(ws, case_id)
     git = lambda *a: sh(["git", *a], ws, env)
     git("init", "-q", "-b", "main")
     git("remote", "add", "origin", "https://git.example.com/acme/ledgerline.git")
@@ -286,7 +292,7 @@ def run_one(case, rep, args, out_dir):
     attempt = {"prompt_id": case["id"], "rep": rep, "model": args.model, "retries": 0}
     try:
         env = case_env(tmp, args)
-        ws, ids = setup_workspace(tmp, env, args.engram_md)
+        ws, ids = setup_workspace(tmp, env, args.engram_md, case['id'])
         before = grade.snapshot_store(ws, env)
         session_id = str(uuid.uuid4())
         for attempt_no in range(args.max_retries + 1):

@@ -1,0 +1,66 @@
+diff --git a/services/notifier/templates/receipt.mjml b/services/notifier/templates/receipt.mjml
+new file mode 100644
+index 0000000..459ef81
+--- /dev/null
++++ b/services/notifier/templates/receipt.mjml
+@@ -0,0 +1,25 @@
++<mjml>
++  <mj-head>
++    <mj-title>Your receipt</mj-title>
++    <mj-preview>Receipt for invoice {{ invoice_id }}</mj-preview>
++  </mj-head>
++  <mj-body>
++    <mj-section>
++      <mj-column>
++        <mj-text font-size="20px" font-weight="bold">Thanks for your payment</mj-text>
++        <mj-text>Your invoice has been finalized. Here is your receipt.</mj-text>
++        <mj-table>
++          <tr>
++            <td>Invoice</td>
++            <td align="right">{{ invoice_id }}</td>
++          </tr>
++          <tr>
++            <td><strong>Total</strong></td>
++            <td align="right"><strong>{{ total_minor }}</strong></td>
++          </tr>
++        </mj-table>
++        <mj-text font-size="12px" color="#666666">Keep this email for your records.</mj-text>
++      </mj-column>
++    </mj-section>
++  </mj-body>
++</mjml>
+diff --git a/services/notifier/templates/receipt.txt b/services/notifier/templates/receipt.txt
+new file mode 100644
+index 0000000..ca73817
+--- /dev/null
++++ b/services/notifier/templates/receipt.txt
+@@ -0,0 +1,8 @@
++Thanks for your payment
++
++Your invoice has been finalized. Here is your receipt.
++
++Invoice: {{ invoice_id }}
++Total:   {{ total_minor }}
++
++Keep this email for your records.
+diff --git a/src/billing/invoices.py b/src/billing/invoices.py
+index 3148b58..0e2ca16 100644
+--- a/src/billing/invoices.py
++++ b/src/billing/invoices.py
+@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
+ import requests
+ import structlog
+ 
++from src.jobs.queue import enqueue
++
+ log = structlog.get_logger()
+ 
+ LEDGER_URL = "https://ledger.internal.acme.example/v1/postings"
+@@ -29,4 +31,6 @@ def finalize(invoice):
+ def finalize_once(invoice):
+     if invoice.ledger_ref:
+         return invoice
+-    return finalize(invoice)
++    finalize(invoice)
++    enqueue("invoices.send_receipt", {"invoice_id": invoice.id}, dedupe_key=f"receipt:{invoice.id}")
++    return invoice
