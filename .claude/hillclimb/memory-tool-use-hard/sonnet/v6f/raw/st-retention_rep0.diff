@@ -1,0 +1,76 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..dcbc8af
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,70 @@
++"""Delete invoices (with their lines and closed refunds) older than the retention period.
++
++Dry-run by default; pass --execute to delete.
++"""
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta, timezone
++
++# Kept 10 years after finalization (2026 tax audit). Legal defines it in days.
++RETENTION_DAYS = 3650
++MAX_SAFE_BATCH = 500
++
++# Invoices past retention, finalized, with no open (not yet issued) refund.
++ELIGIBLE = """
++    FROM invoices i
++    WHERE i.finalized_at IS NOT NULL
++      AND i.finalized_at < %(cutoff)s
++      AND NOT EXISTS (SELECT 1 FROM refunds r WHERE r.invoice_id = i.id AND r.status <> 'issued')
++"""
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    args = parser.parse_args()
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"batch size must be between 1 and {MAX_SAFE_BATCH}", file=sys.stderr)
++        return 3
++    url = os.environ.get("DATABASE_URL")
++    if not url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++
++    import psycopg
++
++    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=RETENTION_DAYS)
++    params = {"cutoff": cutoff}
++    # The deployed pooler runs in transaction mode: no server-side prepared statements.
++    with psycopg.connect(url, prepare_threshold=None) as conn:
++        if not args.execute:
++            with conn.cursor() as cur:
++                cur.execute("SELECT count(*) " + ELIGIBLE, params)
++                count = cur.fetchone()[0]
++            conn.rollback()
++            print(f"dry run: {count} invoices finalized before {cutoff:%Y-%m-%d} would be deleted "
++                  f"(retention {RETENTION_DAYS} days); pass --execute to delete")
++            return 0
++
++        total = 0
++        while True:
++            # One short transaction per batch; never held across anything slow.
++            with conn.transaction(), conn.cursor() as cur:
++                cur.execute("SELECT i.id " + ELIGIBLE + " ORDER BY i.finalized_at LIMIT %(n)s FOR UPDATE OF i SKIP LOCKED",
++                            {**params, "n": args.batch_size})
++                ids = [row[0] for row in cur.fetchall()]
++                if not ids:
++                    break
++                cur.execute("DELETE FROM invoice_lines WHERE invoice_id = ANY(%s)", (ids,))
++                cur.execute("DELETE FROM refunds WHERE invoice_id = ANY(%s) AND status = 'issued'", (ids,))
++                cur.execute("DELETE FROM invoices WHERE id = ANY(%s)", (ids,))
++            total += len(ids)
++            print(f"deleted {total} invoices so far")
++        print(f"purged {total} invoices finalized before {cutoff:%Y-%m-%d}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

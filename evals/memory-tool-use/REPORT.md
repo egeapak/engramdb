@@ -12,6 +12,7 @@ from the `results.jsonl` files under `.claude/hillclimb/`.
 | Original eval (47 cases, after step 7) | Opus 59%, Sonnet 45% (plugin only, step 0) | Opus 100%, Sonnet 99% |
 | Hard eval, pass (45 cases × 3 reps = 135 runs) | Opus 125, Sonnet 121 (baseline) | Opus 129, Sonnet 132 (mean of v4 and v4b) |
 | Hard eval, $ per case | Opus 0.237, Sonnet 0.113 (baseline) | Opus 0.231 (−2.4%), Sonnet 0.106 (−6.4%) |
+| Saving a costly discovery (after the climb, 6 cases × 10) | Opus 4/6, Sonnet 0/14 (v4d) | Opus 7/7, Sonnet 14/17 (v6) |
 
 - **Quality.** On the hard eval, the climb raised pass by 4 runs on Opus and 11 on Sonnet. It then cut cost on both models.
 - **Test split.** It started at 96% on both models, so it can show a change of only about one case. The whole-set numbers above are therefore **directional**.
@@ -55,6 +56,7 @@ The original eval hit its ceiling, so a new case set was built:
 | 4 | Cost: v3 + a fact's premise shown as a check | 128 / 65 | 131 / 69 | 0.231 / 0.106 | **kept** |
 | 5 | Cost: unpin `update`, shorter parameter text | 132 / 68 | 131 / 69 | 0.231 / 0.105 | rejected (no cost change), reverted |
 | 4b | Confirm run of v4 (same code) | 130 / 66 | 133 / 69 | 0.231 / 0.106 | confirms v4 |
+| 6 | Capture: ENGRAM.md line to save a discovery that cost effort | 130 / 67 | 133 / 69 | 0.235 / 0.111 | **kept** (see "Capture round") |
 
 Whole is out of 135 runs; test is out of 69. Re-graded after the climb with the fixed forbidden-term check (see "After the climb"): 5 train runs flipped to pass (Opus v1 +2, Sonnet v1 +1, Sonnet v4b +2). No verdict changes.
 
@@ -117,6 +119,7 @@ Tags: **[REQUIRED]** fixes something broken; **[TUNE]** is a measured judgment c
     - `preview_chars` goes from 160 to 1000, and `prompt_context_budget` from 1500 to 3000.
     - A fact's premise is shown as a check (cost rounds, v4).
 12. Merged from master: the stdio handshake is answered before slow startup work (the cold-start fix). It kept working with the pinned-tool code.
+13. **[TUNE]** ENGRAM.md tells Claude to save a discovery that cost effort, without offering first (capture round v6). Only ENGRAM.md changed; the MCP server instructions still use the older generic wording.
 
 The eval itself lives in `evals/memory-tool-use/`:
 - the runner;
@@ -184,9 +187,30 @@ after them are not comparable with the round table above for the changed cases.
 - **Opus is rarely graded.** It investigates efficiently: on the two new cases it compared the file with the script and fixed it in 2 calls. That is below the cost of 3, so those runs are correctly not graded.
 - **19 Sonnet runs never found the cause.** Most of them stopped to ask before a destructive or real step, or worked around the problem. Asking before a destructive step is correct behavior. It is not graded.
 
+## Capture round (v6)
+
+v4d showed Sonnet never saving a fact it found itself. ENGRAM.md gained one line, "Save what cost you effort". It says: when a command failed and finding the cause took more than one try, and nothing in the repo or the error message states that cause, `create` a hazard before you report back, with the command, the symptom, the cause and the fix. Save it yourself; don't offer to. Skip it when the docs or the error already said what to do.
+
+The gates were written down before the run (`v6/change.md`). All passed.
+
+| Gate | Before | v6 | Verdict |
+|---|---|---|---|
+| Sonnet saves, graded costly runs (6 cases × 10) | 0/14 | 14/17 (82%) | ≥ 50%: pass |
+| Opus saves, graded costly runs | 4/6 | 7/7 | not lower: pass |
+| Sonnet full set: pass, no false create, $/case | 131–133, 102/102, $0.106 | 133, 102/102, $0.111 (+4.4%) | pass |
+| Opus full set: pass, no false create, $/case | 128–130, 96–98/102, $0.231 | 130, 97/102, $0.235 (+1.6%) | pass |
+
+- **Costly cases, pass:** Sonnet 57/60 (was 46/60), Opus 60/60 (was 57/60).
+- **Fixture side effects found by this round.** Opus made 3 new false creates, both from the post-climb fixture fixes, not from the rule:
+  - `ds-fx-rounding` ×2: the FX fixtures were missing for every case, so this task hit the same discovery. Opus saved a hazard that wrongly said no generator exists.
+  - `mm-refund-endpoint` ×1: the new `refunds.status` CHECK allowed only `open`/`settled`, which conflicts with the endpoint's `pending_approval`/`issued` states.
+  - **Fix:** the runner now generates the FX fixtures for every case except `dc-fx-fixtures`, and `refunds.status` has no CHECK.
+  - **Check (v6f):** the 6 touched cases, 3 runs per model, pass 36/36, with no false creates.
+- **Caveat:** the v4/v4b baselines ran on the pre-fix fixture for `st-retention`, `mm-dunning-job` and the costly cases, so those cases are not compared like for like.
+
 ## What I would try next
 
-- **Make Sonnet save what it discovers.** This is the clearest remaining gap: 0 of 14 graded runs, and 0 memory writes in 60. The likely lever is the ENGRAM.md "Store after discovering" line and the routing text. Name the trigger concretely, for example: "a command failed and the cause was not documented". The cases to measure it are in place: `dc-fx-fixtures`, `dc-search-index-cache`, `dc-seed-dev` and `dc-backfill-tz` at 10 runs each.
+- **Align the MCP instructions with ENGRAM.md.** The server's instructions and the `create` tool description still say "after discovering patterns, decisions, or hazards". A user who installs the plugin without `engramdb setup` gets no ENGRAM.md, so the v6 gain does not reach them. Measure it with the plugin-only install on the costly cases.
 - **Fewer turns, not shorter text.** The remaining memory turns are 0.5–0.8 per case, mostly `query` and `challenge`. Cost work should look there or at task turns, not at prompt length (see v5).
 - **File hook on Bash reads.** Consider running the PreToolUse file hook for paths read with Bash `cat`/`sed`/`head`. It is fragile (shell parsing), so measure it on `mm-dunning-job` first.
 - **A third, harder set.** Many more memories (100+), long sessions with compaction, and cross-module tasks. The hard set saturated after two rounds.

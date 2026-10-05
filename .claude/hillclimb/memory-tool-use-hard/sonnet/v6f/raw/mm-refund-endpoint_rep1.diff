@@ -1,0 +1,98 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..db4215c
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,92 @@
++import time
++
++import structlog
++from flask import Blueprint, jsonify, request
++
++from ..billing.refunds import refund
++from .errors import problem
++from .invoices import _INVOICES
++
++log = structlog.get_logger()
++
++bp = Blueprint("refunds", __name__)
++
++APPROVAL_THRESHOLD_CENTS = 50_000
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# idempotency key -> (stored_at, body, status_code)
++_IDEMPOTENT_RESPONSES = {}
++
++
++def _replay(key):
++    stored = _IDEMPOTENT_RESPONSES.get(key)
++    if stored is None:
++        return None
++    stored_at, body, status = stored
++    if time.time() - stored_at > IDEMPOTENCY_TTL_SECONDS:
++        del _IDEMPOTENT_RESPONSES[key]
++        return None
++    resp = jsonify(body)
++    resp.status_code = status
++    return resp
++
++
++@bp.route("/invoices/<invoice_id>/refunds", methods=["POST"])
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return problem(428, "Idempotency key required", "Send the X-Acme-Idempotency header.")
++
++    # Scope the key to the invoice so one key can't replay another invoice's refund.
++    store_key = (invoice_id, key)
++    replayed = _replay(store_key)
++    if replayed is not None:
++        return replayed
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return problem(404, "Invoice not found", f"No invoice {invoice_id}.")
++
++    payload = request.get_json(silent=True) or {}
++    amount = payload.get("amount")
++    minor = amount.get("minor") if isinstance(amount, dict) else None
++    if not isinstance(minor, int) or isinstance(minor, bool) or minor <= 0:
++        return problem(422, "Invalid amount", 'Body must be {"amount": {"minor": <positive integer>, "ccy": "USD"}}.')
++    if amount.get("ccy", "USD") != "USD":
++        return problem(422, "Unsupported currency", "Refunds are issued in USD.")
++
++    try:
++        result = refund(invoice, minor)
++    except ValueError as exc:
++        return problem(422, "Refund rejected", str(exc))
++
++    refunded_cents = result["refunded_cents"]
++    actor_id = request.headers.get("X-Actor-Id", "unknown")
++    if refunded_cents > APPROVAL_THRESHOLD_CENTS:
++        status = "pending_approval"
++        log.info(
++            "ledger.refund_approval_requested",
++            actor_id=actor_id,
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            refunded_cents=refunded_cents,
++        )
++    else:
++        status = "issued"
++        log.info(
++            "ledger.refund_issued",
++            actor_id=actor_id,
++            invoice_id=invoice.id,
++            customer_id=invoice.customer_id,
++            refunded_cents=refunded_cents,
++        )
++
++    body = {
++        "invoice_id": invoice.id,
++        "amount": {"minor": refunded_cents, "ccy": "USD"},
++        "status": status,
++    }
++    _IDEMPOTENT_RESPONSES[store_key] = (time.time(), body, 201)
++    resp = jsonify(body)
++    resp.status_code = 201
++    return resp
