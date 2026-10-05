@@ -363,9 +363,6 @@ pub fn composite_score_target_ignore_decay(
     composite_score_inner(target, context, config, now, true)
 }
 
-/// A physical pattern that matches every path: the project root, or a glob
-/// with no directory before its first metacharacter (`**/*.py`).
-
 fn composite_score_inner(
     target: ScoreTarget<'_>,
     context: &ScoringContext<'_>,
