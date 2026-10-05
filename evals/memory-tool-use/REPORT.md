@@ -149,7 +149,23 @@ after them are not comparable with the round table above for the changed cases.
     - The grader measures **discovery cost**: the tool calls from the first failed run of the task command to its first success. Failure is also read from the output. Saving is graded when the cost is 3 or more.
   - Details are in `HARD_CASES.md`.
 
-**Verification run (v4c):** the 6 changed cases, 3 runs per model, on the v4 build. Results pending.
+**Verification run (v4c).** The 6 changed cases, 3 runs per model, on the v4 build with master merged. Cost was $4.36 for Opus and $2.05 for Sonnet.
+
+| Case | Opus | Sonnet |
+|---|---|---|
+| `mm-dunning-job` | 3/3 | 3/3 (was 0–1/3 from v3 on) |
+| `st-retention` | 3/3 (no false creates) | 3/3 |
+| 4 costly cases, pass | 12/12 | 11/12 |
+| costly saves graded | 2 (both saved, `dc-backfill-tz`) | 1 (not saved, `dc-fx-fixtures`) |
+
+- **The redesign works, but the costly cases still rarely bite.** Only 3 of 24 runs reached the grade: the task command failed, the fix took 3 or more calls, and the agent found the cause.
+  - Opus often inspected the runtime state before running. For example, it opened `var/dev.sqlite3`, saw the missing tables and ran `migrate_dev.py` first. It saved the fact anyway, which is not graded.
+- **Two grader rules were added after reading these runs:**
+  - The save is graded only when a tool call actually used the fact. In two Sonnet `dc-fx-fixtures` runs, Sonnet worked around the missing file: once it wrote the JSON fixture by hand, and once it rewrote `tests/fxdata.py` to read the CSV. It never found `gen_fx_fixtures.py`, so there was nothing to save.
+  - For `dc-golden-statements`, only "golden integrity check failed" counts as a failure. The golden diff right after the change is the expected next step.
+- **The one real miss:** in Sonnet `dc-fx-fixtures` rep 1, Sonnet failed, found `gen_fx_fixtures.py`, and said in its answer that "docs/testing.md doesn't mention this step". It did not save the fact.
+- **A sample of 3 graded runs cannot measure the saving rule.** To measure it, the costly cases need more reps or more cases, not more rounds of this design.
+
 
 ## What I would try next
 

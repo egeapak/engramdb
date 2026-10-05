@@ -269,3 +269,10 @@ def test_stale_fact_local_helper_is_not_the_root_module():
 def test_stale_fact_sees_new_file_paths_and_sql_comments():
     assert _stale("ds-notifier-migration", "+++ b/migrations/0008_rename.sql\n+SELECT 1;\n") == 0
     assert _stale("ds-notifier-migration", "+++ b/services/notifier/m.sql\n+-- no RENAME COLUMN here\n") == 1
+
+
+def test_costly_capture_not_graded_when_the_fact_was_never_found():
+    workaround = ("echo '{}' > fixture.json", "", False)
+    rerun = ("python backfill.py", "would backfill", False)
+    row = _costly([FAIL, READ, workaround, rerun], {})
+    assert row["discovery_cost"] == 3 and "costly_capture" not in row["grade"]

@@ -1,0 +1,136 @@
+diff --git a/scripts/purge_invoices.py b/scripts/purge_invoices.py
+new file mode 100644
+index 0000000..2e99781
+--- /dev/null
++++ b/scripts/purge_invoices.py
+@@ -0,0 +1,130 @@
++"""Delete finalized invoices that are past the retention period.
++
++Dry-run by default: reports what would be purged and writes nothing. Pass
++--execute to actually delete. Invoices with an open refund are never purged.
++"""
++import argparse
++import os
++import sys
++from datetime import datetime, timedelta, timezone
++
++import structlog
++
++log = structlog.get_logger()
++
++# Legal defines the period in days (10 years since the 2026 tax audit); do not
++# derive it from years.
++RETENTION_DAYS = 3650
++
++# Larger batches hold invoices row locks long enough to time out checkout (INC-2291).
++MAX_SAFE_BATCH = 500
++
++ELIGIBLE_WHERE = """
++    i.finalized_at IS NOT NULL
++    AND i.finalized_at < %(cutoff)s
++    AND NOT EXISTS (
++        SELECT 1 FROM refunds r WHERE r.invoice_id = i.id AND r.status = 'open'
++    )
++"""
++
++
++def cutoff_for(now):
++    # finalized_at is a naive TIMESTAMP stored in UTC.
++    return (now - timedelta(days=RETENTION_DAYS)).astimezone(timezone.utc).replace(tzinfo=None)
++
++
++def dry_run(conn, cutoff):
++    eligible = conn.execute(
++        f"SELECT count(*) FROM invoices i WHERE {ELIGIBLE_WHERE}", {"cutoff": cutoff}
++    ).fetchone()[0]
++    held = conn.execute(
++        """
++        SELECT count(DISTINCT i.id) FROM invoices i
++        JOIN refunds r ON r.invoice_id = i.id AND r.status = 'open'
++        WHERE i.finalized_at IS NOT NULL AND i.finalized_at < %(cutoff)s
++        """,
++        {"cutoff": cutoff},
++    ).fetchone()[0]
++    sample = [row[0] for row in conn.execute(
++        f"SELECT i.id FROM invoices i WHERE {ELIGIBLE_WHERE} ORDER BY i.finalized_at, i.id LIMIT 10",
++        {"cutoff": cutoff},
++    )]
++    print(f"dry run: {eligible} invoice(s) finalized before {cutoff:%Y-%m-%d %H:%M:%S} UTC would be purged")
++    print(f"dry run: {held} expired invoice(s) kept because they have an open refund")
++    if sample:
++        print(f"dry run: first {len(sample)}: {', '.join(sample)}")
++    print("nothing written; pass --execute to delete")
++    log.info("invoice_purge_dry_run", eligible=eligible, held_open_refund=held, cutoff=cutoff.isoformat())
++
++
++def purge_batch(conn, cutoff, batch_size):
++    """Purge one batch in its own short transaction. Returns the number of invoices deleted."""
++    with conn.transaction():
++        ids = [row[0] for row in conn.execute(
++            f"""
++            SELECT i.id FROM invoices i WHERE {ELIGIBLE_WHERE}
++            ORDER BY i.id LIMIT %(limit)s
++            FOR UPDATE SKIP LOCKED
++            """,
++            {"cutoff": cutoff, "limit": batch_size},
++        )]
++        if not ids:
++            return 0
++        # Lock the refunds and re-check under the lock, so a refund reopened
++        # since the select above keeps its invoice.
++        reopened = {row[0] for row in conn.execute(
++            "SELECT invoice_id, status FROM refunds WHERE invoice_id = ANY(%s) FOR UPDATE",
++            (ids,),
++        ) if row[1] == "open"}
++        ids = [i for i in ids if i not in reopened]
++        if not ids:
++            return 0
++        lines = conn.execute("DELETE FROM invoice_lines WHERE invoice_id = ANY(%s)", (ids,)).rowcount
++        refunds = conn.execute(
++            "DELETE FROM refunds WHERE invoice_id = ANY(%s) AND status = 'settled'", (ids,)
++        ).rowcount
++        invoices = conn.execute("DELETE FROM invoices WHERE id = ANY(%s)", (ids,)).rowcount
++    log.info("invoices_purged", invoices=invoices, invoice_lines=lines, settled_refunds=refunds,
++             cutoff=cutoff.isoformat())
++    return invoices
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    parser.add_argument("--execute", action="store_true", help="actually delete (default is a dry run)")
++    parser.add_argument("--batch-size", type=int, default=MAX_SAFE_BATCH)
++    args = parser.parse_args()
++    if not 0 < args.batch_size <= MAX_SAFE_BATCH:
++        print(f"--batch-size must be between 1 and {MAX_SAFE_BATCH}", file=sys.stderr)
++        return 3
++
++    dsn = os.environ.get("DATABASE_URL")
++    if not dsn:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++    try:
++        import psycopg
++    except ImportError:
++        print("psycopg is required: pip install 'psycopg[binary]'", file=sys.stderr)
++        return 2
++
++    cutoff = cutoff_for(datetime.now(timezone.utc))
++    # The deployed pooler runs in transaction mode: server-side prepared statements must be off.
++    with psycopg.connect(dsn, prepare_threshold=None, autocommit=True) as conn:
++        if not args.execute:
++            dry_run(conn, cutoff)
++            return 0
++        total = 0
++        while True:
++            deleted = purge_batch(conn, cutoff, args.batch_size)
++            if deleted == 0:
++                break
++            total += deleted
++            print(f"purged {total} invoice(s) so far")
++    print(f"done: purged {total} invoice(s) finalized before {cutoff:%Y-%m-%d %H:%M:%S} UTC")
++    log.info("invoice_purge_finished", invoices=total, cutoff=cutoff.isoformat())
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

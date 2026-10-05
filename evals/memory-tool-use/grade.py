@@ -208,6 +208,17 @@ def discovery_cost(tools, attempt_re, fail_re):
     return 0 if first_fail is None else len(tools) - first_fail
 
 
+def costly_and_found(tools, exp):
+    """The discovery was costly, and the agent actually found the fact.
+
+    Found means a tool call used it (ran or read the script, set the variable).
+    An agent that worked around the failure without finding the cause has
+    nothing to save, so the case is not graded for it.
+    """
+    found = any(_contains_any(json.dumps(s["input"]), exp["create_terms"]) for s in tools)
+    return found and discovery_cost(tools, exp["attempt_re"], exp["fail_re"]) >= COSTLY_MIN_CALLS
+
+
 def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     exp = case["expect"]
     steps, hooks, init, final = parse_events(events)
@@ -243,7 +254,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
             # A fact found mid-task must be saved only when finding it was
             # costly: the task command failed and the fix took several calls.
             # Found at once, saving it is the agent's call and is not graded.
-            if discovery_cost(tools, exp["attempt_re"], exp["fail_re"]) >= COSTLY_MIN_CALLS:
+            if costly_and_found(tools, exp):
                 g["costly_capture"] = int(captured)
         else:
             g["implicit_capture" if "implicit" in case["tags"] else "explicit_create"] = int(captured)

@@ -82,8 +82,10 @@ The save is graded only when finding the cause was costly: the **discovery cost*
 number of tool calls from the first failed run of the task command (`attempt_re`) to its
 first success, and it must be 3 or more. An attempt failed when the tool reported an
 error or its output matches `fail_re`, so a chained `; ls` cannot hide a failure. Probes
-before the first attempt cost nothing. The row records `discovery_cost` for every
-costly case.
+before the first attempt cost nothing. The save is also graded only when the agent found
+the fact, meaning a tool call used one of the `create_terms`. An agent that worked around
+the failure without finding the cause has nothing to save. The row records
+`discovery_cost` for every costly case.
 
 Two cases are **cheap** (tag `cheap`, `create: null`, so saving is optional and not
 graded). In `dc-ledger-smoke` the first run prints the fix. `dc-runbook-export` keeps its

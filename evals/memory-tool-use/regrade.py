@@ -54,6 +54,13 @@ def regrade(variant):
             revs = [s for s in tools if grade.memory_op(s["name"])
                     and grade._is_revision(grade.memory_op(s["name"]), s["input"])]
             g["no_spurious_revise"] = int(all(grade._revises_stale_only(s["input"], seeded) for s in revs))
+        # Rows from the redesigned costly cases carry discovery_cost. The
+        # rules only got stricter, so a graded save can be dropped but never added.
+        if "costly" in case["tags"] and "discovery_cost" in row:
+            row["discovery_cost"] = grade.discovery_cost(tools, case["expect"]["attempt_re"],
+                                                         case["expect"]["fail_re"])
+            if not grade.costly_and_found(tools, case["expect"]):
+                g.pop("costly_capture", None)
         diff_file = raw.with_suffix(".diff")
         if case["expect"].get("forbidden") and diff_file.exists():
             g["no_stale_fact"] = int(not grade._contains_any(grade.added_code(diff_file.read_text()),
