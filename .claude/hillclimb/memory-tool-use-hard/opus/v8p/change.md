@@ -6,4 +6,8 @@ Pre-registered gates:
 - v8p Opus: costly_capture >= 80% (v7p: 5/5).
 - v8p guardrail: no_false_create on nh-*/ds-* x3 >= 95% per model (v7p: 42/42).
 - v8 guardrail (main risk: a normal bug fix is also fail -> fix -> pass): full hard set x3 vs v6 on the 45 climb cases: no_false_create not worse by more than 2 runs; pass not worse by more than 3 runs; $/case not up by more than 5%.
-Result: pending.
+Result, v8p (plugin-only, no ENGRAM.md):
+- Sonnet: saved 20/21 graded costly discoveries (gate >= 50%: pass; v7p 1/12). Costly pass 59/60.
+- Opus: saved 6/6 (gate >= 80%: pass). Costly pass 60/60.
+- Guardrail: no_false_create on nh-*/ds-* x3 = 42/42 on both models (pass).
+v8 (with ENGRAM.md, full set): pending.

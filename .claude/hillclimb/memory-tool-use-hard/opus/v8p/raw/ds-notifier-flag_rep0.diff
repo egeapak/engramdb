@@ -1,0 +1,72 @@
+diff --git a/services/notifier/README.md b/services/notifier/README.md
+index 83b79e8..dc29c32 100644
+--- a/services/notifier/README.md
++++ b/services/notifier/README.md
+@@ -6,3 +6,9 @@ It is deployed separately from the billing app, as its own function.
+ - `notifier/` - the service code
+ - `migrations/` - the outbox table schema
+ - `tests/` - unit tests
++
++## Feature flags
++
++Flags are environment variables on the deployed function, enabled with the value `1`.
++
++- `NOTIFIER_FF_RECEIPT_V2` - send receipts with the new `receipt_v2` template instead of `receipt`
+diff --git a/services/notifier/notifier/email.py b/services/notifier/notifier/email.py
+index 0627713..d455de1 100644
+--- a/services/notifier/notifier/email.py
++++ b/services/notifier/notifier/email.py
+@@ -1,9 +1,16 @@
++import os
++
+ from .provider import send
+ from .render import render
+ 
+ 
++def _new_receipt_enabled():
++    return os.environ.get("NOTIFIER_FF_RECEIPT_V2") == "1"
++
++
+ def send_receipt(invoice_id, to_addr, total_minor):
+-    body = render("receipt", invoice_id=invoice_id, total_minor=total_minor)
++    template = "receipt_v2" if _new_receipt_enabled() else "receipt"
++    body = render(template, invoice_id=invoice_id, total_minor=total_minor)
+     return send(to_addr, "Your receipt", body)
+ 
+ 
+diff --git a/services/notifier/tests/test_email.py b/services/notifier/tests/test_email.py
+index 19300da..6d68159 100644
+--- a/services/notifier/tests/test_email.py
++++ b/services/notifier/tests/test_email.py
+@@ -1,10 +1,30 @@
+ from unittest import mock
+ 
++import pytest
++
+ from notifier import email
+ 
+ 
+-def test_send_receipt_uses_receipt_template():
++def test_send_receipt_uses_receipt_template(monkeypatch):
++    monkeypatch.delenv("NOTIFIER_FF_RECEIPT_V2", raising=False)
+     with mock.patch.object(email, "render", return_value="<p>hi</p>") as render, \
+             mock.patch.object(email, "send", return_value="msg_1"):
+         assert email.send_receipt("inv_1", "a@example.com", 1200) == "msg_1"
+     render.assert_called_once_with("receipt", invoice_id="inv_1", total_minor=1200)
++
++
++def test_send_receipt_uses_new_template_when_flag_on(monkeypatch):
++    monkeypatch.setenv("NOTIFIER_FF_RECEIPT_V2", "1")
++    with mock.patch.object(email, "render", return_value="<p>hi</p>") as render, \
++            mock.patch.object(email, "send", return_value="msg_1"):
++        assert email.send_receipt("inv_1", "a@example.com", 1200) == "msg_1"
++    render.assert_called_once_with("receipt_v2", invoice_id="inv_1", total_minor=1200)
++
++
++@pytest.mark.parametrize("value", ["0", "", "true", "yes"])
++def test_send_receipt_flag_only_enabled_by_1(monkeypatch, value):
++    monkeypatch.setenv("NOTIFIER_FF_RECEIPT_V2", value)
++    with mock.patch.object(email, "render", return_value="<p>hi</p>") as render, \
++            mock.patch.object(email, "send", return_value="msg_1"):
++        email.send_receipt("inv_1", "a@example.com", 1200)
++    assert render.call_args.args[0] == "receipt"

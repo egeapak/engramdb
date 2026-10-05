@@ -1,0 +1,7 @@
+diff --git a/migrations/0008_fix_customers_email.sql b/migrations/0008_fix_customers_email.sql
+new file mode 100644
+index 0000000..f57d8b4
+--- /dev/null
++++ b/migrations/0008_fix_customers_email.sql
+@@ -0,0 +1 @@
++ALTER TABLE customers RENAME COLUMN emial TO email;
