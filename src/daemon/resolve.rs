@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use super::protocol::ModelSelection;
 use super::DaemonHandle;
-use crate::ops::{resolve_backend, resolve_engine_providers, EngineProviders, ProviderCache};
-use crate::types::{EmbeddingBackend, EngramConfig};
+use crate::ops::{resolve_engine_providers, EngineProviders, ProviderCache};
+use crate::types::{DaemonConfig, EmbeddingBackend, EngramConfig};
 
 /// How a front-end may obtain model providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,7 +140,9 @@ impl DaemonCell {
         let failure_window = Duration::from_secs((idle_secs / 3).max(1));
         st.last_spawn = Some((Instant::now(), failure_window));
 
-        let h = DaemonHandle::connect_or_spawn(sock, idle_secs).await;
+        // No idle timeout on the command line: the daemon reads the global
+        // config itself (`idle_secs` above only sizes this cell's backoff).
+        let h = DaemonHandle::connect_or_spawn(sock, None).await;
 
         if h.is_some() {
             // Confirmed successful spawn: shrink the backoff to the short
@@ -169,6 +172,14 @@ pub enum InProcessFallback<'a> {
     /// Serve pooled bundles from the given process-wide cache. Right for
     /// long-lived multi-session callers (the MCP server).
     Pool(&'a ProviderCache),
+    /// Serve single-session bundles from the given cache. Right for a
+    /// sequential batch over several projects (`projects discover` /
+    /// `repair`): the model loads once for the batch, and no extra sessions
+    /// are built that a sequential caller could never use. The one-session
+    /// size applies to the in-process load only — the daemon still gets the
+    /// project's own `pool_size`, so it serves these calls from the same
+    /// bundle as every other session instead of building a second one.
+    SequentialPool(&'a ProviderCache),
 }
 
 /// Resolve model-backed providers for a retrieval engine, routing through the
@@ -183,6 +194,12 @@ pub enum InProcessFallback<'a> {
 ///   one-shot in-process load).
 /// - Either front-end can be overridden to `InProcess` to skip the daemon.
 ///
+/// `config` is the caller's **project** config and decides only *which models*
+/// to load (sent to the daemon as a [`ModelSelection`]). Everything about the
+/// daemon itself — `enabled`, the socket, the idle timeout — comes from the
+/// **global** config, loaded here so no caller can pass a project's `[daemon]`
+/// by mistake.
+///
 /// Graceful fallback is the contract: if the daemon is disabled in config,
 /// the policy is `InProcess`, or the daemon is unreachable, this returns
 /// in-process providers.
@@ -190,36 +207,48 @@ pub async fn resolve_providers_with(
     cell: &DaemonCell,
     config: &EngramConfig,
     backend: Option<EmbeddingBackend>,
-    dir: &Path,
     policy: DaemonPolicy,
     fallback: InProcessFallback<'_>,
 ) -> EngineProviders {
-    if config.daemon.enabled && policy != DaemonPolicy::InProcess {
-        let idle = config.daemon.idle_timeout_secs;
-        let socket = super::resolve_socket(None, &config.daemon);
-        // The re-resolvable cell health-checks a cached handle and re-spawns
-        // a dead daemon, so a session that outlived its daemon heals here
-        // instead of degrading to in-process forever.
-        if let Some(handle) = cell.get(&socket, idle, policy).await {
-            // Send the resolved concrete backend so the daemon's provider
-            // key matches ours regardless of the daemon's environment.
-            let resolved_backend = Some(resolve_backend(config.embeddings.backend, backend));
-            if let Some(providers) = super::remote_providers(
-                handle,
-                dir.to_string_lossy().into_owned(),
-                resolved_backend,
-                config,
-            )
+    if policy != DaemonPolicy::InProcess {
+        let daemon = crate::storage::config::load_global_config_or_default()
             .await
-            {
-                return providers;
-            }
+            .daemon;
+        if let Some(providers) = remote_for(cell, &daemon, config, backend, policy).await {
+            return providers;
         }
     }
     match fallback {
         InProcessFallback::Single => resolve_engine_providers(config, backend, 1),
         InProcessFallback::Pool(cache) => cache.get(config, backend).await,
+        InProcessFallback::SequentialPool(cache) => {
+            let mut single = config.clone();
+            single.embeddings.pool_size = Some(1);
+            cache.get(&single, backend).await
+        }
     }
+}
+
+/// The daemon half of [`resolve_providers_with`], with the global `daemon`
+/// settings passed in. `None` means "use in-process providers".
+async fn remote_for(
+    cell: &DaemonCell,
+    daemon: &DaemonConfig,
+    config: &EngramConfig,
+    backend: Option<EmbeddingBackend>,
+    policy: DaemonPolicy,
+) -> Option<EngineProviders> {
+    if !daemon.enabled {
+        return None;
+    }
+    let socket = super::resolve_socket(None, daemon);
+    // The re-resolvable cell health-checks a cached handle and re-spawns a
+    // dead daemon, so a session that outlived its daemon heals here instead
+    // of degrading to in-process forever.
+    let handle = cell.get(&socket, daemon.idle_timeout_secs, policy).await?;
+    // Send the resolved concrete backend so the daemon's provider key matches
+    // ours regardless of the daemon's environment.
+    super::remote_providers(handle, ModelSelection::from_config(config, backend), config).await
 }
 
 /// [`resolve_providers_with`] with the one-shot [`InProcessFallback::Single`]
@@ -228,16 +257,7 @@ pub async fn resolve_providers(
     cell: &DaemonCell,
     config: &EngramConfig,
     backend: Option<EmbeddingBackend>,
-    dir: &Path,
     policy: DaemonPolicy,
 ) -> EngineProviders {
-    resolve_providers_with(
-        cell,
-        config,
-        backend,
-        dir,
-        policy,
-        InProcessFallback::Single,
-    )
-    .await
+    resolve_providers_with(cell, config, backend, policy, InProcessFallback::Single).await
 }

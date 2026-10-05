@@ -26,7 +26,7 @@ mod title_strategy;
 pub use challenge::Challenge;
 pub use config::{
     ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
-    EngramConfig, EpistemicConfig, HarvestConfig, HooksConfig, LogicalBonusConfig,
+    EngramConfig, EpistemicConfig, GlobalConfig, HarvestConfig, HooksConfig, LogicalBonusConfig,
     MaintenanceConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
     ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, SituationConfig,
     SituationProfile, ThresholdsConfig, TrustWeights, COMPOSITION_METADATA_V1,

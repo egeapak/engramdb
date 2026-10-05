@@ -81,10 +81,16 @@ Pass `--no-embeddings` at init, or set `[embeddings].provider = "none"` (or any 
 ## Daemon
 
 **`daemon status` says "not running" but I see a process.**
-The visible process is bound to a different socket. Use `--socket` or set `ENGRAMDB_DAEMON_SOCKET`. The socket-resolution order is `--socket` > env > config > default.
+The visible process is bound to a different socket. Use `--socket` or set `ENGRAMDB_DAEMON_SOCKET`. The socket-resolution order is `--socket` > env > the global `[daemon].socket_path` > default.
 
 **Daemon won't start; `sun_path too long`.**
-Your default socket path exceeds the OS limit (~104 bytes). Set `ENGRAMDB_DAEMON_SOCKET=/tmp/engramdb-$USER.sock` or put `socket_path = "..."` under `[daemon]` in `config.toml`.
+Your default socket path exceeds the OS limit (~104 bytes). Put the socket in a short private folder: `mkdir -m 700 /tmp/engramdb-$USER`, then set `ENGRAMDB_DAEMON_SOCKET=/tmp/engramdb-$USER/daemon.sock`, or put `socket_path = "/tmp/engramdb-<you>/daemon.sock"` under `[daemon]` in the **global** config file. A socket placed directly in `/tmp` is refused.
+
+**Daemon won't start; "daemon folder … must be private" or "is owned by uid …".**
+The folder that holds the socket also holds the daemon's lock and log, so the daemon requires it to be yours with mode `0700`. It never changes the mode of a folder that already exists. Run `chmod 700 <folder>` for a folder you own, or point the socket into a folder you own. Until then, models load in-process.
+
+**Warning: "… sets daemon.… which is ignored".**
+A project's `.engramdb/config.toml` still has a `[daemon]` section. Daemon settings now come only from the global config file (`~/.config/engramdb/config.toml` on Linux, `~/Library/Application Support/engramdb/config.toml` on macOS). Move the keys there and delete the section from the project config. `engramdb doctor` lists the keys.
 
 **Daemon keeps using the old embedding model after a config change.**
 Run `engramdb daemon restart`. A running daemon caches loaded models for its lifetime.

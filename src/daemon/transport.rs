@@ -9,14 +9,17 @@
 //! - **Unix:** a Unix domain socket bound to the resolved socket path. A stale
 //!   socket left by a crashed daemon is reclaimed atomically (bind a per-pid
 //!   temp path, then `rename` over the target). The bind path is permission-
-//!   hardened: the socket's parent directory is created with (or tightened to)
-//!   mode 0700 and the socket file is chmod'd 0600, so other local users can
+//!   hardened: the socket's parent directory (the daemon folder) is created
+//!   with mode 0700, or verified to be owned by this uid with mode 0700 — a
+//!   folder with another owner or a looser mode is refused, never silently
+//!   used — and the socket file is chmod'd 0600, so other local users can
 //!   neither traverse to nor connect to the socket even when it falls back to
-//!   a shared location like `/tmp` (see [`super::runtime_base`]). A third
-//!   layer — an `SO_PEERCRED` uid check — lives in the server's accept loop.
+//!   a shared location like `/tmp` (see [`super::default_daemon_dir`]). A
+//!   third layer — an `SO_PEERCRED` uid check — lives in the server's accept
+//!   loop.
 //! - **Windows:** a named pipe whose name is derived from the same resolved
-//!   path, so the `--socket` / `ENGRAMDB_DAEMON_SOCKET` / `[daemon].socket_path`
-//!   override chain (and the per-user default path) carry over unchanged. The
+//!   path, so the `--socket` / `ENGRAMDB_DAEMON_SOCKET` / global
+//!   `[daemon].socket_path` override chain (and the per-user default path) carry over unchanged. The
 //!   pipe name is `\\.\pipe\engramdb-<hash>`; an explicit `\\.\pipe\...` value is
 //!   used verbatim. Named pipes vanish when their owning process exits, so no
 //!   stale-state reclamation is needed.
@@ -31,10 +34,10 @@
 use std::path::Path;
 
 #[cfg(unix)]
-pub use unix::{bind_or_yield, connect, Listener};
+pub use unix::{bind_or_yield, connect, prepare_daemon_dir, Listener};
 
 #[cfg(windows)]
-pub use windows::{bind_or_yield, connect, Listener};
+pub use windows::{bind_or_yield, connect, prepare_daemon_dir, Listener};
 
 #[cfg(unix)]
 mod unix {
@@ -61,25 +64,25 @@ mod unix {
         }
     }
 
-    /// Create (or vet) the socket's parent directory with owner-only access.
+    /// Create (or verify) the daemon folder with owner-only access.
     ///
-    /// Defense layer 1 of the daemon's local-only access control: the default
-    /// socket path can land outside `$XDG_RUNTIME_DIR` (per-user cache dir, or
-    /// `/tmp/engramdb-<uid>` as a last resort), where a umask-default
-    /// directory would be world-traversable. A 0700 parent denies every other
-    /// user path traversal to the socket regardless of where it lives.
+    /// Defense layer 1 of the daemon's local-only access control. The folder
+    /// holds the socket, the reclaim lock and the daemon log, and it can land
+    /// outside `$XDG_RUNTIME_DIR` (the per-user cache dir, `/tmp/engramdb-<uid>`
+    /// as a last resort, or an override), where a umask-default directory would
+    /// be world-traversable.
     ///
     /// - **Missing:** created (recursively) with mode 0700.
-    /// - **Exists, owned by us, group/other bits set:** tightened to 0700
-    ///   (logged, since an explicitly overridden `socket_path` could point
-    ///   into a deliberately shared directory).
-    /// - **Exists but owned by another user:** refuse to bind with a clear
-    ///   error — we can't fix its permissions, and serving from a directory
-    ///   someone else controls invites socket squatting/swaps. (This also
-    ///   means a socket placed *directly* in a root-owned dir like `/tmp`
-    ///   is rejected; the default path always uses an owned subdirectory.)
-    fn prepare_socket_dir(parent: &Path) -> std::io::Result<()> {
-        if parent.as_os_str().is_empty() {
+    /// - **Exists, owned by us, mode 0700 (no group/other bits):** used.
+    /// - **Anything else** — another owner, group/other bits set, or not a
+    ///   directory: refused with an error that names the fix. The daemon does
+    ///   not chmod a folder it finds: a loose folder that already exists may
+    ///   be deliberately shared, and a folder someone else owns invites socket
+    ///   squatting or swaps. (A socket placed *directly* in a root-owned dir
+    ///   like `/tmp` is therefore refused; the default always uses an owned
+    ///   subdirectory.)
+    pub fn prepare_daemon_dir(dir: &Path) -> std::io::Result<()> {
+        if dir.as_os_str().is_empty() {
             return Ok(());
         }
         // Recursive create succeeds (like `create_dir_all`) when the dir
@@ -87,33 +90,45 @@ mod unix {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(DIR_MODE)
-            .create(parent)?;
+            .create(dir)?;
+        verify_daemon_dir(dir, crate::daemon::current_euid())
+    }
 
-        let meta = fs::metadata(parent)?;
-        let euid = crate::daemon::current_euid();
+    /// The ownership and mode check of [`prepare_daemon_dir`], split out so a
+    /// test can drive the "owned by another uid" branch without root.
+    pub(crate) fn verify_daemon_dir(dir: &Path, euid: u32) -> std::io::Result<()> {
+        let meta = fs::metadata(dir)?;
+        if !meta.is_dir() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("daemon folder {} is not a directory", dir.display()),
+            ));
+        }
         if meta.uid() != euid {
             return Err(std::io::Error::new(
                 ErrorKind::PermissionDenied,
                 format!(
-                    "daemon socket directory {} is owned by uid {} (we are uid {}); \
-                     refusing to bind — point [daemon].socket_path (or \
-                     ENGRAMDB_DAEMON_SOCKET) at a directory you own",
-                    parent.display(),
+                    "daemon folder {} is owned by uid {} (we are uid {}); refusing to \
+                     bind — point the global [daemon].socket_path (or \
+                     ENGRAMDB_DAEMON_SOCKET) into a directory you own",
+                    dir.display(),
                     meta.uid(),
                     euid
                 ),
             ));
         }
-        if meta.mode() & 0o077 != 0 {
-            // Pre-existing dir with group/other access (e.g. created by an
-            // older engramdb under the default umask): tighten it.
-            tracing::warn!(
-                "tightening daemon socket directory {} from {:o} to {:o}",
-                parent.display(),
-                meta.mode() & 0o777,
-                DIR_MODE
-            );
-            fs::set_permissions(parent, fs::Permissions::from_mode(DIR_MODE))?;
+        let mode = meta.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "daemon folder {} has mode {mode:o}, but it must be private (700); \
+                     refusing to bind — run `chmod 700 {}`, or point the socket into a \
+                     private directory",
+                    dir.display(),
+                    dir.display()
+                ),
+            ));
         }
         Ok(())
     }
@@ -130,13 +145,13 @@ mod unix {
     /// Returns `Ok(None)` when a *live* daemon already owns the socket (this
     /// process should exit), `Ok(Some(listener))` when we own it. On success
     /// the parent directory is mode 0700 and the socket file mode 0600 (see
-    /// [`prepare_socket_dir`] / [`restrict_socket`]).
+    /// [`prepare_daemon_dir`] / [`restrict_socket`]).
     pub async fn bind_or_yield(socket: &Path) -> std::io::Result<Option<Listener>> {
         // The socket is a real filesystem entry, so its directory must exist
         // before bind. (Windows named pipes have no parent directory, hence
         // this lives in the Unix transport rather than the shared server loop.)
         if let Some(parent) = socket.parent() {
-            prepare_socket_dir(parent)?;
+            prepare_daemon_dir(parent)?;
         }
         match UnixListener::bind(socket) {
             Ok(l) => {
@@ -260,6 +275,16 @@ mod windows {
         format!(r"\\.\pipe\engramdb-{hex}")
     }
 
+    /// Create the daemon folder (it holds the log; a named pipe itself has no
+    /// directory). Windows has no Unix mode bits: the folder defaults to the
+    /// per-user local app data, whose ACL is already owner-only.
+    pub fn prepare_daemon_dir(dir: &Path) -> std::io::Result<()> {
+        if dir.as_os_str().is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(dir)
+    }
+
     /// A bound named-pipe listener. Holds the next unconnected pipe instance;
     /// [`Listener::accept`] connects it and creates the replacement, following
     /// the documented Tokio named-pipe server loop.
@@ -381,7 +406,7 @@ mod tests {
     /// bind, accept on a task, connect, write, echo, read back.
     #[tokio::test]
     async fn bind_then_connect_roundtrip() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = crate::daemon::private_tempdir();
         let addr = tmp.path().join("rt.sock");
 
         let listener = bind_or_yield(&addr)
@@ -410,7 +435,7 @@ mod tests {
     /// one daemon ever serves a given socket/pipe).
     #[tokio::test]
     async fn second_bind_yields_to_live_owner() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = crate::daemon::private_tempdir();
         let addr = tmp.path().join("yield.sock");
 
         let _owner = bind_or_yield(&addr)
@@ -430,7 +455,7 @@ mod tests {
     /// socket reclamation.
     #[tokio::test]
     async fn bind_succeeds_after_owner_drops() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = crate::daemon::private_tempdir();
         let addr = tmp.path().join("reclaim.sock");
 
         let owner = bind_or_yield(&addr)
@@ -452,7 +477,7 @@ mod tests {
     /// "daemon not running"), never a hang.
     #[tokio::test]
     async fn connect_to_missing_address_fails() {
-        let tmp = tempfile::TempDir::new().unwrap();
+        let tmp = crate::daemon::private_tempdir();
         let addr = tmp.path().join("absent.sock");
         assert!(
             connect(&addr).await.is_err(),
@@ -476,7 +501,7 @@ mod tests {
         /// and the socket file with mode 0600 — owner-only at both layers.
         #[tokio::test]
         async fn bind_sets_owner_only_permissions() {
-            let tmp = tempfile::TempDir::new().unwrap();
+            let tmp = crate::daemon::private_tempdir();
             // Parent does not exist yet: bind must create it 0700.
             let parent = tmp.path().join("rt").join("engramdb");
             let addr = parent.join("perm.sock");
@@ -494,7 +519,7 @@ mod tests {
         /// path *before* the rename, so the target is never world-accessible.
         #[tokio::test]
         async fn stale_reclaim_sets_owner_only_socket() {
-            let tmp = tempfile::TempDir::new().unwrap();
+            let tmp = crate::daemon::private_tempdir();
             let addr = tmp.path().join("stale.sock");
             // A dead socket file with permissive mode, as a crashed pre-
             // hardening daemon could have left behind.
@@ -508,28 +533,58 @@ mod tests {
             assert_eq!(mode_of(&addr), 0o600, "reclaimed socket must be 0600");
         }
 
-        /// A pre-existing socket directory we own but with group/other access
-        /// (e.g. created by an older engramdb under the default umask) is
-        /// tightened to 0700 at bind.
+        /// A pre-existing daemon folder we own but with group/other access is
+        /// refused, not tightened: the daemon never chmods a folder it did not
+        /// create, and never binds in one that is not private.
         #[tokio::test]
-        async fn loose_existing_dir_is_tightened() {
-            let tmp = tempfile::TempDir::new().unwrap();
+        async fn loose_existing_dir_is_refused() {
+            let tmp = crate::daemon::private_tempdir();
             let parent = tmp.path().join("loose");
             std::fs::create_dir(&parent).unwrap();
             std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
-            assert_eq!(mode_of(&parent), 0o755);
 
             let addr = parent.join("d.sock");
-            let _l = bind_or_yield(&addr)
-                .await
-                .unwrap()
-                .expect("bind succeeds in an owned dir");
-            assert_eq!(
-                mode_of(&parent),
-                0o700,
-                "owned-but-loose socket dir must be tightened"
-            );
-            assert_eq!(mode_of(&addr), 0o600);
+            let err = match bind_or_yield(&addr).await {
+                Err(e) => e,
+                Ok(_) => panic!("a 0755 daemon folder must be refused"),
+            };
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(err.to_string().contains("chmod 700"), "{err}");
+            assert_eq!(mode_of(&parent), 0o755, "the folder must not be changed");
+            assert!(!addr.exists(), "nothing may be bound in a refused folder");
+        }
+
+        /// Group-only access is just as refused as world access.
+        #[tokio::test]
+        async fn group_accessible_dir_is_refused() {
+            let tmp = crate::daemon::private_tempdir();
+            let parent = tmp.path().join("group");
+            std::fs::create_dir(&parent).unwrap();
+            std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o710)).unwrap();
+            assert!(bind_or_yield(&parent.join("d.sock")).await.is_err());
+        }
+
+        /// A folder owned by another uid is refused. Driven through the check
+        /// itself with a uid that is not ours, because a test cannot chown a
+        /// directory to someone else without root.
+        #[test]
+        fn foreign_owned_dir_is_refused() {
+            let tmp = crate::daemon::private_tempdir();
+            let me = crate::daemon::current_euid();
+            assert!(super::super::unix::verify_daemon_dir(tmp.path(), me).is_ok());
+            let err = super::super::unix::verify_daemon_dir(tmp.path(), me.wrapping_add(1))
+                .expect_err("a folder owned by another uid must be refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(err.to_string().contains("owned by uid"), "{err}");
+        }
+
+        /// A file where the folder should be is refused, not bound beside.
+        #[test]
+        fn non_directory_is_refused() {
+            let tmp = crate::daemon::private_tempdir();
+            let file = tmp.path().join("f");
+            std::fs::write(&file, b"x").unwrap();
+            assert!(super::super::prepare_daemon_dir(&file).is_err());
         }
     }
 }

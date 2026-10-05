@@ -32,9 +32,7 @@ pub async fn engine_for(
 ) -> RetrievalEngine {
     let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-    let project_dir = store.project_dir.clone();
-    let providers =
-        engramdb::daemon::resolve_providers(cell, &config, backend, &project_dir, policy).await;
+    let providers = engramdb::daemon::resolve_providers(cell, &config, backend, policy).await;
     engramdb::ops::assemble_engine(store, config, providers)
 }
 
@@ -43,11 +41,13 @@ pub async fn engine_for(
 ///
 /// Differs only in the in-process fallback: bundles are served from a shared
 /// [`ProviderCache`] so the model loads once for the whole batch instead of
-/// once per project. The pool is pinned to a single session — `ProviderCache`
-/// is the MCP server's seam and otherwise auto-sizes to `cores/2` for many
-/// concurrent callers, but these callers are strictly sequential, so the extra
-/// sessions could never be used and would cost a full model load each. The
-/// size is part of `provider_cache_key`, so this stays a coherent cache key.
+/// once per project. The in-process pool is pinned to a single session
+/// ([`InProcessFallback::SequentialPool`]) — `ProviderCache` is the MCP
+/// server's seam and otherwise auto-sizes to `cores/2` for many concurrent
+/// callers, but these callers are strictly sequential, so the extra sessions
+/// could never be used and would cost a full model load each. The size is
+/// part of `provider_cache_key`, so this stays a coherent cache key. The
+/// daemon is not affected: it gets the project's own `pool_size`.
 pub async fn engine_for_project(
     store: MemoryStore,
     backend: Option<EmbeddingBackend>,
@@ -56,16 +56,13 @@ pub async fn engine_for_project(
     cache: &ProviderCache,
 ) -> RetrievalEngine {
     let config_path = store.project_dir.join(".engramdb").join("config.toml");
-    let mut config = engramdb::storage::config::load_config_or_default(&config_path).await;
-    config.embeddings.pool_size = Some(1);
-    let project_dir = store.project_dir.clone();
+    let config = engramdb::storage::config::load_config_or_default(&config_path).await;
     let providers = engramdb::daemon::resolve_providers_with(
         cell,
         &config,
         backend,
-        &project_dir,
         policy,
-        InProcessFallback::Pool(cache),
+        InProcessFallback::SequentialPool(cache),
     )
     .await;
     engramdb::ops::assemble_engine(store, config, providers)

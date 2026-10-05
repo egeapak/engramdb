@@ -131,9 +131,9 @@ exit: 0
         {
           "details": [
             "socket: [RUNTIME]/d.sock",
-            "config: enabled=false, idle_timeout_secs=900"
+            "config: [CONFIG]/config.toml (enabled=false, idle_timeout_secs=900)"
           ],
-          "message": "disabled in config (models load in-process per MCP)",
+          "message": "disabled in the global config (models load in-process per MCP)",
           "name": "Embedding daemon",
           "passed": true,
           "status": "info"

@@ -1051,13 +1051,31 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     }
     match crate::storage::config::load_config(&config_path).await {
         Ok(config) => match config.validate() {
-            Ok(()) => EnvironmentCheck {
-                name: "Config file".to_string(),
-                passed: true,
-                message: ".engramdb/config.toml valid".to_string(),
-                suggestion: None,
-                details: vec![],
-                status: None,
+            // A leftover `[daemon]` table is ignored, not invalid: warn (the
+            // user's settings are silently not applying) without failing the
+            // check or the exit code.
+            Ok(()) => match crate::storage::config::legacy_daemon_message(&config_path, &config) {
+                Some(message) => EnvironmentCheck {
+                    name: "Config file".to_string(),
+                    passed: true,
+                    message: ".engramdb/config.toml sets [daemon] keys that are ignored"
+                        .to_string(),
+                    suggestion: Some(
+                        "Move the [daemon] keys to the global config file and delete them \
+                         from .engramdb/config.toml"
+                            .to_string(),
+                    ),
+                    details: vec![message],
+                    status: Some(CheckStatus::Warn),
+                },
+                None => EnvironmentCheck {
+                    name: "Config file".to_string(),
+                    passed: true,
+                    message: ".engramdb/config.toml valid".to_string(),
+                    suggestion: None,
+                    details: vec![],
+                    status: None,
+                },
             },
             Err(e) => EnvironmentCheck {
                 name: "Config file".to_string(),
@@ -3916,6 +3934,32 @@ mod tests {
         assert_eq!(result.name, "Config file");
         assert!(result.passed);
         assert!(result.message.contains("valid"));
+    }
+
+    /// An old project config with `[daemon]` still loads, and doctor flags
+    /// it as a warning naming each key and the global file that replaces it
+    /// — without failing the check.
+    #[tokio::test]
+    async fn test_check_config_file_flags_legacy_daemon_section() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[daemon]\nenabled = false\nidle_timeout_secs = 30\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "an ignored section must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(result.message.contains("[daemon]"), "{}", result.message);
+        let detail = result.details.join("\n");
+        assert!(detail.contains("daemon.enabled"), "{detail}");
+        assert!(detail.contains("daemon.idle_timeout_secs"), "{detail}");
+        let global = crate::storage::paths::global_config_path().unwrap();
+        assert!(detail.contains(&global.display().to_string()), "{detail}");
     }
 
     #[tokio::test]

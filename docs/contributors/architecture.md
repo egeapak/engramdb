@@ -128,11 +128,13 @@ Every store records a fingerprint of the embedding model it was built with: `mod
 
 ## Provider caching
 
-`ProviderCache` in `src/ops/mod.rs` keys loaded model bundles by `provider_cache_key = backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model`. Daemon-only and routing-only fields (`idle_timeout_secs`, `socket_path`, `use_for_cli`) deliberately don't affect the key. **If you add a model-affecting config field, extend this key** — the `cache_key_is_deterministic_and_signature_sensitive` test will fail if you forget.
+`ProviderCache` in `src/ops/mod.rs` keys loaded model bundles by `provider_cache_key = backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model`. Daemon settings are not in the project config at all (they live in the global config file), so they cannot affect the key. The daemon builds its key from the model sections each request carries (`daemon::ModelSelection`). **If you add a model-affecting config field, extend this key** — the `cache_key_is_deterministic_and_signature_sensitive` test will fail if you forget.
 
 ## Shared embedding daemon
 
 See [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) ("Shared embedding daemon" section) for the full design. The contract you must not break: **daemon failures never break operations** — when disabled or unreachable, the MCP process loads models in-process. Every client/server site uses `daemon::resolve_socket` so they agree on the socket path.
+
+The daemon's settings (`[daemon]`) come only from the **global** config file (`engram_storage::paths::global_config_path`, loaded by `engram_storage::config::load_global_config_or_default`), never from a project's `.engramdb/config.toml`: one daemon serves every project. A project `[daemon]` table still parses (`EngramConfig::legacy_daemon`, raw TOML) so old configs load, but nothing reads it as settings; the loader warns and `doctor` reports it. Model selection stays per project and travels in each request (`daemon::ModelSelection`); the daemon never reads a project directory.
 
 ## Retrieval pipeline
 
@@ -172,7 +174,7 @@ Downstream effects, each in its own layer:
 | Invariant | Where it lives | Why |
 |-----------|---------------|-----|
 | One map for `provider_str → (onnx_spec, ollama_spec)` | `src/ops/mod.rs::provider_specs` | Fingerprint and resolver can't disagree about which model a config selects. |
-| `provider_cache_key` includes every model-affecting config field, none of the daemon-only fields | `src/ops/mod.rs::provider_cache_key` | Avoid stale model bundles after a config change. |
+| `provider_cache_key` includes every model-affecting config field; daemon settings are global and never part of it | `src/ops/mod.rs::provider_cache_key` | Avoid stale model bundles after a config change. |
 | Daemon failures never break operations | `src/daemon/remote.rs` falls back to local providers | Daemon is a perf optimization, not a dependency. |
 | All model downloads cache to `dirs::cache_dir() / "engramdb" / "models"` | `crates/engram-storage/src/paths.rs::model_cache_dir` | Restricted-egress environments pre-stage models into one known location. |
 | `provider_specs` keys are stable on disk via `model_id()` | `EmbeddingProvider::model_id` | Manifests written today must keep meaning the same model tomorrow. |

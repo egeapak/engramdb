@@ -5,9 +5,26 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::BufReader;
 
-use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse};
+use super::protocol::{
+    read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, ModelSelection,
+};
 use super::server::run_daemon;
 use crate::storage::paths::model_cache_dir;
+use crate::types::{EmbeddingBackend, EngramConfig};
+
+/// The model selection a client with a default project config sends.
+fn default_models(backend: Option<EmbeddingBackend>) -> ModelSelection {
+    ModelSelection::from_config(&EngramConfig::default(), backend)
+}
+
+/// Write this test process's global config file. The test harness points
+/// `ENGRAMDB_CONFIG_DIR` at a per-process temp dir, and nextest runs each test
+/// in its own process, so this never leaks between tests.
+fn write_global_config(toml: &str) {
+    let path = crate::storage::paths::global_config_path().unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, toml).unwrap();
+}
 
 /// Frames survive a write→read round-trip over an in-memory duplex.
 #[tokio::test]
@@ -18,16 +35,24 @@ async fn protocol_roundtrip() {
     let mut ar = BufReader::new(ar);
     let mut br = BufReader::new(br);
 
+    let mut project = EngramConfig::default();
+    project.embeddings.provider = "all-minilm-l6".to_string();
+    project.rerank.enabled = false;
     let req = DaemonRequest {
-        dir: "/tmp/x".to_string(),
-        backend: None,
+        models: Some(ModelSelection::from_config(
+            &project,
+            Some(EmbeddingBackend::Onnx),
+        )),
         op: DaemonOp::Embed {
             texts: vec!["hello".to_string(), "world".to_string()],
         },
     };
     write_msg(&mut aw, &req).await.unwrap();
     let got: DaemonRequest = read_msg(&mut br).await.unwrap().unwrap();
-    assert_eq!(got.dir, "/tmp/x");
+    let models = got.models.expect("model selection survives the wire");
+    assert_eq!(models.backend, EmbeddingBackend::Onnx);
+    assert_eq!(models.embeddings.provider, "all-minilm-l6");
+    assert!(!models.rerank.enabled);
     assert!(matches!(got.op, DaemonOp::Embed { .. }));
 
     let resp = DaemonResponse::Embedded {
@@ -55,7 +80,7 @@ async fn read_msg_eof_is_none() {
 /// A real daemon answers `Ping` without loading any model.
 #[tokio::test]
 async fn daemon_answers_ping() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     // Long idle timeout so the watchdog doesn't shut the daemon down mid-test.
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
@@ -63,8 +88,7 @@ async fn daemon_answers_ping() {
     let resp = wait_request(
         &socket,
         DaemonRequest {
-            dir: String::new(),
-            backend: None,
+            models: None,
             op: DaemonOp::Ping,
         },
     )
@@ -93,7 +117,7 @@ async fn remote_embedding_end_to_end() {
         return;
     }
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
@@ -105,8 +129,6 @@ async fn remote_embedding_end_to_end() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    let store_dir = tmp.path().join("proj");
-    std::fs::create_dir_all(&store_dir).unwrap();
     let config = crate::types::EngramConfig::default();
     let handle = super::DaemonHandle::connect_existing(socket.clone());
     // Pin the backend: this test gates on the ONNX model being staged, so its
@@ -116,8 +138,7 @@ async fn remote_embedding_end_to_end() {
     // and every assertion below still passes.
     let providers = super::remote_providers(
         handle,
-        store_dir.to_string_lossy().into_owned(),
-        Some(crate::types::EmbeddingBackend::Onnx),
+        ModelSelection::from_config(&config, Some(EmbeddingBackend::Onnx)),
         &config,
     )
     .await
@@ -145,16 +166,9 @@ async fn status_and_shutdown_frames_roundtrip() {
     // DaemonOp::Status / Shutdown survive a request round-trip.
     for op in [DaemonOp::Status, DaemonOp::Shutdown] {
         let want = format!("{op:?}");
-        write_msg(
-            &mut aw,
-            &DaemonRequest {
-                dir: String::new(),
-                backend: None,
-                op,
-            },
-        )
-        .await
-        .unwrap();
+        write_msg(&mut aw, &DaemonRequest { models: None, op })
+            .await
+            .unwrap();
         let got: DaemonRequest = read_msg(&mut br).await.unwrap().unwrap();
         assert_eq!(format!("{:?}", got.op), want);
     }
@@ -256,7 +270,7 @@ async fn blank_frame_is_treated_as_eof() {
 
 #[tokio::test]
 async fn daemon_status_reports_metrics() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
@@ -264,8 +278,7 @@ async fn daemon_status_reports_metrics() {
     let first = wait_request(
         &socket,
         DaemonRequest {
-            dir: String::new(),
-            backend: None,
+            models: None,
             op: DaemonOp::Status,
         },
     )
@@ -282,8 +295,7 @@ async fn daemon_status_reports_metrics() {
     let s2 = match wait_request(
         &socket,
         DaemonRequest {
-            dir: String::new(),
-            backend: None,
+            models: None,
             op: DaemonOp::Status,
         },
     )
@@ -297,7 +309,7 @@ async fn daemon_status_reports_metrics() {
 
 #[tokio::test]
 async fn client_helpers_without_daemon() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("absent.sock");
     assert!(super::query_status(&socket).await.unwrap().is_none());
     assert!(!super::request_shutdown(&socket).await.unwrap());
@@ -312,7 +324,7 @@ async fn client_helpers_without_daemon() {
 /// return-on-shutdown seam makes safe to exercise in-process.
 #[tokio::test]
 async fn request_shutdown_maps_ack() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("stub.sock");
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Shutdown => DaemonResponse::ShuttingDown,
@@ -333,7 +345,7 @@ async fn request_shutdown_maps_ack() {
 /// (returns `Ok(())`) instead of binding.
 #[tokio::test]
 async fn second_daemon_yields_to_live_one() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
     for _ in 0..100 {
@@ -388,7 +400,7 @@ fn counters_seed_and_snapshot() {
 #[tokio::test]
 async fn metrics_persist_then_load_latest() {
     use super::metrics::{self, MetricsSnapshot};
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let dir = tmp.path();
 
     assert!(metrics::load_latest_at(dir).await.unwrap().is_none());
@@ -439,7 +451,7 @@ async fn metrics_persist_then_load_latest() {
 #[tokio::test]
 async fn metrics_persist_prunes_old_snapshots() {
     use super::metrics::{self, MetricsSnapshot};
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let dir = tmp.path();
 
     // Seed a batch of stale snapshot rows (40 days old) directly, bypassing
@@ -525,7 +537,7 @@ where
 
 #[tokio::test]
 async fn remote_providers_none_when_meta_errors() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("stub.sock");
     spawn_stub(socket.clone(), |_op| DaemonResponse::Error {
         message: "no model here".to_string(),
@@ -539,8 +551,7 @@ async fn remote_providers_none_when_meta_errors() {
     let handle = super::DaemonHandle::connect_existing(socket);
     let out = super::remote_providers(
         handle,
-        "/tmp/whatever".to_string(),
-        None,
+        default_models(None),
         &crate::types::EngramConfig::default(),
     )
     .await;
@@ -549,7 +560,7 @@ async fn remote_providers_none_when_meta_errors() {
 
 #[tokio::test]
 async fn remote_embedding_maps_daemon_error() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("stub.sock");
     // Meta succeeds (so providers build) but Embed fails.
     spawn_stub(socket.clone(), |op| match op {
@@ -574,8 +585,7 @@ async fn remote_embedding_maps_daemon_error() {
     let handle = super::DaemonHandle::connect_existing(socket);
     let providers = super::remote_providers(
         handle,
-        "/tmp/whatever".to_string(),
-        None,
+        default_models(None),
         &crate::types::EngramConfig::default(),
     )
     .await
@@ -640,8 +650,7 @@ async fn read_msg_capped_enforces_limit_and_parses() {
     use super::protocol::read_msg_capped;
 
     // A small valid frame under the cap parses fine.
-    let mut r =
-        BufReader::new(&b"{\"dir\":\"\",\"backend\":null,\"op\":{\"kind\":\"ping\"}}\n"[..]);
+    let mut r = BufReader::new(&b"{\"models\":null,\"op\":{\"kind\":\"ping\"}}\n"[..]);
     let ok: Option<DaemonRequest> = read_msg_capped(&mut r, 1024).await.unwrap();
     assert!(matches!(ok.unwrap().op, DaemonOp::Ping));
 
@@ -665,18 +674,17 @@ async fn read_msg_capped_enforces_limit_and_parses() {
 // Daemon dispatch + stale-socket reclaim
 // ---------------------------------------------------------------------------
 
-/// Model-free dispatch path: a non-Ping/Status op with an empty `dir` is
+/// Model-free dispatch path: a model op without a model selection is
 /// rejected before any model load.
 #[tokio::test]
-async fn dispatch_rejects_missing_dir() {
-    let tmp = TempDir::new().unwrap();
+async fn dispatch_rejects_missing_model_selection() {
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
     let resp = wait_request(
         &socket,
         DaemonRequest {
-            dir: String::new(),
-            backend: None,
+            models: None,
             op: DaemonOp::Embed {
                 texts: vec!["x".to_string()],
             },
@@ -684,7 +692,9 @@ async fn dispatch_rejects_missing_dir() {
     )
     .await;
     match resp {
-        DaemonResponse::Error { message } => assert!(message.contains("missing store directory")),
+        DaemonResponse::Error { message } => {
+            assert!(message.contains("missing model selection"), "{message}")
+        }
         other => panic!("expected Error, got {other:?}"),
     }
 }
@@ -697,14 +707,11 @@ async fn dispatch_rejects_missing_dir() {
 async fn failed_request_does_not_increment_counter() {
     // Force embedding resolution to fail: point the model cache at an empty dir
     // and refuse network downloads. (Per-process env; nextest isolates tests.)
-    let empty_cache = TempDir::new().unwrap();
+    let empty_cache = super::private_tempdir();
     std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
     std::env::set_var("ENGRAMDB_OFFLINE", "1");
 
-    let store = TempDir::new().unwrap();
-    let dir = store.path().to_string_lossy().to_string();
-
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
 
@@ -717,8 +724,7 @@ async fn failed_request_does_not_increment_counter() {
     let resp = wait_request(
         &socket,
         DaemonRequest {
-            dir: dir.clone(),
-            backend: Some(crate::types::EmbeddingBackend::Onnx),
+            models: Some(default_models(Some(EmbeddingBackend::Onnx))),
             op: DaemonOp::Embed {
                 texts: vec!["hello".to_string()],
             },
@@ -733,8 +739,7 @@ async fn failed_request_does_not_increment_counter() {
     let status = wait_request(
         &socket,
         DaemonRequest {
-            dir,
-            backend: None,
+            models: None,
             op: DaemonOp::Status,
         },
     )
@@ -761,7 +766,7 @@ async fn failed_request_does_not_increment_counter() {
 async fn daemon_reclaims_stale_socket() {
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
     std::fs::write(&socket, b"stale - not a live socket").unwrap();
 
@@ -769,8 +774,7 @@ async fn daemon_reclaims_stale_socket() {
     let resp = wait_request(
         &socket,
         DaemonRequest {
-            dir: String::new(),
-            backend: None,
+            models: None,
             op: DaemonOp::Ping,
         },
     )
@@ -813,7 +817,7 @@ fn peer_allowed_only_for_matching_euid() {
 #[tokio::test]
 async fn query_status_parses_stub_status() {
     use super::protocol::DaemonStatus;
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("stub.sock");
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Status => DaemonResponse::Status(DaemonStatus {
@@ -857,7 +861,7 @@ async fn query_status_parses_stub_status() {
 
 #[tokio::test]
 async fn healthy_rejects_protocol_version_mismatch() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
 
     let good = tmp.path().join("good.sock");
     spawn_stub(good.clone(), |_| DaemonResponse::Pong {
@@ -897,7 +901,7 @@ async fn healthy_rejects_protocol_version_mismatch() {
 /// must match too.
 #[tokio::test]
 async fn healthy_rejects_older_build_on_matching_protocol() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
 
     let stale = tmp.path().join("stale-build.sock");
     spawn_stub(stale.clone(), |_| DaemonResponse::Pong {
@@ -940,7 +944,7 @@ async fn healthy_rejects_older_build_on_matching_protocol() {
 #[tokio::test]
 async fn remote_providers_wire_nli_and_reranker_per_config() {
     use super::protocol::NliWire;
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("stub.sock");
     spawn_stub(socket.clone(), |op| match op {
         DaemonOp::Meta => DaemonResponse::Meta {
@@ -982,7 +986,7 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
     let handle = super::DaemonHandle::connect_existing(socket.clone());
     let mut off = crate::types::EngramConfig::default();
     off.rerank.enabled = false;
-    let p = super::remote_providers(handle, "/tmp/x".to_string(), None, &off)
+    let p = super::remote_providers(handle, ModelSelection::from_config(&off, None), &off)
         .await
         .expect("providers");
     assert!(p.embedding.is_some());
@@ -994,7 +998,7 @@ async fn remote_providers_wire_nli_and_reranker_per_config() {
     cfg.nli.enabled = true;
     cfg.rerank.enabled = true;
     let handle = super::DaemonHandle::connect_existing(socket.clone());
-    let p = super::remote_providers(handle, "/tmp/x".to_string(), None, &cfg)
+    let p = super::remote_providers(handle, ModelSelection::from_config(&cfg, None), &cfg)
         .await
         .expect("providers");
     let nli = p.nli.expect("nli wired when enabled");
@@ -1040,7 +1044,7 @@ async fn poll_until_connectable(socket: &std::path::Path) {
 /// stall every tool call and the heartbeat for minutes before fallback.
 #[tokio::test]
 async fn health_check_of_wedged_daemon_fails_fast() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("wedged.sock");
 
     // Accept-but-never-reply stub: reads requests, writes nothing, and keeps
@@ -1092,7 +1096,7 @@ async fn health_check_of_wedged_daemon_fails_fast() {
 async fn daemon_cell_respawns_after_handle_lost() {
     use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("cell.sock");
     let cell = DaemonCell::new();
 
@@ -1168,18 +1172,17 @@ async fn wait_request(socket: &std::path::Path, req: DaemonRequest) -> DaemonRes
 async fn resolve_providers_in_process_never_touches_socket() {
     use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     // Deliberately absent socket — any connect attempt would fail.
     let socket_env = tmp.path().join("absent.sock");
     std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket_env);
 
     let cell = DaemonCell::new();
     let config = crate::types::EngramConfig::default();
-    let dir = tmp.path();
 
     // InProcess must return providers (possibly with no embedding if the model
     // isn't staged — the function still returns the struct, just with None fields).
-    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::InProcess).await;
+    let providers = resolve_providers(&cell, &config, None, DaemonPolicy::InProcess).await;
     // The call must not hang or panic. We only assert the type is returned.
     let _ = providers;
 
@@ -1199,7 +1202,7 @@ async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
     use super::protocol::DaemonOp;
     use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("cli-e2e.sock");
 
     // Stub daemon: answers Ping + Meta with sentinel dimensions=42.
@@ -1223,11 +1226,10 @@ async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
     std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
 
     let cell = DaemonCell::new();
-    let mut config = crate::types::EngramConfig::default();
-    config.daemon.enabled = true;
-    let dir = tmp.path();
+    let config = crate::types::EngramConfig::default();
+    write_global_config("[daemon]\nenabled = true\n");
 
-    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::ConnectOnly).await;
+    let providers = resolve_providers(&cell, &config, None, DaemonPolicy::ConnectOnly).await;
     let emb = providers
         .embedding
         .expect("ConnectOnly: remote embedding expected when daemon is live");
@@ -1247,7 +1249,7 @@ async fn cli_connect_only_uses_daemon_and_in_process_override_does_not() {
     // no embedding if the model isn't staged).  The key assertion is that it
     // does not hang or panic — it never attempts to connect to the absent socket.
     let cell2 = DaemonCell::new();
-    let providers2 = resolve_providers(&cell2, &config, None, dir, DaemonPolicy::InProcess).await;
+    let providers2 = resolve_providers(&cell2, &config, None, DaemonPolicy::InProcess).await;
     // If ONNX model is staged the embedding will be Some; if not it will be
     // None.  Either way `resolve_providers` must return without error.
     let _ = providers2;
@@ -1263,7 +1265,7 @@ async fn resolve_providers_connect_only_uses_live_daemon() {
     use super::protocol::DaemonOp;
     use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("rp.sock");
 
     // Stub daemon: answers Meta (so remote providers build) but nothing else.
@@ -1286,12 +1288,12 @@ async fn resolve_providers_connect_only_uses_live_daemon() {
     std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
 
     let cell = DaemonCell::new();
-    let mut config = crate::types::EngramConfig::default();
-    // daemon.enabled must be true for resolve_providers to try the daemon path.
-    config.daemon.enabled = true;
-    let dir = tmp.path();
+    let config = crate::types::EngramConfig::default();
+    // The global daemon.enabled must be true for resolve_providers to try the
+    // daemon path (it is the default; written out to make the premise plain).
+    write_global_config("[daemon]\nenabled = true\n");
 
-    let providers = resolve_providers(&cell, &config, None, dir, DaemonPolicy::ConnectOnly).await;
+    let providers = resolve_providers(&cell, &config, None, DaemonPolicy::ConnectOnly).await;
     // The stub answered Meta with dimensions=16, so the remote embedding
     // provider should be present with those dimensions.
     let emb = providers
@@ -1312,8 +1314,7 @@ async fn ping_once(socket: &std::path::Path) {
     let resp = wait_request(
         socket,
         DaemonRequest {
-            dir: String::new(),
-            backend: None,
+            models: None,
             op: DaemonOp::Ping,
         },
     )
@@ -1328,7 +1329,7 @@ async fn ping_once(socket: &std::path::Path) {
 /// its 1-second idle timeout.
 #[tokio::test]
 async fn heartbeat_pings_keep_daemon_alive_past_idle() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("hb.sock");
 
     // Spawn daemon with a 1-second idle timeout.
@@ -1366,7 +1367,7 @@ async fn heartbeat_pings_keep_daemon_alive_past_idle() {
 async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
     use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("hbcell.sock");
 
     // 1-second idle timeout; the daemon is already running so each `get` just
@@ -1396,7 +1397,7 @@ async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
 async fn daemon_cell_get_pings_the_daemon() {
     use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("cellping.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
     poll_until_connectable(&socket).await;
@@ -1424,7 +1425,7 @@ async fn daemon_cell_get_pings_the_daemon() {
 /// `last_ping_secs_ago` must be `Some`.
 #[tokio::test]
 async fn daemon_status_reports_ping_count_and_last_ping() {
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("p.sock");
     tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
     poll_until_connectable(&socket).await;
@@ -1449,7 +1450,7 @@ async fn daemon_status_reports_ping_count_and_last_ping() {
 async fn cell_self_heals_after_daemon_killed() {
     use crate::daemon::resolve::{DaemonCell, DaemonPolicy};
 
-    let tmp = TempDir::new().unwrap();
+    let tmp = super::private_tempdir();
     let socket = tmp.path().join("heal.sock");
 
     // Start daemon 1.
@@ -1485,4 +1486,261 @@ async fn cell_self_heals_after_daemon_killed() {
         h3.is_some(),
         "cell should re-connect after new daemon starts"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Global daemon config: one daemon per user, whatever the project says
+// ---------------------------------------------------------------------------
+
+/// A project whose config still carries a `[daemon]` table.
+async fn project_with_daemon_section(section: &str) -> (TempDir, EngramConfig) {
+    let tmp = super::private_tempdir();
+    let engram = tmp.path().join(".engramdb");
+    std::fs::create_dir_all(&engram).unwrap();
+    let path = engram.join("config.toml");
+    std::fs::write(&path, format!("[daemon]\n{section}")).unwrap();
+    let config = crate::storage::config::load_config(&path)
+        .await
+        .expect("an old project config with [daemon] still parses");
+    (tmp, config)
+}
+
+/// Two projects with different (even contradictory) `[daemon]` values both
+/// resolve the socket and idle timeout from the global file, and both reach
+/// the one daemon listening there. Before the fix, project A's
+/// `enabled = false` disabled the daemon for A, and each project's
+/// `socket_path` pointed it at a different daemon.
+#[tokio::test]
+async fn projects_with_conflicting_daemon_sections_share_the_global_daemon() {
+    use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("global.sock");
+    let metas = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&metas);
+    spawn_stub(socket.clone(), move |op| match op {
+        DaemonOp::Ping => DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+        DaemonOp::Meta => {
+            seen.fetch_add(1, Ordering::SeqCst);
+            DaemonResponse::Meta {
+                dimensions: 77,
+                max_tokens: 64,
+                model_id: "onnx/global-stub".to_string(),
+            }
+        }
+        _ => DaemonResponse::Error {
+            message: "not implemented in stub".to_string(),
+        },
+    });
+    poll_until_connectable(&socket).await;
+    write_global_config(&format!(
+        "[daemon]\nidle_timeout_secs = 150\nsocket_path = {:?}\n",
+        socket.display().to_string()
+    ));
+
+    let (_a, config_a) = project_with_daemon_section(
+        "enabled = false\nidle_timeout_secs = 60\nsocket_path = \"/tmp/a.sock\"\n",
+    )
+    .await;
+    let (_b, config_b) =
+        project_with_daemon_section("idle_timeout_secs = 3000\nsocket_path = \"/tmp/b.sock\"\n")
+            .await;
+    assert!(!config_a.legacy_daemon_keys().is_empty());
+    assert!(!config_b.legacy_daemon_keys().is_empty());
+
+    // What both projects resolve: the global socket and idle timeout.
+    let global = crate::storage::config::load_global_config_or_default()
+        .await
+        .daemon;
+    assert_eq!(super::resolve_socket(None, &global), socket);
+    assert_eq!(global.idle_timeout_secs, 150);
+    // The heartbeat interval derives from that same global value.
+    assert_eq!(
+        super::heartbeat_interval(global.idle_timeout_secs),
+        Duration::from_secs(50)
+    );
+
+    // And both actually reach the one global daemon.
+    for config in [&config_a, &config_b] {
+        let cell = DaemonCell::new();
+        let p = resolve_providers(&cell, config, None, DaemonPolicy::ConnectOnly).await;
+        let emb = p
+            .embedding
+            .expect("remote embedding from the global daemon");
+        assert_eq!(emb.dimensions(), 77);
+        assert_eq!(emb.model_id(), "onnx/global-stub");
+    }
+    assert_eq!(
+        metas.load(Ordering::SeqCst),
+        2,
+        "both projects hit one daemon"
+    );
+}
+
+/// The global `enabled = false` turns the daemon off for every project, even
+/// one whose (ignored) project section says `enabled = true`.
+#[tokio::test]
+async fn global_disable_wins_over_a_project_section() {
+    use crate::daemon::resolve::{resolve_providers, DaemonCell, DaemonPolicy};
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("off.sock");
+    spawn_stub(socket.clone(), |_op| DaemonResponse::Meta {
+        dimensions: 99,
+        max_tokens: 64,
+        model_id: "onnx/must-not-be-used".to_string(),
+    });
+    poll_until_connectable(&socket).await;
+    write_global_config(&format!(
+        "[daemon]\nenabled = false\nsocket_path = {:?}\n",
+        socket.display().to_string()
+    ));
+    let (_p, mut config) = project_with_daemon_section("enabled = true\n").await;
+    // Keep the in-process fallback model-free and fast.
+    config.embeddings.provider = "none".to_string();
+    config.rerank.enabled = false;
+    config.nli.enabled = false;
+    config.title.strategy = crate::title::TitleStrategy::Keyword;
+
+    let cell = DaemonCell::new();
+    let p = resolve_providers(&cell, &config, None, DaemonPolicy::ConnectOnly).await;
+    assert!(
+        p.embedding.as_ref().is_none_or(|e| e.dimensions() != 99),
+        "a globally disabled daemon must not be used"
+    );
+}
+
+/// The heartbeat interval is `max(30s, idle/3)` of the global value, so the
+/// validator's `>= 60` floor guarantees two pings per idle window.
+#[test]
+fn heartbeat_interval_fits_the_idle_window() {
+    assert_eq!(super::heartbeat_interval(60), Duration::from_secs(30));
+    assert_eq!(super::heartbeat_interval(900), Duration::from_secs(300));
+    for idle in [60u64, 61, 89, 90, 900, 86_400] {
+        assert!(super::heartbeat_interval(idle) * 2 <= Duration::from_secs(idle));
+    }
+}
+
+/// The daemon's provider-cache key is built from the request's model fields,
+/// and it equals the key the client computes from its own project config —
+/// so a client and the daemon always agree on which bundle serves a request.
+#[test]
+fn model_selection_reproduces_the_client_cache_key() {
+    use crate::ops::provider_cache_key;
+    let mut project = EngramConfig::default();
+    project.embeddings.provider = "all-minilm-l6".to_string();
+    project.embeddings.pool_size = Some(3);
+    project.nli.enabled = true;
+    project.rerank.enabled = false;
+    project.title.strategy = crate::title::TitleStrategy::Keyword;
+    project.title.pool_size = Some(2);
+
+    for backend in [None, Some(EmbeddingBackend::Onnx)] {
+        let sel = ModelSelection::from_config(&project, backend);
+        // Through the wire, as the daemon receives it.
+        let json = serde_json::to_string(&sel).unwrap();
+        let sel: ModelSelection = serde_json::from_str(&json).unwrap();
+        let daemon_side = sel.to_config();
+        for pool in [1, 4] {
+            assert_eq!(
+                provider_cache_key(&daemon_side, Some(sel.backend), pool),
+                provider_cache_key(&project, backend, pool),
+            );
+        }
+    }
+}
+
+/// End to end without reading any project directory: an old-style frame that
+/// still names a `dir` that does not exist is served from the model fields it
+/// carries. The daemon loads the bundle the selection names (the default
+/// ONNX model) and reports its id. Skipped when that model cannot load here.
+#[tokio::test]
+async fn daemon_loads_the_bundle_named_by_the_request_not_by_dir() {
+    use tokio::io::AsyncWriteExt;
+
+    let config = EngramConfig::default();
+    let Some(local) =
+        crate::ops::resolve_engine_providers(&config, Some(EmbeddingBackend::Onnx), 1).embedding
+    else {
+        eprintln!("skipping: the default ONNX embedding model cannot load here");
+        return;
+    };
+    let expected_id = local.model_id();
+    let expected_dims = local.dimensions();
+    drop(local);
+
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let missing = tmp.path().join("no-such-project");
+    assert!(!missing.exists());
+    let mut frame = serde_json::to_value(DaemonRequest {
+        models: Some(ModelSelection::from_config(
+            &config,
+            Some(EmbeddingBackend::Onnx),
+        )),
+        op: DaemonOp::Meta,
+    })
+    .unwrap();
+    // A v4-shaped field the daemon must ignore — never open.
+    frame["dir"] = serde_json::Value::String(missing.display().to_string());
+    let mut bytes = serde_json::to_vec(&frame).unwrap();
+    bytes.push(b'\n');
+
+    let stream = super::transport::connect(&socket).await.unwrap();
+    let (r, mut w) = tokio::io::split(stream);
+    w.write_all(&bytes).await.unwrap();
+    w.flush().await.unwrap();
+    let mut r = BufReader::new(r);
+    let resp: DaemonResponse = read_msg(&mut r).await.unwrap().unwrap();
+    match resp {
+        DaemonResponse::Meta {
+            model_id,
+            dimensions,
+            ..
+        } => {
+            assert_eq!(model_id, expected_id);
+            assert_eq!(dimensions, expected_dims);
+        }
+        other => panic!("expected Meta, got {other:?}"),
+    }
+    assert!(
+        !missing.exists(),
+        "the daemon must not create the named dir"
+    );
+}
+
+/// A v4 daemon must still be able to parse a v5 client's `Ping`, or it never
+/// answers with its old version and is never evicted. Its request type had a
+/// required `dir: String` (and an optional `backend`).
+#[test]
+fn v4_daemon_can_parse_a_v5_ping() {
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct V4Request {
+        dir: String,
+        backend: Option<EmbeddingBackend>,
+        op: DaemonOp,
+    }
+    let json = serde_json::to_string(&DaemonRequest {
+        models: None,
+        op: DaemonOp::Ping,
+    })
+    .unwrap();
+    let old: V4Request = serde_json::from_str(&json).expect("v4 daemon parses a v5 Ping");
+    assert!(old.dir.is_empty(), "the compat field never carries a path");
+    assert!(matches!(old.op, DaemonOp::Ping));
+
+    // And the field is ignored on the way back in.
+    let back: DaemonRequest = serde_json::from_str(&json).unwrap();
+    assert!(back.models.is_none());
 }

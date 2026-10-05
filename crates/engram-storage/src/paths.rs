@@ -88,8 +88,9 @@ pub fn memories_dir(dir: &Path) -> PathBuf {
 /// - macOS: `~/Library/Application Support/engramdb/`
 /// - Linux: `$XDG_CONFIG_HOME/engramdb/` (default `~/.config/engramdb/`)
 ///
-/// Used only for the global registry and future global settings.
-/// Respects `ENGRAMDB_CONFIG_DIR` env var for testing isolation.
+/// Holds the global registry and the global config file
+/// ([`global_config_path`]). Respects `ENGRAMDB_CONFIG_DIR` env var for
+/// testing isolation.
 pub fn global_config_dir() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ENGRAMDB_CONFIG_DIR") {
         return Ok(PathBuf::from(path));
@@ -97,6 +98,18 @@ pub fn global_config_dir() -> Result<PathBuf> {
     dirs::config_dir()
         .ok_or_else(|| StorageError::Validation("Could not determine config directory".to_string()))
         .map(|p| p.join("engramdb"))
+}
+
+/// Returns the path of the global, per-user config file:
+/// `<global_config_dir>/config.toml`.
+///
+/// It holds settings that belong to the user rather than to one project —
+/// today only `[daemon]`, because one daemon serves every project. A project's
+/// own settings stay in `<project>/.engramdb/config.toml`. Follows
+/// `ENGRAMDB_CONFIG_DIR` through [`global_config_dir`], so the test harness
+/// redirects it with everything else.
+pub fn global_config_path() -> Result<PathBuf> {
+    Ok(global_config_dir()?.join("config.toml"))
 }
 
 /// Returns the global data directory (platform-specific).
@@ -227,28 +240,6 @@ pub fn global_store_dir() -> Result<PathBuf> {
 /// Returns the LanceDB directory for the global memory store.
 pub fn global_lancedb_dir() -> Result<PathBuf> {
     Ok(global_data_dir()?.join("global").join("lancedb"))
-}
-
-/// Returns the directory for machine-wide diagnostic logs.
-///
-/// A sibling of `projects/` and `global/` rather than anything project-local:
-/// the daemon is shared across every project on the machine, so a per-project
-/// log would scatter one process's output across all of them. Nothing scans
-/// this directory level — the orphan-project sweep in `ops::doctor` and the
-/// project listings all descend into `projects/` specifically — so a new
-/// sibling here is inert.
-pub fn logs_dir() -> Result<PathBuf> {
-    Ok(global_data_dir()?.join("logs"))
-}
-
-/// Returns the path of the shared daemon's diagnostic log.
-///
-/// The daemon is spawned detached with its streams redirected here, because a
-/// process nobody is watching cannot report a failure to anyone. It inherits
-/// `ENGRAMDB_DATA_DIR` through [`global_data_dir`], so the test harness
-/// redirects it along with everything else.
-pub fn daemon_log_path() -> Result<PathBuf> {
-    Ok(logs_dir()?.join("daemon.log"))
 }
 
 /// Returns the root directory for a named group memory store.
