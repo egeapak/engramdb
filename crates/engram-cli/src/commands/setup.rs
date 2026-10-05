@@ -21,6 +21,11 @@ This project uses EngramDB for persistent agent memory.
   decisions, hazards, or conventions. For decisions, state the premise
   ("because C") and what would invalidate it (`premise`, `invalidated_by`).
   For task-specific choices, set `origin_task` and `generality: "task"`.
+- **Save what cost you effort** — when a command failed and finding the cause
+  took more than one try, and nothing in the repo or the error message states
+  that cause, `create` a hazard before you report back: the command, the
+  symptom, the cause and the fix. Save it yourself; don't offer to. Skip it
+  when the docs or the error already said what to do.
 - **Where to save** — project facts, conventions, hazards and decisions go to
   EngramDB `create`, including when the user says "remember". Claude Code's
   auto-memory is private to one machine and invisible to `query` and to
