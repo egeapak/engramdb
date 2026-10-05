@@ -909,11 +909,30 @@ fn extract_session_id(input: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The id a per-conversation record is kept under: the session id, plus the
+/// subagent's `agent_id` when the event comes from a subagent. Claude Code
+/// gives a subagent's events the parent's `session_id`, but the subagent's
+/// context holds none of what the parent was shown, so the two must not
+/// share a record.
+fn extract_context_id(input: &str) -> Option<String> {
+    let session_id = extract_session_id(input)?;
+    let agent_id = serde_json::from_str::<serde_json::Value>(input)
+        .ok()?
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .filter(|a| !a.is_empty())
+        .map(str::to_string);
+    Some(match agent_id {
+        Some(agent) => format!("{session_id}_{agent}"),
+        None => session_id,
+    })
+}
+
 /// Drop the memories this session's hooks already injected: the
 /// conversation still holds them, and a repeat is re-read on every later
 /// turn for nothing (see `engramdb::storage::hook_seen`).
 fn drop_already_shown(memories: Vec<ScoredMemory>, input: &str, dir: &Path) -> Vec<ScoredMemory> {
-    let Some(session_id) = extract_session_id(input) else {
+    let Some(session_id) = extract_context_id(input) else {
         return memories;
     };
     let seen = engramdb::storage::hook_seen::seen_ids(dir, &session_id);
@@ -929,7 +948,7 @@ fn drop_already_shown(memories: Vec<ScoredMemory>, input: &str, dir: &Path) -> V
 /// Record the memories `context` actually rendered (an entry the budget left
 /// out was not shown, so a later hook may still show it).
 fn record_shown(memories: &[ScoredMemory], context: &str, input: &str, dir: &Path) {
-    let Some(session_id) = extract_session_id(input) else {
+    let Some(session_id) = extract_context_id(input) else {
         return;
     };
     let ids: Vec<String> = memories
@@ -944,7 +963,7 @@ fn record_shown(memories: &[ScoredMemory], context: &str, input: &str, dir: &Pat
 
 /// Forget what this session's hooks injected: its context was reset.
 fn forget_shown(input: &str, dir: &Path) {
-    if let Some(session_id) = extract_session_id(input) {
+    if let Some(session_id) = extract_context_id(input) {
         if let Err(e) = engramdb::storage::hook_seen::clear_seen(dir, &session_id) {
             tracing::debug!("hook record clear failed (non-fatal): {e}");
         }
@@ -1040,8 +1059,9 @@ pub async fn run_hook_user_prompt_submit(dir: &Path) -> Result<()> {
 const RETRY_NOTE_PREFIX: &str = "[EngramDB]";
 const RETRY_NOTE: &str = "failed earlier in this session and has now succeeded. If finding the \
 cause took more than one try and nothing in the repo or the error message states it, save it now \
-with `create` (type hazard: the command, the symptom, the cause and the fix). Save it yourself; \
-don't offer to. Skip this if the docs or the error message already said what to do.";
+with `create` (type hazard: the command, the symptom, the cause and the fix). Save it yourself \
+rather than offering to, unless the user asked you not to save memories. Skip this if the docs or \
+the error message already said what to do, or if the fix was a change to the code under test.";
 
 /// Programs whose runs are looking around, not the task: their failures are
 /// probes (`ls var`, `cat missing.txt`) and never prompt.
@@ -1081,9 +1101,92 @@ const MASKED_FAILURE_SIGNS: &[&str] = &[
 /// probes, `VAR=value` prefixes, wrappers, flags and redirections. Two runs of
 /// the same script with different flags or environment share a key, which is
 /// what lets a failure and its later fix be matched.
+/// Subcommands that run something else named by the next word (`npm run
+/// lint`, `uv run pytest`, `bundle exec rspec`): the key keeps that word, or
+/// every script of the tool would share one key.
+const RUN_SUBCOMMANDS: &[&str] = &["run", "exec", "compose", "x", "dlx"];
+
+/// The command line with quoted text emptied and heredoc bodies removed, so
+/// neither a commit message nor an inline script is read as commands.
+fn strip_quotes_and_heredocs(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut chars = command.chars().peekable();
+    let mut heredoc_ends: Vec<String> = Vec::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '\'' | '"' => {
+                // Keep an empty pair so an argument position stays an argument.
+                out.push(c);
+                let mut escaped = false;
+                for q in chars.by_ref() {
+                    if c == '"' && q == '\\' && !escaped {
+                        escaped = true;
+                        continue;
+                    }
+                    if q == c && !escaped {
+                        break;
+                    }
+                    escaped = false;
+                }
+                out.push(c);
+            }
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                if chars.peek() == Some(&'<') {
+                    chars.next(); // here-string `<<<`: the word is data
+                    continue;
+                }
+                if chars.peek() == Some(&'-') {
+                    chars.next();
+                }
+                while chars.peek().is_some_and(|c| *c == ' ') {
+                    chars.next();
+                }
+                let word: String = std::iter::from_fn(|| {
+                    chars.next_if(|c| c.is_alphanumeric() || matches!(c, '_' | '\'' | '"'))
+                })
+                .filter(|c| *c != '\'' && *c != '"')
+                .collect();
+                if !word.is_empty() {
+                    heredoc_ends.push(word);
+                }
+            }
+            '\n' if !heredoc_ends.is_empty() => {
+                out.push('\n');
+                // Drop each pending heredoc body, up to and including its end line.
+                for end in std::mem::take(&mut heredoc_ends) {
+                    loop {
+                        let line: String =
+                            std::iter::from_fn(|| chars.next_if(|c| *c != '\n')).collect();
+                        let at_end = chars.next().is_none();
+                        if line.trim() == end || at_end {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// A key that names a program or script, not a stray word.
+fn plausible_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with('-')
+        && key.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '+' | '@' | ' ')
+        })
+}
+
 fn command_keys(command: &str) -> Vec<String> {
     let mut keys = Vec::new();
-    let segments = command.split(['\n', ';', '|', '&']);
+    let stripped = strip_quotes_and_heredocs(command);
+    let segments = stripped.split(['\n', ';', '|', '&']);
     for segment in segments {
         let mut words = segment
             .split_whitespace()
@@ -1125,23 +1228,27 @@ fn command_keys(command: &str) -> Vec<String> {
             continue;
         }
         let mut args = words.filter(|w| {
-            !w.contains(['>', '<']) && (!w.starts_with('-') || *w == "-m" || *w == "-c")
+            !w.contains(['>', '<']) && (!w.starts_with('-') || matches!(*w, "-m" | "-c" | "-e"))
         });
         let key = if INTERPRETERS.contains(&base) {
             match args.next() {
                 Some("-m") => args.next().map(str::to_string),
-                Some("-c") | None => None,
+                Some("-c" | "-e") | None => None,
                 Some(script) => Some(script.trim_start_matches("./").to_string()),
             }
         } else if SUBCOMMAND_TOOLS.contains(&base) {
-            Some(
-                args.next()
-                    .map_or(base.to_string(), |sub| format!("{base} {sub}")),
-            )
+            Some(match args.next() {
+                Some(sub) if RUN_SUBCOMMANDS.contains(&sub) => match args.next() {
+                    Some(target) => format!("{base} {sub} {target}"),
+                    None => format!("{base} {sub}"),
+                },
+                Some(sub) => format!("{base} {sub}"),
+                None => base.to_string(),
+            })
         } else {
             Some(base.to_string())
         };
-        if let Some(key) = key.filter(|k| !k.is_empty()) {
+        if let Some(key) = key.filter(|k| plausible_key(k)) {
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -1181,7 +1288,7 @@ fn process_bash_retry(value: &serde_json::Value, dir: &Path) -> Option<String> {
     if !project_dir.join("manifest.toml").exists() && !project_dir.join("memories").is_dir() {
         return None;
     }
-    let session_id = value.get("session_id")?.as_str()?;
+    let session_id = &extract_context_id(&value.to_string())?;
     let command = value.get("tool_input")?.get("command")?.as_str()?;
     let keys = command_keys(command);
     if keys.is_empty() {
@@ -1227,6 +1334,14 @@ async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
         if value.get("tool_name").and_then(|v| v.as_str()) == Some("Bash") {
             return Ok(process_bash_retry(&value, dir));
+        }
+        // An edit between a failed command and its next success means the fix
+        // was a code change (the normal red-green loop), not an undocumented
+        // cause worth saving: settle the pending failures.
+        if let Some(context_id) = extract_context_id(input) {
+            if let Err(e) = engramdb::storage::bash_retry::settle_pending(dir, &context_id) {
+                tracing::debug!("retry record settle failed (non-fatal): {e}");
+            }
         }
     }
     let file_path = match extract_file_path(input) {
@@ -2632,6 +2747,36 @@ mod tests {
         assert!(k("sqlite3 var/dev.sqlite3 .tables").is_empty());
     }
 
+    #[test]
+    fn command_keys_ignore_quoted_text_heredocs_and_inline_code() {
+        let k = |c: &str| command_keys(c);
+        // Claude Code's commit command: the message is data, not commands.
+        let commit = "git add -A && git commit -m \"$(cat <<'EOF'\nFix the thing; really\n\nCo-Authored-By: X <x@y>\nEOF\n)\" && cargo test";
+        assert_eq!(k(commit), ["cargo test"]);
+        let script = "python3 - <<'PY'\nimport sys\nfrom x import y\nPY\nmake check";
+        assert_eq!(k(script), ["make check"]);
+        assert!(k("node -e \"require('fs'); console.log(1)\"").is_empty());
+        assert!(k("ruby -e 'puts 1'").is_empty());
+        assert_eq!(k("python scripts/x.py \"a;b|c\" --flag"), ["scripts/x.py"]);
+        assert_eq!(k("cat <<< \"$X\" | jq ."), Vec::<String>::new());
+    }
+
+    #[test]
+    fn command_keys_cover_common_runners() {
+        let k = |c: &str| command_keys(c);
+        assert_eq!(k("npm run lint"), ["npm run lint"]);
+        assert_eq!(k("npm run build -- --prod"), ["npm run build"]);
+        assert_eq!(k("npm test"), ["npm test"]);
+        assert_eq!(k("go test ./..."), ["go test"]);
+        assert_eq!(k("uv run pytest -x"), ["uv run pytest"]);
+        assert_eq!(k("bundle exec rspec spec/a_spec.rb"), ["bundle exec rspec"]);
+        assert_eq!(k("docker compose up -d db"), ["docker compose up"]);
+        assert_eq!(
+            k("set -o pipefail; cargo test 2>&1 | tail -5"),
+            ["cargo test"]
+        );
+    }
+
     fn bash_event(session: &str, event: &str, command: &str, stdout: &str) -> String {
         serde_json::json!({
             "session_id": session,
@@ -2689,6 +2834,81 @@ mod tests {
         assert!(run("PostToolUse", "python scripts/seed_dev.py", "loaded")
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn bash_retry_stays_quiet_in_a_red_green_loop() {
+        let project = TempDir::new().unwrap();
+        MemoryStore::init(project.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let p = project.path();
+        let fail = bash_event("s-4", "PostToolUseFailure", "cargo test", "");
+        assert!(process_post_tool_use(&fail, p).await.unwrap().is_none());
+        let edit = serde_json::json!({
+            "session_id": "s-4",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": p.join("src/lib.rs").to_str().unwrap() },
+        })
+        .to_string();
+        let _ = process_post_tool_use(&edit, p).await.unwrap();
+        let pass = bash_event("s-4", "PostToolUse", "cargo test", "ok");
+        assert!(
+            process_post_tool_use(&pass, p).await.unwrap().is_none(),
+            "fail, edit, pass is a code fix, not a hidden cause"
+        );
+        // The key is not blocked: a later failure fixed without an edit prompts.
+        assert!(process_post_tool_use(&fail, p).await.unwrap().is_none());
+        assert!(process_post_tool_use(&pass, p).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn bash_retry_keeps_subagent_records_apart() {
+        let project = TempDir::new().unwrap();
+        MemoryStore::init(project.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let p = project.path();
+        let with_agent = |event: &str, out: &str| {
+            let mut v: serde_json::Value =
+                serde_json::from_str(&bash_event("s-5", event, "make deploy", out)).unwrap();
+            v["agent_id"] = "a1b2".into();
+            v.to_string()
+        };
+        let parent_fail = bash_event("s-5", "PostToolUseFailure", "make deploy", "");
+        assert!(process_post_tool_use(&parent_fail, p)
+            .await
+            .unwrap()
+            .is_none());
+        // The subagent's success is not the parent's fix.
+        assert!(process_post_tool_use(&with_agent("PostToolUse", "ok"), p)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            process_post_tool_use(&with_agent("PostToolUseFailure", ""), p)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(process_post_tool_use(&with_agent("PostToolUse", "ok"), p)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn context_id_separates_subagents() {
+        assert_eq!(
+            extract_context_id(r#"{"session_id":"s"}"#).as_deref(),
+            Some("s")
+        );
+        assert_eq!(
+            extract_context_id(r#"{"session_id":"s","agent_id":"a9"}"#).as_deref(),
+            Some("s_a9")
+        );
+        assert_eq!(extract_context_id(r#"{"agent_id":"a9"}"#), None);
     }
 
     #[tokio::test]

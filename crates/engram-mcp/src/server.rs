@@ -1797,8 +1797,9 @@ impl EngramDbServer {
                  Save what cost you effort: when a command failed and finding the cause \
                  took more than one try, and nothing in the repo or the error message states \
                  that cause, create a hazard before you report back (the command, the \
-                 symptom, the cause and the fix). Save it yourself; don't offer to. Skip it \
-                 when the docs or the error already said what to do. \
+                 symptom, the cause and the fix). Save it yourself rather than offering to, \
+                 unless the user asked you not to save memories. Skip it when the docs or \
+                 the error already said what to do, or when the fix was a change to the code. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, \"global\", or \"group:<name>\") to operate on a different \
                  store's memories. \
@@ -1827,8 +1828,10 @@ impl EngramDbServer {
                  dated doc, a dependency pin, existing code doing what the memory forbids. Do \
                  not wait for the user to confirm a file-based conflict. Challenge first, then \
                  work from the newer source and tell the user. Not contradictions: code that \
-                 merely doesn't mention the rule, a narrower memory scoping an exception, a \
-                 one-off or hypothetical request, a memory already marked superseded."
+                 merely doesn't mention the rule, code the memory itself calls legacy or an \
+                 exception, a narrower memory scoping an exception, a source that is not \
+                 clearly newer than the memory, a one-off or hypothetical request, a memory \
+                 already marked superseded."
                 .to_string();
             if let Some(w) = embedding_warning {
                 s.push_str("\n\n");
@@ -2161,7 +2164,7 @@ fn resolve_session_id() -> String {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards; after a failed command whose cause took more than one try to find and is not documented (save it yourself, don't offer to); and when the user asks you to remember something about the project: use this, not Claude Code's file-based auto-memory, which other sessions' queries and collaborators never see. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards; after a failed command whose cause took more than one try to find and is not documented (save it yourself rather than offering to, unless the user asked you not to); and when the user asks you to remember something about the project: use this, not Claude Code's file-based auto-memory, which other sessions' queries and collaborators never see. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
     )]
     async fn memory_create(
         &self,
@@ -2653,7 +2656,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "challenge",
-        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as a source states the opposite of the memory: the user saying it is out of date (even when the code has not caught up), or a file you read, such as a dated doc, a dependency pin, or existing code using what the memory forbids (pass it as `source_file`). A challenge flags the memory and does not rewrite it, so a file-based conflict needs no confirmation from the user first. Absence is not contradiction: code that does not mention the rule does not count. When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
+        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as a source states the opposite of the memory: the user saying it is out of date (even when the code has not caught up), or a file you read, such as a dated doc, a dependency pin, or existing code using what the memory forbids (pass it as `source_file`). A challenge flags the memory and does not rewrite it, so a file-based conflict needs no confirmation from the user first. Not contradictions: code that does not mention the rule, code the memory itself calls legacy or an exception, and a source that is not clearly newer than the memory. When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
     )]
     async fn memory_challenge(
         &self,

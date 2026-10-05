@@ -4,10 +4,12 @@
 //! The PostToolUseFailure hook records a key for a failed command; when a
 //! later PostToolUse for the same key succeeds, the hook prompts once to save
 //! the cause, and records that it prompted so the key never prompts again in
-//! this session.
+//! this session. A file edit in between settles the failure without a prompt:
+//! fail, edit, pass is the normal red-green loop, not a hidden cause.
 //!
 //! One append-only file per session at `.engramdb/state/bash_retry/<session>`,
-//! one `F <key>` (failed) or `P <key>` (prompted) line per event. Appends need
+//! one `F <key>` (failed), `S <key>` (settled by an edit) or `P <key>`
+//! (prompted) line per event, folded in order. Appends need
 //! no lock: two hooks appending at once can at worst both record a line, which
 //! reads back the same. The record is advisory: a read failure means "nothing
 //! failed", so the hook stays silent rather than prompting wrongly.
@@ -68,6 +70,19 @@ pub fn mark_prompted(project_dir: &Path, session_id: &str, keys: &[String]) -> R
     append(project_dir, session_id, 'P', keys)
 }
 
+/// Settle every pending failure without prompting: the session edited files
+/// after the failure, so a later success is a code fix, not a hidden cause.
+/// A no-op (and no file) when nothing is pending.
+pub fn settle_pending(project_dir: &Path, session_id: &str) -> Result<()> {
+    let pending: Vec<String> = pending_failures(project_dir, session_id)
+        .into_iter()
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    append(project_dir, session_id, 'S', &pending)
+}
+
 /// Keys that failed in this session and have not been prompted for yet.
 /// Empty when the session id is invalid, nothing was recorded, or the record
 /// cannot be read.
@@ -86,20 +101,25 @@ pub fn pending_failures(project_dir: &Path, session_id: &str) -> HashSet<String>
             return HashSet::new();
         }
     };
+    // Folded in order: a settle clears the failures before it, a prompt clears
+    // them and blocks the key for the rest of the session.
     let mut failed = HashSet::new();
     let mut prompted = HashSet::new();
     for line in text.lines() {
         match line.split_once(' ') {
-            Some(("F", key)) => {
+            Some(("F", key)) if !prompted.contains(key) => {
                 failed.insert(key.to_string());
             }
+            Some(("S", key)) => {
+                failed.remove(key);
+            }
             Some(("P", key)) => {
+                failed.remove(key);
                 prompted.insert(key.to_string());
             }
             _ => {}
         }
     }
-    failed.retain(|k| !prompted.contains(k));
     failed
 }
 
@@ -160,6 +180,21 @@ mod tests {
         // A later failure of a prompted key does not prompt again.
         record_failure(p, "s-1", &keys(&["scripts/seed_dev.py"])).unwrap();
         assert!(!pending_failures(p, "s-1").contains("scripts/seed_dev.py"));
+    }
+
+    #[test]
+    fn settle_pending_retires_failures_without_a_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        settle_pending(p, "s-1").unwrap();
+        assert!(!p.join(".engramdb/state/bash_retry/s-1").exists());
+        record_failure(p, "s-1", &keys(&["cargo test"])).unwrap();
+        settle_pending(p, "s-1").unwrap();
+        assert!(pending_failures(p, "s-1").is_empty());
+        // A later failure of the same command is pending again: settling is
+        // not prompting, so it does not block the key.
+        record_failure(p, "s-1", &keys(&["cargo test"])).unwrap();
+        assert!(pending_failures(p, "s-1").contains("cargo test"));
     }
 
     #[test]

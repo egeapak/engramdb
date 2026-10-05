@@ -24,8 +24,9 @@ This project uses EngramDB for persistent agent memory.
 - **Save what cost you effort** — when a command failed and finding the cause
   took more than one try, and nothing in the repo or the error message states
   that cause, `create` a hazard before you report back: the command, the
-  symptom, the cause and the fix. Save it yourself; don't offer to. Skip it
-  when the docs or the error already said what to do.
+  symptom, the cause and the fix. Save it yourself rather than offering to,
+  unless the user asked you not to save memories. Skip it when the docs or the
+  error already said what to do, or when the fix was a change to the code.
 - **Where to save** — project facts, conventions, hazards and decisions go to
   EngramDB `create`, including when the user says "remember". Claude Code's
   auto-memory is private to one machine and invisible to `query` and to
@@ -34,7 +35,9 @@ This project uses EngramDB for persistent agent memory.
   the opposite: the user saying it is outdated (even if the code still
   matches it), or a file you read (a dated doc, a dependency pin, existing code
   doing what it forbids; pass `source_file`). Don't wait for the user to
-  confirm a file-based conflict, and work from the newer source. `update` it
+  confirm a file-based conflict, and work from the newer source. Not a
+  conflict: code the memory itself calls legacy or an exception, or a source
+  that is not clearly newer than the memory. `update` it
   (or `create` with `supersedes`) when you know the replacement. `verify` a memory
   you've confirmed against the code; prefer `resolve` with `invalidate`
   over `delete` when something *was* true but no longer is (history stays).

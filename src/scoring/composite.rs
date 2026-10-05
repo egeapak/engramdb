@@ -365,16 +365,6 @@ pub fn composite_score_target_ignore_decay(
 
 /// A physical pattern that matches every path: the project root, or a glob
 /// with no directory before its first metacharacter (`**/*.py`).
-fn is_root_wide(pattern: &str) -> bool {
-    let p = pattern.trim();
-    if p.is_empty() || p == "/" {
-        return true;
-    }
-    match p.find(['*', '?', '[', '{']) {
-        Some(pos) => p[..pos].trim_matches('/').is_empty(),
-        None => false,
-    }
-}
 
 fn composite_score_inner(
     target: ScoreTarget<'_>,
@@ -509,8 +499,8 @@ fn composite_score_inner(
     // threshold on its own relevance. Under a path that is any physical
     // pattern matching the path at any depth (the file, a sibling, an
     // ancestor directory such as a service root), or a related logical
-    // scope — but not a root-wide pattern (`/`, or a glob with no directory
-    // part): `/` is what a memory saved without paths gets, it matches every
+    // scope — but not a root-wide pattern (`/`, or a glob made only of `*`
+    // and `**`, see `physical::is_root_wide`): `/` is what a memory saved without paths gets, it matches every
     // file, and every such memory would otherwise ride along on every file
     // edit. Under a logical-only context it is a related declared logical
     // scope — an unscoped memory there only gets the neutral floor, which is
@@ -522,7 +512,7 @@ fn composite_score_inner(
         let matched = if let Some(path) = context.path {
             let scoring = &config.retrieval.scoring;
             let physical = target.physical.iter().any(|p| {
-                !is_root_wide(p)
+                !crate::scope::physical::is_root_wide(p)
                     && crate::scope::physical::proximity(
                         std::slice::from_ref(p),
                         path,
