@@ -81,10 +81,16 @@ Pass `--no-embeddings` at init, or set `[embeddings].provider = "none"` (or any 
 ## Daemon
 
 **`daemon status` says "not running" but I see a process.**
-The visible process is bound to a different socket. Use `--socket` or set `ENGRAMDB_DAEMON_SOCKET`. The socket-resolution order is `--socket` > env > config > default.
+The visible process is bound to a different socket. Use `--socket` or set `ENGRAMDB_DAEMON_SOCKET`. The socket-resolution order is `--socket` > env > the global `[daemon].socket_path` > default.
 
 **Daemon won't start; `sun_path too long`.**
-Your default socket path exceeds the OS limit (~104 bytes). Set `ENGRAMDB_DAEMON_SOCKET=/tmp/engramdb-$USER.sock` or put `socket_path = "..."` under `[daemon]` in `config.toml`.
+Your default socket path exceeds the OS limit (~104 bytes). Put the socket in a short private folder: `mkdir -m 700 /tmp/engramdb-$USER`, then set `ENGRAMDB_DAEMON_SOCKET=/tmp/engramdb-$USER/daemon.sock`, or put `socket_path = "/tmp/engramdb-<you>/daemon.sock"` under `[daemon]` in the **global** config file. A socket placed directly in `/tmp` is refused.
+
+**Daemon won't start; "daemon folder … must be private" or "is owned by uid …".**
+The folder that holds the socket also holds the daemon's lock and log, so the daemon requires it to be yours with mode `0700`. It never changes the mode of a folder that already exists. Run `chmod 700 <folder>` for a folder you own, or point the socket into a folder you own. Until then, models load in-process. `engramdb doctor` reports this as a failure on the "Embedding daemon" check and names the folder.
+
+**Warning: "… sets daemon.… which is ignored".**
+A project's `.engramdb/config.toml` still has a `[daemon]` section. Daemon settings now come only from the global config file (`~/.config/engramdb/config.toml` on Linux, `~/Library/Application Support/engramdb/config.toml` on macOS). Move the keys there and delete the section from the project config. `engramdb doctor` lists the keys.
 
 **Daemon keeps using the old embedding model after a config change.**
 Run `engramdb daemon restart`. A running daemon caches loaded models for its lifetime.
@@ -93,7 +99,7 @@ Run `engramdb daemon restart`. A running daemon caches loaded models for its lif
 This is expected and self-recovering — only one process binds the socket. The other(s) get a `connection refused`, retry with backoff, and connect to the winner. If you see persistent errors, run `engramdb daemon status` to confirm a daemon is up.
 
 **A CLI command is slow / doesn't seem to use the daemon.**
-Model-needing CLI commands use a daemon only if one is *already running* (connect-only); they don't spawn one. Start one with `engramdb --spawn-daemon <command> …`, or just let your MCP session's daemon stay up. To force local loading instead, use `--in-process` (or `ENGRAMDB_IN_PROCESS=1`, or `[daemon].use_for_cli = false`).
+Model-needing CLI commands use a daemon only if one is *already running* (connect-only); they don't spawn one. Start one with `engramdb --spawn-daemon <command> …`, or just let your MCP session's daemon stay up. To force local loading instead, use `--in-process` (or `ENGRAMDB_IN_PROCESS=1`, or `use_for_cli = false` under `[daemon]` in the global config file).
 
 **The daemon stays running longer than `idle_timeout_secs`.**
 That's intended. Each MCP `serve` session sends a heartbeat that keeps the daemon resident while the session is connected; it reaps `idle_timeout_secs` after the **last** session disconnects, not after the last inference. `engramdb daemon status` shows a `pings: N (last Xs ago)` line so you can see the heartbeat. If the daemon dies mid-session it is re-spawned automatically on the next request.
@@ -168,7 +174,7 @@ After init: `engramdb projects unlink <worktree_id>`. It becomes a root project.
 O(N × embedding-cost) where N = memory count. Expect minutes for thousands of memories. Run with the daemon up — batches share an open model session.
 
 **MCP server uses a lot of RAM.**
-Per-process model load. Use the daemon (`[daemon].enabled = true`, the default) to share one copy across all sessions.
+Per-process model load. Use the daemon (the global `[daemon].enabled = true`, the default) to share one copy across all sessions.
 
 ## Data and migrations
 

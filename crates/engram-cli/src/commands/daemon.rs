@@ -5,7 +5,7 @@ use crate::output::{format_ping_line, outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::daemon;
 use engramdb::types::DaemonConfig;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Point this process's stderr at the daemon log unless a terminal is
@@ -25,14 +25,14 @@ use std::time::Duration;
 ///
 /// Best-effort: a failure here leaves stderr as it was.
 #[cfg(unix)]
-fn redirect_stderr_to_log_unless_tty() {
+fn redirect_stderr_to_log_unless_tty(socket: &Path) {
     use engramdb::daemon::logging::{daemon_log_for_spawn, stderr_target, StderrTarget};
     use std::io::IsTerminal;
 
     if stderr_target(std::io::stderr().is_terminal()) == StderrTarget::Inherit {
         return;
     }
-    let file = match daemon_log_for_spawn() {
+    let file = match daemon_log_for_spawn(socket) {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!("cannot open the daemon log ({e}); leaving stderr as-is");
@@ -50,18 +50,30 @@ fn redirect_stderr_to_log_unless_tty() {
 /// the auto-spawn path (which is what actually needs capture) redirects the
 /// child's stderr at spawn time on every platform.
 #[cfg(not(unix))]
-fn redirect_stderr_to_log_unless_tty() {}
+fn redirect_stderr_to_log_unless_tty(_socket: &Path) {}
 
-/// Load the `[daemon]` config from the given project directory's store (best
-/// effort; defaults when absent). Used so a configured `socket_path` /
-/// `idle_timeout_secs` apply to the `daemon` subcommands too. `dir` is the
-/// dispatcher-resolved project directory (`--dir` or cwd), like every other
-/// command — not a separate `current_dir()` lookup that would ignore `--dir`.
-async fn daemon_config_at(dir: &Path) -> DaemonConfig {
-    let path = dir.join(".engramdb").join("config.toml");
-    engramdb::storage::config::load_config_or_default(&path)
+/// The `[daemon]` section of the global config (best effort; defaults when
+/// absent). The daemon is one process shared by every project, so its
+/// subcommands read the same global settings no matter which directory they
+/// run in — a project's `.engramdb/config.toml` is never consulted.
+async fn global_daemon_config() -> DaemonConfig {
+    engramdb::storage::config::load_global_config_or_default()
         .await
         .daemon
+}
+
+/// The socket and idle timeout `daemon run` serves with: the `--socket` /
+/// `--idle-timeout` flags when given (tests and hand-run daemons use them),
+/// else the global config. An auto-spawned daemon gets only `--socket`, so its
+/// lifetime is always the global `idle_timeout_secs`.
+fn run_settings(
+    socket_flag: Option<&Path>,
+    idle_flag: Option<u64>,
+    global: &DaemonConfig,
+) -> (PathBuf, Duration) {
+    let socket = daemon::resolve_socket(socket_flag, global);
+    let idle = Duration::from_secs(idle_flag.unwrap_or(global.idle_timeout_secs));
+    (socket, idle)
 }
 
 fn fmt_dur(secs: u64) -> String {
@@ -78,20 +90,15 @@ fn fmt_dur(secs: u64) -> String {
 }
 
 /// Dispatch an `engramdb daemon <sub>` invocation.
-pub async fn run_daemon_cmd(
-    dir: &Path,
-    command: DaemonCommand,
-    formatter: &OutputFormatter,
-) -> Result<()> {
-    let cfg = daemon_config_at(dir).await;
+pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter) -> Result<()> {
+    let cfg = global_daemon_config().await;
     match command {
         DaemonCommand::Run {
             socket,
             idle_timeout,
         } => {
-            let socket = daemon::resolve_socket(socket.as_deref(), &cfg);
-            let idle = Duration::from_secs(idle_timeout.unwrap_or(cfg.idle_timeout_secs));
-            redirect_stderr_to_log_unless_tty();
+            let (socket, idle) = run_settings(socket.as_deref(), idle_timeout, &cfg);
+            redirect_stderr_to_log_unless_tty(&socket);
             daemon::run_daemon(socket, idle).await
         }
 
@@ -181,8 +188,9 @@ pub async fn run_daemon_cmd(
                     }
                 }
             }
-            let idle = idle_timeout.unwrap_or(cfg.idle_timeout_secs);
-            match daemon::DaemonHandle::connect_or_spawn(socket.clone(), idle).await {
+            // Only an explicit `--idle-timeout` is forwarded; without it the
+            // new daemon reads the global config like any auto-spawned one.
+            match daemon::DaemonHandle::connect_or_spawn(socket.clone(), idle_timeout).await {
                 Some(_) => {
                     let verb = if was_running { "restarted" } else { "started" };
                     match daemon::query_status(&socket).await? {
@@ -235,7 +243,7 @@ mod tests {
             socket: Some(socket),
         };
         // Result must be Ok and must not panic.
-        run_daemon_cmd(tmp.path(), cmd, &fmt()).await.unwrap();
+        run_daemon_cmd(cmd, &fmt()).await.unwrap();
     }
 
     /// The pretty "not running" branch (the `fmt()` helper above is JSON, so
@@ -249,7 +257,7 @@ mod tests {
         let cmd = DaemonCommand::Status {
             socket: Some(socket),
         };
-        run_daemon_cmd(tmp.path(), cmd, &formatter).await.unwrap();
+        run_daemon_cmd(cmd, &formatter).await.unwrap();
     }
 
     /// `daemon stop` against a socket no daemon owns: must print
@@ -263,6 +271,31 @@ mod tests {
         let cmd = DaemonCommand::Stop {
             socket: Some(socket),
         };
-        run_daemon_cmd(tmp.path(), cmd, &fmt()).await.unwrap();
+        run_daemon_cmd(cmd, &fmt()).await.unwrap();
+    }
+
+    /// `daemon run` without flags takes its idle timeout and socket from the
+    /// global config file — the same file every session's heartbeat reads.
+    #[tokio::test]
+    async fn daemon_run_takes_idle_timeout_from_the_global_config() {
+        let path = engramdb::storage::paths::global_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "[daemon]\nidle_timeout_secs = 777\nsocket_path = \"/run/g/d.sock\"\n",
+        )
+        .unwrap();
+        // This process's env may carry a socket override (nextest does not
+        // set one; guard anyway so the assertion means what it says).
+        std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+        let global = global_daemon_config().await;
+        let (socket, idle) = run_settings(None, None, &global);
+        assert_eq!(idle, Duration::from_secs(777));
+        assert_eq!(socket, PathBuf::from("/run/g/d.sock"));
+
+        // The flags still win, for tests and hand-run daemons.
+        let (socket, idle) = run_settings(Some(Path::new("/x/y.sock")), Some(61), &global);
+        assert_eq!(idle, Duration::from_secs(61));
+        assert_eq!(socket, PathBuf::from("/x/y.sock"));
     }
 }

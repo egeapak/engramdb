@@ -5,7 +5,7 @@
 //! - **in_process_cold**: `resolve_engine_providers(config, None, 1)` — the
 //!   classic CLI path that loads ONNX in-process on every call (simulates a
 //!   cold first-call because Criterion re-invokes the closure).
-//! - **daemon_connect_only**: `resolve_providers(cell, config, None, dir,
+//! - **daemon_connect_only**: `resolve_providers(cell, config, None,
 //!   ConnectOnly)` against a pre-warmed daemon on a temp socket — quantifies
 //!   the latency of the "connect, send Meta, receive providers" round-trip once
 //!   the daemon is already running.
@@ -83,10 +83,12 @@ fn daemon_lifecycle_benchmarks(c: &mut Criterion) {
     // the embedding provider resolution path.
     config.nli.enabled = false;
     config.rerank.enabled = false;
-    // Point the daemon field at our temp socket.
-    config.daemon.enabled = true;
-    config.daemon.socket_path = Some(socket.to_string_lossy().into_owned());
-    let dir = tmp.path().to_path_buf();
+    // Point the client at our temp socket. Daemon settings come from the
+    // global config, which here is the real user's file — so override the
+    // socket through the env var (it outranks the global `socket_path`)
+    // rather than touching that file. This assumes the user has not set the
+    // global `[daemon].enabled = false`.
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
 
     let mut group = c.benchmark_group("daemon_lifecycle");
     // Use a small sample count — model loading is slow and we want a
@@ -116,10 +118,9 @@ fn daemon_lifecycle_benchmarks(c: &mut Criterion) {
     // -----------------------------------------------------------------------
     group.bench_function("daemon_connect_only", |b| {
         let cfg = config.clone();
-        let dir_ref = dir.clone();
         b.to_async(&rt).iter(|| async {
             let cell = DaemonCell::new();
-            let _ = resolve_providers(&cell, &cfg, None, &dir_ref, DaemonPolicy::ConnectOnly).await;
+            let _ = resolve_providers(&cell, &cfg, None, DaemonPolicy::ConnectOnly).await;
         });
     });
 

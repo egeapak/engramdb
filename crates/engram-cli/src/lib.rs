@@ -31,6 +31,11 @@ pub mod validation;
 
 /// Determine the `DaemonPolicy` for a CLI invocation based on the flag ladder.
 ///
+/// `daemon` is the **global** `[daemon]` section. `enabled` and `use_for_cli`
+/// are routing choices, and they are per user rather than per project, so the
+/// CLI behaves the same in every project. The per-invocation opt-out is the
+/// `--in-process` flag (or `ENGRAMDB_IN_PROCESS`).
+///
 /// Precedence (highest first):
 /// 1. `daemon.enabled == false` → `InProcess` (master switch).
 /// 2. `in_process` flag (or `ENGRAMDB_IN_PROCESS` env var, checked before this
@@ -41,12 +46,12 @@ pub mod validation;
 pub fn cli_daemon_policy(
     in_process: bool,
     spawn: bool,
-    config: &engramdb::types::EngramConfig,
+    daemon: &engramdb::types::DaemonConfig,
 ) -> engramdb::daemon::DaemonPolicy {
     use engramdb::daemon::DaemonPolicy;
 
     // Master switch: daemon globally disabled → always in-process.
-    if !config.daemon.enabled {
+    if !daemon.enabled {
         return DaemonPolicy::InProcess;
     }
     // --in-process flag (or ENGRAMDB_IN_PROCESS env) → in-process.
@@ -54,7 +59,7 @@ pub fn cli_daemon_policy(
         return DaemonPolicy::InProcess;
     }
     // use_for_cli=false and no explicit --spawn-daemon → in-process.
-    if !config.daemon.use_for_cli && !spawn {
+    if !daemon.use_for_cli && !spawn {
         return DaemonPolicy::InProcess;
     }
     // --spawn-daemon → promote to ConnectOrSpawn.
@@ -193,9 +198,8 @@ pub async fn run(cli: Cli) -> Result<()> {
     // stray store, and register the worktree as a sub-project. `init` and
     // `serve` perform their own worktree handling (they own user-facing
     // messaging / run the MCP server); `completions` and `setup` don't touch
-    // a memory store; `daemon` is a process-wide model host that only reads
-    // `dir` for its `[daemon]` config section (each request carries its own
-    // resolved store dir).
+    // a memory store; `daemon` is a process-wide model host whose settings
+    // come from the global config, not from any project.
     let is_exempt = matches!(
         cli.command,
         Command::Init { .. }
@@ -232,7 +236,8 @@ pub async fn run(cli: Cli) -> Result<()> {
     };
 
     // Load the project config once (best-effort: defaults if absent/unreadable)
-    // — used for both the maintenance policy and the daemon policy below.
+    // — used for the maintenance policy below. The daemon policy reads the
+    // global config instead: the daemon is shared by every project.
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = engramdb::storage::config::load_config_or_default(&config_path).await;
 
@@ -264,10 +269,11 @@ pub async fn run(cli: Cli) -> Result<()> {
         engramdb::ops::auto_compact(&dir, &config.maintenance, cli.no_maintenance).await;
     }
 
-    // Compute the daemon policy once per process using the project config.
+    // Compute the daemon policy once per process from the global config.
     // Defaults (daemon.enabled=true, use_for_cli=true → ConnectOnly by default)
-    // apply when the config file is absent/unreadable.
-    let daemon_policy = cli_daemon_policy(in_process_flag, spawn_daemon_flag, &config);
+    // apply when the global config file is absent/unreadable.
+    let global = engramdb::storage::config::load_global_config_or_default().await;
+    let daemon_policy = cli_daemon_policy(in_process_flag, spawn_daemon_flag, &global.daemon);
 
     // Create production prompter for interactive commands
     let prompter = InquirePrompter;
@@ -615,7 +621,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Serve { transport, port } => {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
-        Command::Daemon { command } => commands::run_daemon_cmd(&dir, command, &formatter).await,
+        Command::Daemon { command } => commands::run_daemon_cmd(command, &formatter).await,
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())
@@ -837,11 +843,11 @@ pub async fn run(cli: Cli) -> Result<()> {
 mod tests {
     use super::*;
     use engramdb::daemon::DaemonPolicy;
-    use engramdb::types::EngramConfig;
+    use engramdb::types::DaemonConfig;
 
     #[test]
     fn cli_policy_precedence() {
-        let mut c = EngramConfig::default();
+        let mut c = DaemonConfig::default();
         // Default: use_for_cli=true, enabled=true → ConnectOnly.
         assert_eq!(
             cli_daemon_policy(false, false, &c),
@@ -855,10 +861,10 @@ mod tests {
             DaemonPolicy::ConnectOrSpawn
         );
         // use_for_cli=false + no --spawn-daemon → InProcess.
-        c.daemon.use_for_cli = false;
+        c.use_for_cli = false;
         assert_eq!(cli_daemon_policy(false, false, &c), DaemonPolicy::InProcess);
         // daemon.enabled=false is the master switch — wins over --spawn-daemon.
-        c.daemon.enabled = false;
+        c.enabled = false;
         assert_eq!(cli_daemon_policy(false, true, &c), DaemonPolicy::InProcess);
     }
 }

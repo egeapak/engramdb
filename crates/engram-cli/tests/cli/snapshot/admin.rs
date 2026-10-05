@@ -116,7 +116,7 @@ fn stats_reports_drift_after_a_file_is_edited_behind_the_store() {
     insta::assert_snapshot!("stats_drifted", f.run(&["--format", "plain", "stats"]));
 }
 
-/// With `[daemon] enabled = false` and an unbound socket, this is the
+/// With the global `[daemon] enabled = false` and an unbound socket, this is the
 /// "no daemon" branch — the only one reachable without spawning a process.
 #[test]
 fn stats_daemon() {

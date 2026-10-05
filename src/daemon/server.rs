@@ -1,6 +1,6 @@
 //! The daemon process: loads each model once and serves inference.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,7 +13,6 @@ use super::protocol::{
     PROTOCOL_VERSION,
 };
 use crate::ops::ProviderCache;
-use crate::types::EngramConfig;
 
 /// Snapshot is persisted to the global store at least this often while the
 /// daemon runs (plus on idle-exit and on graceful shutdown), so `stats
@@ -25,79 +24,9 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 /// and its 60s request timeout; see the guard in `handle_conn`.
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Upper bound on distinct config paths retained by [`ConfigCache`].
-///
-/// Sized for "every project on this machine, generously" — the daemon is
-/// shared, so the honest working set is larger than one session's.
-const MAX_CACHED_CONFIGS: usize = 512;
-
-/// Parsed-config cache keyed by path, invalidated by file mtime + length.
-///
-/// Every Embed/Classify/Rerank/Title/Meta request resolves the caller's
-/// project config before the provider-cache lookup; re-reading and
-/// TOML-parsing the file on the daemon's hot path is pure waste when it
-/// hasn't changed. A stamp mismatch (including the file appearing or
-/// disappearing) refreshes the entry, so config edits take effect on the
-/// next request. Length is folded in alongside mtime so a same-second
-/// rewrite on coarse-timestamp filesystems still invalidates unless it is
-/// also byte-length-identical (an accepted residual staleness).
-///
-/// Capped at [`MAX_CACHED_CONFIGS`]. The key is derived from `req.dir`,
-/// which arrives over the socket and is only checked for emptiness, and this
-/// is the longest-lived process in the system — the heartbeat keeps it
-/// resident while any session is connected. Every distinct directory any
-/// client ever names would otherwise be retained for the daemon's lifetime,
-/// including paths that no longer exist (they cache as a `None` stamp).
-/// Eviction is random for the same reason as the glob-matcher cache in
-/// `scope::physical`: recency tracking would make the hot-path read a write,
-/// and a wrong victim costs one config re-read, not correctness.
-#[derive(Default)]
-struct ConfigCache {
-    #[allow(clippy::type_complexity)]
-    inner: Mutex<
-        std::collections::HashMap<PathBuf, (Option<(std::time::SystemTime, u64)>, EngramConfig)>,
-    >,
-}
-
-impl ConfigCache {
-    async fn load(&self, path: &Path) -> EngramConfig {
-        let stamp = tokio::fs::metadata(path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok().map(|t| (t, m.len())));
-        if let Ok(guard) = self.inner.lock() {
-            if let Some((cached_stamp, cfg)) = guard.get(path) {
-                if *cached_stamp == stamp {
-                    return cfg.clone();
-                }
-            }
-        }
-        let cfg = crate::storage::config::load_config_or_default(path).await;
-        if let Ok(mut guard) = self.inner.lock() {
-            // Make room before inserting so the map never exceeds the cap.
-            // A refreshed existing key is a replace, not growth, so only
-            // evict when this key is genuinely new.
-            if guard.len() >= MAX_CACHED_CONFIGS && !guard.contains_key(path) {
-                if let Some(victim) = guard.keys().next().cloned() {
-                    guard.remove(&victim);
-                }
-            }
-            guard.insert(path.to_path_buf(), (stamp, cfg.clone()));
-        }
-        cfg
-    }
-
-    /// Number of cached entries. Test-only hook for asserting the cap binds.
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.inner.lock().map(|g| g.len()).unwrap_or(0)
-    }
-}
-
 /// Shared per-process daemon state.
 struct Ctx {
     cache: ProviderCache,
-    configs: ConfigCache,
     counters: Arc<Counters>,
     start: Instant,
     pid: u32,
@@ -163,7 +92,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
             tracing::warn!(
                 "cannot bind or reclaim the daemon socket {}: {e}. \
                  Models will load in-process. Remove the path if it is stale, \
-                 or point [daemon].socket_path elsewhere.",
+                 or point [daemon].socket_path in the global config elsewhere.",
                 socket.display()
             );
             return Err(e.into());
@@ -180,7 +109,6 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let ctx = Arc::new(Ctx {
         cache: ProviderCache::new(),
-        configs: ConfigCache::default(),
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
         pid: std::process::id(),
@@ -275,8 +203,8 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         // 0600 socket file — see `transport`) should already keep other users
         // out, but this check holds even if the socket path was relocated to
         // a directory with looser permissions. A rejected peer is dropped
-        // before it can drive inference, read Status, probe arbitrary `dir`
-        // config paths, or send an unauthenticated Shutdown.
+        // before it can drive inference, read Status, or send an
+        // unauthenticated Shutdown.
         #[cfg(unix)]
         match stream.peer_cred() {
             Ok(cred) if peer_allowed(cred.uid(), super::current_euid()) => {}
@@ -471,17 +399,21 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
         _ => {}
     }
 
-    if req.dir.is_empty() {
+    // The client sends its model selection; the daemon reads no project
+    // directory. It used to load `<req.dir>/.engramdb/config.toml` here,
+    // which made a shared, long-lived process read whatever path a peer named.
+    let Some(models) = req.models else {
         return DaemonResponse::Error {
-            message: "missing store directory".to_string(),
+            message: "missing model selection".to_string(),
         };
-    }
-    let config_path = Path::new(&req.dir).join(".engramdb").join("config.toml");
-    let config = ctx.configs.load(&config_path).await;
-    // `req.backend` is the backend the client already resolved; trust it over
-    // this daemon process's own environment so the provider-cache key (and
-    // thus the loaded model) matches what the client expects.
-    let providers = ctx.cache.get(&config, req.backend).await;
+    };
+    // `models.backend` is the backend the client already resolved; trust it
+    // over this daemon process's own environment so the provider-cache key
+    // (and thus the loaded model) matches what the client expects.
+    let providers = ctx
+        .cache
+        .get(&models.to_config(), Some(models.backend))
+        .await;
 
     match req.op {
         DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
@@ -579,40 +511,5 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 message: "title model unavailable".to_string(),
             },
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn config_cache_stays_bounded() {
-        // `req.dir` arrives over the socket and is only checked for
-        // emptiness, so distinct paths would otherwise accumulate for the
-        // daemon's whole lifetime. None of these exist on disk — the
-        // not-found path caches too, which is exactly the leak.
-        let cache = ConfigCache::default();
-        for i in 0..(MAX_CACHED_CONFIGS + 200) {
-            let path = PathBuf::from(format!("/nonexistent/project{i}/.engramdb/config.toml"));
-            let _ = cache.load(&path).await;
-        }
-        let len = cache.len();
-        assert!(
-            len <= MAX_CACHED_CONFIGS,
-            "config cache grew to {len}, above the {MAX_CACHED_CONFIGS} cap"
-        );
-    }
-
-    #[tokio::test]
-    async fn config_cache_refresh_does_not_count_as_growth() {
-        // Re-loading the SAME path replaces its entry rather than adding
-        // one, so a single hot project can't evict the rest of the cache.
-        let cache = ConfigCache::default();
-        let path = PathBuf::from("/nonexistent/only/.engramdb/config.toml");
-        for _ in 0..50 {
-            let _ = cache.load(&path).await;
-        }
-        assert_eq!(cache.len(), 1, "repeated loads of one path must not grow");
     }
 }

@@ -39,7 +39,7 @@ mod transport;
 
 pub use client::{query_status, request_shutdown, DaemonHandle};
 pub use doctor::check_daemon;
-pub use protocol::{DaemonStatus, RequestCounts, PROTOCOL_VERSION};
+pub use protocol::{DaemonStatus, ModelSelection, RequestCounts, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use resolve::{
     resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy, InProcessFallback,
@@ -53,7 +53,22 @@ pub use server::run_daemon;
 #[cfg(test)]
 mod tests;
 
-use std::path::PathBuf;
+/// A temp dir the daemon will accept as its folder. `tempfile` creates
+/// directories with the umask default (usually 0755), and the transport
+/// refuses any daemon folder that is not 0700, so every test that binds a
+/// socket in a temp dir must use this instead of `TempDir::new()`.
+#[cfg(test)]
+pub(crate) fn private_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    dir
+}
+
+use std::path::{Path, PathBuf};
 
 /// This process's effective uid. Used for the daemon's access-control
 /// layers: per-uid default socket paths, socket-directory ownership checks,
@@ -63,25 +78,30 @@ pub(crate) fn current_euid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-/// Base directory for the daemon's socket and lock files.
+/// The daemon's default folder: one shared, private, per-user directory that
+/// holds the socket, the reclaim lock and `daemon.log`.
 ///
-/// Prefers `$XDG_RUNTIME_DIR` (tmpfs, per-user, mode 0700 by spec, cleared on
-/// logout), then the per-user cache dir, then — as a last resort on systems
-/// with neither (cron, minimal containers, some su/sudo sessions) — a
-/// **per-uid** subdirectory of the system temp dir (`/tmp/engramdb-<uid>`).
-/// The uid in the temp-dir name guarantees two users never contend for the
-/// same default path even under a shared world-writable `/tmp`.
+/// - `$XDG_RUNTIME_DIR/engramdb` when a runtime dir exists (tmpfs, per-user,
+///   mode 0700 by spec, cleared on logout). Only the daemon uses it.
+/// - Otherwise `<cache_dir>/engramdb/daemon`. This is a dedicated leaf rather
+///   than `<cache_dir>/engramdb` itself, because that directory also holds the
+///   model cache and is often created world-readable by a model download —
+///   the daemon must own a folder whose mode it can insist on.
+/// - As a last resort on systems with neither (cron, minimal containers, some
+///   su/sudo sessions), a **per-uid** subdirectory of the system temp dir
+///   (`/tmp/engramdb-<uid>`), so two users never contend for one path.
 ///
-/// The base alone is not the security boundary: whichever directory is chosen
-/// (including config/env overrides), the Unix transport hardens it at bind
-/// time — the socket's parent directory is created with (or tightened to)
-/// mode 0700, the socket file is chmod'd 0600, and the server verifies each
-/// accepted peer's uid via `SO_PEERCRED` (see [`transport`] and
-/// `server::peer_allowed`). So even a fallback under `/tmp` is not reachable
-/// by other local users.
-fn runtime_base() -> PathBuf {
-    if let Some(d) = dirs::runtime_dir().or_else(dirs::cache_dir) {
+/// Whatever folder is used (including `--socket` / `ENGRAMDB_DAEMON_SOCKET` /
+/// global `[daemon].socket_path` overrides), the Unix transport creates it
+/// with mode 0700 and refuses to bind when it exists with another owner or a
+/// looser mode (see [`transport`]). The server also checks each peer's uid via
+/// `SO_PEERCRED` (`server::peer_allowed`).
+pub fn default_daemon_dir() -> PathBuf {
+    if let Some(d) = dirs::runtime_dir() {
         return d.join("engramdb");
+    }
+    if let Some(d) = dirs::cache_dir() {
+        return d.join("engramdb").join("daemon");
     }
     #[cfg(unix)]
     let leaf = format!("engramdb-{}", current_euid());
@@ -92,7 +112,39 @@ fn runtime_base() -> PathBuf {
 
 /// The default per-user socket path (no overrides applied).
 fn default_socket_path() -> PathBuf {
-    runtime_base().join("daemon.sock")
+    default_daemon_dir().join("daemon.sock")
+}
+
+/// The daemon folder for a resolved `socket`: the directory that holds the
+/// socket, the reclaim lock and `daemon.log`.
+///
+/// On Unix this is the socket's parent, so an overridden socket moves the
+/// whole folder with it (tests and the eval runner rely on that for
+/// isolation). A Windows named pipe has no parent directory, so an explicit
+/// `\\.\pipe\...` name keeps its log in [`default_daemon_dir`].
+pub fn daemon_dir_for(socket: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let lower = socket.to_string_lossy().to_ascii_lowercase();
+        if lower.starts_with(r"\\.\pipe\") || lower.starts_with(r"\\?\pipe\") {
+            return default_daemon_dir();
+        }
+    }
+    match socket.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// Path of the daemon's diagnostic log for a resolved `socket`:
+/// `<daemon folder>/daemon.log`.
+///
+/// It lives beside the socket, not in the data dir, so the daemon has one
+/// private folder and one folder to clean up. The cost: under
+/// `$XDG_RUNTIME_DIR` the log is cleared on logout. That is acceptable for
+/// this log, whose only job is "why did the daemon just fail".
+pub fn daemon_log_path(socket: &Path) -> PathBuf {
+    daemon_dir_for(socket).join("daemon.log")
 }
 
 /// Path to the daemon's IPC endpoint, applying env + default only.
@@ -113,12 +165,16 @@ pub fn socket_path() -> PathBuf {
 /// highest first:
 /// 1. an explicit `--socket` CLI flag (`cli`),
 /// 2. the `ENGRAMDB_DAEMON_SOCKET` env var,
-/// 3. `[daemon].socket_path` in config (`cfg`),
-/// 4. the default per-user runtime path.
+/// 3. `[daemon].socket_path` in the **global** config (`cfg`),
+/// 4. the default per-user path ([`default_daemon_dir`]).
 ///
-/// Clients, the MCP server, `doctor`, `stats`, and the daemon itself all
-/// resolve identically so they agree on which socket a daemon lives at.
-pub fn resolve_socket(cli: Option<&std::path::Path>, cfg: &crate::types::DaemonConfig) -> PathBuf {
+/// `cfg` must come from
+/// [`crate::storage::config::load_global_config_or_default`], never from a
+/// project config: two projects that resolved different sockets would spawn
+/// two daemons and load every model twice. Clients, the MCP server, `doctor`,
+/// `stats`, and the daemon itself all resolve identically so they agree on
+/// which socket a daemon lives at.
+pub fn resolve_socket(cli: Option<&Path>, cfg: &crate::types::DaemonConfig) -> PathBuf {
     if let Some(p) = cli {
         return p.to_path_buf();
     }
@@ -129,4 +185,15 @@ pub fn resolve_socket(cli: Option<&std::path::Path>, cfg: &crate::types::DaemonC
         return PathBuf::from(p);
     }
     default_socket_path()
+}
+
+/// The heartbeat interval for an idle timeout: `max(30s, idle/3)`.
+///
+/// Both sides of the daemon's lifetime read `idle_timeout_secs` from the same
+/// global config — the daemon to decide when to exit, every session to decide
+/// how often to ping — so `DaemonConfig::validate`'s `>= 60` floor really does
+/// guarantee at least two pings per idle window. When the value came from each
+/// project's own config, a session could ping slower than the daemon reaped.
+pub fn heartbeat_interval(idle_timeout_secs: u64) -> std::time::Duration {
+    std::time::Duration::from_secs((idle_timeout_secs / 3).max(30))
 }

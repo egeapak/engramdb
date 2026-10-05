@@ -4,7 +4,8 @@
 //! emits no embedded newlines, so a line is a frame). The connection stays
 //! open for multiple request/response round-trips.
 
-use crate::types::EmbeddingBackend;
+use crate::types::config::{EmbeddingsConfig, NliConfig, RerankConfig, TitleConfig};
+use crate::types::{EmbeddingBackend, EngramConfig};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
@@ -23,22 +24,101 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// and stamped its id, `doctor` demanded the new one, and repeating the
 /// suggested command could never converge. `Pong.build` now catches this
 /// automatically; bumping here is the explicit lever.
-pub const PROTOCOL_VERSION: &str = "4";
+///
+/// `5` replaced the request's `dir` + `backend` with [`ModelSelection`]: the
+/// client sends the model-affecting config itself, and the daemon no longer
+/// reads `<dir>/.engramdb/config.toml` for a path named over the socket.
+pub const PROTOCOL_VERSION: &str = "5";
 
-/// A request frame: which store's config selects the model, the resolved
-/// embedding backend (sent so the daemon's provider key matches the client's
-/// regardless of the daemon process environment), and the operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A request frame: which models to use (for model ops) and the operation.
+///
+/// Serialized by hand (see the `Serialize` impl) to keep one v4 field on the
+/// wire; deserialized normally, so that field is ignored when read.
+#[derive(Debug, Clone, Deserialize)]
 pub struct DaemonRequest {
-    /// Resolved store directory. The daemon loads
-    /// `<dir>/.engramdb/config.toml` to pick the right model bundle. Ignored
-    /// (and may be empty) for [`DaemonOp::Ping`].
-    pub dir: String,
-    /// Resolved embedding backend, or `None` to let the daemon resolve from
-    /// config + its own environment.
-    pub backend: Option<EmbeddingBackend>,
+    /// The client's model selection. Required for the model ops (`Meta`,
+    /// `Embed`, `Classify`, `Rerank`, `Title`); `None` for `Ping`, `Status`
+    /// and `Shutdown`, which load no models.
+    pub models: Option<ModelSelection>,
     /// The operation to perform.
     pub op: DaemonOp,
+}
+
+impl Serialize for DaemonRequest {
+    /// Writes an always-empty `dir` beside the real fields.
+    ///
+    /// A v4 daemon's request type has a required `dir: String`. Without it,
+    /// that daemon cannot parse even our `Ping`, so it never answers with its
+    /// `Pong { version: "4" }` — and the client never learns the daemon is
+    /// older and never asks it to shut down. Every session would then fall
+    /// back to in-process models until the old daemon idled out, which the
+    /// heartbeats of old sessions can postpone indefinitely. The field is
+    /// never read: a v5 daemon ignores it, and it is always empty.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            dir: &'static str,
+            models: &'a Option<ModelSelection>,
+            op: &'a DaemonOp,
+        }
+        Wire {
+            dir: "",
+            models: &self.models,
+            op: &self.op,
+        }
+        .serialize(serializer)
+    }
+}
+
+/// The model-affecting part of a project's config, sent with every model
+/// request.
+///
+/// Model selection is legitimately per project — vectors are stored per
+/// project and checked against that project's manifest fingerprint — but the
+/// daemon is shared, so it must not decide it by reading a project directory
+/// named over the socket. The client has already loaded its project config;
+/// it sends these sections, and the daemon builds its provider-cache key
+/// (`ops::provider_cache_key`) from them. They are exactly the sections that
+/// key reads; fields the key ignores travel along and stay ignored, so two
+/// projects that differ only there still share one bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSelection {
+    /// The embedding backend the client resolved (config + its own
+    /// `ENGRAMDB_EMBEDDING_BACKEND` + CLI override), so the daemon's provider
+    /// key matches the client's regardless of the daemon's own environment.
+    pub backend: EmbeddingBackend,
+    pub embeddings: EmbeddingsConfig,
+    pub nli: NliConfig,
+    pub rerank: RerankConfig,
+    pub title: TitleConfig,
+}
+
+impl ModelSelection {
+    /// Take the model sections out of a client's project `config`, resolving
+    /// the backend against `backend_override` and this process's
+    /// environment.
+    pub fn from_config(config: &EngramConfig, backend_override: Option<EmbeddingBackend>) -> Self {
+        Self {
+            backend: crate::ops::resolve_backend(config.embeddings.backend, backend_override),
+            embeddings: config.embeddings.clone(),
+            nli: config.nli.clone(),
+            rerank: config.rerank.clone(),
+            title: config.title.clone(),
+        }
+    }
+
+    /// The config the daemon resolves providers from: these sections on top
+    /// of defaults. Only the model sections matter to `ProviderCache`, so the
+    /// defaults elsewhere are inert.
+    pub fn to_config(&self) -> EngramConfig {
+        EngramConfig {
+            embeddings: self.embeddings.clone(),
+            nli: self.nli.clone(),
+            rerank: self.rerank.clone(),
+            title: self.title.clone(),
+            ..EngramConfig::default()
+        }
+    }
 }
 
 /// The model operation a request is asking the daemon to perform.

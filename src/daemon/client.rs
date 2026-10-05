@@ -16,15 +16,7 @@ async fn oneshot(socket: &Path, op: DaemonOp) -> anyhow::Result<DaemonResponse> 
     let fut = async {
         let stream = super::transport::connect(socket).await?;
         let (read_half, mut write_half) = tokio::io::split(stream);
-        write_msg(
-            &mut write_half,
-            &DaemonRequest {
-                dir: String::new(),
-                backend: None,
-                op,
-            },
-        )
-        .await?;
+        write_msg(&mut write_half, &DaemonRequest { models: None, op }).await?;
         let mut reader = BufReader::new(read_half);
         match read_msg::<_, DaemonResponse>(&mut reader).await? {
             Some(resp) => Ok(resp),
@@ -123,7 +115,16 @@ impl DaemonHandle {
     /// one process can bind the socket, so of several concurrently-spawned
     /// daemons one survives and the rest exit; every client converges on the
     /// survivor.
-    pub async fn connect_or_spawn(socket: PathBuf, idle_timeout_secs: u64) -> Option<Arc<Self>> {
+    ///
+    /// The spawned daemon reads its idle timeout from the global config
+    /// itself. `idle_override` exists only for `engramdb daemon restart
+    /// --idle-timeout` (an explicit, user-typed value); every automatic spawn
+    /// passes `None`, so no project's value can decide the shared daemon's
+    /// lifetime.
+    pub async fn connect_or_spawn(
+        socket: PathBuf,
+        idle_override: Option<u64>,
+    ) -> Option<Arc<Self>> {
         let handle = Self {
             socket: socket.clone(),
         };
@@ -131,7 +132,7 @@ impl DaemonHandle {
             return Some(Arc::new(handle));
         }
 
-        Self::spawn_daemon(&socket, idle_timeout_secs);
+        Self::spawn_daemon(&socket, idle_override);
 
         // The daemon must load nothing to answer Ping, so it becomes
         // reachable as soon as it binds the socket. Bounded retry (~3.8s
@@ -168,8 +169,7 @@ impl DaemonHandle {
         match self
             .request_with_timeout(
                 DaemonRequest {
-                    dir: String::new(),
-                    backend: None,
+                    models: None,
                     op: DaemonOp::Ping,
                 },
                 Self::PING_TIMEOUT,
@@ -236,7 +236,7 @@ impl DaemonHandle {
     /// while a long-lived parent (`serve`) is still running, it does not
     /// linger as a zombie. `kill_on_drop` stays false (tokio's default), so
     /// the daemon outlives the parent exactly as before.
-    fn spawn_daemon(socket: &std::path::Path, idle_timeout_secs: u64) {
+    fn spawn_daemon(socket: &std::path::Path, idle_override: Option<u64>) {
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
@@ -244,15 +244,7 @@ impl DaemonHandle {
                 return;
             }
         };
-        let mut cmd = tokio::process::Command::new(exe);
-        cmd.arg("daemon")
-            .arg("run")
-            .arg("--socket")
-            .arg(socket)
-            .arg("--idle-timeout")
-            .arg(idle_timeout_secs.to_string())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null());
+        let mut cmd = spawn_command(&exe, socket, idle_override);
 
         // This child is detached and outlives us, so nobody is watching its
         // stderr — it used to go to `/dev/null`, which meant every reason a
@@ -262,7 +254,7 @@ impl DaemonHandle {
         // can't be opened, fall back to discarding rather than inheriting:
         // inheriting would interleave daemon output into an MCP server's
         // stdio, which is a protocol stream.
-        match super::logging::daemon_log_for_spawn() {
+        match super::logging::daemon_log_for_spawn(socket) {
             Ok(file) => {
                 cmd.stderr(std::process::Stdio::from(file));
             }
@@ -329,6 +321,67 @@ impl DaemonHandle {
         })
         .await
         .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
+    }
+}
+
+/// The command line for a spawned daemon: `daemon run --socket <socket>`,
+/// plus `--idle-timeout` only when `idle_override` is set.
+///
+/// The socket is always passed, because the client has already resolved it
+/// and the daemon must bind exactly that path. The idle timeout is not: the
+/// daemon reads `idle_timeout_secs` from the global config itself, which is
+/// the same value every session's heartbeat interval is derived from.
+fn spawn_command(exe: &Path, socket: &Path, idle_override: Option<u64>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.arg("daemon").arg("run").arg("--socket").arg(socket);
+    if let Some(secs) = idle_override {
+        cmd.arg("--idle-timeout").arg(secs.to_string());
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    cmd
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::spawn_command;
+    use std::path::Path;
+
+    fn args(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// An automatic spawn passes no idle timeout: the daemon takes it from
+    /// the global config, never from the project that spawned it.
+    #[test]
+    fn automatic_spawn_passes_no_idle_timeout() {
+        let cmd = spawn_command(Path::new("/bin/engramdb"), Path::new("/run/d.sock"), None);
+        assert_eq!(args(&cmd), ["daemon", "run", "--socket", "/run/d.sock"]);
+    }
+
+    /// `daemon restart --idle-timeout N` is an explicit user value and is
+    /// still forwarded.
+    #[test]
+    fn explicit_override_is_forwarded() {
+        let cmd = spawn_command(
+            Path::new("/bin/engramdb"),
+            Path::new("/run/d.sock"),
+            Some(90),
+        );
+        assert_eq!(
+            args(&cmd),
+            [
+                "daemon",
+                "run",
+                "--socket",
+                "/run/d.sock",
+                "--idle-timeout",
+                "90"
+            ]
+        );
     }
 }
 

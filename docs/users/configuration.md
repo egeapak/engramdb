@@ -1,13 +1,16 @@
 # Configuration
 
-EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, the three `[retrieval.scoring]` weight sub-tables (`with_query`, `scope_only`, `degraded`) and their `relevance` weights, all of `[thresholds]` (`needs_review` / `gc` / `compress`), all of `[search]`, `[scope_proximity]`, `[logical_bonus]`, `[trust_weights]`, `[nli]`, and `[rerank]`. The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override. There is no global `config.toml`; each project gets its own.
+EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, the three `[retrieval.scoring]` weight sub-tables (`with_query`, `scope_only`, `degraded`) and their `relevance` weights, all of `[thresholds]` (`needs_review` / `gc` / `compress`), all of `[search]`, `[scope_proximity]`, `[logical_bonus]`, `[trust_weights]`, `[nli]`, and `[rerank]`. The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override.
+
+One section is the exception: `[daemon]` is read only from the **global** config file, `<global config dir>/config.toml` (Linux: `~/.config/engramdb/config.toml`; macOS: `~/Library/Application Support/engramdb/config.toml`; `$ENGRAMDB_CONFIG_DIR/config.toml` when that variable is set). The daemon is one process shared by every project, so its settings cannot come from a project. The global file holds only `[daemon]`; a missing file means the defaults. A project config that still has a `[daemon]` section loads, but EngramDB ignores the keys, warns once naming each one, and `engramdb doctor` reports them. See [daemon.md](./daemon.md#configuration).
 
 ## Override precedence
 
 | Layer | Source |
 |-------|--------|
 | Built-in defaults | `crates/engram-types/src/config.rs` |
-| `config.toml` | `<project>/.engramdb/config.toml` |
+| `config.toml` | `<project>/.engramdb/config.toml` — every section except `[daemon]` |
+| Global `config.toml` | `<global config dir>/config.toml` — `[daemon]` only |
 | Environment | `ENGRAMDB_DAEMON_SOCKET`, `ENGRAMDB_EMBEDDING_BACKEND`, `ENGRAMDB_DATA_DIR`, `ENGRAMDB_CONFIG_DIR`, `CLAUDE_CONFIG_DIR` |
 | CLI flag | `--embedding-backend`, `--socket`, etc. |
 
@@ -15,7 +18,7 @@ Higher rows lose to lower rows.
 
 ## Full schema
 
-Every field with its default:
+Every field with its default. All sections go in `<project>/.engramdb/config.toml`, except `[daemon]`, which goes in the global config file:
 
 ```toml
 [retrieval]
@@ -141,11 +144,13 @@ interval_secs = 21600               # 6h throttle on the full housekeeping pass
 compaction_fragment_threshold = 32  # uncompacted fragments that trigger early compaction (0 = time-based only)
 compaction_min_interval_secs = 120  # floor between compaction firings
 
+# [daemon] goes in the GLOBAL config file (<global config dir>/config.toml),
+# never in a project config — see daemon.md.
 [daemon]
 enabled = true
 idle_timeout_secs = 900        # 15 min idle → daemon exits
 use_for_cli = true             # route model-needing CLI commands through a running daemon
-# socket_path = "/run/user/1000/engramdb/daemon.sock"   # optional override
+# socket_path = "/run/user/1000/engramdb/daemon.sock"   # optional override; the folder must be yours, mode 0700
 
 [title]
 strategy = "t5"                # "t5" (default) | "keyword" | "none"
@@ -240,18 +245,18 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 - **`[review]`** — the recency trigger for reviewing old memories. `recency_days` (default **90**) is the age past which an *active* memory that hasn't been updated (every edit and every `resolve`/keep/update bumps `updated_at`) is suggested for review. It never deletes or hides anything — it only surfaces a suggestion: the MCP `review` tool folds these stale memories in alongside flagged (challenged / needs-review) ones by default, and the MCP `memory-session-end` prompt reports how many are due so an agent can offer to revisit them. Stale memories are ranked by criticality so the ones most worth re-verifying come first. Omit the field to keep the 90-day default; validation accepts 1–3650. On the CLI, `engramdb review --stale-after-days [N]` opts a single run into the trigger (bare flag = 90).
 - **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event".
 - **`[title]`** — how a memory's title is generated when the caller doesn't supply one. `t5` (default) is abstractive T5-small summarization; the shared daemon / MCP server loads (and pools) the encoder+decoder **once machine-wide**, so the per-`create` cost is amortized. `keyword` is in-process RAKE extraction (no model); `none` skips automatic titling. The one-shot CLI's `engramdb add` always uses `keyword` so a single command never pays a cold T5 load. The MCP `create` tool's per-call `title_strategy` overrides this.
-- **`[daemon]`** — see [daemon.md](./daemon.md). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading.
+- **`[daemon]`** — **global config file only**; see [daemon.md](./daemon.md#configuration). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading. `enabled` and `use_for_cli` are per user, so the daemon is used the same way in every project; for a one-off opt-out use `--in-process` or `ENGRAMDB_IN_PROCESS=1`.
 - **`[security]`** — `allow_cross_project_writes` (default `true`, preserving historical behavior) gates the MCP server's confused-deputy surface. Nearly every MCP tool accepts an optional `project` override that resolves to *any* project in the global registry, so a steered agent operating in project A could otherwise mutate a different registered project B on the same machine. Setting it to `false` blocks the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`, `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) from writing to a **different** registered project. `doctor` is gated as well, but only when called with `fix: true` — reading the diagnosis is not a write, flipping memories to `needs_review` is. The session's own project (`project` omitted) and the shared global store (`project = "global"`) are always allowed; a linked worktree of the session's own project is not treated as cross-project. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_*`, `doctor` without `fix`, `harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search`) are never gated. `allow_all_projects_harvest` (default **false**) is separate because it gates a *read*: the harvest tools' `all_projects` option reads every Claude Code conversation on the machine rather than this project's, and naming another `project` reads that project's raw transcripts. Both need this flag — it gates the *read* tools (`harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search` — search returns conversation-derived text, and even a result *count* says something about a project you may not read), and also `harvest_mark`, which despite being a write resolves a session-id prefix against the target's transcripts and names every match in its error, so the write gate alone made it a session-id oracle for a project the read gate refuses; `harvest_mark` therefore needs **both** flags for a cross-project target — and both read it from **your own** project's config — never the target's, so a permissive setting in one repo cannot open the gate for the rest. Cross-project *memory* reads are unaffected: memories are curated, a transcript is the raw conversation.
 
 ## Environment variables
 
 | Variable | Effect |
 |----------|--------|
-| `ENGRAMDB_DAEMON_SOCKET` | Override daemon socket path. |
+| `ENGRAMDB_DAEMON_SOCKET` | Override daemon socket path. Outranks the global `[daemon].socket_path`. The socket's folder (which also holds the daemon's lock and log) must be yours with mode 0700. |
 | `ENGRAMDB_EMBEDDING_BACKEND` | Override `[embeddings].backend` (`auto`/`onnx`/`ollama`). CLI flag wins. |
 | `ENGRAMDB_IN_PROCESS` | Truthy (`1`/`true`/`yes`/`on`) forces CLI model loading in-process instead of via the daemon. The `--in-process` flag wins. |
 | `ENGRAMDB_DATA_DIR` | Override platform global data dir. Used by tests for isolation. |
-| `ENGRAMDB_CONFIG_DIR` | Override platform global config dir. Used by tests. |
+| `ENGRAMDB_CONFIG_DIR` | Override platform global config dir (the registry and the global `config.toml` with `[daemon]`). Used by tests. |
 | `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
 | `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own config root (default `~/.claude`). Read, never written — it is how `harvest` locates session transcripts. |

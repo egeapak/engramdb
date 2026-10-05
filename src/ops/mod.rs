@@ -1096,9 +1096,10 @@ mod provider_cache_tests {
         c.title.pool_size = Some(3);
         assert_ne!(k, provider_cache_key(&c, None, 2));
 
-        // A daemon-only config change does NOT change the model signature.
+        // A leftover project `[daemon]` table does NOT change the model
+        // signature (daemon settings are global and never model identity).
         let mut c = base.clone();
-        c.daemon.idle_timeout_secs += 1;
+        c.legacy_daemon = Some(toml::from_str("idle_timeout_secs = 61").unwrap());
         assert_eq!(k, provider_cache_key(&c, None, 2));
     }
 
