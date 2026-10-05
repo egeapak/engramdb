@@ -188,30 +188,55 @@ if __name__ == "__main__":
 def _costly_case():
     return {"id": "dc-x", "tags": ["discovered", "implicit", "costly"], "prompt": "p",
             "expect": {"query": None, "create": True, "revise": None, "facts": [],
-                       "create_terms": ["TZ=UTC"]}}
+                       "create_terms": ["TZ=UTC"], "attempt_re": r"backfill\.py",
+                       "fail_re": r"does not line up|Traceback"}}
 
 
-def _events_with_failures(n):
+def _bash_events(calls):
+    """calls: (command, output, is_error) per Bash call."""
     events = [{"type": "system", "subtype": "init"}]
-    for i in range(n + 1):
+    for i, (cmd, out, err) in enumerate(calls):
         events.append({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": "make test"}}]}})
+            {"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {"command": cmd}}]}})
         events.append({"type": "user", "message": {"content": [
-            {"type": "tool_result", "tool_use_id": f"t{i}", "content": "x", "is_error": i < n}]}})
+            {"type": "tool_result", "tool_use_id": f"t{i}", "content": out, "is_error": err}]}})
     events.append({"type": "result", "result": "done", "usage": {}})
     return events
 
 
-def test_costly_capture_graded_only_after_two_failures():
-    after = {"m.md": ("b", "remember TZ=UTC for tests")}
-    row, _ = grade.grade_case(_costly_case(), _events_with_failures(2), "", {}, after, {}, 1.0)
-    assert row["grade"]["costly_capture"] == 1 and row["grade"]["pass"] == 1
-    row, _ = grade.grade_case(_costly_case(), _events_with_failures(2), "", {}, {}, {}, 1.0)
-    assert row["grade"]["costly_capture"] == 0 and row["grade"]["pass"] == 0
-    row, _ = grade.grade_case(_costly_case(), _events_with_failures(1), "", {}, {}, {}, 1.0)
-    assert "costly_capture" not in row["grade"] and row["grade"]["pass"] == 1
-    assert row["failed_tool_calls"] == 1
+def _events_with_failures(n):
+    return _bash_events([("make test", "x", i < n) for i in range(n + 1)])
 
+
+FAIL = ("python backfill.py", "RuntimeError: period does not line up", True)
+OK = ("TZ=UTC python backfill.py", "would backfill", False)
+PROBE = ("ls var", "No such file", True)
+READ = ("cat src/periods.py", "...", False)
+
+
+def _costly(calls, after):
+    row, _ = grade.grade_case(_costly_case(), _bash_events(calls), "", {}, after, {}, 1.0)
+    return row
+
+
+def test_costly_capture_graded_when_the_fix_took_several_calls():
+    saved = {"m.md": ("b", "backfills need TZ=UTC")}
+    row = _costly([FAIL, READ, PROBE, OK], saved)
+    assert row["discovery_cost"] == 3 and row["grade"]["costly_capture"] == 1 and row["grade"]["pass"] == 1
+    row = _costly([FAIL, READ, PROBE, OK], {})
+    assert row["grade"]["costly_capture"] == 0 and row["grade"]["pass"] == 0
+
+
+def test_costly_capture_not_graded_when_cheap_or_avoided():
+    assert "costly_capture" not in _costly([READ, OK], {})["grade"]          # read first, no failure
+    assert "costly_capture" not in _costly([FAIL, OK], {})["grade"]          # fixed at once
+    assert "costly_capture" not in _costly([PROBE, PROBE, READ, OK], {})["grade"]  # probes before any attempt
+
+
+def test_masked_failure_still_counts_and_a_run_that_never_succeeds_is_charged():
+    masked = ("python backfill.py; ls -la var", "RuntimeError: period does not line up\ntotal 0", False)
+    assert _costly([masked, READ, READ, OK], {})["discovery_cost"] == 3
+    assert _costly([FAIL, READ, READ], {})["discovery_cost"] == 3
 
 HARD = {c["id"]: c for c in map(json.loads, (HERE / "cases_hard.jsonl").read_text().splitlines())}
 

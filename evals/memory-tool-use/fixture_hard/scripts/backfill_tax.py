@@ -2,18 +2,12 @@
 import argparse
 import os
 import sys
-from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.billing.periods import month_window  # noqa: E402
 
 MAX_SAFE_BATCH = 500
-
-
-def month_window(month):
-    start = datetime.strptime(month, "%Y-%m")
-    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
-    # finalized_at is stored as naive UTC; see docs/ops/backfills.md
-    if os.environ.get("TZ") != "UTC":
-        raise RuntimeError(f"month window for {month} is ambiguous (zone not pinned)")
-    return start, end
 
 
 def main():

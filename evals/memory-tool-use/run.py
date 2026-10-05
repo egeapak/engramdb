@@ -26,6 +26,7 @@ import json
 import os
 import random
 import shutil
+import sqlite3
 import signal
 import subprocess
 import sys
@@ -119,6 +120,9 @@ def case_env(tmp, args):
     env["ENGRAMDB_CONFIG_DIR"] = str(tmp / "engram-config")
     env["ENGRAMDB_DAEMON_SOCKET"] = str(tmp / "daemon.sock")
     env["ENGRAMDB_OFFLINE"] = "1"  # models are pre-staged; never download mid-run
+    # The fixture's ops host runs in Berlin. dc-backfill-tz depends on it: the
+    # backfill only works with TZ=UTC, and nothing in the repo says so.
+    env["TZ"] = "Europe/Berlin"
     if args.ort_dylib:
         env["ORT_DYLIB_PATH"] = args.ort_dylib
     (tmp / "claude-config").mkdir()
@@ -149,11 +153,31 @@ def install_engram_md(ws):
     (claude_dir / "CLAUDE.md").write_text("@ENGRAM.md\n")
 
 
+def stale_dev_db(ws, applied=4):
+    """Leave a preview database from an older checkout in var/ (git-ignored).
+
+    dc-seed-dev depends on it: the database exists, so nothing says to create
+    it, but it predates migration 0005, so seed_dev.py fails on the missing
+    refunds table and swallows the error. Only running migrate_dev.py fixes it.
+    """
+    db = ws / "var" / "dev.sqlite3"
+    db.parent.mkdir()
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY)")
+    for path in sorted((ws / "migrations").glob("*.sql"))[:applied]:
+        conn.executescript(path.read_text())
+        conn.execute("INSERT INTO schema_migrations VALUES (?)", (path.name,))
+    conn.commit()
+    conn.close()
+
+
 def setup_workspace(tmp, env, engram_md=False):
     ws = tmp / "ledgerline"
     shutil.copytree(HERE / FIXTURES[FIXTURE["name"]].get("dir", "fixture"), ws)
     if engram_md:
         install_engram_md(ws)
+    if FIXTURE["name"] == "hard":
+        stale_dev_db(ws)
     git = lambda *a: sh(["git", *a], ws, env)
     git("init", "-q", "-b", "main")
     git("remote", "add", "origin", "https://git.example.com/acme/ledgerline.git")

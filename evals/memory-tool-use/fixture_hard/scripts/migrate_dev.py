@@ -1,4 +1,4 @@
-"""Create or update the local preview database (var/dev.sqlite3) from migrations/."""
+"""Apply migrations/ to the local preview database (var/dev.sqlite3)."""
 import sqlite3
 from pathlib import Path
 

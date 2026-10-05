@@ -1,4 +1,4 @@
-"""Load demo invoices into the local preview database (var/dev.sqlite3)."""
+"""Load demo invoices and refunds into the local preview database (var/dev.sqlite3)."""
 import os
 import sqlite3
 import sys
@@ -6,7 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "var" / "dev.sqlite3"
-DEMO = [(f"inv_demo_{i:02d}", f"cus_demo_{i % 4}", 1000 * i) for i in range(1, 13)]
+INVOICES = [(f"inv_demo_{i:02d}", f"cus_demo_{i % 4}", 1000 * i) for i in range(1, 13)]
+REFUNDS = [(f"ref_demo_{i}", f"inv_demo_{i:02d}", 500) for i in (2, 5, 9)]
 
 
 def main():
@@ -16,19 +17,17 @@ def main():
         return 1
     DB.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB)
-    loaded = 0
     try:
         conn.execute("DELETE FROM invoices")
-        for row in DEMO:
-            conn.execute("INSERT INTO invoices (id, customer_id, subtotal_cents) VALUES (?, ?, ?)", row)
-            loaded += 1
+        conn.execute("DELETE FROM refunds")
+        conn.executemany("INSERT INTO invoices (id, customer_id, subtotal_cents) VALUES (?, ?, ?)", INVOICES)
+        conn.executemany("INSERT INTO refunds (id, invoice_id, refunded_cents) VALUES (?, ?, ?)", REFUNDS)
         conn.commit()
     except sqlite3.Error:
-        pass
-    if loaded != len(DEMO):
-        print(f"seed failed: demo data did not load ({loaded}/{len(DEMO)} invoices)", file=sys.stderr)
+        conn.rollback()
+        print("seed failed: demo data did not load", file=sys.stderr)
         return 1
-    print(f"loaded {loaded} demo invoices into {DB.relative_to(ROOT)}")
+    print(f"loaded {len(INVOICES)} demo invoices and {len(REFUNDS)} refunds into {DB.relative_to(ROOT)}")
     return 0
 
 

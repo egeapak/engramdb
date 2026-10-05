@@ -1,10 +1,10 @@
 import json
-import os
 from decimal import Decimal
 from pathlib import Path
 
+FX_DIR = Path(__file__).resolve().parent / "fixtures" / "fx"
+
 
 def load_rates(day):
-    root = Path(os.environ["LEDGERLINE_FX_FIXTURES"])
-    with open(root / f"{day}.json") as f:
+    with open(FX_DIR / f"{day}.json") as f:
         return {code: Decimal(rate) for code, rate in json.load(f)["rates"].items()}

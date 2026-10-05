@@ -184,6 +184,30 @@ def added_code(diff):
     return "\n".join(out)
 
 
+COSTLY_MIN_CALLS = 3
+
+
+def discovery_cost(tools, attempt_re, fail_re):
+    """Tool calls spent from the first failed run of the task command to its first success.
+
+    An attempt is a Bash call whose command matches `attempt_re`. It failed when
+    the tool reported an error or its output matches `fail_re`, so a chained
+    `; ls` that makes the shell exit 0 cannot hide the failure. Probes before
+    the first failed attempt cost nothing: reading first is the right habit. A
+    run that never succeeds is charged up to its end.
+    """
+    first_fail = None
+    for i, s in enumerate(tools):
+        if s["name"] != "Bash" or not re.search(attempt_re, s["input"].get("command", "")):
+            continue
+        failed = s["result"]["is_error"] or bool(re.search(fail_re, s["result"]["text"]))
+        if failed and first_fail is None:
+            first_fail = i
+        elif not failed and first_fail is not None:
+            return i - first_fail
+    return 0 if first_fail is None else len(tools) - first_fail
+
+
 def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     exp = case["expect"]
     steps, hooks, init, final = parse_events(events)
@@ -217,9 +241,9 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         captured = any(_contains_any(t, exp["create_terms"]) for t in new_or_changed)
         if "costly" in case["tags"]:
             # A fact found mid-task must be saved only when finding it was
-            # costly: two or more failed tool calls in this run. Found at
-            # once, saving it is the agent's call and is not graded.
-            if failed_calls >= 2:
+            # costly: the task command failed and the fix took several calls.
+            # Found at once, saving it is the agent's call and is not graded.
+            if discovery_cost(tools, exp["attempt_re"], exp["fail_re"]) >= COSTLY_MIN_CALLS:
                 g["costly_capture"] = int(captured)
         else:
             g["implicit_capture" if "implicit" in case["tags"] else "explicit_create"] = int(captured)
@@ -271,6 +295,8 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         "out_tokens": usage.get("output_tokens"),
         "wrote_auto_memory": int(bool(gaps["auto_memory_writes"])),
         "failed_tool_calls": failed_calls,
+        "discovery_cost": (discovery_cost(tools, exp["attempt_re"], exp["fail_re"])
+                           if "costly" in case["tags"] else None),
         "usage": usage,
         "meta": {"gaps": gaps, "seeded_ids": seeded_ids, "model_usage": final.get("modelUsage"),
                  "claude_code_version": init.get("claude_code_version")},
