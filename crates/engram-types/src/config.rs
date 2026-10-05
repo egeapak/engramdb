@@ -840,9 +840,11 @@ pub struct EmbeddingsConfig {
     /// [`EmbeddingsConfig::resolved_pool_size`] to `cores/2` for long-lived
     /// multi-tenant contexts (daemon / MCP server); one-shot CLI runs pass
     /// `1` explicitly regardless. `Some(1)` forces a single session;
-    /// `Some(n)` pins the pool to `n`. Embedding uses fastembed's own
-    /// internal threadpool, so the `pool_size × intra_threads ≤ cores`
-    /// constraint that bounds the NLI/T5 sessions does not apply here.
+    /// `Some(n)` pins the pool to `n`. Each pooled session gets
+    /// `cores / pool_size` intra-op threads
+    /// ([`EmbeddingsConfig::session_intra_threads`]), the same
+    /// `pool_size × intra_threads ≤ cores` rule that bounds the NLI/T5
+    /// sessions.
     #[serde(default)]
     pub pool_size: Option<usize>,
 }
@@ -883,6 +885,29 @@ impl EmbeddingsConfig {
         self.pool_size
             .unwrap_or((cores / 2).max(1))
             .clamp(1, cores.max(1))
+    }
+
+    /// Intra-op thread count for each session of an embedding pool of
+    /// `pool_size` on a machine with `cores` logical CPUs. `None` means
+    /// "leave ONNX Runtime's default".
+    ///
+    /// - A single session (`pool_size <= 1`, the CLI) keeps ORT's default,
+    ///   which uses every core and is the fastest single-session setup.
+    /// - A pool gets `cores / pool_size` threads per session (at least 1),
+    ///   so the sessions never compete for the same cores.
+    ///
+    /// Leaving ORT's default on every pooled session was measured as the
+    /// worst configuration (4-vCPU Xeon, MiniLM-L12 uint8): with the default
+    /// pool of 2, one caller got 27 doc/s against 56 for a single session,
+    /// because each session's full-size, spin-waiting threadpool competes
+    /// with the other's. With 2 threads per session the same pool does
+    /// 42 doc/s for one caller and 81–83 doc/s at 4–8 callers (vs 20–28).
+    /// See `experiments/inference-engines/README.md`.
+    ///
+    /// `ENGRAMDB_ONNX_INTRA_THREADS`, when set, overrides this; the caller
+    /// applies it (this crate does not read the environment).
+    pub fn session_intra_threads(pool_size: usize, cores: usize) -> Option<usize> {
+        (pool_size > 1).then(|| (cores / pool_size).max(1))
     }
 }
 
@@ -1052,9 +1077,11 @@ impl Default for RerankConfig {
 ///
 /// `strategy` selects how a memory's title is derived when the caller
 /// doesn't supply one explicitly:
-/// - `keyword` (default): RAKE keyword extraction — in-process, no model,
-///   negligible cost; never cached/pooled.
-/// - `t5`: abstractive T5-small summarization. The model session is
+/// - `keyword`: RAKE keyword extraction — in-process, no model,
+///   negligible cost; never cached/pooled. This is [`TitleStrategy`]'s own
+///   `Default`, which the one-shot CLI uses.
+/// - `t5` (config default, see [`default_title_strategy`]): abstractive
+///   T5-small summarization. The model session is
 ///   expensive (encoder + decoder ONNX init), so when this is configured
 ///   the daemon / MCP server loads it **once** into the provider bundle
 ///   (and pools it) instead of rebuilding it on every `create`.
@@ -3446,6 +3473,34 @@ weight = 0.7
         assert_eq!(cfg.title.pool_size, Some(3));
         assert_eq!(cfg.title.resolved_pool_size(8), 3);
         assert_eq!(cfg.title.resolved_pool_size(2), 2); // clamp down to cores
+    }
+
+    #[test]
+    fn embeddings_session_intra_threads_partition_cores() {
+        // A single session keeps ONNX Runtime's own default.
+        assert_eq!(EmbeddingsConfig::session_intra_threads(1, 8), None);
+        assert_eq!(EmbeddingsConfig::session_intra_threads(0, 8), None);
+        // A pool splits the cores so sessions never compete for them.
+        assert_eq!(EmbeddingsConfig::session_intra_threads(2, 4), Some(2));
+        assert_eq!(EmbeddingsConfig::session_intra_threads(4, 8), Some(2));
+        // Integer division floors.
+        assert_eq!(EmbeddingsConfig::session_intra_threads(3, 8), Some(2));
+        // Never zero, even for a pool larger than the core count.
+        assert_eq!(EmbeddingsConfig::session_intra_threads(4, 2), Some(1));
+        assert_eq!(EmbeddingsConfig::session_intra_threads(2, 0), Some(1));
+        // The auto-sized pool (cores/2) never oversubscribes: a pool of one
+        // (cores < 4) keeps ORT's default, anything larger gets 2 threads
+        // per session.
+        for cores in [1usize, 2, 3, 4, 8, 16, 32] {
+            let pool = EmbeddingsConfig::default().resolved_pool_size(cores);
+            match EmbeddingsConfig::session_intra_threads(pool, cores) {
+                None => assert_eq!(pool, 1, "cores={cores}"),
+                Some(intra) => {
+                    assert_eq!(intra, 2, "cores={cores}");
+                    assert!(pool * intra <= cores, "{pool} x {intra} > {cores}");
+                }
+            }
+        }
     }
 
     #[test]

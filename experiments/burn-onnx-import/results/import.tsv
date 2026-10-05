@@ -1,0 +1,11 @@
+minilm-fp32	compiles	15.2	
+minilm-uint8	codegen-failed	0.1	[31mERROR[0m [2mburn_onnx::logger[0m[2m:[0m PANIC => panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-onnx-0.21.0/src/model_gen.rs:349:33:
+reranker-fp32	compiles	13.6	
+reranker-uint8	codegen-failed	0.1	[31mERROR[0m [2mburn_onnx::logger[0m[2m:[0m PANIC => panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-onnx-0.21.0/src/model_gen.rs:349:33:
+nli-fp32	compiles	33.1	
+nli-int8	codegen-failed	0.5	[31mERROR[0m [2mburn_onnx::logger[0m[2m:[0m PANIC => panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-onnx-0.21.0/src/model_gen.rs:349:33:
+t5-encoder-fp32	compiles	13.7	
+t5-encoder-int8	codegen-failed	0.1	[31mERROR[0m [2mburn_onnx::logger[0m[2m:[0m PANIC => panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-onnx-0.21.0/src/model_gen.rs:349:33:
+t5-decoder-fp32	compiles	15.8	
+t5-decoder-int8	codegen-failed	0.1	[31mERROR[0m [2mburn_onnx::logger[0m[2m:[0m PANIC => panicked at /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-onnx-0.21.0/src/model_gen.rs:349:33:
+t5-decoder-past-fp32	compiles	13.7	

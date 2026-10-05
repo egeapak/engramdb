@@ -10,9 +10,17 @@
 //! Measured on an 8-core Apple Silicon box (int8 all-MiniLM), a pool of
 //! `cores/2` delivers ~+166–195% aggregate throughput at 4–8 concurrent
 //! callers over a single session, and beats a pool of 2 on both throughput
-//! and p99. fastembed manages its own internal threadpool, so the
-//! `pool_size × intra_threads ≤ cores` rule that bounds the direct-ORT
-//! NLI/T5 sessions does not constrain the embedding pool.
+//! and p99.
+//!
+//! The members must split the cores between them: each is built with
+//! `cores / pool_size` intra-op threads
+//! (`EmbeddingsConfig::session_intra_threads`), the same
+//! `pool_size × intra_threads ≤ cores` rule as the NLI/T5 pools. Leaving
+//! every member on ONNX Runtime's default threadpool (the previous
+//! behavior) made the pool *slower* than one session on a 4-vCPU x86 host:
+//! 27 vs 56 doc/s for a single caller and 20–28 doc/s at 4–8 callers,
+//! against 42 and 81–83 doc/s with the split (MiniLM-L12 uint8,
+//! `experiments/inference-engines/README.md`).
 
 use super::EmbeddingProvider;
 use anyhow::Result;

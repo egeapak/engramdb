@@ -21,7 +21,8 @@
 //!    Run with `ENGRAMDB_BENCH_WORKLOADS=lever_e`.
 //! 7. **Part B — prepacked_weights A/B** — warm and concurrent latency with vs
 //!    without PrepackedWeights for NLI and T5 (the two Mutex-guarded direct-ort
-//!    sessions now default-on). Run with `ENGRAMDB_BENCH_WORKLOADS=prepacked_ab`.
+//!    sessions). Production does NOT ship prepacked; this A/B is the evidence.
+//!    Run with `ENGRAMDB_BENCH_WORKLOADS=prepacked_ab`.
 //!
 //! Workloads: embedding single + batch16 (all-MiniLM-L6-v2), NLI
 //! contradiction (DeBERTa-v3-xsmall), and T5 title generation
@@ -654,7 +655,7 @@ async fn bench_prepacked_ab() {
             .expect("nli tokenizer")
     };
 
-    // NLI session WITHOUT prepacked weights (legacy path).
+    // NLI session WITHOUT prepacked weights (mirrors src/nli/onnx.rs).
     let nli_without = {
         let session = Session::builder()
             .expect("session builder")
@@ -669,7 +670,7 @@ async fn bench_prepacked_ab() {
         (Arc::new(Mutex::new(session)), Arc::new(tokenizer))
     };
 
-    // NLI session WITH prepacked weights (new path — mirrors src/nli/onnx.rs).
+    // NLI session WITH prepacked weights (the variant under test).
     let nli_with = {
         let weights = PrepackedWeights::new();
         let session = Session::builder()
@@ -845,9 +846,8 @@ async fn bench_prepacked_ab() {
         );
     }
 
-    // T5 A/B: use the production wrappers (OnnxNliProvider and T5TitleGenerator)
-    // since both now always use prepacked. Instead, A/B by building two T5
-    // generators via raw ort for "without" vs our wrapper for "with".
+    // T5 A/B: build both encoder/decoder pairs via raw ort so the only
+    // difference is PrepackedWeights (production wrappers ship without it).
     println!("\n  [T5 warm latency: WITHOUT vs WITH prepacked_weights]");
 
     let (enc_path, dec_path, tok_path) = {
@@ -870,7 +870,7 @@ async fn bench_prepacked_ab() {
 
     let t5_tok = Arc::new(tokenizers::Tokenizer::from_file(&tok_path).expect("t5 tokenizer"));
 
-    // T5 WITHOUT prepacked.
+    // T5 WITHOUT prepacked (mirrors src/title/t5.rs).
     let t5_enc_without = Arc::new(Mutex::new(
         Session::builder()
             .expect("sb")
@@ -892,7 +892,7 @@ async fn bench_prepacked_ab() {
             .expect("dec without prepacked"),
     ));
 
-    // T5 WITH prepacked (mirrors src/title/t5.rs).
+    // T5 WITH prepacked (the variant under test).
     let enc_weights = PrepackedWeights::new();
     let t5_enc_with = Arc::new(Mutex::new(
         Session::builder()
