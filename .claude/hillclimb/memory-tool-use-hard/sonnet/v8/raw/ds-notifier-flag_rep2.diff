@@ -1,0 +1,46 @@
+diff --git a/services/notifier/notifier/email.py b/services/notifier/notifier/email.py
+index 0627713..0d1306c 100644
+--- a/services/notifier/notifier/email.py
++++ b/services/notifier/notifier/email.py
+@@ -1,8 +1,17 @@
++import os
++
+ from .provider import send
+ from .render import render
+ 
+ 
++def receipt_email_enabled():
++    return os.environ.get("NOTIFIER_FF_RECEIPT_EMAIL") == "1"
++
++
+ def send_receipt(invoice_id, to_addr, total_minor):
++    """Send the receipt email; returns None without sending while the flag is off."""
++    if not receipt_email_enabled():
++        return None
+     body = render("receipt", invoice_id=invoice_id, total_minor=total_minor)
+     return send(to_addr, "Your receipt", body)
+ 
+diff --git a/services/notifier/tests/test_email.py b/services/notifier/tests/test_email.py
+index 19300da..1765d40 100644
+--- a/services/notifier/tests/test_email.py
++++ b/services/notifier/tests/test_email.py
+@@ -3,8 +3,18 @@ from unittest import mock
+ from notifier import email
+ 
+ 
+-def test_send_receipt_uses_receipt_template():
++def test_send_receipt_uses_receipt_template(monkeypatch):
++    monkeypatch.setenv("NOTIFIER_FF_RECEIPT_EMAIL", "1")
+     with mock.patch.object(email, "render", return_value="<p>hi</p>") as render, \
+             mock.patch.object(email, "send", return_value="msg_1"):
+         assert email.send_receipt("inv_1", "a@example.com", 1200) == "msg_1"
+     render.assert_called_once_with("receipt", invoice_id="inv_1", total_minor=1200)
++
++
++def test_send_receipt_skipped_when_flag_off(monkeypatch):
++    monkeypatch.delenv("NOTIFIER_FF_RECEIPT_EMAIL", raising=False)
++    with mock.patch.object(email, "render") as render, \
++            mock.patch.object(email, "send") as send:
++        assert email.send_receipt("inv_1", "a@example.com", 1200) is None
++    render.assert_not_called()
++    send.assert_not_called()

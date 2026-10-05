@@ -1,0 +1,100 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..ebc3856 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,92 @@
++"""Write the month's finalized invoices to a CSV that Finance imports.
++
++Format required by the Finance import tool (German locale): ';' delimiter,
++DD.MM.YYYY dates, integer cents, UTF-8 without BOM.
++"""
+ import argparse
++import csv
+ import os
++import sys
++from datetime import datetime, timedelta
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++sys.path.insert(0, str(ROOT))
++from src.billing.periods import month_window  # noqa: E402
++
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++# Drafts have finalized_at NULL. Zero-amount invoices are kept on purpose.
++QUERY = """
++    SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at
++    FROM invoices
++    WHERE finalized_at >= %s AND finalized_at < %s
++    ORDER BY finalized_at, id
++"""
++
++
++def default_month(today=None):
++    """The previous calendar month, as "YYYY-MM" (the cron runs on the 2nd)."""
++    first = (today or datetime.utcnow()).replace(day=1)
++    return (first - timedelta(days=1)).strftime("%Y-%m")
++
++
++def fetch_rows(database_url, start, end):
++    import psycopg
++
++    # Deployed databases sit behind a transaction-mode pooler: no prepared statements.
++    with psycopg.connect(database_url, prepare_threshold=None) as conn:
++        return conn.execute(QUERY, (start, end)).fetchall()
++
++
++def write_csv(path, rows):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with open(path, "w", newline="", encoding="utf-8") as f:
++        writer = csv.writer(f, delimiter=";", lineterminator="\r\n")
++        writer.writerow(HEADER)
++        for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++            writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%d.%m.%Y")])
++
++
++def upload(path, bucket, key):
++    import boto3
++
++    boto3.client("s3").upload_file(str(path), bucket, key)
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--output-dir", default=str(ROOT / "var" / "exports"))
++    parser.add_argument("--dry-run", action="store_true", help="write the CSV locally, do not upload")
+     args = parser.parse_args()
++
++    month = args.month or default_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    database_url = os.environ.get("DATABASE_URL")
++    if not database_url:
++        print("DATABASE_URL is not set", file=sys.stderr)
++        return 2
++    if args.env == "staging" and not args.dry_run:
++        # EXPORT_BUCKET points at the production bucket in staging.
++        print("refusing to export staging without --dry-run", file=sys.stderr)
++        return 2
++
++    start, end = month_window(month)
++    rows = fetch_rows(database_url, start, end)
++    key = f"exports/{month}/invoices.csv"
++    path = Path(args.output_dir) / args.env / key
++    write_csv(path, rows)
++    print(f"exporting {args.env} {month}: {len(rows)} invoices -> {path}")
++
++    if args.dry_run:
++        print(f"dry run: not uploading to {bucket}/{key}")
++    else:
++        upload(path, bucket, key)
++        print(f"uploaded to {bucket}/{key}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

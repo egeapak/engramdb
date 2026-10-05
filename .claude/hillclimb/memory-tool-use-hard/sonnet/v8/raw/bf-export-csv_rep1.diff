@@ -1,0 +1,96 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..22f20ab 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,89 @@
+ import argparse
++import csv
+ import os
++import sqlite3
++import sys
++from datetime import date, datetime
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++
++# Finance's import tool runs with a German locale: ';' delimiter, DD.MM.YYYY dates.
++DELIMITER = ";"
++DATE_FORMAT = "%d.%m.%Y"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++    "WHERE finalized_at IS NOT NULL AND finalized_at >= {p} AND finalized_at < {p} "
++    "ORDER BY finalized_at, id"
++)
++
++
++def previous_month(today=None):
++    today = today or date.today()
++    return f"{today.year - 1}-12" if today.month == 1 else f"{today.year}-{today.month - 1:02d}"
++
++
++def bounds(month):
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_finalized(month):
++    """Every finalized invoice of the month, drafts (finalized_at NULL) excluded."""
++    start, end = bounds(month)
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg  # deployed environments: Postgres behind the pooler; one short read
++
++        with psycopg.connect(url) as conn:
++            return conn.execute(QUERY.format(p="%s"), (start, end)).fetchall()
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        return conn.execute(QUERY.format(p="?"), (start.isoformat(" "), end.isoformat(" "))).fetchall()
++    finally:
++        conn.close()
++
++
++def to_row(record):
++    invoice_id, customer_id, subtotal, tax, finalized_at = record
++    if isinstance(finalized_at, str):
++        finalized_at = datetime.fromisoformat(finalized_at)
++    return [invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime(DATE_FORMAT)]
++
++
++def write_csv(path, records):
++    path.parent.mkdir(parents=True, exist_ok=True)
++    # UTF-8 without BOM; newline="" so csv controls line endings.
++    with open(path, "w", newline="", encoding="utf-8") as f:
++        writer = csv.writer(f, delimiter=DELIMITER)
++        writer.writerow(HEADER)
++        writer.writerows(to_row(r) for r in records)
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+     parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--out-dir", default=str(ROOT / "var" / "exports"), help="local directory for the CSV")
+     args = parser.parse_args()
++    month = args.month or previous_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    print(f"exporting {args.env} {month} to {bucket} (dry_run={args.dry_run})")
++
++    records = fetch_finalized(month)
++    path = Path(args.out_dir) / month / "invoices.csv"
++    if args.dry_run:
++        print(f"dry run: would write {len(records)} invoices to {path} (nothing written)")
++        return 0
++    write_csv(path, records)
++    print(f"wrote {len(records)} invoices to {path}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

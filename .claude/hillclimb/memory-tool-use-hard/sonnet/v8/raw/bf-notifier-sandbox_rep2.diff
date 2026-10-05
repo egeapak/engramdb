@@ -1,0 +1,68 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..e23cd4f
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,62 @@
++"""Integration test: sends a real email through the provider sandbox.
++
++Needs the sandbox key in MAIL_API_KEY (dev secrets store). The sandbox is
++rate-limited (2/s) and capped at 500 messages/day for the whole team, so this
++sends exactly one message. It silently drops mail to any recipient outside
++@sink.acme.test, so we send to the sink domain and read it back from the sink
++inbox API.
++
++Run from services/notifier:
++    python -m pytest --import-mode=importlib tests/test_email_integration.py
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++# NOTE: the sink inbox endpoint is not documented in this repo; confirm the URL
++# and response shape against the provider docs and override via env if needed.
++SINK_INBOX_URL = os.environ.get(
++    "MAIL_SINK_INBOX_URL", "https://api.mailprovider.example/v3/sink/messages"
++)
++
++pytestmark = pytest.mark.skipif(
++    not os.environ.get("MAIL_API_KEY"), reason="MAIL_API_KEY (sandbox key) not set"
++)
++
++
++def _find_in_sink(to_addr, message_id, timeout=30, interval=2):
++    headers = {"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"}
++    deadline = time.monotonic() + timeout
++    while time.monotonic() < deadline:
++        resp = requests.get(
++            SINK_INBOX_URL,
++            headers=headers,
++            params={"to": to_addr},
++            timeout=10,
++        )
++        resp.raise_for_status()
++        for msg in resp.json().get("messages", []):
++            if msg.get("id") == message_id:
++                return msg
++        time.sleep(interval)
++    return None
++
++
++def test_send_receipt_is_delivered_to_sandbox_sink():
++    # Unique recipient and invoice id so we only match our own message.
++    token = uuid.uuid4().hex[:12]
++    to_addr = f"receipts+{token}@sink.acme.test"
++    invoice_id = f"inv_it_{token}"
++
++    message_id = email.send_receipt(invoice_id, to_addr, 1200)
++    assert message_id
++
++    msg = _find_in_sink(to_addr, message_id)
++    assert msg is not None, f"{message_id} not delivered to sink for {to_addr}"
++    assert msg.get("subject") == "Your receipt"
++    assert invoice_id in (msg.get("html") or msg.get("body") or "")

@@ -1,0 +1,32 @@
+diff --git a/src/billing/money.py b/src/billing/money.py
+index 21f39c6..daf11c8 100644
+--- a/src/billing/money.py
++++ b/src/billing/money.py
+@@ -6,6 +6,6 @@ class Money:
+     cents: int
+     currency: str = "USD"
+ 
+-    def __add__(self, other):
++    def __add__(self, other: "Money") -> "Money":
+         assert self.currency == other.currency
+         return Money(self.cents + other.cents, self.currency)
+diff --git a/src/billing/tax.py b/src/billing/tax.py
+index 7f21856..1016b66 100644
+--- a/src/billing/tax.py
++++ b/src/billing/tax.py
+@@ -1,12 +1,13 @@
+ from decimal import Decimal
++from typing import Any, Iterable, Mapping
+ 
+ 
+-def line_total(lines):
++def line_total(lines: Iterable[Mapping[str, Any]]) -> int:
+     x = 0
+     for line in lines:
+         x += line["quantity"] * line["unit_cents"]
+     return x
+ 
+ 
+-def tax_for(amount_cents, rate):
++def tax_for(amount_cents: int, rate: Decimal | float) -> int:
+     raise NotImplementedError

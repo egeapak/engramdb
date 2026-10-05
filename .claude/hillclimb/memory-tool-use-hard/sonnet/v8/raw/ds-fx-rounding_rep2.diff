@@ -1,0 +1,20 @@
+diff --git a/src/billing/currency.py b/src/billing/currency.py
+index 3d11ab4..9dee481 100644
+--- a/src/billing/currency.py
++++ b/src/billing/currency.py
+@@ -1,5 +1,5 @@
+ """Currency conversion for multi-currency invoices."""
+-from decimal import Decimal
++from decimal import ROUND_FLOOR, Decimal
+ 
+ 
+ def fetch_rates(day):
+@@ -9,4 +9,7 @@ def fetch_rates(day):
+ 
+ def convert(amount_cents, rate):
+     """Convert an amount in minor units with a Decimal rate; returns minor units."""
+-    raise NotImplementedError
++    # Treasury (April 2026): round toward negative infinity so a conversion
++    # never credits more than the rate allows. Not the same as tax rounding.
++    converted = Decimal(amount_cents) * rate
++    return int(converted.to_integral_value(rounding=ROUND_FLOOR))

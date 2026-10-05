@@ -1,0 +1,62 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..ed0ea46
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,56 @@
++"""Integration test: send a receipt through the provider sandbox and read it back.
++
++Needs the sandbox key in MAIL_API_KEY and the sink inbox API location in
++SINK_INBOX_URL. The sandbox silently drops mail to anything outside
++@sink.acme.test, so we must send there. It is capped at 500 messages/day for
++the whole team: this test sends exactly one.
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = pytest.mark.integration
++
++RECIPIENT = "receipts@sink.acme.test"
++POLL_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++
++@pytest.fixture(autouse=True)
++def _require_sandbox():
++    for var in ("MAIL_API_KEY", "SINK_INBOX_URL"):
++        if not os.environ.get(var):
++            pytest.skip(f"{var} not set")
++
++
++def _find_in_sink(message_id):
++    deadline = time.monotonic() + POLL_TIMEOUT_S
++    while time.monotonic() < deadline:
++        resp = requests.get(
++            os.environ["SINK_INBOX_URL"],
++            headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++            params={"to": RECIPIENT},
++            timeout=10,
++        )
++        resp.raise_for_status()
++        for msg in resp.json():
++            if msg.get("id") == message_id:
++                return msg
++        time.sleep(POLL_INTERVAL_S)
++    return None
++
++
++def test_send_receipt_is_delivered_to_sandbox_sink():
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:8]}"
++
++    message_id = email.send_receipt(invoice_id, RECIPIENT, 1200)
++
++    assert message_id
++    delivered = _find_in_sink(message_id)
++    assert delivered is not None, f"{message_id} not delivered to {RECIPIENT} within {POLL_TIMEOUT_S}s"
++    assert delivered.get("subject") == "Your receipt"
