@@ -126,10 +126,11 @@ def case_env(tmp, args):
     if args.ort_dylib:
         env["ORT_DYLIB_PATH"] = args.ort_dylib
     (tmp / "claude-config").mkdir()
-    # Holds only registry.json. Daemon settings are read from the project's
-    # .engramdb/config.toml, so the daemon runs with the default 900 s idle
-    # timeout and the finally-block in run_case stops it.
+    # The global config dir: registry.json and the global config.toml, which
+    # is where [daemon] lives. The minimum idle timeout (60 s) lets a daemon
+    # that the finally-block in run_one fails to stop reap itself soon.
     (tmp / "engram-config").mkdir()
+    (tmp / "engram-config" / "config.toml").write_text("[daemon]\nidle_timeout_secs = 60\n")
     return env
 
 
@@ -355,8 +356,8 @@ def run_one(case, rep, args, out_dir):
         append_jsonl(out_dir / "errors.jsonl", {**attempt, "failure_class": cls, "error": str(exc)[-2000:]})
         return None
     finally:
-        # Each case spawns its own daemon (about 400 MB) with the default
-        # 900 s idle timeout. Stop it explicitly; otherwise a full run keeps
+        # Each case spawns its own daemon (about 400 MB). Stop it explicitly
+        # rather than wait 60 s for it to reap; otherwise a full run keeps
         # dozens of them alive at once.
         if "env" in locals():
             subprocess.run(["engramdb", "daemon", "stop"], env=env, capture_output=True, timeout=30)
