@@ -300,6 +300,18 @@ After the PR was opened, two reviews looked for anything fitted too closely to t
   - `nh-payout-retry-hypothetical` gained its target, so a hook delivery can count.
 - **Not changed:** treating Bash writes (`sed -i`, `> file`) as edits. It would close a false-pass risk, but a redirect to an output file would then cause false failures, and the review found no run it mattered for.
 
+**Validation (v9, v9b).** The product changes were checked with gates written down before the run:
+
+| Check | Result |
+|---|---|
+| Hard challenge/update cases (6 × 2, both models) | Sonnet 12/12, Opus 12/12 (v6+v8: 100%) |
+| Hard negatives (8 × 2, both models) | no false create and no spurious revise 16/16 each |
+| Plugin-only Sonnet saves a costly discovery (6 × 5), with the edit rule | 9/10 |
+| Xhard contradiction cases, first wording ("not clearly newer") | Opus 4/4, **Sonnet 2/4** |
+| Same, after flipping to "clearly older" (v9b, Sonnet × 3) | Sonnet 12/12, Opus 4/4, no collateral challenge 16/16 |
+
+The first wording failed because hook previews carry no dates, so Sonnet could not tell which source was newer and held back. The flipped wording is kept.
+
 All hard and xhard rounds were re-graded with these rules. The numbers on this page are the re-graded ones. Recorded pass counts rose by 0–4 runs per round (Opus 0–4, Sonnet 0–2), and no keep or reject verdict changed. Rows from before new memory files were recorded can only have a false create lifted when the transcript shows it was a replacement. Phase 1 numbers (`RESULTS.md`) were not re-graded.
 
 ## What I would try next
@@ -307,6 +319,7 @@ All hard and xhard rounds were re-graded with these rules. The numbers on this p
 - **Cross-module memories.** This is the only gap the xhard pilot found. Two levers, measured on the `xm-*` cases:
   1. when a file is edited, also surface memories scoped to the modules it imports;
   2. run the file hook for paths read with Bash `cat`/`head`/`sed -n`.
+- **Dates in hook previews.** Show when each memory was recorded or last verified. In v9 Sonnet asked for this so it could judge whether a source is newer than a memory.
 - **Run `test_grade.py` in CI.** It has 32 tests and makes no API calls. The grader changed several times after the climb, and one wrong pattern silently changes every pass rate.
 - **A full xhard baseline** (40 cases × 3 runs per model) only if one of the levers above is tried. The pilot shows the set is otherwise near its ceiling.
 - **Cost:** cut turns, not text (see v5). The remaining memory turns are 0.5–0.8 per case, so the gain is small.
