@@ -137,7 +137,6 @@ All are below the noise floor:
 
 - **Scope by dependency.** When a file is edited, also surface memories scoped to modules it imports or calls. This fixes `mm-dunning-job`.
 - **Fewer turns, not shorter text.** The remaining memory turns are 0.5–0.8 per case, mostly `query` and `challenge`. Cost work should look there or at task turns, not at prompt length (see v5).
-- **Daemon idle timeout.** During the eval, the embedding daemon did not exit after its idle timeout, so the runner stops it explicitly. A user running many sessions would accumulate daemons, about 400 MB each.
 - **Fixture and grader polish.** Fix the `st-retention` schema gap. Loosen the two forbidden-term checks. Add discovery cases where running is the only way to find the cause.
 - **A third, harder set.** Many more memories (100+), long sessions with compaction, and cross-module tasks. The hard set saturated after two rounds.
 
