@@ -167,8 +167,26 @@ after them are not comparable with the round table above for the changed cases.
 - **A sample of 3 graded runs cannot measure the saving rule.** To measure it, the costly cases need more reps or more cases, not more rounds of this design.
 
 
+**Costly-discovery run (v4d).** All 6 costly cases (the 4 redesigned and 2 new ones: `dc-reconcile-format`, `dc-search-index-cache`), 10 runs per model, on the v4 build. Cost was $11.97 for Opus and $5.37 for Sonnet.
+
+| | Opus | Sonnet |
+|---|---|---|
+| Runs | 60 | 60 |
+| Runs that found the cause | 60 | 41 |
+| Runs graded (costly and found) | 6 | 14 |
+| Graded runs that saved the fact | **4/6** | **0/14** |
+| Runs with any memory write | 47 | **0** |
+
+- **Sonnet never saves a fact it discovered itself.** It made no memory write in any of the 60 runs, including the 41 where it found the cause. It knows the fact is worth keeping: in one run it ended with "I haven't saved anything to memory. I could record that the backfill needs `TZ=UTC` and a batch size of at most 500, if you want."
+  - This is specific to self-discovered facts. When the user states a fact, Sonnet saves it (implicit capture 6/6 in every round).
+- **Opus saves eagerly.** It wrote a memory in 47 of 60 runs, mostly after a cheap discovery, which the rule allows but does not require.
+  - Its 2 graded misses are `dc-seed-dev`: it ran the migrations and seeded, but did not record that seeding needs `migrate_dev.py` first.
+- **Opus is rarely graded.** It investigates efficiently: on the two new cases it compared the file with the script and fixed it in 2 calls. That is below the cost of 3, so those runs are correctly not graded.
+- **19 Sonnet runs never found the cause.** Most of them stopped to ask before a destructive or real step, or worked around the problem. Asking before a destructive step is correct behavior. It is not graded.
+
 ## What I would try next
 
+- **Make Sonnet save what it discovers.** This is the clearest remaining gap: 0 of 14 graded runs, and 0 memory writes in 60. The likely lever is the ENGRAM.md "Store after discovering" line and the routing text. Name the trigger concretely, for example: "a command failed and the cause was not documented". The cases to measure it are in place: `dc-fx-fixtures`, `dc-search-index-cache`, `dc-seed-dev` and `dc-backfill-tz` at 10 runs each.
 - **Fewer turns, not shorter text.** The remaining memory turns are 0.5–0.8 per case, mostly `query` and `challenge`. Cost work should look there or at task turns, not at prompt length (see v5).
 - **File hook on Bash reads.** Consider running the PreToolUse file hook for paths read with Bash `cat`/`sed`/`head`. It is fragile (shell parsing), so measure it on `mm-dunning-job` first.
 - **A third, harder set.** Many more memories (100+), long sessions with compaction, and cross-module tasks. The hard set saturated after two rounds.
