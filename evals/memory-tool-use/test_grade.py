@@ -104,9 +104,13 @@ class Revise(unittest.TestCase):
         self.assertEqual(self.grade([], before={old: ("a", "x")}, after={old: ("a", "x"), new: ("c", "z")}), 0)
 
     def test_create_with_supersedes_is_a_spurious_revise_elsewhere(self):
-        ev = events([(MEM + "create", {"summary": "x", "supersedes": ["abc"]})], "ok")
+        ev = events([(MEM + "create", {"summary": "x", "supersedes": [IDS["logging"]]})], "ok")
         row, _ = grade.grade_case(CASES["pq-tests"], ev, "", {}, {}, IDS, 1.0)
         self.assertEqual(row["grade"]["no_spurious_revise"], 0)
+        # Revising a memory the run made itself is not a revision of the store.
+        ev = events([(MEM + "update", {"id": "01a10a0c-effe-7d52-a732-a3f91f256087"})], "ok")
+        row, _ = grade.grade_case(CASES["pq-tests"], ev, "", {}, {}, IDS, 1.0)
+        self.assertEqual(row["grade"]["no_spurious_revise"], 1)
 
 
 class Signals(unittest.TestCase):
@@ -290,3 +294,33 @@ def test_collateral_revise_of_a_neighbour_fails_a_no_collateral_case():
     ev = events([(mem, hit), (mem, {"id": IDS["tests"]})])
     row, _ = grade.grade_case(case, ev, "", {}, {}, IDS, 1.0)
     assert row["grade"]["no_collateral_revise"] == 0 and row["grade"]["pass"] == 0
+
+
+def test_reading_a_script_is_not_running_it():
+    assert not grade._runs("cat scripts/backfill_tax.py | head", r"backfill_tax\.py")
+    assert not grade._runs("grep -n TZ scripts/backfill_tax.py", r"backfill_tax\.py")
+    assert grade._runs("cd ws && TZ=UTC python scripts/backfill_tax.py --month 2026-09", r"backfill_tax\.py")
+
+
+def test_regex_needles_and_docstrings():
+    assert grade._contains_any("Backfills: TZ must be UTC", [r"re:\bTZ\b.{0,20}\bUTC\b"])
+    diff = '+++ b/a.py\n+"""Uses structlog, not logging."""\n+x = "#tag"  # structlog\n+import logging\n'
+    code = grade.added_code(diff)
+    assert "structlog" not in code and '"#tag"' in code and "import logging" in code
+
+
+def test_replacement_and_renamed_memories_are_not_false_creates():
+    seeded = {"logging": IDS["logging"]}
+    tools = [{"name": MEM + "create", "input": {"summary": "s", "supersedes": [IDS["logging"]]},
+              "result": {"text": '{"id":"01a10a0c-effe-7d52-a732-a3f91f256087","created":true}',
+                         "is_error": False}}]
+    new = ["m/new_01a10a0c-effe-7d52-a732-a3f91f256087.md", f"m/renamed_{IDS['logging']}.md", "m/other_x.md"]
+    assert grade.false_creates(new, tools, seeded) == ["m/other_x.md"]
+
+
+def test_multi_turn_query_counts_against_the_last_turn():
+    steps = [{"kind": "tool", "name": "Edit", "input": {}},
+             {"kind": "user", "text": "turn 2"},
+             {"kind": "tool", "name": MEM + "query", "input": {}},
+             {"kind": "tool", "name": "Edit", "input": {}}]
+    assert grade.first_act(steps) == 2

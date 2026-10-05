@@ -162,8 +162,29 @@ def to_trace(steps, hooks, prompt):
 # ---------------------------------------------------------------- grading
 
 def _contains_any(text, needles):
+    """Case-insensitive substring match; a needle starting with `re:` is a regex."""
     low = text.lower()
-    return any(n.lower() in low for n in needles)
+    return any(re.search(n[3:], text, re.I) if n.startswith("re:") else n.lower() in low
+               for n in needles)
+
+
+def _strip_comment(line, marker):
+    """`line` without its trailing comment; a marker inside a string is kept."""
+    quote = None
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif line.startswith(marker, i):
+            return line[:i]
+        i += 1
+    return line
 
 
 def added_code(diff):
@@ -173,14 +194,33 @@ def added_code(diff):
     lines are not its work, and a comment that names the old value to say
     "not X" is not a use of X.
     """
-    out, comment = [], "#"
+    out, comment, python, docstring = [], "#", False, None
     for line in diff.splitlines():
         if line.startswith("+++ "):
             path = line[4:].removeprefix("b/")
             comment = "--" if path.endswith(".sql") else "#"
+            python, docstring = path.endswith(".py"), None
             out.append(path)
         elif line.startswith("+"):
-            out.append(line[1:].split(comment, 1)[0])
+            code = line[1:]
+            if python:
+                # A docstring is prose about the code, like a comment.
+                kept = ""
+                while code:
+                    if docstring:
+                        end = code.find(docstring)
+                        if end < 0:
+                            code = ""
+                            break
+                        code, docstring = code[end + 3:], None
+                    else:
+                        m = re.search(r"\"\"\"|\'\'\'", code)
+                        if not m:
+                            kept, code = kept + code, ""
+                            break
+                        kept, docstring, code = kept + code[:m.start()], m.group(), code[m.end():]
+                code = kept
+            out.append(_strip_comment(code, comment))
     return "\n".join(out)
 
 
@@ -198,7 +238,7 @@ def discovery_cost(tools, attempt_re, fail_re):
     """
     first_fail = None
     for i, s in enumerate(tools):
-        if s["name"] != "Bash" or not re.search(attempt_re, s["input"].get("command", "")):
+        if s["name"] != "Bash" or not _runs(s["input"].get("command", ""), attempt_re):
             continue
         failed = s["result"]["is_error"] or bool(re.search(fail_re, s["result"]["text"]))
         if failed and first_fail is None:
@@ -206,6 +246,23 @@ def discovery_cost(tools, attempt_re, fail_re):
         elif not failed and first_fail is not None:
             return i - first_fail
     return 0 if first_fail is None else len(tools) - first_fail
+
+
+READ_ONLY = {"cat", "head", "tail", "sed", "grep", "rg", "less", "more", "wc", "ls", "echo",
+             "git", "file", "stat", "awk", "nl", "bat", "diff", "find", "cd"}
+
+
+def _runs(command, attempt_re):
+    """True when a segment of `command` runs (not reads) what `attempt_re` names.
+
+    `cat scripts/x.py` mentions the script; it does not run it, and the
+    script's own failure text in its source must not count as a failed run.
+    """
+    for segment in re.split(r"&&|\|\||;|\||\n", command):
+        words = [w for w in segment.split() if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)]
+        if words and words[0] not in READ_ONLY and re.search(attempt_re, segment):
+            return True
+    return False
 
 
 def costly_and_found(tools, exp):
@@ -219,34 +276,104 @@ def costly_and_found(tools, exp):
     return found and discovery_cost(tools, exp["attempt_re"], exp["fail_re"]) >= COSTLY_MIN_CALLS
 
 
+def first_act(steps):
+    """Index (into the tool calls) of the first edit in the case's last turn.
+
+    In a multi-turn case the fact is needed in the last turn; an edit made in
+    an earlier turn must not turn a correct query at the start of the last
+    turn into a "query after acting".
+    """
+    tools_seen, last_turn = 0, 0
+    for s in steps:
+        if s["kind"] == "user":
+            last_turn = tools_seen
+        elif s["kind"] == "tool":
+            tools_seen += 1
+    tools = [s for s in steps if s["kind"] == "tool"]
+    return next((i for i, s in enumerate(tools) if i >= last_turn and s["name"] in EDIT_TOOLS), None)
+
+
+def read_memory_directly(case, tools, before):
+    """True when a tool call before `before` read the target memory's file
+    (`cat`/Read/grep under `.engramdb/memories`) and got its body back.
+    Bypassing the tools is still consulting the memory."""
+    target = _target_seed(case)
+    if not target:
+        return False
+    probe = " ".join(target["content"].split()[:6])
+    return any(".engramdb/memories" in json.dumps(s["input"])
+               and probe in " ".join(s["result"]["text"].split())
+               for s in tools[:before])
+
+
+def consulted(case, steps, hooks):
+    """(query_before_act, consulted_before_act) for a case that expects a query."""
+    tools = [s for s in steps if s["kind"] == "tool"]
+    first_edit = first_act(steps)
+    query = any(memory_op(s["name"]) in CONSULT for s in tools[:first_edit])
+    return int(query), int(query or hook_delivered_body(case, hooks)
+                           or read_memory_directly(case, tools, first_edit))
+
+
+def _created_id(step):
+    """The id a `create` call returned, if its result says."""
+    m = re.search(r'"id"\s*:\s*"([0-9a-f-]{8,36})"', step["result"]["text"])
+    return m.group(1) if m else None
+
+
+def replacement_ids(tools, seeded_ids):
+    """Ids of memories created to supersede a seeded one: a replacement is a
+    revision of the seeded memory, not a new fact."""
+    ids = []
+    for s in tools:
+        if memory_op(s["name"]) == "create" and s["input"].get("supersedes"):
+            named = {k: s["input"][k] for k in ("supersedes",)}
+            if any(_ids_match(i, named, [o for o in seeded_ids.values() if o != i])
+                   for i in seeded_ids.values()):
+                ids.append(_created_id(s))
+    return [i for i in ids if i]
+
+
+def false_creates(new_files, tools, seeded_ids):
+    """New memory files that are new facts: not a seeded memory's file renamed
+    by an `update`, and not a replacement created with `supersedes`."""
+    keep = list(seeded_ids.values()) + replacement_ids(tools, seeded_ids)
+    return [f for f in new_files if not any(i in Path(f).name for i in keep)]
+
+
+def fact_used(case, answer, diff):
+    """1 when the answer or the diff states the case's fact (every group of
+    `facts_all`)."""
+    exp = case["expect"]
+    text = answer + "\n" + diff
+    ok = _contains_any(text, exp["facts"]) if exp["facts"] else True
+    # Multi-memory tasks: every group must be matched.
+    ok = ok and all(_contains_any(text, group) for group in exp.get("facts_all", []))
+    if case["id"] == "ed-migration-typo":  # the applied migration must stay untouched
+        ok = ok and "migrations/0007_add_customers.sql" not in diff
+    return int(ok)
+
+
 def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     exp = case["expect"]
     steps, hooks, init, final = parse_events(events)
     tools = [s for s in steps if s["kind"] == "tool"]
     mem = [(i, memory_op(s["name"]), s) for i, s in enumerate(tools) if memory_op(s["name"])]
-    first_edit = next((i for i, s in enumerate(tools) if s["name"] in EDIT_TOOLS), None)
     # Every turn's answer: a multi-turn case may state its facts early.
     finals = [e for e in events if e.get("type") == "result"]
     answer = "\n".join(e.get("result") or "" for e in finals)
     g = {}
 
     if exp["query"] is True:
-        g["query_before_act"] = int(any(op in CONSULT and (first_edit is None or i < first_edit) for i, op, _ in mem))
-        g["consulted_before_act"] = int(g["query_before_act"] or hook_delivered_body(case, hooks))
+        g["query_before_act"], g["consulted_before_act"] = consulted(case, steps, hooks)
     if exp["facts"] or exp.get("facts_all"):
-        text = answer + "\n" + diff
-        ok = _contains_any(text, exp["facts"]) if exp["facts"] else True
-        # Multi-memory tasks: every group must be matched.
-        ok = ok and all(_contains_any(text, group) for group in exp.get("facts_all", []))
-        if case["id"] == "ed-migration-typo":  # the applied migration must stay untouched
-            ok = ok and "migrations/0007_add_customers.sql" not in diff
-        g["fact_used"] = int(ok)
+        g["fact_used"] = fact_used(case, answer, diff)
     if exp.get("forbidden"):
         # Added code only: an answer or a comment may rightly say "we moved off X".
         g["no_stale_fact"] = int(not _contains_any(added_code(diff), exp["forbidden"]))
 
     new_or_changed = [text for path, (sha, text) in after.items() if before.get(path, (None,))[0] != sha]
-    new_files = [p for p in after if p not in before]
+    new_files = false_creates([p for p in after if p not in before], tools, seeded_ids)
     failed_calls = sum(1 for s in tools if s["result"]["is_error"])
     if exp["create"] is True:
         captured = any(_contains_any(t, exp["create_terms"]) for t in new_or_changed)
@@ -279,7 +406,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
                 _revises_only(s["input"], seeded_ids, {case.get("target")} | stale_keys())
                 for s in revise_calls))
     elif exp["revise"] is False:
-        g["no_spurious_revise"] = int(all(_revises_stale_only(s["input"], seeded_ids)
+        g["no_spurious_revise"] = int(all(not_spurious(s["input"], seeded_ids, exp)
                                           for s in revise_calls))
 
     graded = [v for k, v in g.items() if k not in NOT_IN_PASS]
@@ -312,6 +439,7 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         "out_tokens": usage.get("output_tokens"),
         "wrote_auto_memory": int(bool(gaps["auto_memory_writes"])),
         "failed_tool_calls": failed_calls,
+        "new_memory_files": new_files,
         "discovery_cost": (discovery_cost(tools, exp["attempt_re"], exp["fail_re"])
                            if "costly" in case["tags"] else None),
         "usage": usage,
@@ -391,14 +519,24 @@ def stale_keys():
 
 def _revises_stale_only(tool_input, seeded_ids):
     """True when every seeded memory this revision names is stale by design.
-    A revision that names no seeded memory at all counts as spurious."""
+    A revision that names no seeded memory (one the run created) is not spurious."""
     stale = stale_keys()
     # The target fields only: `evidence` may quote the id of the newer
     # memory that shows this one is stale.
     target = {k: tool_input[k] for k in ("id", "supersedes") if k in tool_input}
     named = [k for k, i in seeded_ids.items()
              if _ids_match(i, target, [o for o in seeded_ids.values() if o != i])]
-    return bool(named) and all(k in stale for k in named)
+    # A revision of a memory the run made itself is not a revision of the store.
+    return all(k in stale for k in named)
+
+
+def not_spurious(tool_input, seeded_ids, exp):
+    """A revision that does not count against `no_spurious_revise`: of a stale
+    memory, or, when the case asks to save a fact, one that saves that fact
+    into an existing memory."""
+    if exp.get("create") is True and _contains_any(json.dumps(tool_input), exp.get("create_terms", [])):
+        return True
+    return _revises_stale_only(tool_input, seeded_ids)
 
 
 def _revises_only(tool_input, seeded_ids, allowed_keys):

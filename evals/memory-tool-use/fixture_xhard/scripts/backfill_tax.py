@@ -1,4 +1,4 @@
-"""Recompute tax_cents for finalized invoices of one month."""
+"""Fill in tax_cents for invoices of one month that were finalized before 0002 added it."""
 import argparse
 import os
 import sys

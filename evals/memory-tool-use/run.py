@@ -112,7 +112,7 @@ def sh(cmd, cwd, env, timeout=120, check=True):
     return p
 
 
-def case_env(tmp, args):
+def case_env(tmp, args, case_id=None):
     # Start from an allowlist, not the parent environment: a host that runs Claude
     # Code itself (a cloud container, CI) sets variables that change behavior, e.g.
     # MCP_CONNECTION_NONBLOCKING=true starts the turn before the plugin's MCP
@@ -125,9 +125,11 @@ def case_env(tmp, args):
     env["ENGRAMDB_CONFIG_DIR"] = str(tmp / "engram-config")
     env["ENGRAMDB_DAEMON_SOCKET"] = str(tmp / "daemon.sock")
     env["ENGRAMDB_OFFLINE"] = "1"  # models are pre-staged; never download mid-run
-    # The fixture's ops host runs in Berlin. dc-backfill-tz depends on it: the
-    # backfill only works with TZ=UTC, and nothing in the repo says so.
-    env["TZ"] = "Europe/Berlin"
+    # dc-backfill-tz runs on the fixture's ops host, in Berlin: the backfill
+    # only works with TZ=UTC, and nothing in the repo says so. Only that case
+    # gets the zone; elsewhere it would be a discovery every task can trip on.
+    if case_id == "dc-backfill-tz":
+        env["TZ"] = "Europe/Berlin"
     if args.ort_dylib:
         env["ORT_DYLIB_PATH"] = args.ort_dylib
     (tmp / "claude-config").mkdir()
@@ -297,7 +299,7 @@ def run_one(case, rep, args, out_dir):
     tmp = Path(tempfile.mkdtemp(prefix=f"mte-{case['id']}-"))
     attempt = {"prompt_id": case["id"], "rep": rep, "model": args.model, "retries": 0}
     try:
-        env = case_env(tmp, args)
+        env = case_env(tmp, args, case['id'])
         ws, ids = setup_workspace(tmp, env, args.engram_md, case['id'])
         before = grade.snapshot_store(ws, env)
         session_id = str(uuid.uuid4())
