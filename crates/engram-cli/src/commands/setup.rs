@@ -37,7 +37,8 @@ This project uses EngramDB for persistent agent memory.
   doing what it forbids; pass `source_file`). Don't wait for the user to
   confirm a file-based conflict, and work from the newer source. Not a
   conflict: code the memory itself calls legacy or an exception, or a source
-  that is not clearly newer than the memory. `update` it
+  that is clearly older than the memory (an undated source still counts).
+  `update` it
   (or `create` with `supersedes`) when you know the replacement. `verify` a memory
   you've confirmed against the code; prefer `resolve` with `invalidate`
   over `delete` when something *was* true but no longer is (history stays).

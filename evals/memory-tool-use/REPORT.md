@@ -125,7 +125,7 @@ Tags: **[REQUIRED]** fixes something broken; **[TUNE]** is a measured judgment c
 13. **[TUNE]** ENGRAM.md tells Claude to save a discovery that cost effort, rather than offering to, unless the user asked it not to save memories (capture round v6; softened by the review). The MCP server instructions and the `create` description carry the same wording (v7p). That second part has no measured benefit for Sonnet; it is kept for consistency.
 14. **[TUNE]** PostToolUse and PostToolUseFailure on Bash: when a command that failed earlier in the session succeeds with no file edit in between, the hook asks once to save the cause if it is not documented (v8; edit rule, quote/heredoc handling and run-style keys from the review). State is in `.engramdb/state/bash_retry/<session>` (per subagent); `setup` widens an existing PostToolUse matcher.
 15. Merged from master: `[daemon]` moved to a global config, and the daemon got one private folder (#132).
-16. **[REQUIRED]** Found by the review: `**/<dir>/…` and `**/<file>` scopes were treated as root-wide, so the file hook never surfaced them. The once-per-session record now also separates subagents, which share the parent's `session_id`. The `challenge` rules gained two non-triggers (code the memory calls legacy, a source not clearly newer than the memory).
+16. **[REQUIRED]** Found by the review: `**/<dir>/…` and `**/<file>` scopes were treated as root-wide, so the file hook never surfaced them. The once-per-session record now also separates subagents, which share the parent's `session_id`. The `challenge` rules gained two non-triggers (code the memory calls legacy, a source clearly older than the memory).
 
 The eval itself lives in `evals/memory-tool-use/`:
 - the runner;
@@ -279,7 +279,7 @@ After the PR was opened, two reviews looked for anything fitted too closely to t
 - **`**/` globs counted as root-wide.** A scope such as `**/migrations/*.py` or `**/Dockerfile` was treated like `/`. Such memories missed the file hook's scope rule and sorted last. Now only globs made of wildcards, or of one file type (`**/*.py`), count as root-wide.
 - **Instruction text was too forceful.**
   - "Save it yourself; don't offer to" now reads "Save it yourself rather than offering to, unless the user asked you not to save memories". The retry note also skips a save when the fix was a code change.
-  - The `challenge` rules gained two non-triggers: code the memory itself calls legacy or an exception, and a source that is not clearly newer than the memory.
+  - The `challenge` rules gained two non-triggers: code the memory itself calls legacy or an exception, and a source that is clearly older than the memory. A first wording, "not clearly newer", stopped Sonnet from challenging in 2 of 4 xhard contradiction cases: hook previews carry no dates, so it could not tell (v9). The burden was flipped: an undated source still counts.
 - **Not changed, by design:**
   - The CLI's rank fallback (3 weak matches marked `below_threshold`) stays. It is configurable as `[retrieval].rank_fallback`. Scripts that test a rank query for emptiness should note it.
   - `MASKED_FAILURE_SIGNS` is English-only, but a miss is silent and safe.

@@ -1829,9 +1829,9 @@ impl EngramDbServer {
                  not wait for the user to confirm a file-based conflict. Challenge first, then \
                  work from the newer source and tell the user. Not contradictions: code that \
                  merely doesn't mention the rule, code the memory itself calls legacy or an \
-                 exception, a narrower memory scoping an exception, a source that is not \
-                 clearly newer than the memory, a one-off or hypothetical request, a memory \
-                 already marked superseded."
+                 exception, a narrower memory scoping an exception, a source that is clearly \
+                 older than the memory (an undated source still counts), a one-off or \
+                 hypothetical request, a memory already marked superseded."
                 .to_string();
             if let Some(w) = embedding_warning {
                 s.push_str("\n\n");
@@ -2656,7 +2656,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "challenge",
-        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as a source states the opposite of the memory: the user saying it is out of date (even when the code has not caught up), or a file you read, such as a dated doc, a dependency pin, or existing code using what the memory forbids (pass it as `source_file`). A challenge flags the memory and does not rewrite it, so a file-based conflict needs no confirmation from the user first. Not contradictions: code that does not mention the rule, code the memory itself calls legacy or an exception, and a source that is not clearly newer than the memory. When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
+        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as a source states the opposite of the memory: the user saying it is out of date (even when the code has not caught up), or a file you read, such as a dated doc, a dependency pin, or existing code using what the memory forbids (pass it as `source_file`). A challenge flags the memory and does not rewrite it, so a file-based conflict needs no confirmation from the user first. Not contradictions: code that does not mention the rule, code the memory itself calls legacy or an exception, and a source that is clearly older than the memory (an undated source still counts). When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
     )]
     async fn memory_challenge(
         &self,

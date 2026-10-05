@@ -8,4 +8,8 @@ Pre-registered gates (all graded with the review-fixed grader):
 - hard/v9, nh-*: no_false_create and no_spurious_revise 100% (v6/v8 levels).
 - hard/v9p Sonnet: costly_capture >= 50% of graded runs (v8p 20/21).
 - xhard/v9: pass the ct-* cases with no_collateral_revise on both models.
-Result: pending.
+Result:
+- hard/v9 revise:true cases: Sonnet 12/12, Opus 12/12 (v6+v8: 36/36, 22/22). Pass.
+- hard/v9 nh-*: no_false_create 16/16 and no_spurious_revise 16/16 on both models. Pass.
+- hard/v9p Sonnet (plugin-only): costly_capture 9/10. Pass.
+- xhard/v9 ct-*: Opus 4/4. Sonnet 2/4: FAIL. In ct-batch-limit and ct-notifier-retry Sonnet saw the conflict and did not challenge, reasoning that it could not tell whether the source was newer than the memory (hook previews carry no dates). Cause: the new non-trigger "a source that is not clearly newer than the memory". Fixed by flipping the burden: "a source that is clearly older than the memory (an undated source still counts)". Re-checked in v9b.
