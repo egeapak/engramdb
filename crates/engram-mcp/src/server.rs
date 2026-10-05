@@ -1870,22 +1870,26 @@ impl EngramDbServer {
         Ok(())
     }
 
-    /// Whether the shared-daemon path should be taken. Always disabled under
-    /// the crate's own `cargo test --lib` (see [`Self::resolve_providers`]).
+    /// Whether this process may route through the shared daemon at all.
+    /// Always `false` under the crate's own `cargo test --lib` (see
+    /// [`Self::resolve_providers`]).
     ///
-    /// `daemon` is the **global** `[daemon]` section — never a project's: one
-    /// daemon serves every project, so whether to use it is a per-user choice.
     /// `ENGRAMDB_IN_PROCESS` (any truthy value) is a hard override that forces
     /// in-process model loading, mirroring the CLI's `--in-process` flag. The
     /// MCP server has no equivalent flag, so this env var is its only knob —
     /// gating it here disables both provider routing and the daemon heartbeat.
+    ///
+    /// This deliberately does not read the global `[daemon].enabled`: the
+    /// shared resolver already loads the global config and checks it, so a
+    /// tool call reads that file once, not twice. Only the heartbeat, which
+    /// does not go through the resolver, checks `enabled` itself.
     #[cfg(not(test))]
-    fn daemon_path_enabled(daemon: &engramdb::types::DaemonConfig) -> bool {
-        daemon.enabled && !engramdb::types::in_process_override()
+    fn daemon_routing_allowed() -> bool {
+        !engramdb::types::in_process_override()
     }
 
     #[cfg(test)]
-    fn daemon_path_enabled(_daemon: &engramdb::types::DaemonConfig) -> bool {
+    fn daemon_routing_allowed() -> bool {
         false
     }
 
@@ -1893,13 +1897,14 @@ impl EngramDbServer {
     ///
     /// Thin policy wrapper over the shared [`engramdb::daemon::resolve_providers_with`]
     /// resolver (the same code path the CLI uses): compute the daemon policy
-    /// from the global config + env + `cfg(test)`, and fall back to the pooled
+    /// from env + `cfg(test)` (the resolver adds the global `[daemon].enabled`),
+    /// and fall back to the pooled
     /// in-process [`ops::ProviderCache`], which still loads each model at
     /// most once per process (PR #35). Associated rather than a `&self`
     /// method so the warmup task can call it with cloned handles.
     ///
     /// The daemon branch is compiled out under `cfg(test)` (via
-    /// [`Self::daemon_path_enabled`]): the crate's own `cargo test --lib`
+    /// [`Self::daemon_routing_allowed`]): the crate's own `cargo test --lib`
     /// would otherwise auto-spawn the *test* binary as a daemon (it isn't
     /// the CLI), stalling every server test on the connect/retry budget. The
     /// daemon path has dedicated coverage in [`engramdb::daemon::tests`];
@@ -1911,8 +1916,7 @@ impl EngramDbServer {
         backend_override: Option<EmbeddingBackend>,
         config: &engramdb::types::EngramConfig,
     ) -> ops::EngineProviders {
-        let global = load_global_config_or_default().await;
-        let policy = if Self::daemon_path_enabled(&global.daemon) {
+        let policy = if Self::daemon_routing_allowed() {
             engramdb::daemon::DaemonPolicy::ConnectOrSpawn
         } else {
             engramdb::daemon::DaemonPolicy::InProcess
@@ -1968,7 +1972,7 @@ impl EngramDbServer {
                 // Re-read every tick so an edit to the global config applies
                 // without restarting the session.
                 let global = load_global_config_or_default().await.daemon;
-                if !Self::daemon_path_enabled(&global) {
+                if !(global.enabled && Self::daemon_routing_allowed()) {
                     // Daemon disabled (or test build): re-check periodically in
                     // case the config is edited to enable it.
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
