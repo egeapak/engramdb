@@ -1037,12 +1037,198 @@ pub async fn run_hook_user_prompt_submit(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+const RETRY_NOTE_PREFIX: &str = "[EngramDB]";
+const RETRY_NOTE: &str = "failed earlier in this session and has now succeeded. If finding the \
+cause took more than one try and nothing in the repo or the error message states it, save it now \
+with `create` (type hazard: the command, the symptom, the cause and the fix). Save it yourself; \
+don't offer to. Skip this if the docs or the error message already said what to do.";
+
+/// Programs whose runs are looking around, not the task: their failures are
+/// probes (`ls var`, `cat missing.txt`) and never prompt.
+const PROBE_PROGRAMS: &[&str] = &[
+    "ls", "cat", "echo", "printf", "grep", "rg", "cd", "head", "tail", "sed", "awk", "find",
+    "which", "pwd", "test", "[", "true", "false", "rm", "mkdir", "cp", "mv", "touch", "wc", "sort",
+    "uniq", "export", "git", "diff", "file", "stat", "tree", "less", "more", "xargs", "tee",
+    "date", "sleep", "chmod", "du", "df", "ps", "kill", "sqlite3", "jq", "set", "source", ".",
+    "type",
+];
+/// Wrappers that run the next word as the real program.
+const WRAPPERS: &[&str] = &[
+    "env", "sudo", "nice", "time", "command", "exec", "nohup", "npx", "bunx",
+];
+/// Interpreters: the script or `-m` module they run is the command's identity.
+const INTERPRETERS: &[&str] = &[
+    "python", "python3", "node", "bash", "sh", "zsh", "ruby", "perl", "deno",
+];
+/// Tools whose first argument names the action (`make test`, `cargo build`).
+const SUBCOMMAND_TOOLS: &[&str] = &[
+    "make", "cargo", "npm", "yarn", "pnpm", "go", "docker", "just", "uv", "poetry", "pipenv",
+    "bundle", "gradle", "mvn", "dotnet",
+];
+/// Output that means a piped command failed even though the pipeline's exit
+/// status (the last stage's, e.g. `tail`) was 0.
+const MASKED_FAILURE_SIGNS: &[&str] = &[
+    "Traceback (most recent call last)",
+    "] Error ",
+    "FAILED",
+    "command not found",
+    "No such file or directory",
+    "Permission denied",
+    "panicked at",
+];
+
+/// Stable identities of the commands a shell line runs, ignoring `cd`,
+/// probes, `VAR=value` prefixes, wrappers, flags and redirections. Two runs of
+/// the same script with different flags or environment share a key, which is
+/// what lets a failure and its later fix be matched.
+fn command_keys(command: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let segments = command.split(['\n', ';', '|', '&']);
+    for segment in segments {
+        let mut words = segment
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c| c == '"' || c == '\'' || c == '(' || c == ')'))
+            .filter(|w| !w.is_empty())
+            .peekable();
+        // Leading `VAR=value` assignments and wrappers (with `timeout N`).
+        let program = loop {
+            let Some(w) = words.next() else { break None };
+            let is_assignment = w.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            if is_assignment || WRAPPERS.contains(&w) {
+                continue;
+            }
+            if w == "timeout" {
+                if words
+                    .peek()
+                    .is_some_and(|n| n.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                {
+                    words.next();
+                }
+                continue;
+            }
+            break Some(w);
+        };
+        let Some(program) = program else { continue };
+        let base = program.rsplit('/').next().unwrap_or(program);
+        // python3.11 -> python3
+        let base = base
+            .split_once('.')
+            .filter(|(head, tail)| {
+                head.starts_with("python") && tail.chars().all(|c| c.is_ascii_digit())
+            })
+            .map_or(base, |(head, _)| head);
+        if PROBE_PROGRAMS.contains(&base)
+            || base.starts_with(|c: char| c.is_ascii_digit() || c == '>')
+        {
+            continue;
+        }
+        let mut args = words.filter(|w| {
+            !w.contains(['>', '<']) && (!w.starts_with('-') || *w == "-m" || *w == "-c")
+        });
+        let key = if INTERPRETERS.contains(&base) {
+            match args.next() {
+                Some("-m") => args.next().map(str::to_string),
+                Some("-c") | None => None,
+                Some(script) => Some(script.trim_start_matches("./").to_string()),
+            }
+        } else if SUBCOMMAND_TOOLS.contains(&base) {
+            Some(
+                args.next()
+                    .map_or(base.to_string(), |sub| format!("{base} {sub}")),
+            )
+        } else {
+            Some(base.to_string())
+        };
+        if let Some(key) = key.filter(|k| !k.is_empty()) {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+/// Whether a Bash result that Claude Code reported as a success actually
+/// failed: only for a pipeline (whose exit status is the last stage's) with
+/// unmistakable failure output.
+fn masked_failure(command: &str, value: &serde_json::Value) -> bool {
+    if !command.contains('|') {
+        return false;
+    }
+    let response = value.get("tool_response");
+    let text = |field: &str| {
+        response
+            .and_then(|r| r.get(field))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    };
+    let output = format!("{}\n{}", text("stdout"), text("stderr"));
+    MASKED_FAILURE_SIGNS
+        .iter()
+        .any(|sign| output.contains(sign))
+}
+
+/// The Bash half of the PostToolUse hook (and all of PostToolUseFailure):
+/// record a failed command, and when a later run of the same command
+/// succeeds, prompt once to save what it took. Returns the hook response, if
+/// any. Every error is swallowed: this is advice, never a blocker.
+fn process_bash_retry(value: &serde_json::Value, dir: &Path) -> Option<String> {
+    // This writes state, so it bails for a directory that was never `init`ed,
+    // like SessionEnd (the plugin registers hooks machine-wide).
+    let project_dir = engramdb::storage::paths::project_dir(dir);
+    if !project_dir.join("manifest.toml").exists() && !project_dir.join("memories").is_dir() {
+        return None;
+    }
+    let session_id = value.get("session_id")?.as_str()?;
+    let command = value.get("tool_input")?.get("command")?.as_str()?;
+    let keys = command_keys(command);
+    if keys.is_empty() {
+        return None;
+    }
+    let failed = value.get("hook_event_name").and_then(|v| v.as_str())
+        == Some("PostToolUseFailure")
+        || masked_failure(command, value);
+    if failed {
+        if let Err(e) = engramdb::storage::bash_retry::record_failure(dir, session_id, &keys) {
+            tracing::debug!("retry record write failed (non-fatal): {e}");
+        }
+        return None;
+    }
+    let pending = engramdb::storage::bash_retry::pending_failures(dir, session_id);
+    let fixed: Vec<String> = keys.into_iter().filter(|k| pending.contains(k)).collect();
+    if fixed.is_empty() {
+        return None;
+    }
+    if let Err(e) = engramdb::storage::bash_retry::mark_prompted(dir, session_id, &fixed) {
+        // Without the record the prompt would repeat on every later success.
+        tracing::debug!("retry record write failed, not prompting: {e}");
+        return None;
+    }
+    let names = fixed
+        .iter()
+        .map(|k| format!("`{}`", engramdb::storage::transcripts::sanitize_one_line(k)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    build_hook_response(
+        "PostToolUse",
+        &format!("{RETRY_NOTE_PREFIX} {names} {RETRY_NOTE}"),
+    )
+    .ok()
+}
+
 /// Core PostToolUse logic (§8.5.2): after a file mutation, match the edited
 /// path against the `watch_paths` index column, restricted to currently-valid
 /// memories (this hook bypasses the query path, so it applies the §2.4
 /// default exclusion itself — an invalidated memory must not keep warning).
 /// Index-only: no memory files are loaded.
 async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
+        if value.get("tool_name").and_then(|v| v.as_str()) == Some("Bash") {
+            return Ok(process_bash_retry(&value, dir));
+        }
+    }
     let file_path = match extract_file_path(input) {
         Some(fp) => fp,
         None => return Ok(None),
@@ -1108,7 +1294,8 @@ async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>
     Ok(Some(json))
 }
 
-/// Run the PostToolUse hook handler (matcher `Write|Edit|MultiEdit`).
+/// Run the PostToolUse hook handler (matcher `Write|Edit|MultiEdit|Bash`), which
+/// also serves PostToolUseFailure (matcher `Bash`).
 pub async fn run_hook_post_tool_use(dir: &Path) -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -1150,6 +1337,10 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
 
     forget_shown(&input, dir);
     engramdb::storage::hook_seen::prune_stale(dir);
+    if let Err(e) = engramdb::storage::bash_retry::clear(dir, &session_id) {
+        tracing::debug!("SessionEnd retry record clear failed (non-fatal): {e}");
+    }
+    engramdb::storage::bash_retry::prune_stale(dir);
     let ended_task = match engramdb::storage::task_state::clear_session_task(dir, &session_id) {
         Ok(t) => t,
         Err(e) => {
@@ -2411,6 +2602,128 @@ mod tests {
     }
 
     // --- Integration tests for the new hook events (§8.5) ---
+
+    #[test]
+    fn command_keys_identify_the_script_not_its_flags_or_environment() {
+        let k = |c: &str| command_keys(c);
+        assert_eq!(
+            k("python scripts/backfill_tax.py --month 2026-09"),
+            ["scripts/backfill_tax.py"]
+        );
+        assert_eq!(
+            k("cd /tmp/ws && TZ=UTC python3 ./scripts/backfill_tax.py --month 2026-09 --batch-size 500"),
+            ["scripts/backfill_tax.py"]
+        );
+        assert_eq!(
+            k("LEDGERLINE_ENV=dev python scripts/seed_dev.py; ls -la var"),
+            ["scripts/seed_dev.py"]
+        );
+        assert_eq!(k("python -m pytest -q tests/test_currency.py"), ["pytest"]);
+        assert_eq!(k("pytest tests/"), ["pytest"]);
+        assert_eq!(k("make test-fast 2>&1 | tail -20"), ["make test-fast"]);
+        assert_eq!(k("timeout 60 cargo build --release"), ["cargo build"]);
+        assert_eq!(
+            k("python3.11 -m unittest tests.test_statements"),
+            ["unittest"]
+        );
+        // Probes and inline code are not task commands.
+        assert!(k("ls var; cat docs/testing.md | head").is_empty());
+        assert!(k("python -c 'import sqlite3'").is_empty());
+        assert!(k("sqlite3 var/dev.sqlite3 .tables").is_empty());
+    }
+
+    fn bash_event(session: &str, event: &str, command: &str, stdout: &str) -> String {
+        serde_json::json!({
+            "session_id": session,
+            "hook_event_name": event,
+            "tool_name": "Bash",
+            "tool_input": { "command": command },
+            "tool_response": { "stdout": stdout, "stderr": "" },
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn bash_retry_prompts_once_after_a_failed_command_succeeds() {
+        let project = TempDir::new().unwrap();
+        MemoryStore::init(project.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let p = project.path();
+        let run = |event: &str, cmd: &str, out: &str| {
+            let input = bash_event("s-1", event, cmd, out);
+            async move { process_post_tool_use(&input, p).await.unwrap() }
+        };
+
+        // Probes and unrelated successes say nothing.
+        assert!(run("PostToolUseFailure", "ls var", "").await.is_none());
+        assert!(run("PostToolUse", "python scripts/seed_dev.py", "ok")
+            .await
+            .is_none());
+
+        assert!(run("PostToolUseFailure", "python scripts/seed_dev.py", "")
+            .await
+            .is_none());
+        assert!(
+            run("PostToolUse", "python scripts/migrate_dev.py", "applied")
+                .await
+                .is_none()
+        );
+        let out = run(
+            "PostToolUse",
+            "LEDGERLINE_ENV=dev python scripts/seed_dev.py",
+            "loaded",
+        )
+        .await
+        .expect("the fixed command prompts");
+        assert!(
+            out.contains("`scripts/seed_dev.py`") && out.contains("Save it yourself"),
+            "{out}"
+        );
+        assert!(out.contains("\"hookEventName\":\"PostToolUse\""), "{out}");
+
+        // Once per key per session.
+        assert!(run("PostToolUseFailure", "python scripts/seed_dev.py", "")
+            .await
+            .is_none());
+        assert!(run("PostToolUse", "python scripts/seed_dev.py", "loaded")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn bash_retry_sees_a_failure_masked_by_a_pipe() {
+        let project = TempDir::new().unwrap();
+        MemoryStore::init(project.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let p = project.path();
+        let masked = bash_event(
+            "s-2",
+            "PostToolUse",
+            "make test-fast 2>&1 | tail -5",
+            "E   FileNotFoundError: [Errno 2] No such file or directory\nmake: *** [Makefile:4: test-fast] Error 1",
+        );
+        assert!(process_post_tool_use(&masked, p).await.unwrap().is_none());
+        let fixed = bash_event(
+            "s-2",
+            "PostToolUse",
+            "make test-fast 2>&1 | tail -5",
+            "4 passed",
+        );
+        assert!(process_post_tool_use(&fixed, p).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn bash_retry_stays_out_of_uninitialized_directories() {
+        let dir = TempDir::new().unwrap();
+        let input = bash_event("s-3", "PostToolUseFailure", "python x.py", "");
+        assert!(process_post_tool_use(&input, dir.path())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!dir.path().join(".engramdb").exists());
+    }
 
     #[tokio::test]
     async fn post_tool_use_notes_auto_memory_writes() {

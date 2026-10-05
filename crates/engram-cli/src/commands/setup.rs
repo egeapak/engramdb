@@ -495,7 +495,23 @@ fn install_settings_fallback(
         hooks,
         "PostToolUse",
         json!({
-            "matcher": "Write|Edit|MultiEdit",
+            "matcher": "Write|Edit|MultiEdit|Bash",
+            "hooks": [{
+                "type": "command",
+                "command": "engramdb hook post-tool-use --dir ."
+            }]
+        }),
+        "engramdb hook post-tool-use",
+        &settings_path,
+    )?;
+    // Installs from before the retried-command prompt matched only file edits.
+    changed |= ensure_matcher_includes(hooks, "PostToolUse", "engramdb hook post-tool-use", "Bash");
+
+    changed |= ensure_hook_entry(
+        hooks,
+        "PostToolUseFailure",
+        json!({
+            "matcher": "Bash",
             "hooks": [{
                 "type": "command",
                 "command": "engramdb hook post-tool-use --dir ."
@@ -649,6 +665,41 @@ fn ensure_hook_entry(
 
     event_array.push(entry);
     Ok(true)
+}
+
+/// Add `tool` to the matcher of this event's entry that runs `match_command`,
+/// when the entry exists without it. Returns whether anything changed.
+fn ensure_matcher_includes(
+    hooks: &mut serde_json::Map<String, Value>,
+    event: &str,
+    match_command: &str,
+    tool: &str,
+) -> bool {
+    let Some(entries) = hooks.get_mut(event).and_then(|v| v.as_array_mut()) else {
+        return false;
+    };
+    let mut changed = false;
+    for entry in entries {
+        let runs_command = entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|inner| {
+                inner.iter().any(|h| {
+                    h.get("command")
+                        .and_then(|c| c.as_str())
+                        .is_some_and(|c| c.contains(match_command))
+                })
+            });
+        let Some(matcher) = entry.get("matcher").and_then(|m| m.as_str()) else {
+            continue;
+        };
+        if runs_command && !matcher.split('|').any(|m| m == tool) {
+            let widened = format!("{matcher}|{tool}");
+            entry["matcher"] = Value::String(widened);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Ensure MCP tool permissions are present in settings.json.
@@ -1061,6 +1112,30 @@ mod tests {
                 "hook command differs for {event}"
             );
         }
+    }
+
+    #[test]
+    fn test_settings_fallback_widens_an_old_post_tool_use_matcher() {
+        let tmp = TempDir::new().unwrap();
+        let f = test_formatter();
+        let old = json!({"hooks": {"PostToolUse": [{
+            "matcher": "Write|Edit|MultiEdit",
+            "hooks": [{"type": "command", "command": "engramdb hook post-tool-use --dir ."}]
+        }]}});
+        std::fs::write(tmp.path().join("settings.json"), old.to_string()).unwrap();
+        assert!(install_settings_fallback(tmp.path(), false, &f).unwrap());
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        let post = settings["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post.len(), 1, "widened in place, not duplicated");
+        assert_eq!(post[0]["matcher"], "Write|Edit|MultiEdit|Bash");
+        assert_eq!(
+            settings["hooks"]["PostToolUseFailure"][0]["matcher"],
+            "Bash"
+        );
+        assert!(!install_settings_fallback(tmp.path(), false, &f).unwrap());
     }
 
     #[test]

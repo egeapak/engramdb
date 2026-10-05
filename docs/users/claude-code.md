@@ -1,11 +1,12 @@
 # Claude Code Integration
 
-Once wired up, EngramDB exposes its MCP tool surface and runs six hooks automatically:
+Once wired up, EngramDB exposes its MCP tool surface and runs these hooks automatically:
 
 - **SessionStart** injects high-criticality memories as `additionalContext`, grouped by epistemic class.
 - **PreToolUse (Read|Write|Edit)** surfaces memories relevant to the file being touched.
 - **UserPromptSubmit** surfaces memories relevant to the prompt you just submitted.
 - **PostToolUse (Write|Edit|MultiEdit)** warns when an edit touches a path a memory is watching.
+- **PostToolUse / PostToolUseFailure (Bash)** notices a command that failed and later succeeded in the same session, and asks once to save the cause if it is not documented.
 - **SessionEnd** does task housekeeping and keeps a compressed copy of the session transcript (no context output).
 - **PreCompact** reminds the agent to store durable discoveries before context is compacted.
 
@@ -81,7 +82,13 @@ Snapshot of the relevant `settings.json` shape after `setup --global`:
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [{ "type": "command", "command": "engramdb hook post-tool-use --dir ." }]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
         "hooks": [{ "type": "command", "command": "engramdb hook post-tool-use --dir ." }]
       }
     ],

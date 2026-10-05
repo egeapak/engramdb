@@ -8,6 +8,7 @@
 //! It is re-exported by the top-level `engramdb` crate under its historical
 //! `storage` / `telemetry` module paths.
 
+pub mod bash_retry;
 pub mod config;
 pub mod conversation_index;
 pub mod digest;
