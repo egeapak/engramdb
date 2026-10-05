@@ -1,0 +1,52 @@
+diff --git a/src/subscriptions/renewals.py b/src/subscriptions/renewals.py
+index 5e712d2..e01ebd6 100644
+--- a/src/subscriptions/renewals.py
++++ b/src/subscriptions/renewals.py
+@@ -2,13 +2,19 @@
+ from dataclasses import dataclass
+ from datetime import datetime
+ 
++import structlog
++
++from src.billing.dunning import schedule_retries
+ from src.billing.invoices import create_invoice, finalize_once
+ from src.billing.refunds import refund
+ from src.jobs.queue import enqueue
+ from src.subscriptions.plans import PLANS
+ from src.subscriptions.proration import prorate_amount
+ 
++log = structlog.get_logger()
++
+ RENEWAL_NOTICE_DAYS = 7
++RENEWAL_RETRY_DELAYS_S = [3600, 21600, 86400]  # 1 h, 6 h, 24 h
+ 
+ 
+ @dataclass
+@@ -33,8 +39,25 @@ def renew(sub):
+ 
+ 
+ def retry_failed_renewal(sub, invoice, attempt):
+-    """Called when the renewal charge for `invoice` failed on `attempt` (1-based)."""
+-    raise NotImplementedError
++    """Called when the renewal charge for `invoice` failed on `attempt` (1-based).
++
++    Attempt 1 is the original charge; each failure schedules the next of the
++    three retries (1 h, 6 h, 24 h after the failure). When the last retry
++    fails, the subscription goes `past_due` and the invoice goes to dunning.
++    """
++    if attempt > len(RENEWAL_RETRY_DELAYS_S):
++        sub.status = "past_due"
++        schedule_retries(invoice)
++        log.info("renewal_past_due", subscription_id=sub.id, invoice_id=invoice.id)
++        return
++    # The retry job has its own policy: the backend must not retry a charge itself.
++    enqueue(
++        "subscriptions.retry_charge",
++        {"subscription_id": sub.id, "invoice_id": invoice.id, "attempt": attempt + 1},
++        dedupe_key=f"renewal_retry:{invoice.id}:{attempt + 1}",
++        delays_s=[RENEWAL_RETRY_DELAYS_S[attempt - 1]],
++        max_attempts=1,
++    )
+ 
+ 
+ def reminder_due(sub, now):

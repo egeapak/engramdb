@@ -1,0 +1,42 @@
+diff --git a/services/ingest/ingest.toml b/services/ingest/ingest.toml
+index 8f2ec63..47c20ab 100644
+--- a/services/ingest/ingest.toml
++++ b/services/ingest/ingest.toml
+@@ -1,3 +1,3 @@
+ [source]
+-bucket = "psp-settlements-eu"
+-prefix = "daily/"
++bucket = "acme-psp-inbound"
++prefix = "settlements/"
+diff --git a/services/ingest/ingest/source.py b/services/ingest/ingest/source.py
+index 3d4eb3b..e45bcc4 100644
+--- a/services/ingest/ingest/source.py
++++ b/services/ingest/ingest/source.py
+@@ -7,4 +7,16 @@ CONFIG = tomllib.loads((Path(__file__).resolve().parent.parent / "ingest.toml").
+ 
+ def list_new_files(day):
+     """Object keys of the settlement files for `day` (a date)."""
+-    raise NotImplementedError
++    import boto3
++
++    source = CONFIG["source"]
++    prefix = f"{source['prefix']}{day:%Y}/{day:%m}/"
++    wanted = f"settlement_{day.isoformat()}"
++    keys = []
++    paginator = boto3.client("s3").get_paginator("list_objects_v2")
++    for page in paginator.paginate(Bucket=source["bucket"], Prefix=prefix):
++        for obj in page.get("Contents", []):
++            name = obj["Key"][len(prefix):]
++            if name.startswith(wanted) and name.endswith(".csv"):
++                keys.append(obj["Key"])
++    return sorted(keys)
+diff --git a/services/ingest/pyproject.toml b/services/ingest/pyproject.toml
+index 1a49be4..a533266 100644
+--- a/services/ingest/pyproject.toml
++++ b/services/ingest/pyproject.toml
+@@ -2,4 +2,4 @@
+ name = "ledgerline-ingest"
+ version = "0.2.0"
+ requires-python = ">=3.11"
+-dependencies = ["requests>=2.32"]
++dependencies = ["requests>=2.32", "boto3>=1.34"]

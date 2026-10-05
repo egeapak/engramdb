@@ -1,0 +1,55 @@
+diff --git a/src/payouts/batch.py b/src/payouts/batch.py
+index 32e5cc8..dfe50e9 100644
+--- a/src/payouts/batch.py
++++ b/src/payouts/batch.py
+@@ -1,9 +1,14 @@
+ """Payout runs: what each seller gets paid, and when."""
+ from dataclasses import dataclass
++from datetime import datetime, timezone
++
++import structlog
+ 
+ from src.jobs.queue import enqueue
+ from src.payouts import bankco
+ 
++log = structlog.get_logger()
++
+ 
+ @dataclass
+ class Payout:
+@@ -13,6 +18,8 @@ class Payout:
+     currency: str
+     iban: str
+     status: str = "pending"
++    paid_at: datetime | None = None
++    paid_by: str | None = None
+ 
+ 
+ def eligible_balance(seller_id, rows):
+@@ -32,4 +39,25 @@ def submit_batch(payouts):
+ 
+ def mark_paid(payout, user):
+     """Record that BankCo executed `payout`; `user` is who confirmed it."""
+-    raise NotImplementedError
++    if payout.status == "paid":
++        return payout
++    payout.status = "paid"
++    payout.paid_at = datetime.now(timezone.utc)
++    payout.paid_by = user.id
++    log.info("ledger.payout_paid", payout_id=payout.id, seller_id=payout.seller_id,
++             amount_minor=payout.amount_minor, currency=payout.currency, actor_id=user.id)
++    enqueue(
++        "notifier.send_email",
++        {
++            "template": "payout_paid",
++            "customer_id": payout.seller_id,
++            "vars": {
++                "payout_id": payout.id,
++                "amount_minor": payout.amount_minor,
++                "currency": payout.currency,
++                "iban_last4": payout.iban[-4:],
++            },
++        },
++        dedupe_key=f"payout_paid:{payout.id}",
++    )
++    return payout

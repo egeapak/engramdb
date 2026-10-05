@@ -12,7 +12,8 @@ from the `results.jsonl` files under `.claude/hillclimb/`.
 | Original eval (47 cases, after step 7) | Opus 59%, Sonnet 45% (plugin only, step 0) | Opus 100%, Sonnet 99% |
 | Hard eval, pass (45 cases × 3 reps = 135 runs) | Opus 125, Sonnet 121 (baseline) | Opus 129, Sonnet 132 (mean of v4 and v4b) |
 | Hard eval, $ per case | Opus 0.237, Sonnet 0.113 (baseline) | Opus 0.231 (−2.4%), Sonnet 0.106 (−6.4%) |
-| Saving a costly discovery (after the climb, 6 cases × 10) | Opus 4/6, Sonnet 0/14 (v4d) | Opus 7/7, Sonnet 14/17 (v6) |
+| Saving a costly discovery (after the climb, 6 cases × 10) | Opus 4/6, Sonnet 0/14 (v4d) | Opus 7/7, Sonnet 14/17 (v6, with ENGRAM.md) |
+| Same, plugin-only install (no ENGRAM.md) | Opus 5/5, Sonnet 1/12 (v7p) | Opus 6/6, Sonnet 20/21 (v8p) |
 
 - **Quality.** On the hard eval, the climb raised pass by 4 runs on Opus and 11 on Sonnet. It then cut cost on both models.
 - **Test split.** It started at 96% on both models, so it can show a change of only about one case. The whole-set numbers above are therefore **directional**.
@@ -57,6 +58,7 @@ The original eval hit its ceiling, so a new case set was built:
 | 5 | Cost: unpin `update`, shorter parameter text | 132 / 68 | 131 / 69 | 0.231 / 0.105 | rejected (no cost change), reverted |
 | 4b | Confirm run of v4 (same code) | 130 / 66 | 133 / 69 | 0.231 / 0.106 | confirms v4 |
 | 6 | Capture: ENGRAM.md line to save a discovery that cost effort | 130 / 67 | 133 / 69 | 0.235 / 0.111 | **kept** (see "Capture round") |
+| 8 | Hook: ask once to save the cause after a failed Bash command succeeds | pilot 37/39 | 134 / 69 | — / 0.107 | **kept** (see "Retried-command prompt") |
 
 Whole is out of 135 runs; test is out of 69. Re-graded after the climb with the fixed forbidden-term check (see "After the climb"): 5 train runs flipped to pass (Opus v1 +2, Sonnet v1 +1, Sonnet v4b +2). No verdict changes.
 
@@ -120,6 +122,8 @@ Tags: **[REQUIRED]** fixes something broken; **[TUNE]** is a measured judgment c
     - A fact's premise is shown as a check (cost rounds, v4).
 12. Merged from master: the stdio handshake is answered before slow startup work (the cold-start fix). It kept working with the pinned-tool code.
 13. **[TUNE]** ENGRAM.md tells Claude to save a discovery that cost effort, without offering first (capture round v6). The MCP server instructions and the `create` description carry the same wording (v7p). That second part has no measured benefit for Sonnet; it is kept for consistency.
+14. **[TUNE]** PostToolUse and PostToolUseFailure on Bash: when a command that failed earlier in the session succeeds, the hook asks once to save the cause if it is not documented (v8). State is in `.engramdb/state/bash_retry/<session>`; `setup` widens an existing PostToolUse matcher.
+15. Merged from master: `[daemon]` moved to a global config, and the daemon got one private folder (#132).
 
 The eval itself lives in `evals/memory-tool-use/`:
 - the runner;
@@ -219,12 +223,57 @@ The gates were written down before the run (`v6/change.md`). All passed.
 - **The aligned text is kept for consistency.** It causes no false creates and costs nothing measurable, but it has no measured benefit.
 - **Reaching plugin-only Sonnet users needs another channel.** See "What I would try next".
 
+## Retried-command prompt (v8)
+
+v7p showed that the MCP text alone does not make Sonnet save in a plugin-only install. v8 puts the reminder in the flow instead:
+- **Record:** PostToolUseFailure on Bash records the failed command by a stable key: its script or program, ignoring `VAR=` prefixes, wrappers, flags and probes such as `ls`, `cat` and `grep`.
+- **Prompt:** when a later run with the same key succeeds, PostToolUse adds one line asking to save the cause if it is not documented. It does this once per command per session.
+- **Piped commands:** `cmd | tail` exits 0 even when `cmd` fails, so a pipeline counts as failed only when its output shows an unmistakable failure.
+
+The gates were written down before the run (`v8/change.md`).
+
+| Gate | Result | Verdict |
+|---|---|---|
+| Plugin-only, Sonnet saves (6 costly cases × 10) | 20/21, was 1/12 | ≥ 50%: pass |
+| Plugin-only, Opus saves | 6/6 | ≥ 80%: pass |
+| Plugin-only, no false create on `nh-*`/`ds-*` × 3 | 42/42 on both models | ≥ 95%: pass |
+| With ENGRAM.md, Sonnet full set vs v6 | pass 134 (133); no false create 101/102 (102/102); $/case −3.4% | pass |
+| With ENGRAM.md, Opus | **pilot**, not the full set: 18 riskiest cases × 2, pass 37/39 | see below |
+
+- **Opus ran a pilot instead of the full set,** at your request. The pilot covers all 6 bug-fix cases, where test fails → fix → test passes, the cases Opus failed before, and the negatives.
+  - Both failures are false creates that Opus also made in earlier rounds: `st-pdf-premise` in v4, v4b and v6, and `bf-export-csv` in v4. The prompt did not fire in either run.
+  - The prompt fired in 1 of 39 runs, so normal bug-fix loops do not trigger it.
+- **Sonnet's one false create** (`st-retention` rep 0) is also not from the prompt, which did not fire in that run.
+
+## Is there room to grow? The xhard pilot
+
+A third case set, `cases_xhard.jsonl` (`XHARD_CASES.md`), was built to look for headroom:
+- **Memories:** 114, with groups of near-duplicates (7 rounding rules, 7 retry policies, 7 ownership memories) and six 3-step supersede chains.
+- **Cases:** 40, in six categories: crowded retrieval, cross-module, long sessions with a real `/compact` turn, superseded chains, contradiction under noise, and hard negatives.
+- **Fixture:** new modules for payouts, subscriptions and an ingest service.
+- **Grader:** contradiction cases now also fail when Claude challenges a still-valid neighbour of the target.
+
+Pilot: 20 of the 40 cases, 1 run each, on the v8 build. The cases were weighted toward those expected to be hardest.
+
+| | Sonnet | Opus |
+|---|---|---|
+| Pass | 19/20 | 18/20 |
+| Cost per case | $0.175 | $0.404 |
+
+All three failures are cross-module cases:
+- **Opus, `xm-payout-paid` and `xm-cancel-refund`:** Opus read the other modules only with Bash `cat`. The file hook does not fire on Bash reads, and Opus did not `query`. It still used the right facts from the code, but it never consulted memory.
+- **Sonnet, `xm-payout-paid`:** Sonnet read files with the Read tool. But the rules it needed (the audit event name and the notifier entry point) are scoped to modules it never opened, so no hook showed them, and it used neither fact.
+
+**Conclusion: little room is left.** Even the hardest-weighted half of xhard passes at 90–95%. The one remaining gap is narrow and well defined: memories of modules that the edited code calls, especially when the files are read through Bash. The crowded, superseded-chain, long-session, contradiction and negative categories all passed on both models.
+
 ## What I would try next
 
-- **A save prompt at the moment of discovery, for plugin-only installs.** MCP text did not reach Sonnet (v7p: 1/12). A PostToolUse hook on Bash can see a failed command followed by a success of the same command, and add one line at that point: "That took more than one try. If the cause is not documented, save it with `create`." Measure it plugin-only on the costly cases, with `nh-*` and `ds-*` as the false-create guardrail.
-- **Fewer turns, not shorter text.** The remaining memory turns are 0.5–0.8 per case, mostly `query` and `challenge`. Cost work should look there or at task turns, not at prompt length (see v5).
-- **File hook on Bash reads.** Consider running the PreToolUse file hook for paths read with Bash `cat`/`sed`/`head`. It is fragile (shell parsing), so measure it on `mm-dunning-job` first.
-- **A third, harder set.** Many more memories (100+), long sessions with compaction, and cross-module tasks. The hard set saturated after two rounds.
+- **Cross-module memories.** This is the only gap the xhard pilot found. Two levers, measured on the `xm-*` cases:
+  1. run the file hook for paths read with Bash `cat`/`head`/`sed -n`;
+  2. when a file is edited, also surface memories scoped to the modules it imports.
+- **Run `test_grade.py` in CI.** It has 28 tests and makes no API calls. The grader changed several times after the climb, and one wrong pattern silently changes every pass rate.
+- **A full xhard baseline** (40 cases × 3 runs per model) only if one of the levers above is tried. The pilot shows the set is otherwise near its ceiling.
+- **Cost:** cut turns, not text (see v5). The remaining memory turns are 0.5–0.8 per case, so the gain is small.
 
 ## Where to look
 
@@ -233,3 +282,4 @@ The gates were written down before the run (`v6/change.md`). All passed.
 - `.claude/hillclimb/memory-tool-use-hard/{opus,sonnet}/vN/change.md` — each round's reason, prediction and result.
 - `evals/memory-tool-use/RESULTS.md` — the original eval, steps 1–7.
 - `evals/memory-tool-use/HARD_CASES.md` — the hard case set.
+- `evals/memory-tool-use/XHARD_CASES.md` — the xhard case set; pilot results in `.claude/hillclimb/memory-tool-use-xhard/{opus,sonnet}/pilot/`.

@@ -1,0 +1,33 @@
+diff --git a/src/payouts/batch.py b/src/payouts/batch.py
+index 32e5cc8..5a254c7 100644
+--- a/src/payouts/batch.py
++++ b/src/payouts/batch.py
+@@ -1,9 +1,13 @@
+ """Payout runs: what each seller gets paid, and when."""
+ from dataclasses import dataclass
+ 
++import structlog
++
+ from src.jobs.queue import enqueue
+ from src.payouts import bankco
+ 
++log = structlog.get_logger()
++
+ 
+ @dataclass
+ class Payout:
+@@ -32,4 +36,13 @@ def submit_batch(payouts):
+ 
+ def mark_paid(payout, user):
+     """Record that BankCo executed `payout`; `user` is who confirmed it."""
+-    raise NotImplementedError
++    if payout.status == "paid":
++        return payout
++    payout.status = "paid"
++    log.info("payout_marked_paid", payout_id=payout.id, seller_id=payout.seller_id, confirmed_by=str(user))
++    enqueue(
++        "payouts.send_paid_notice",
++        {"payout_id": payout.id, "seller_id": payout.seller_id},
++        dedupe_key=f"payout_paid:{payout.id}",
++    )
++    return payout

@@ -1,0 +1,74 @@
+diff --git a/services/ingest/ingest/client.py b/services/ingest/ingest/client.py
+index 5520eaf..c36004e 100644
+--- a/services/ingest/ingest/client.py
++++ b/services/ingest/ingest/client.py
+@@ -4,8 +4,20 @@ import os
+ import requests
+ 
+ BILLING_URL = os.environ.get("BILLING_INTERNAL_URL", "http://ledgerline.internal")
++CALLER = "ingest"
+ 
+ 
+ def post_settlement(record):
+     """Report one settled payment (a record from parse_row) to billing."""
+-    raise NotImplementedError
++    resp = requests.post(
++        f"{BILLING_URL}/internal/settlements",
++        json=record,
++        headers={
++            "X-Acme-Caller": CALLER,
++            # Keyed on the PSP's reference so a re-run of the same file is
++            # replayed by billing instead of settling the payment twice.
++            "X-Acme-Idempotency": f"settlement-{record['psp_reference']}",
++        },
++        timeout=10,
++    )
++    resp.raise_for_status()
+diff --git a/services/ingest/tests/test_client.py b/services/ingest/tests/test_client.py
+new file mode 100644
+index 0000000..14322af
+--- /dev/null
++++ b/services/ingest/tests/test_client.py
+@@ -0,0 +1,42 @@
++import unittest
++from unittest import mock
++
++from ingest import client
++
++RECORD = {
++    "psp_reference": "psp_123",
++    "invoice_id": "inv_1",
++    "currency": "EUR",
++    "amount": 1250,
++    "status": "settled",
++}
++
++
++class PostSettlementTest(unittest.TestCase):
++    @mock.patch("ingest.client.requests.post")
++    def test_posts_record_with_caller_and_idempotency_headers(self, post):
++        client.post_settlement(RECORD)
++        post.assert_called_once()
++        args, kwargs = post.call_args
++        self.assertEqual(args[0], f"{client.BILLING_URL}/internal/settlements")
++        self.assertEqual(kwargs["json"], RECORD)
++        self.assertEqual(kwargs["headers"]["X-Acme-Caller"], "ingest")
++        self.assertEqual(kwargs["headers"]["X-Acme-Idempotency"], "settlement-psp_123")
++        self.assertIn("timeout", kwargs)
++
++    @mock.patch("ingest.client.requests.post")
++    def test_same_record_reuses_idempotency_key(self, post):
++        client.post_settlement(RECORD)
++        client.post_settlement(dict(RECORD))
++        keys = [c.kwargs["headers"]["X-Acme-Idempotency"] for c in post.call_args_list]
++        self.assertEqual(keys[0], keys[1])
++
++    @mock.patch("ingest.client.requests.post")
++    def test_raises_on_error_status(self, post):
++        post.return_value.raise_for_status.side_effect = client.requests.HTTPError("500")
++        with self.assertRaises(client.requests.HTTPError):
++            client.post_settlement(RECORD)
++
++
++if __name__ == "__main__":
++    unittest.main()

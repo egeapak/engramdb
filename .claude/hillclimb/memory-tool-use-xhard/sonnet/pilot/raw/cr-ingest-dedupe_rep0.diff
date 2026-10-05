@@ -1,0 +1,76 @@
+diff --git a/services/ingest/ingest/loader.py b/services/ingest/ingest/loader.py
+index 44d0c73..080a30e 100644
+--- a/services/ingest/ingest/loader.py
++++ b/services/ingest/ingest/loader.py
+@@ -1,12 +1,21 @@
+ """Load one settlement file into the billing database."""
+ import csv
++import hashlib
+ import io
+ 
+ from .parse import parse_row
+ 
+ 
+ def load_file(name, data, db):
+-    """Parse settlement file `name` (its bytes are `data`) and insert its rows through `db`."""
++    """Parse settlement file `name` (its bytes are `data`) and insert its rows through `db`.
++
++    Returns the number of rows inserted, or 0 if a file with the same content was loaded before.
++    The PSP reuses file names, so "already loaded" is decided by the SHA-256 of the bytes.
++    """
++    sha = hashlib.sha256(data).hexdigest()
++    if db.has_loaded_file(sha):
++        return 0
+     rows = [parse_row(r) for r in csv.DictReader(io.StringIO(data.decode("utf-8")))]
+     db.insert_settlements(rows)
++    db.record_loaded_file(name, sha)
+     return len(rows)
+diff --git a/services/ingest/tests/test_loader.py b/services/ingest/tests/test_loader.py
+new file mode 100644
+index 0000000..a5788ed
+--- /dev/null
++++ b/services/ingest/tests/test_loader.py
+@@ -0,0 +1,43 @@
++import unittest
++from unittest import mock
++
++from ingest import loader
++
++
++class FakeDb:
++    def __init__(self):
++        self.shas = set()
++        self.inserted = []
++
++    def has_loaded_file(self, sha):
++        return sha in self.shas
++
++    def record_loaded_file(self, name, sha):
++        self.shas.add(sha)
++
++    def insert_settlements(self, rows):
++        self.inserted.extend(rows)
++
++
++class LoadFileTest(unittest.TestCase):
++    def setUp(self):
++        patcher = mock.patch.object(loader, "parse_row", side_effect=lambda r: r)
++        patcher.start()
++        self.addCleanup(patcher.stop)
++
++    def test_same_bytes_load_once_even_under_another_name(self):
++        db = FakeDb()
++        data = b"reference\nA\n"
++        self.assertEqual(loader.load_file("settlement_1.csv", data, db), 1)
++        self.assertEqual(loader.load_file("settlement_2.csv", data, db), 0)
++        self.assertEqual(len(db.inserted), 1)
++
++    def test_corrected_file_with_same_name_is_loaded(self):
++        db = FakeDb()
++        loader.load_file("settlement_1.csv", b"reference\nA\n", db)
++        self.assertEqual(loader.load_file("settlement_1.csv", b"reference\nB\n", db), 1)
++        self.assertEqual(len(db.inserted), 2)
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,25 @@
+diff --git a/src/payouts/fees.py b/src/payouts/fees.py
+index 5fd7112..f2ba023 100644
+--- a/src/payouts/fees.py
++++ b/src/payouts/fees.py
+@@ -1,7 +1,17 @@
+ """Platform fees charged on seller payouts."""
+-from decimal import Decimal
++from decimal import ROUND_CEILING, Decimal
++
++MIN_FEE_MINOR = 30
+ 
+ 
+ def platform_fee(gross_minor, rate_bps):
+-    """Return the platform fee, in minor units, on a payout of `gross_minor` at `rate_bps` basis points."""
+-    raise NotImplementedError
++    """Return the platform fee, in minor units, on a payout of `gross_minor` at `rate_bps` basis points.
++
++    The fee is rounded up to the next minor unit so the platform never
++    under-collects (seller agreement, clause 7.2), and is at least
++    MIN_FEE_MINOR per payout.
++    """
++    fee = (Decimal(gross_minor) * Decimal(rate_bps) / Decimal(10_000)).to_integral_value(
++        rounding=ROUND_CEILING
++    )
++    return max(int(fee), MIN_FEE_MINOR)

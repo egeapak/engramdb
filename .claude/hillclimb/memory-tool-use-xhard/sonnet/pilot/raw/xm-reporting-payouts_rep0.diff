@@ -1,0 +1,23 @@
+diff --git a/services/reporting/reports/monthly.py b/services/reporting/reports/monthly.py
+index 2c066e7..280e0b5 100644
+--- a/services/reporting/reports/monthly.py
++++ b/services/reporting/reports/monthly.py
+@@ -16,6 +16,18 @@ def load_payout_rows(month):
+     raise NotImplementedError("reads from the billing warehouse")
+ 
+ 
++def payout_revenue(month):
++    """Platform revenue from one month's seller payouts, in Decimal major units.
++
++    Only the platform fee is revenue; gross and net are the seller's money.
++    """
++    total = sum(
++        (Decimal(row["fee_minor"]) / 100 for row in load_payout_rows(month)),
++        Decimal(0),
++    )
++    return total.quantize(Decimal("0.0001"))
++
++
+ def month_bounds(month):
+     """The [start, end) instants of report month "YYYY-MM", as aware datetimes."""
+     raise NotImplementedError

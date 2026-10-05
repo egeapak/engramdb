@@ -1,0 +1,20 @@
+diff --git a/src/payouts/bankco.py b/src/payouts/bankco.py
+index 341c172..14a2544 100644
+--- a/src/payouts/bankco.py
++++ b/src/payouts/bankco.py
+@@ -15,5 +15,13 @@ def send_transfer(request_id, iban, amount_minor, currency, remittance):
+ 
+ 
+ def split_into_files(transfers):
+-    """Split one payout run (a list of transfers) into the batch files BankCo accepts."""
+-    raise NotImplementedError
++    """Split one payout run (a list of transfers) into the batch files BankCo accepts.
++
++    Returns a list of files, each a list of at most MAX_TRANSFERS_PER_FILE
++    transfers, in order; the file's position in the list is its sequence number.
++    """
++    transfers = list(transfers)
++    return [
++        transfers[i:i + MAX_TRANSFERS_PER_FILE]
++        for i in range(0, len(transfers), MAX_TRANSFERS_PER_FILE)
++    ]

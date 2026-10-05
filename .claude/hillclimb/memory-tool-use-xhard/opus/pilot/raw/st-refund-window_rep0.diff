@@ -1,0 +1,59 @@
+diff --git a/src/billing/refunds.py b/src/billing/refunds.py
+index c7a111d..38699be 100644
+--- a/src/billing/refunds.py
++++ b/src/billing/refunds.py
+@@ -1,10 +1,17 @@
++from datetime import datetime, timedelta, timezone
++
+ from .invoices import Invoice
+ 
+-# Days after finalization during which an invoice can be refunded.
+-REFUND_WINDOW_DAYS = 180
++# Days after finalization during which an invoice can be refunded (13 months, October 2026 terms).
++REFUND_WINDOW_DAYS = 395
+ 
+ 
+-def refund(invoice: Invoice, amount_cents: int):
++def refund(invoice: Invoice, amount_cents: int, *, now: datetime | None = None):
++    if invoice.finalized_at is None:
++        raise ValueError("cannot refund an invoice that has not been finalized")
++    now = now or datetime.now(timezone.utc)
++    if now > invoice.finalized_at + timedelta(days=REFUND_WINDOW_DAYS):
++        raise ValueError(f"refund window of {REFUND_WINDOW_DAYS} days after finalization has passed")
+     if amount_cents > invoice.subtotal_cents + invoice.tax_cents:
+         raise ValueError("refund exceeds invoice total")
+     return {"invoice_id": invoice.id, "refunded_cents": amount_cents}
+diff --git a/tests/test_refunds.py b/tests/test_refunds.py
+new file mode 100644
+index 0000000..c66eeee
+--- /dev/null
++++ b/tests/test_refunds.py
+@@ -0,0 +1,28 @@
++from datetime import datetime, timedelta, timezone
++
++import pytest
++
++from src.billing.invoices import Invoice
++from src.billing.refunds import REFUND_WINDOW_DAYS, refund
++
++FINALIZED = datetime(2026, 1, 1, tzinfo=timezone.utc)
++
++
++def _invoice(finalized_at=FINALIZED):
++    return Invoice(id="inv_1", customer_id="cus_1", subtotal_cents=1000, tax_cents=200, finalized_at=finalized_at)
++
++
++def test_refund_inside_window():
++    now = FINALIZED + timedelta(days=REFUND_WINDOW_DAYS)
++    assert refund(_invoice(), 500, now=now) == {"invoice_id": "inv_1", "refunded_cents": 500}
++
++
++def test_refund_outside_window_is_refused():
++    now = FINALIZED + timedelta(days=REFUND_WINDOW_DAYS, seconds=1)
++    with pytest.raises(ValueError, match=f"{REFUND_WINDOW_DAYS} days"):
++        refund(_invoice(), 500, now=now)
++
++
++def test_refund_of_unfinalized_invoice_is_refused():
++    with pytest.raises(ValueError, match="not been finalized"):
++        refund(_invoice(finalized_at=None), 500)
