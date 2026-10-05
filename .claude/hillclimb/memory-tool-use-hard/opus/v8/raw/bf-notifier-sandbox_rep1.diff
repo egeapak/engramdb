@@ -1,0 +1,80 @@
+diff --git a/services/notifier/pyproject.toml b/services/notifier/pyproject.toml
+index 31023e5..eb39f19 100644
+--- a/services/notifier/pyproject.toml
++++ b/services/notifier/pyproject.toml
+@@ -6,3 +6,8 @@ dependencies = ["requests>=2.32"]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8.0"]
++
++[tool.pytest.ini_options]
++markers = [
++    "integration: talks to the email provider sandbox over the network",
++]
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..ff3a4b4
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,61 @@
++"""Sends a real receipt through the email provider's sandbox account.
++
++Needs MAIL_API_KEY (sandbox key from the dev secrets store) and MAIL_SINK_URL
++(base URL of the sink inbox API). The sandbox silently drops anything not
++addressed to @sink.acme.test, so delivery is only observable via the sink.
++"""
++import os
++import time
++import uuid
++from unittest import mock
++
++import pytest
++import requests
++
++from notifier import email
++
++pytestmark = [
++    pytest.mark.integration,
++    pytest.mark.skipif(
++        not (os.environ.get("MAIL_API_KEY") and os.environ.get("MAIL_SINK_URL")),
++        reason="needs MAIL_API_KEY (sandbox) and MAIL_SINK_URL",
++    ),
++]
++
++SINK_ADDR = "receipts@sink.acme.test"
++DELIVERY_TIMEOUT_S = 60
++POLL_INTERVAL_S = 2
++
++
++def fetch_sink_messages(to_addr):
++    resp = requests.get(
++        f"{os.environ['MAIL_SINK_URL'].rstrip('/')}/messages",
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        params={"to": to_addr},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    return resp.json()["items"]
++
++
++def wait_for_message(message_id, to_addr):
++    deadline = time.monotonic() + DELIVERY_TIMEOUT_S
++    while time.monotonic() < deadline:
++        for msg in fetch_sink_messages(to_addr):
++            if msg["id"] == message_id:
++                return msg
++        time.sleep(POLL_INTERVAL_S)
++    pytest.fail(f"message {message_id} not delivered to {to_addr} within {DELIVERY_TIMEOUT_S}s")
++
++
++def test_send_receipt_is_delivered():
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:12]}"
++
++    # render() is not implemented yet; stub it so only the provider path is real.
++    with mock.patch.object(email, "render", return_value=f"<p>Receipt for {invoice_id}</p>"):
++        message_id = email.send_receipt(invoice_id, SINK_ADDR, 1200)
++
++    assert message_id
++    msg = wait_for_message(message_id, SINK_ADDR)
++    assert msg["subject"] == "Your receipt"
++    assert invoice_id in msg["html"]

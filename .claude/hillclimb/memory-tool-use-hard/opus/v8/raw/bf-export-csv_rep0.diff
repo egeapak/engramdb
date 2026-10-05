@@ -1,0 +1,109 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..9b920af 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,101 @@
++"""Export one month's finalized invoices as the CSV that Finance imports.
++
++Finance's import tool runs with a German locale: semicolon delimiter, dates as
++DD.MM.YYYY, amounts as integer cents, UTF-8 without a BOM. Every finalized
++invoice of the month appears exactly once (zero-amount ones included); drafts
++(finalized_at IS NULL) are left out.
++"""
+ import argparse
++import csv
++import io
+ import os
++import sqlite3
++import sys
++from datetime import date, datetime
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++HEADER = ("invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date")
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices"
++    " WHERE finalized_at IS NOT NULL AND finalized_at >= {p} AND finalized_at < {p} ORDER BY finalized_at, id"
++)
++
++
++def previous_month(today):
++    first = today.replace(day=1)
++    return f"{first.year - 1}-12" if first.month == 1 else f"{first.year}-{first.month - 1:02d}"
++
++
++def month_bounds(month):
++    """[start, end) of a "YYYY-MM" month as naive UTC datetimes, matching invoices.finalized_at."""
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_invoices(start, end):
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg
++
++        with psycopg.connect(url) as conn:
++            return conn.execute(QUERY.format(p="%s"), (start, end)).fetchall()
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        return conn.execute(QUERY.format(p="?"), (start.isoformat(" "), end.isoformat(" "))).fetchall()
++    finally:
++        conn.close()
++
++
++def as_date(value):
++    if isinstance(value, datetime):
++        return value.date()
++    if isinstance(value, date):
++        return value
++    return datetime.fromisoformat(str(value)).date()
++
++
++def render_csv(rows):
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=";", lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        subtotal, tax = int(subtotal), int(tax or 0)
++        writer.writerow((invoice_id, customer_id, subtotal, tax, subtotal + tax, as_date(finalized_at).strftime("%d.%m.%Y")))
++    return buf.getvalue()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", help="YYYY-MM (default: the previous calendar month)")
++    parser.add_argument("--dry-run", action="store_true", help="build the CSV and report counts, write nothing")
+     args = parser.parse_args()
++
++    month = args.month or previous_month(date.today())
++    start, end = month_bounds(month)
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    target = Path(bucket) / "exports" / month / "invoices.csv"
++
++    rows = fetch_invoices(start, end)
++    ids = [r[0] for r in rows]
++    if len(ids) != len(set(ids)):
++        print(f"export {month}: duplicate invoice ids in query result; refusing to write", file=sys.stderr)
++        return 1
++    body = render_csv(rows)
++    total = sum(int(r[2]) + int(r[3] or 0) for r in rows)
++    print(f"export {args.env} {month}: {len(rows)} finalized invoices, total {total} cents -> {target} (dry_run={args.dry_run})")
++    if args.dry_run:
++        return 0
++
++    target.parent.mkdir(parents=True, exist_ok=True)
++    tmp = target.with_suffix(".csv.tmp")
++    tmp.write_text(body, encoding="utf-8", newline="")
++    tmp.replace(target)
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
