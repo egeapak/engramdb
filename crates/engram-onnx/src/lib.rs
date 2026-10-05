@@ -132,8 +132,9 @@ pub fn default_backend() -> Backend {
 /// `min(4, cores/2)`. The benchmark sweep found 4 the sweet spot on an
 /// 8-core machine (≈2× faster NLI/T5 vs 1), 8 worse than 4, and gains
 /// scaling down on smaller machines; the cap at 4 avoids the oversubscription
-/// regression. The embedding path (fastembed) manages its own pool and is
-/// unaffected by this.
+/// regression. The embedding path does not use this: a single embedding
+/// session keeps ORT's default and pooled ones get `cores / pool_size`
+/// (`EmbeddingsConfig::session_intra_threads`).
 fn default_intra_threads() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -158,9 +159,12 @@ pub fn intra_threads() -> usize {
 /// [`intra_threads`]. `fastembed` sessions (embeddings, reranker) are
 /// different: not calling `with_intra_threads` leaves ONNX Runtime's own
 /// default in place, which benchmarks as ~1.7× faster on the batch path than
-/// [`default_intra_threads`] on a 4-core host. So they honor the env override
-/// when it is set and otherwise keep ORT's default, which is what this
-/// accessor expresses.
+/// [`default_intra_threads`] on a 4-core host. So a single fastembed session
+/// honors the env override when it is set and otherwise keeps ORT's default,
+/// which is what this accessor expresses. Pooled embedding sessions are the
+/// exception: without the override they get `cores / pool_size` threads each,
+/// because several sessions on ORT's full-size default oversubscribe the CPU
+/// (see `EmbeddingsConfig::session_intra_threads`).
 pub fn intra_threads_override() -> Option<usize> {
     std::env::var("ENGRAMDB_ONNX_INTRA_THREADS")
         .ok()

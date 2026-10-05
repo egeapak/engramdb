@@ -1,0 +1,6 @@
+baseline	59.8	2032160
+ort	72.3	3894688
+burn-flex	200.6	5947336
+burn-ndarray	173.2	6438112
+candle	152.0	5274856
+burn-cpu	575.0	131272904

@@ -83,7 +83,8 @@ max_tokens = 256               # truncate inputs longer than this
 reindex_on_model_change = "warn"   # "off" | "warn" | "auto" | "error"
 metadata_vector = true         # embed "{title}. {summary}. tags: ..." as an extra vector per memory
                                # (toggling changes vector composition: run `engramdb reindex --embeddings-only`)
-# pool_size = 2                # independent embedding sessions; omit to auto-size (cores/2) in daemon/MCP, 1 in one-shot CLI
+# pool_size = 2                # independent embedding sessions; omit to auto-size (cores/2) in daemon/MCP, 1 in one-shot CLI.
+#                               # Each pooled session gets cores/pool_size ONNX threads, so the pool never oversubscribes the CPU.
 
 [scope_proximity]
 exact_file = 1.0
@@ -244,6 +245,6 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 | `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
 | `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own config root (default `~/.claude`). Read, never written — it is how `harvest` locates session transcripts. |
-| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for the embedding/reranker sessions. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
+| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |
 

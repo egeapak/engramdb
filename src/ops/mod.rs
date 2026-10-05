@@ -487,8 +487,17 @@ pub async fn embedding_model_report(
 /// always matches the fingerprint recorded for the store.
 // `return`s are load-bearing across feature combinations (fallback cfg blocks
 // follow when a backend isn't compiled in).
+///
+/// `intra_threads` is the ONNX Runtime intra-op thread count for the session
+/// (`None` = ORT's default); see [`embedding_session_intra_threads`].
 #[allow(clippy::needless_return)]
-fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn EmbeddingProvider>> {
+fn resolve_provider(
+    model: &str,
+    backend: EmbeddingBackend,
+    intra_threads: Option<usize>,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    #[cfg(not(feature = "onnxruntime"))]
+    let _ = intra_threads;
     let Some(specs) = provider_specs(model) else {
         eprintln!(
             "Warning: unknown embedding model '{}', embeddings disabled",
@@ -513,7 +522,7 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
     // Auto / Onnx: try ONNX Runtime first when it is compiled in.
     #[cfg(feature = "onnxruntime")]
     {
-        if let Some(p) = OnnxProvider::try_with_model(specs.onnx.clone())
+        if let Some(p) = OnnxProvider::try_with_model_intra(specs.onnx.clone(), intra_threads)
             .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
         {
             return Some(p);
@@ -536,6 +545,18 @@ fn resolve_provider(model: &str, backend: EmbeddingBackend) -> Option<Arc<dyn Em
 
     let _ = &specs;
     None
+}
+
+/// Intra-op threads for each ONNX session of an embedding pool:
+/// `ENGRAMDB_ONNX_INTRA_THREADS` when set, else
+/// [`EmbeddingsConfig::session_intra_threads`](crate::types::config::EmbeddingsConfig::session_intra_threads)
+/// (ORT's default for a single session, `cores / pool` for a pool).
+fn embedding_session_intra_threads(pool_size: usize, cores: usize) -> Option<usize> {
+    #[cfg(feature = "onnxruntime")]
+    if let Some(n) = crate::onnx_ep::intra_threads_override() {
+        return Some(n);
+    }
+    crate::types::config::EmbeddingsConfig::session_intra_threads(pool_size, cores)
 }
 
 /// The model-backed providers a [`RetrievalEngine`] is wired with.
@@ -580,9 +601,13 @@ pub fn resolve_engine_providers(
     // mutex. A first-load failure leaves the pool empty → embeddings
     // disabled, exactly as a single-load failure behaved before; a later
     // session failing just yields a smaller pool (graceful degradation).
+    let intra_threads = embedding_session_intra_threads(
+        embedding_pool_size,
+        crate::types::config::available_cores(),
+    );
     let mut sessions = Vec::with_capacity(embedding_pool_size.max(1));
     for _ in 0..embedding_pool_size.max(1) {
-        match resolve_provider(config.embeddings.provider.as_str(), backend) {
+        match resolve_provider(config.embeddings.provider.as_str(), backend, intra_threads) {
             Some(p) => sessions.push(p),
             None => break,
         }
@@ -1209,6 +1234,26 @@ mod provider_cache_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pooled embedding sessions split the cores; a single session keeps
+    /// ORT's default; `ENGRAMDB_ONNX_INTRA_THREADS` wins over both.
+    /// (nextest runs each test in its own process, so the env change is
+    /// isolated.)
+    #[test]
+    fn embedding_session_intra_threads_policy_and_override() {
+        std::env::remove_var("ENGRAMDB_ONNX_INTRA_THREADS");
+        assert_eq!(embedding_session_intra_threads(1, 8), None);
+        assert_eq!(embedding_session_intra_threads(2, 4), Some(2));
+        assert_eq!(embedding_session_intra_threads(4, 8), Some(2));
+
+        #[cfg(feature = "onnxruntime")]
+        {
+            std::env::set_var("ENGRAMDB_ONNX_INTRA_THREADS", "3");
+            assert_eq!(embedding_session_intra_threads(1, 8), Some(3));
+            assert_eq!(embedding_session_intra_threads(4, 8), Some(3));
+            std::env::remove_var("ENGRAMDB_ONNX_INTRA_THREADS");
+        }
+    }
 
     fn onnx_config(provider: &str) -> EngramConfig {
         let mut config = EngramConfig::default();

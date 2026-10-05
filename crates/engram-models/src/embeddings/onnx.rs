@@ -483,6 +483,13 @@ impl OnnxProvider {
         Self::with_model(spec).ok()
     }
 
+    /// [`OnnxProvider::try_with_model`] with an explicit intra-op thread
+    /// count (`None` leaves ONNX Runtime's default). Used for the members of
+    /// an embedding pool, which must split the cores between them.
+    pub fn try_with_model_intra(spec: OnnxModelSpec, intra_threads: Option<usize>) -> Option<Self> {
+        Self::with_model_on_intra(spec, engram_onnx::default_backend(), intra_threads).ok()
+    }
+
     /// Try to create the default model on an explicit backend, returning
     /// None if unavailable.
     pub fn try_new_on(backend: engram_onnx::Backend) -> Option<Self> {

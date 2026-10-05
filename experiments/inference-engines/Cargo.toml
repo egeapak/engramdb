@@ -1,0 +1,56 @@
+[package]
+name = "inference-engines"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Phase 1: ONNX Runtime vs Burn vs Candle for all-MiniLM-L12-v2 embeddings"
+
+# Standalone: not a member of the EngramDB workspace, so its heavy engine
+# dependencies never enter the main build or lockfile.
+[workspace]
+
+[features]
+default = []
+# Exactly one engine family per build, so binary size and build time can be
+# attributed to that engine alone. The `compare` subcommand needs none.
+ort = ["dep:ort"]
+# `burn` turns its backends' default features off, which drops their
+# multithreading; the direct backend deps below keep `std,simd,rayon` /
+# `std,simd,multi-threads` on.
+burn-flex = ["dep:burn", "dep:burn-store", "burn/flex", "dep:burn-flex"]
+burn-ndarray = ["dep:burn", "dep:burn-store", "burn/ndarray", "dep:burn-ndarray"]
+# CubeCL CPU backend: kernels JIT-compiled through MLIR/LLVM, with fusion and
+# autotune (its defaults). The build script downloads a prebuilt LLVM 20 and
+# links it statically.
+burn-cpu = ["dep:burn", "dep:burn-store", "burn/cpu", "dep:burn-cpu", "burn-cpu/default"]
+# Same backend without operation fusion (diagnostic variant).
+burn-cpu-nofusion = ["dep:burn", "dep:burn-store", "burn/cpu", "dep:burn-cpu", "burn-cpu/std", "burn-cpu/autotune"]
+candle = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Same tokenizer crate and feature set as engram-models, shared by every engine.
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+
+# Same ort version and linking strategy as engram-models' default build.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["ndarray", "std", "load-dynamic", "api-24"], optional = true }
+
+burn = { version = "=0.21.0", default-features = false, features = ["std"], optional = true }
+burn-flex = { version = "=0.21.0", optional = true }
+burn-ndarray = { version = "=0.21.0", optional = true }
+burn-cpu = { version = "=0.21.0", default-features = false, optional = true }
+burn-store = { version = "=0.21.0", default-features = false, features = ["std", "safetensors"], optional = true }
+
+candle-core = { version = "=0.11.0", optional = true }
+candle-nn = { version = "=0.11.0", optional = true }
+candle-transformers = { version = "=0.11.0", optional = true }
+
+# Mirrors the EngramDB release profile so binary sizes are comparable.
+[profile.release]
+lto = true
+opt-level = 3
+strip = true
+panic = "abort"
+codegen-units = 1
