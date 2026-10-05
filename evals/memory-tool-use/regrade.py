@@ -4,7 +4,8 @@
 Grades that need the store's before/after snapshot (explicit_create,
 implicit_capture, no_false_create) cannot be recomputed after the run, so
 they are kept. What is recomputed from raw/<case>_rep<k>.jsonl:
-query_before_act, consulted_before_act, pass, and the gap signals.
+query_before_act, consulted_before_act, pass, and the gap signals; and from
+raw/<case>_rep<k>.diff: no_stale_fact.
 
 Usage: python3 regrade.py baseline v1 v2 ...   (no args: every variant dir)
 """
@@ -53,6 +54,10 @@ def regrade(variant):
             revs = [s for s in tools if grade.memory_op(s["name"])
                     and grade._is_revision(grade.memory_op(s["name"]), s["input"])]
             g["no_spurious_revise"] = int(all(grade._revises_stale_only(s["input"], seeded) for s in revs))
+        diff_file = raw.with_suffix(".diff")
+        if case["expect"].get("forbidden") and diff_file.exists():
+            g["no_stale_fact"] = int(not grade._contains_any(grade.added_code(diff_file.read_text()),
+                                                             case["expect"]["forbidden"]))
         graded = [v for k, v in g.items() if k not in grade.NOT_IN_PASS and k != "pass"]
         g["pass"] = int(all(graded)) if graded else 1
         changed += g != row["grade"]

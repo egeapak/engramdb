@@ -166,6 +166,24 @@ def _contains_any(text, needles):
     return any(n.lower() in low for n in needles)
 
 
+def added_code(diff):
+    """What a diff adds, as code: new file paths plus added lines without comments.
+
+    A forbidden term is a stale fact the agent *used*. Context and removed
+    lines are not its work, and a comment that names the old value to say
+    "not X" is not a use of X.
+    """
+    out, comment = [], "#"
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            path = line[4:].removeprefix("b/")
+            comment = "--" if path.endswith(".sql") else "#"
+            out.append(path)
+        elif line.startswith("+"):
+            out.append(line[1:].split(comment, 1)[0])
+    return "\n".join(out)
+
+
 def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
     exp = case["expect"]
     steps, hooks, init, final = parse_events(events)
@@ -189,8 +207,8 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
             ok = ok and "migrations/0007_add_customers.sql" not in diff
         g["fact_used"] = int(ok)
     if exp.get("forbidden"):
-        # Diff only: an answer may rightly say "we moved off X".
-        g["no_stale_fact"] = int(not _contains_any(diff, exp["forbidden"]))
+        # Added code only: an answer or a comment may rightly say "we moved off X".
+        g["no_stale_fact"] = int(not _contains_any(added_code(diff), exp["forbidden"]))
 
     new_or_changed = [text for path, (sha, text) in after.items() if before.get(path, (None,))[0] != sha]
     new_files = [p for p in after if p not in before]

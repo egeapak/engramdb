@@ -211,3 +211,36 @@ def test_costly_capture_graded_only_after_two_failures():
     row, _ = grade.grade_case(_costly_case(), _events_with_failures(1), "", {}, {}, {}, 1.0)
     assert "costly_capture" not in row["grade"] and row["grade"]["pass"] == 1
     assert row["failed_tool_calls"] == 1
+
+
+HARD = {c["id"]: c for c in map(json.loads, (HERE / "cases_hard.jsonl").read_text().splitlines())}
+
+
+def _stale(case_id, diff):
+    row, _ = grade.grade_case(HARD[case_id], _events_with_failures(0), diff, {}, {}, {}, 1.0)
+    return row["grade"]["no_stale_fact"]
+
+
+def test_stale_fact_ignores_comments_docstring_mentions_and_context():
+    diff = ("+++ b/src/billing/currency.py\n"
+            "+from decimal import ROUND_FLOOR\n"
+            "+    # not tax's ROUND_HALF_EVEN\n"
+            "+    \"\"\"Different from tax rounding (ROUND_HALF_EVEN).\"\"\"\n"
+            " CONTEXT rounding=ROUND_HALF_EVEN\n"
+            "-    return x.quantize(q, rounding=ROUND_HALF_EVEN)\n"
+            "+    return x.quantize(q, rounding=ROUND_FLOOR)\n")
+    assert _stale("ds-fx-rounding", diff) == 1
+    assert _stale("ds-fx-rounding", "+    return x.quantize(q, rounding=ROUND_HALF_EVEN)\n") == 0
+
+
+def test_stale_fact_local_helper_is_not_the_root_module():
+    local = ("+++ b/services/notifier/flags.py\n"
+             "+def is_on(name):\n"
+             "+    # cannot read the root flags.toml\n")
+    assert _stale("ds-notifier-flag", local) == 1
+    assert _stale("ds-notifier-flag", "+++ b/services/notifier/send.py\n+from src.flags import is_on\n") == 0
+
+
+def test_stale_fact_sees_new_file_paths_and_sql_comments():
+    assert _stale("ds-notifier-migration", "+++ b/migrations/0008_rename.sql\n+SELECT 1;\n") == 0
+    assert _stale("ds-notifier-migration", "+++ b/services/notifier/m.sql\n+-- no RENAME COLUMN here\n") == 1
