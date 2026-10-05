@@ -1,0 +1,58 @@
+diff --git a/src/api/refunds.py b/src/api/refunds.py
+new file mode 100644
+index 0000000..3e33ba3
+--- /dev/null
++++ b/src/api/refunds.py
+@@ -0,0 +1,52 @@
++import time
++
++from flask import Blueprint, jsonify, request
++
++from src.billing.refunds import refund
++
++from . import errors
++from .invoices import _INVOICES
++
++bp = Blueprint("refunds", __name__)
++
++IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
++
++# (idempotency key, invoice id) -> (stored_at, body, status)
++_IDEMPOTENT_RESPONSES = {}
++
++
++@bp.post("/invoices/<invoice_id>/refunds")
++def create_refund(invoice_id):
++    key = request.headers.get("X-Acme-Idempotency")
++    if not key:
++        return errors.problem(428, "Precondition Required", "X-Acme-Idempotency header is required")
++
++    now = time.time()
++    stored = _IDEMPOTENT_RESPONSES.get((key, invoice_id))
++    if stored and now - stored[0] < IDEMPOTENCY_TTL_SECONDS:
++        _, body, status = stored
++        return jsonify(body), status
++
++    invoice = _INVOICES.get(invoice_id)
++    if invoice is None:
++        return errors.problem(404, "Not Found", f"invoice {invoice_id} not found")
++
++    payload = request.get_json(silent=True) or {}
++    amount = payload.get("amount")
++    if not isinstance(amount, dict) or amount.get("ccy") != "USD":
++        return errors.problem(400, "Bad Request", 'amount must be {"minor": <int>, "ccy": "USD"}')
++    amount_cents = amount.get("minor")
++    if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
++        return errors.problem(400, "Bad Request", "amount.minor must be a positive integer")
++
++    try:
++        result = refund(invoice, amount_cents)
++    except ValueError as exc:
++        return errors.problem(422, "Unprocessable Entity", str(exc))
++
++    body = {
++        "invoice_id": result["invoice_id"],
++        "refunded": {"minor": result["refunded_cents"], "ccy": "USD"},
++    }
++    _IDEMPOTENT_RESPONSES[(key, invoice_id)] = (now, body, 201)
++    return jsonify(body), 201

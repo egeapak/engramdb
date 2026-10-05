@@ -1,0 +1,115 @@
+diff --git a/src/api/webhooks.py b/src/api/webhooks.py
+index c326872..dd7eb25 100644
+--- a/src/api/webhooks.py
++++ b/src/api/webhooks.py
+@@ -1,10 +1,42 @@
++import hashlib
++import hmac
++import os
++import time
++
+ from flask import Blueprint, request
+ 
++from src.api import errors
++
+ bp = Blueprint("webhooks", __name__)
+ 
++# Reject events whose Psp-Signature-Timestamp is further than this from now (replay protection).
++MAX_SIGNATURE_AGE_SECONDS = 120
++
++
++def _signature_is_valid(body, signature, timestamp):
++    secret = os.environ.get("PSP_WEBHOOK_SECRET")
++    if not secret or not signature or not timestamp:
++        return False
++    try:
++        sent_at = int(timestamp)
++    except ValueError:
++        return False
++    if abs(time.time() - sent_at) > MAX_SIGNATURE_AGE_SECONDS:
++        return False
++    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
++    return hmac.compare_digest(expected, signature)
++
+ 
+ @bp.post("/webhooks/psp")
+ def psp_webhook():
++    # Verify against the raw bytes before parsing anything.
++    body = request.get_data(cache=True)
++    if not _signature_is_valid(
++        body,
++        request.headers.get("Psp-Signature"),
++        request.headers.get("Psp-Signature-Timestamp"),
++    ):
++        return errors.problem(401, "Invalid webhook signature")
+     event = request.get_json()
+-    # TODO: verify the event, then dispatch on event["type"]
++    # TODO: dispatch on event["type"]
+     return "", 204
+diff --git a/tests/test_webhooks.py b/tests/test_webhooks.py
+new file mode 100644
+index 0000000..2d1ccb9
+--- /dev/null
++++ b/tests/test_webhooks.py
+@@ -0,0 +1,61 @@
++import hashlib
++import hmac
++import json
++import time
++
++import pytest
++from flask import Flask
++
++from src.api import webhooks
++
++SECRET = "whsec_test"
++
++
++@pytest.fixture
++def client(monkeypatch):
++    monkeypatch.setenv("PSP_WEBHOOK_SECRET", SECRET)
++    app = Flask(__name__)
++    app.register_blueprint(webhooks.bp)
++    return app.test_client()
++
++
++def _post(client, body, secret=SECRET, timestamp=None, signature=None):
++    raw = json.dumps(body).encode()
++    if signature is None:
++        signature = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
++    headers = {
++        "Psp-Signature": signature,
++        "Psp-Signature-Timestamp": str(int(time.time()) if timestamp is None else timestamp),
++        "Content-Type": "application/json",
++    }
++    return client.post("/webhooks/psp", data=raw, headers=headers)
++
++
++def test_valid_signature_is_accepted(client):
++    assert _post(client, {"type": "charge.succeeded"}).status_code == 204
++
++
++def test_wrong_secret_is_rejected(client):
++    resp = _post(client, {"type": "charge.succeeded"}, secret="other")
++    assert resp.status_code == 401
++    assert resp.mimetype == "application/problem+json"
++
++
++def test_missing_headers_are_rejected(client):
++    resp = client.post("/webhooks/psp", json={"type": "charge.succeeded"})
++    assert resp.status_code == 401
++
++
++def test_stale_timestamp_is_rejected(client):
++    resp = _post(client, {"type": "charge.succeeded"}, timestamp=int(time.time()) - 121)
++    assert resp.status_code == 401
++
++
++def test_malformed_timestamp_is_rejected(client):
++    resp = _post(client, {"type": "charge.succeeded"}, timestamp="yesterday")
++    assert resp.status_code == 401
++
++
++def test_unset_secret_rejects_everything(client, monkeypatch):
++    monkeypatch.delenv("PSP_WEBHOOK_SECRET")
++    assert _post(client, {"type": "charge.succeeded"}).status_code == 401

@@ -1,0 +1,146 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..68eead0 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,102 @@
++"""Export one month's finalized invoices as the CSV Finance imports into their accounting tool.
++
++The Finance import runs with a German locale: semicolon delimiter, DD.MM.YYYY dates,
++UTF-8 without a BOM. Amounts are integer cents. Every finalized invoice of the month
++appears exactly once (zero-amount ones included); drafts (finalized_at IS NULL) do not.
++"""
+ import argparse
++import csv
++import io
+ import os
++import sqlite3
++import sys
++from datetime import date, datetime
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++OUT_DIR = ROOT / "var" / "exports"
++HEADER = ("invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date")
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++    "WHERE finalized_at IS NOT NULL AND finalized_at >= {p} AND finalized_at < {p} ORDER BY id"
++)
++
++
++def previous_month(today):
++    """The cron runs early in the month and exports the month before it."""
++    return f"{today.year - 1}-12" if today.month == 1 else f"{today.year}-{today.month - 1:02d}"
++
++
++def month_bounds(month):
++    """[start, end) of a "YYYY-MM" month as naive datetimes, matching invoices.finalized_at."""
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
+ 
+ 
+-def main():
++def fetch_invoices(month):
++    """Rows of (id, customer_id, subtotal_cents, tax_cents, finalized_at) for the month."""
++    start, end = month_bounds(month)
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg
++
++        # One short read-only query; don't hold a pooled connection longer than needed.
++        with psycopg.connect(url) as conn:
++            return conn.execute(QUERY.format(p="%s"), (start, end)).fetchall()
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        rows = conn.execute(QUERY.format(p="?"), (start.isoformat(" "), end.isoformat(" "))).fetchall()
++    finally:
++        conn.close()
++    return [(*r[:4], datetime.fromisoformat(r[4])) for r in rows]
++
++
++def render_csv(rows):
++    """Render invoice rows in the Finance import format."""
++    buf = io.StringIO()
++    writer = csv.writer(buf, delimiter=";", lineterminator="\n")
++    writer.writerow(HEADER)
++    seen = set()
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        if invoice_id in seen:
++            raise ValueError(f"invoice {invoice_id} appears twice in the export")
++        seen.add(invoice_id)
++        subtotal, tax = int(subtotal), int(tax or 0)
++        if isinstance(finalized_at, datetime):
++            finalized_at = finalized_at.date()
++        if not isinstance(finalized_at, date):
++            raise ValueError(f"invoice {invoice_id} has no usable finalized date")
++        writer.writerow((invoice_id, customer_id, subtotal, tax, subtotal + tax, finalized_at.strftime("%d.%m.%Y")))
++    return buf.getvalue()
++
++
++def main(argv=None):
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
+-    args = parser.parse_args()
++    parser.add_argument("--month", help="YYYY-MM (default: the previous month)")
++    parser.add_argument("--out-dir", type=Path, default=OUT_DIR,
++                        help="local root the file is written under, as exports/<YYYY-MM>/invoices.csv")
++    parser.add_argument("--dry-run", action="store_true", help="print the CSV instead of writing it")
++    args = parser.parse_args(argv)
++    month = args.month or previous_month(date.today())
++    month_bounds(month)  # validates the format before touching the database
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    key = f"exports/{month}/invoices.csv"
++
++    rows = fetch_invoices(month)
++    body = render_csv(rows)
++    if args.dry_run:
++        sys.stdout.write(body)
++        print(f"dry run: {len(rows)} invoices for {month} would go to {bucket}/{key}", file=sys.stderr)
++        return 0
++    path = args.out_dir / key
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_bytes(body.encode("utf-8"))  # plain UTF-8, no BOM
++    print(f"exported {len(rows)} invoices for {month} ({args.env}) to {path}; destination {bucket}/{key}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
+diff --git a/tests/test_export.py b/tests/test_export.py
+new file mode 100644
+index 0000000..482a027
+--- /dev/null
++++ b/tests/test_export.py
+@@ -0,0 +1,28 @@
++from datetime import datetime
++
++import pytest
++
++from scripts.export import previous_month, render_csv
++
++
++def test_render_csv_uses_finance_import_format():
++    rows = [
++        ("inv_1", "cus_1", 1000, 190, datetime(2026, 9, 3, 14, 5)),
++        ("inv_2", "cus_2", 0, 0, datetime(2026, 9, 30, 23, 59)),
++    ]
++    assert render_csv(rows) == (
++        "invoice_id;customer_id;subtotal_cents;tax_cents;total_cents;finalized_date\n"
++        "inv_1;cus_1;1000;190;1190;03.09.2026\n"
++        "inv_2;cus_2;0;0;0;30.09.2026\n"
++    )
++
++
++def test_render_csv_rejects_duplicate_invoices():
++    row = ("inv_1", "cus_1", 1000, 0, datetime(2026, 9, 3))
++    with pytest.raises(ValueError):
++        render_csv([row, row])
++
++
++def test_previous_month_wraps_the_year():
++    assert previous_month(datetime(2026, 1, 2)) == "2025-12"
++    assert previous_month(datetime(2026, 10, 2)) == "2026-09"
