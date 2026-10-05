@@ -10,10 +10,10 @@ from the `results.jsonl` files under `.claude/hillclimb/`.
 | | Start | End |
 |---|---|---|
 | Original eval (47 cases, after step 7) | Opus 59%, Sonnet 45% (plugin only, step 0) | Opus 100%, Sonnet 99% |
-| Hard eval, pass (45 cases × 3 reps = 135 runs) | Opus 125, Sonnet 121 (baseline) | Opus 129, Sonnet 131 (mean of v4 and v4b) |
+| Hard eval, pass (45 cases × 3 reps = 135 runs) | Opus 125, Sonnet 121 (baseline) | Opus 129, Sonnet 132 (mean of v4 and v4b) |
 | Hard eval, $ per case | Opus 0.237, Sonnet 0.113 (baseline) | Opus 0.231 (−2.4%), Sonnet 0.106 (−6.4%) |
 
-- **Quality.** On the hard eval, the climb raised pass by 4 runs on Opus and 10 on Sonnet. It then cut cost on both models.
+- **Quality.** On the hard eval, the climb raised pass by 4 runs on Opus and 11 on Sonnet. It then cut cost on both models.
 - **Test split.** It started at 96% on both models, so it can show a change of only about one case. The whole-set numbers above are therefore **directional**.
 - **Cost.** The cost cut against the incumbent before the cost climb (v2) is larger: −5.5% on Opus and −10.2% on Sonnet. It reproduced on a fresh confirm run.
 - **Recommendation.** Merge the product changes listed under "Changes in the codebase". Each one is tied to a measured behavior change.
@@ -44,19 +44,19 @@ The original eval hit its ceiling, so a new case set was built:
 
 - **Categories:** multi-memory tasks, facts buried past the hook preview, stale or superseded memories, distractors, multi-turn sessions, facts discovered mid-task, and hard negatives.
 - **Split:** 22 train and 23 test, stratified by category. The analyzer subagent read only train transcripts.
-- **Saving discovered facts (your rule):** a fact found during a task must be saved only when finding it was costly, meaning 2 or more failed tool calls in that run. Otherwise saving is optional and not graded.
+- **Saving discovered facts (your rule):** a fact found during a task must be saved only when finding it was costly. Otherwise saving is optional and not graded. The rounds below used "2 or more failed tool calls in the run" as the test for costly; see "After the climb" for why that changed.
 
 | Round | Change | Opus whole / test | Sonnet whole / test | $ per case (Opus / Sonnet) | Verdict |
 |---|---|---|---|---|---|
 | 0 | baseline | 125 / 67 | 121 / 66 | 0.237 / 0.113 | — |
-| 1 | `challenge` on any contradicting source, not only the user | 132 / 68 | 122 / 68 | 0.250 / 0.117 | kept |
+| 1 | `challenge` on any contradicting source, not only the user | 134 / 68 | 123 / 68 | 0.250 / 0.117 | kept |
 | 2 | File hook picks memories by nearest enclosing scope | 130 / 67 | 133 / 68 | 0.245 / 0.118 | kept |
 | 3 | Cost: each memory once per session, in full | 129 / 67 | 129 / 69 | 0.232 / 0.104 | rejected (Sonnet outside quality band) |
 | 4 | Cost: v3 + a fact's premise shown as a check | 128 / 65 | 131 / 69 | 0.231 / 0.106 | **kept** |
 | 5 | Cost: unpin `update`, shorter parameter text | 132 / 68 | 131 / 69 | 0.231 / 0.105 | rejected (no cost change), reverted |
-| 4b | Confirm run of v4 (same code) | 130 / 66 | 131 / 69 | 0.231 / 0.106 | confirms v4 |
+| 4b | Confirm run of v4 (same code) | 130 / 66 | 133 / 69 | 0.231 / 0.106 | confirms v4 |
 
-Whole is out of 135 runs; test is out of 69.
+Whole is out of 135 runs; test is out of 69. Re-graded after the climb with the fixed forbidden-term check (see "After the climb"): 5 train runs flipped to pass (Opus v1 +2, Sonnet v1 +1, Sonnet v4b +2). No verdict changes.
 
 - **Noise floor.** One case is 3 runs, about 2.2 points of whole-set pass. The cost noise is about ±2.5–2.8% per variant pair.
 - **Guardrails.** No-false-create and no-spurious-revise stayed within 2 runs of the baseline on every kept round.
@@ -125,19 +125,36 @@ The eval itself lives in `evals/memory-tool-use/`:
 - `regrade.py` and `summarize.py`;
 - the retrieval probe in `evals/retrieval-probe/`.
 
-## Remaining failures
+## After the climb: fixture and grader fixes
 
-All are below the noise floor:
-- **`st-retention` (Opus).** It saves real inconsistencies of the fixture: the docs refer to columns the migrations never add. This is a fixture flaw, not a product gap.
-- **`mm-dunning-job` (Sonnet).** The needed memory is scoped to a module the edited file calls (`src/jobs/`), so no scope rule reaches it. This is a real but small gap.
-- **`ds-fx-rounding`, `ds-notifier-flag`.** Grader artifacts: a contrastive comment, and a helper name that trips a forbidden-term check.
-- **Costly-discovery cases.** They never triggered: both models read the script before running it, so no run hit 2 failed calls. The rule is in the grader, but the cases do not exercise it.
+A review of the remaining failures found that two of the original diagnoses were wrong.
+None of the failures was a product gap. The fixes below change the case set, so rows run
+after them are not comparable with the round table above for the changed cases.
+
+- **`mm-dunning-job` (Sonnet).** The earlier diagnosis said the needed memory is scoped to a module that the edited file calls. That is wrong: `src/billing/dunning.py` imported and called nothing.
+  - Sonnet passed only when it opened `src/jobs/queue.py` with the Read tool, which fires the file hook. Other runs returned a list of retry dates, which was a fair reading of "Plan the payment retries".
+  - **Fix:** `dunning.py` now imports `enqueue`, and the prompt asks for each retry to go on the job queue.
+  - **Product gap, not fixed:** the file hook does not fire when Claude reads a file with Bash `cat`, `sed` or `head`.
+  - **Possible regression:** Sonnet passed this case 3/3 at baseline and 0–1/3 from v3 on, when it stopped calling `query`. With 3 runs per round this may be noise.
+- **`st-retention` (Opus).** Opus was right: no migration added `invoices.finalized_at`, and `refunds` had no status column, but docs, scripts and a seed memory rely on both. **Fix:** migrations `0001` and `0005` now define them. No `0008` was added, because `nh-other-project` needs it absent.
+- **`ds-fx-rounding`, `ds-notifier-flag`.** `no_stale_fact` searched the whole diff, including context lines, removed lines and comments.
+  - **Fix:** it now checks only added code: new file paths, plus added lines with comments removed.
+  - **Needles:** they name the stale use. For fx it is the `rounding=ROUND_HALF_EVEN` argument. For the notifier it is an import of the root `flags` module.
+  - **Effect:** all rounds were re-graded, and exactly the 5 known false failures flipped to pass.
+- **Costly-discovery cases.** The earlier claim that they never triggered is wrong. In two Sonnet v4 `dc-seed-dev` runs the rule fired and the save was missing.
+  - **The failure count was noisy:** a probe like `ls var` counted as a failure, and a chained `; ls` hid a real one.
+  - **The cases were too easy:** every cause was named in the docs or the script, so a model that read first never failed.
+  - **Redesign:**
+    - The causes are now runtime state or a deep code path, and the docs no longer name the remedies. The runner sets `TZ=Europe/Berlin` and leaves a stale `var/dev.sqlite3`; the backfill zone check moved into `src/billing/periods.py`.
+    - The grader measures **discovery cost**: the tool calls from the first failed run of the task command to its first success. Failure is also read from the output. Saving is graded when the cost is 3 or more.
+  - Details are in `HARD_CASES.md`.
+
+**Verification run (v4c):** the 6 changed cases, 3 runs per model, on the v4 build. Results pending.
 
 ## What I would try next
 
-- **Scope by dependency.** When a file is edited, also surface memories scoped to modules it imports or calls. This fixes `mm-dunning-job`.
 - **Fewer turns, not shorter text.** The remaining memory turns are 0.5–0.8 per case, mostly `query` and `challenge`. Cost work should look there or at task turns, not at prompt length (see v5).
-- **Fixture and grader polish.** Fix the `st-retention` schema gap. Loosen the two forbidden-term checks. Add discovery cases where running is the only way to find the cause.
+- **File hook on Bash reads.** Consider running the PreToolUse file hook for paths read with Bash `cat`/`sed`/`head`. It is fragile (shell parsing), so measure it on `mm-dunning-job` first.
 - **A third, harder set.** Many more memories (100+), long sessions with compaction, and cross-module tasks. The hard set saturated after two rounds.
 
 ## Where to look
