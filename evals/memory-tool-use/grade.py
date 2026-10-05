@@ -272,6 +272,12 @@ def grade_case(case, events, diff, before, after, seeded_ids, latency_s):
         target_changed = any(target in Path(path).name and path in before and before[path][0] != sha
                              for path, (sha, _) in after.items()) if target else False
         g["revise"] = int(hit or target_changed)
+        if exp.get("no_collateral"):
+            # Among similar memories, revising a still-valid neighbour of the
+            # target is a wrong challenge even when the target was hit too.
+            g["no_collateral_revise"] = int(all(
+                _revises_only(s["input"], seeded_ids, {case.get("target")} | stale_keys())
+                for s in revise_calls))
     elif exp["revise"] is False:
         g["no_spurious_revise"] = int(all(_revises_stale_only(s["input"], seeded_ids)
                                           for s in revise_calls))
@@ -393,6 +399,15 @@ def _revises_stale_only(tool_input, seeded_ids):
     named = [k for k, i in seeded_ids.items()
              if _ids_match(i, target, [o for o in seeded_ids.values() if o != i])]
     return bool(named) and all(k in stale for k in named)
+
+
+def _revises_only(tool_input, seeded_ids, allowed_keys):
+    """True when every seeded memory this revision targets is in `allowed_keys`.
+    A revision that names no seeded memory is not collateral."""
+    target = {k: tool_input[k] for k in ("id", "supersedes") if k in tool_input}
+    named = [k for k, i in seeded_ids.items()
+             if _ids_match(i, target, [o for o in seeded_ids.values() if o != i])]
+    return all(k in allowed_keys for k in named)
 
 
 def seeded_ids_from_events(events):

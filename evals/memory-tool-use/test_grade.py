@@ -276,3 +276,17 @@ def test_costly_capture_not_graded_when_the_fact_was_never_found():
     rerun = ("python backfill.py", "would backfill", False)
     row = _costly([FAIL, READ, workaround, rerun], {})
     assert row["discovery_cost"] == 3 and "costly_capture" not in row["grade"]
+
+
+def test_collateral_revise_of_a_neighbour_fails_a_no_collateral_case():
+    case = {"id": "ct-x", "tags": ["contradiction"], "prompt": "p", "target": "logging",
+            "expect": {"query": None, "create": None, "revise": True, "facts": [],
+                       "create_terms": [], "no_collateral": True}}
+    mem = MEM + "challenge"
+    hit = {"id": IDS["logging"]}
+    ev = events([(mem, hit)])
+    row, _ = grade.grade_case(case, ev, "", {}, {}, IDS, 1.0)
+    assert row["grade"]["revise"] == 1 and row["grade"]["no_collateral_revise"] == 1
+    ev = events([(mem, hit), (mem, {"id": IDS["tests"]})])
+    row, _ = grade.grade_case(case, ev, "", {}, {}, IDS, 1.0)
+    assert row["grade"]["no_collateral_revise"] == 0 and row["grade"]["pass"] == 0
