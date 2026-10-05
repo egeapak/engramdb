@@ -1798,6 +1798,11 @@ impl EngramDbServer {
                  differs from the type default, and origin_task + generality=\"task\" \
                  for task-specific choices. Declare situation on query when debugging \
                  or weighing a design choice. \
+                 Save what cost you effort: when a command failed and finding the cause \
+                 took more than one try, and nothing in the repo or the error message states \
+                 that cause, create a hazard before you report back (the command, the \
+                 symptom, the cause and the fix). Save it yourself; don't offer to. Skip it \
+                 when the docs or the error already said what to do. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, \"global\", or \"group:<name>\") to operate on a different \
                  store's memories. \
@@ -2153,7 +2158,7 @@ fn resolve_session_id() -> String {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards, and when the user asks you to remember something about the project: use this, not Claude Code's file-based auto-memory, which other sessions' queries and collaborators never see. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards; after a failed command whose cause took more than one try to find and is not documented (save it yourself, don't offer to); and when the user asks you to remember something about the project: use this, not Claude Code's file-based auto-memory, which other sessions' queries and collaborators never see. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
     )]
     async fn memory_create(
         &self,

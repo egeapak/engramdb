@@ -73,7 +73,7 @@ Each entry includes `epistemic` (always) and `invalidated_at` / `valid_from` whe
 
 ### `create` (mutates)
 
-**Store a new memory.** Use after discovering patterns, decisions, or hazards.
+**Store a new memory.** Use after discovering patterns, decisions, or hazards, and after a failed command whose cause took more than one try to find and is not documented.
 
 | Param | Type | Description |
 |-------|------|-------------|
