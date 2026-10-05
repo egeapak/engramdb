@@ -1,6 +1,6 @@
 # Hard cases for the memory-tool-use eval
 
-Files: `cases_hard.jsonl` (45 cases), `seed_memories_hard.json` (43 memories: the 10
+Files: `cases_hard.jsonl` (47 cases; 45 in the climb, 2 costly cases added after it), `seed_memories_hard.json` (43 memories: the 10
 original seeds unchanged, then 33 new ones in seeding order), and `fixture_hard/` (a copy
 of `fixture/` plus the files listed at the end). The original eval is at its ceiling
 because every fact sits in a short memory whose body the hooks inject whole, one memory
@@ -62,8 +62,8 @@ the record"), or asks something only memory answers after a turn of unrelated ed
 Turn 2 arrives with `--resume`, where Claude tends to answer from context already in the
 session instead of going back to the store.
 
-**discovered (dc-, 6).** A fact that one script warning reveals at once does not need
-saving, so this category separates two kinds of case. Four are **costly** (tag `costly`,
+**discovered (dc-, 8).** A fact that one script warning reveals at once does not need
+saving, so this category separates two kinds of case. Six are **costly** (tag `costly`,
 `create: true`). In each, the cause is runtime state or a deep code path that no doc
 names, so reading first does not reveal it, and the fix takes several calls after the
 task command fails:
@@ -77,6 +77,12 @@ task command fails:
   the real error swallowed. Run `scripts/migrate_dev.py` first.
 - `dc-golden-statements`: the expected golden diff, then "golden integrity check failed"
   after the hand edit. Goldens are regenerated with `scripts/regen_goldens.py`.
+- `dc-reconcile-format` (added after the climb): the runner leaves the ledger's export in
+  `var/ledger/` in the provider's v1 column order. The script reads v2 by default and
+  reports every invoice missing. Run it with `--format v1`.
+- `dc-search-index-cache` (added after the climb): the runner leaves token shards from an
+  older tokenizer in `var/cache/search/`. The build fails with "unexpected token". Run it
+  with `--clear-cache`.
 
 The save is graded only when finding the cause was costly: the **discovery cost** is the
 number of tool calls from the first failed run of the task command (`attempt_re`) to its

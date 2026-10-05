@@ -46,7 +46,9 @@
   "nh-user-unsure-rounding",
   "st-fx-provider",
   "st-notifier-owner",
-  "st-pdf-premise"
+  "st-pdf-premise",
+  "dc-reconcile-format",
+  "dc-search-index-cache"
  ],
  "seed": 20261002,
  "stratified_by": "tags[0]"

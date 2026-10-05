@@ -153,22 +153,34 @@ def install_engram_md(ws):
     (claude_dir / "CLAUDE.md").write_text("@ENGRAM.md\n")
 
 
-def stale_dev_db(ws, applied=4):
-    """Leave a preview database from an older checkout in var/ (git-ignored).
+def runtime_state(ws):
+    """Leave git-ignored state in var/ that the costly discovered cases depend on.
 
-    dc-seed-dev depends on it: the database exists, so nothing says to create
-    it, but it predates migration 0005, so seed_dev.py fails on the missing
-    refunds table and swallows the error. Only running migrate_dev.py fixes it.
+    None of it is in the repo, so reading the code first does not reveal it.
+    - dc-seed-dev: a preview database from an older checkout. It predates
+      migration 0005, so seed_dev.py fails on the missing refunds table and
+      swallows the error. Only running migrate_dev.py fixes it.
+    - dc-reconcile-format: the ledger's September export, in the provider's
+      v1 column order. reconcile_ledger.py defaults to v2, so every invoice
+      looks missing until it runs with --format v1.
+    - dc-search-index-cache: token shards cached by an older tokenizer.
+      build_search_index.py rejects them until it runs with --clear-cache.
     """
-    db = ws / "var" / "dev.sqlite3"
-    db.parent.mkdir()
-    conn = sqlite3.connect(db)
+    var = ws / "var"
+    var.mkdir()
+    conn = sqlite3.connect(var / "dev.sqlite3")
     conn.execute("CREATE TABLE schema_migrations (name TEXT PRIMARY KEY)")
-    for path in sorted((ws / "migrations").glob("*.sql"))[:applied]:
+    for path in sorted((ws / "migrations").glob("*.sql"))[:4]:
         conn.executescript(path.read_text())
         conn.execute("INSERT INTO schema_migrations VALUES (?)", (path.name,))
     conn.commit()
     conn.close()
+    (var / "ledger").mkdir()
+    rows = [f"inv_2026_09_{i:03d},le_{9000 + i},{1000 * i}" for i in range(1, 13)]
+    (var / "ledger" / "2026-09.csv").write_text("col1,col2,col3\n" + "\n".join(rows) + "\n")
+    (var / "cache" / "search").mkdir(parents=True)
+    for i in range(3):
+        (var / "cache" / "search" / f"shard-{i:03d}.json").write_text(json.dumps({"tokenizer": 2, "tokens": []}))
 
 
 def setup_workspace(tmp, env, engram_md=False):
@@ -177,7 +189,7 @@ def setup_workspace(tmp, env, engram_md=False):
     if engram_md:
         install_engram_md(ws)
     if FIXTURE["name"] == "hard":
-        stale_dev_db(ws)
+        runtime_state(ws)
     git = lambda *a: sh(["git", *a], ws, env)
     git("init", "-q", "-b", "main")
     git("remote", "add", "origin", "https://git.example.com/acme/ledgerline.git")
