@@ -1,0 +1,8 @@
+[project]
+name = "ledgerline-notifier"
+version = "0.3.0"
+requires-python = ">=3.12"
+dependencies = ["requests>=2.32"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]

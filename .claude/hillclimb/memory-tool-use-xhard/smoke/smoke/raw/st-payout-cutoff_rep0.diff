@@ -1,0 +1,27 @@
+diff --git a/src/payouts/schedule.py b/src/payouts/schedule.py
+index 5909c8a..94e7690 100644
+--- a/src/payouts/schedule.py
++++ b/src/payouts/schedule.py
+@@ -1,8 +1,10 @@
+ """When a payout leaves the bank."""
+ from datetime import time, timedelta
++from zoneinfo import ZoneInfo
+ 
+-# BankCo's same-day cutoff, CET.
+-SAME_DAY_CUTOFF = time(14, 0)
++# BankCo's same-day cutoff (SEPA Instant window), Europe/Amsterdam local time, so DST applies.
++SAME_DAY_CUTOFF = time(15, 30)
++BANK_TZ = ZoneInfo("Europe/Amsterdam")
+ 
+ 
+ def next_business_day(day):
+@@ -14,4 +16,8 @@ def next_business_day(day):
+ 
+ def payout_date(submitted_at):
+     """The business day on which a payout submitted at `submitted_at` (an aware datetime) leaves the bank."""
+-    raise NotImplementedError
++    local = submitted_at.astimezone(BANK_TZ)
++    day = local.date()
++    if day.weekday() < 5 and local.time() < SAME_DAY_CUTOFF:
++        return day
++    return next_business_day(day)

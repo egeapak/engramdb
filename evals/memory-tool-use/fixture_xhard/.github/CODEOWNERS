@@ -1,0 +1,8 @@
+# Enforced by branch protection on main.
+*                         @acme/billing-core
+/src/billing/invoices.py  @acme/ledger-integrations
+/src/payouts/             @acme/treasury-eng
+/src/subscriptions/       @acme/revenue-eng   # moved from billing-core on 2026-09-22 (REV-7)
+/services/notifier/       @acme/growth-eng
+/services/ingest/         @acme/data-platform
+/services/reporting/      @acme/finance-analytics

@@ -1,0 +1,71 @@
+diff --git a/src/billing/money.py b/src/billing/money.py
+index 21f39c6..daf11c8 100644
+--- a/src/billing/money.py
++++ b/src/billing/money.py
+@@ -6,6 +6,6 @@ class Money:
+     cents: int
+     currency: str = "USD"
+ 
+-    def __add__(self, other):
++    def __add__(self, other: "Money") -> "Money":
+         assert self.currency == other.currency
+         return Money(self.cents + other.cents, self.currency)
+diff --git a/src/billing/statements.py b/src/billing/statements.py
+index 93109cc..5b57a9f 100644
+--- a/src/billing/statements.py
++++ b/src/billing/statements.py
+@@ -1,11 +1,12 @@
+ """Plain-text customer statements."""
++from typing import Any
+ 
+ 
+-def format_cents(cents):
++def format_cents(cents: int) -> str:
+     return f"{cents // 100}.{cents % 100:02d}"
+ 
+ 
+-def render_statement(customer_id, invoices):
++def render_statement(customer_id: str, invoices: list[dict[str, Any]]) -> str:
+     lines = [f"Statement for {customer_id}"]
+     total = 0
+     for inv in invoices:
+diff --git a/src/subscriptions/renewals.py b/src/subscriptions/renewals.py
+index 5e712d2..b8dcf85 100644
+--- a/src/subscriptions/renewals.py
++++ b/src/subscriptions/renewals.py
+@@ -1,6 +1,7 @@
+ """Subscription renewals."""
+ from dataclasses import dataclass
+-from datetime import datetime
++from datetime import datetime, time, timedelta, timezone
++from zoneinfo import ZoneInfo
+ 
+ from src.billing.invoices import create_invoice, finalize_once
+ from src.billing.refunds import refund
+@@ -8,7 +9,7 @@ from src.jobs.queue import enqueue
+ from src.subscriptions.plans import PLANS
+ from src.subscriptions.proration import prorate_amount
+ 
+-RENEWAL_NOTICE_DAYS = 7
++RENEWAL_NOTICE_DAYS = 14
+ 
+ 
+ @dataclass
+@@ -37,9 +38,15 @@ def retry_failed_renewal(sub, invoice, attempt):
+     raise NotImplementedError
+ 
+ 
+-def reminder_due(sub, now):
++def reminder_due(sub: Subscription, now: datetime) -> bool:
+     """True when the renewal reminder for `sub` should go out at `now`."""
+-    raise NotImplementedError
++    if sub.status != "active":
++        return False
++    tz = ZoneInfo(sub.customer_tz)
++    # Renewal happens at 06:00 local time on the day the period ends.
++    end_day = sub.current_period_end.astimezone(tz).date()
++    renews_at = datetime.combine(end_day, time(6, 0), tzinfo=tz).astimezone(timezone.utc)
++    return renews_at - timedelta(days=RENEWAL_NOTICE_DAYS) <= now < renews_at
+ 
+ 
+ def send_renewal_notice(sub):

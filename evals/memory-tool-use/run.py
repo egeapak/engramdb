@@ -78,6 +78,11 @@ FIXTURES = {
     # multi-memory tasks, facts buried past the hook preview, superseded and
     # distractor memories, multi-turn sessions, facts discovered mid-task.
     "hard": {"seeds": "seed_memories_hard.json", "cases": "cases_hard.jsonl", "dir": "fixture_hard"},
+    # Headroom set once the hard set saturated: 114 memories with crowded
+    # same-topic neighbours, cross-module tasks, compaction, 3-step superseded
+    # chains, contradictions among look-alikes (XHARD_CASES.md). Its FX
+    # fixtures are committed, so it needs no runtime_state().
+    "xhard": {"seeds": "seed_memories_xhard.json", "cases": "cases_xhard.jsonl", "dir": "fixture_xhard"},
 }
 FIXTURE = {"name": "default"}
 

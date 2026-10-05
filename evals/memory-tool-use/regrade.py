@@ -22,7 +22,8 @@ FLOW_DIR = (Path(__file__).resolve().parent.parent.parent / ".claude" / "hillcli
         / os.environ.get("MTE_FLOW", "memory-tool-use"))
 FIXTURES = {"default": ("seed_memories.json", "cases.jsonl"),
             "vague": ("seed_memories_vague.json", "cases_vague.jsonl"),
-            "hard": ("seed_memories_hard.json", "cases_hard.jsonl")}
+            "hard": ("seed_memories_hard.json", "cases_hard.jsonl"),
+            "xhard": ("seed_memories_xhard.json", "cases_xhard.jsonl")}
 
 
 def regrade(variant):
