@@ -1,0 +1,114 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 1b369e4..2809ebc 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -2,7 +2,7 @@
+ name = "ledgerline"
+ version = "2026.9.1"
+ requires-python = ">=3.10"
+-dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32"]
++dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32", "boto3>=1.34", "psycopg[binary]>=3.1"]
+ 
+ [project.optional-dependencies]
+ dev = ["pytest>=8.0"]
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..2517c4e 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,93 @@
++"""Write the month's finalized invoices to a CSV that Finance imports.
++
++Finance's import tool runs with a German locale: semicolon delimiter, DD.MM.YYYY
++dates, UTF-8 without a BOM. Amounts are integer cents.
++"""
+ import argparse
++import csv
++import io
+ import os
++import sqlite3
++import sys
++from datetime import datetime, timezone
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++QUERY = (
++    "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++    "WHERE finalized_at IS NOT NULL AND finalized_at >= {p} AND finalized_at < {p} "
++    "ORDER BY finalized_at, id"
++)
++
++
++def month_bounds(month):
++    """[start, end) of a "YYYY-MM" month as naive datetimes (the ledger stores UTC)."""
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def previous_month(today=None):
++    today = today or datetime.now(timezone.utc)
++    return f"{today.year - 1}-12" if today.month == 1 else f"{today.year}-{today.month - 1:02d}"
++
++
++def fetch_invoices(start, end):
++    """Finalized invoices with start <= finalized_at < end; drafts have no finalized_at."""
++    url = os.environ.get("DATABASE_URL")
++    if url:
++        import psycopg
++
++        with psycopg.connect(url) as conn:
++            return conn.execute(QUERY.format(p="%s"), (start, end)).fetchall()
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        return conn.execute(QUERY.format(p="?"), (start.isoformat(" "), end.isoformat(" "))).fetchall()
++    finally:
++        conn.close()
++
++
++def to_date(value):
++    if isinstance(value, str):
++        value = datetime.fromisoformat(value)
++    return value.strftime("%d.%m.%Y")
++
++
++def render_csv(rows):
++    buf = io.StringIO(newline="")
++    writer = csv.writer(buf, delimiter=";", lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([invoice_id, customer_id, subtotal, tax, subtotal + tax, to_date(finalized_at)])
++    return buf.getvalue()
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
+-    parser.add_argument("--dry-run", action="store_true")
++    parser.add_argument("--month", help="YYYY-MM (default: the previous month)")
++    parser.add_argument("--dry-run", action="store_true", help="write under var/exports/ instead of uploading")
+     args = parser.parse_args()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    month = args.month or previous_month()
++    key = f"exports/{month}/invoices.csv"
++    body = render_csv(fetch_invoices(*month_bounds(month))).encode("utf-8")
++    count = body.count(b"\n") - 1
++    print(f"exporting {args.env} {month}: {count} invoices (dry_run={args.dry_run})")
++    if args.dry_run:
++        path = ROOT / "var" / key
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_bytes(body)
++        print(f"wrote {path.relative_to(ROOT)}")
++        return 0
++    import boto3
++
++    boto3.client("s3").put_object(Bucket=bucket, Key=key, Body=body, ContentType="text/csv; charset=utf-8")
++    print(f"uploaded s3://{bucket}/{key}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())

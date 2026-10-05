@@ -1,0 +1,59 @@
+diff --git a/services/notifier/tests/test_email_integration.py b/services/notifier/tests/test_email_integration.py
+new file mode 100644
+index 0000000..31324dc
+--- /dev/null
++++ b/services/notifier/tests/test_email_integration.py
+@@ -0,0 +1,53 @@
++"""Integration test: sends a real email through the provider sandbox.
++
++Requires MAIL_API_KEY (sandbox key from the dev secrets store) and
++SINK_INBOX_URL (the sink inbox API endpoint from the provider's docs).
++The sandbox is capped at 2 msg/s and 500 msg/day for the whole team, so this
++sends exactly one message. It only delivers to @sink.acme.test; any other
++recipient is accepted (202) and silently dropped.
++"""
++import os
++import time
++import uuid
++
++import pytest
++import requests
++
++from notifier import email
++
++SINK_ADDR = "receipts@sink.acme.test"
++POLL_TIMEOUT_S = 30
++POLL_INTERVAL_S = 2
++
++pytestmark = pytest.mark.skipif(
++    not (os.environ.get("MAIL_API_KEY") and os.environ.get("SINK_INBOX_URL")),
++    reason="needs MAIL_API_KEY (sandbox key) and SINK_INBOX_URL",
++)
++
++
++def _find_in_sink(message_id):
++    resp = requests.get(
++        os.environ["SINK_INBOX_URL"],
++        headers={"Authorization": f"Bearer {os.environ['MAIL_API_KEY']}"},
++        params={"to": SINK_ADDR},
++        timeout=10,
++    )
++    resp.raise_for_status()
++    return next((m for m in resp.json() if m.get("id") == message_id), None)
++
++
++def test_send_receipt_is_delivered_to_sandbox_sink():
++    invoice_id = f"inv_it_{uuid.uuid4().hex[:8]}"
++
++    message_id = email.send_receipt(invoice_id, SINK_ADDR, 1200)
++    assert message_id
++
++    deadline = time.monotonic() + POLL_TIMEOUT_S
++    delivered = None
++    while delivered is None and time.monotonic() < deadline:
++        delivered = _find_in_sink(message_id)
++        if delivered is None:
++            time.sleep(POLL_INTERVAL_S)
++
++    assert delivered is not None, f"{message_id} not delivered within {POLL_TIMEOUT_S}s"
++    assert delivered["subject"] == "Your receipt"

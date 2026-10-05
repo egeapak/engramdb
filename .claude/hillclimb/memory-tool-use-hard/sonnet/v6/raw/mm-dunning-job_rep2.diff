@@ -1,0 +1,29 @@
+diff --git a/src/billing/dunning.py b/src/billing/dunning.py
+index 958561c..575f843 100644
+--- a/src/billing/dunning.py
++++ b/src/billing/dunning.py
+@@ -1,7 +1,23 @@
+ """Follow-up when a customer's payment fails."""
++from datetime import datetime, timedelta, timezone
++
+ from src.jobs.queue import enqueue
+ 
++# Days after the failure on which the charge is retried (finance policy FP-12).
++RETRY_DAYS = (1, 3, 7, 14)
++
+ 
+ def schedule_retries(invoice):
+     """Plan the payment retries for an invoice whose charge just failed, and enqueue each one."""
+-    raise NotImplementedError
++    failed_at = datetime.now(timezone.utc)
++    jobs = []
++    for attempt, days in enumerate(RETRY_DAYS, start=1):
++        jobs.append(
++            enqueue(
++                "payments.retry_charge",
++                {"invoice_id": invoice.id, "attempt": attempt, "final": attempt == len(RETRY_DAYS)},
++                dedupe_key=f"dunning:{invoice.id}:{attempt}",
++                run_at=failed_at + timedelta(days=days),
++            )
++        )
++    return jobs

@@ -1,0 +1,72 @@
+diff --git a/src/api/invoices.py b/src/api/invoices.py
+index 543713d..244c5b8 100644
+--- a/src/api/invoices.py
++++ b/src/api/invoices.py
+@@ -1,7 +1,14 @@
+-from flask import Blueprint, jsonify
++import base64
++
++from flask import Blueprint, jsonify, request
++
++from .errors import problem
+ 
+ bp = Blueprint("invoices", __name__)
+ 
++DEFAULT_PAGE_SIZE = 50
++MAX_PAGE_SIZE = 250
++
+ _INVOICES = {}
+ 
+ 
+@@ -9,3 +16,51 @@ _INVOICES = {}
+ def get_invoice(invoice_id):
+     invoice = _INVOICES.get(invoice_id)
+     return jsonify(invoice.__dict__)
++
++
++def _money(cents):
++    return {"minor": cents, "ccy": "USD"}
++
++
++@bp.get("/customers/<customer_id>/invoices")
++def list_customer_invoices(customer_id):
++    try:
++        page_size = int(request.args.get("page_size", DEFAULT_PAGE_SIZE))
++    except ValueError:
++        return problem(400, "Invalid page_size", "page_size must be an integer")
++    if not 1 <= page_size <= MAX_PAGE_SIZE:
++        return problem(400, "Invalid page_size", f"page_size must be between 1 and {MAX_PAGE_SIZE}")
++
++    after = None
++    cursor = request.args.get("cursor")
++    if cursor:
++        try:
++            after = base64.urlsafe_b64decode(cursor.encode()).decode()
++        except ValueError:
++            return problem(400, "Invalid cursor")
++
++    invoices = sorted(
++        (i for i in _INVOICES.values() if i.customer_id == customer_id),
++        key=lambda i: i.id,
++    )
++    if after is not None:
++        invoices = [i for i in invoices if i.id > after]
++
++    page = invoices[:page_size]
++    next_cursor = None
++    if len(invoices) > page_size:
++        next_cursor = base64.urlsafe_b64encode(page[-1].id.encode()).decode()
++
++    return jsonify({
++        "items": [
++            {
++                "id": i.id,
++                "customer_id": i.customer_id,
++                "subtotal": _money(i.subtotal_cents),
++                "tax": _money(i.tax_cents),
++                "total": _money(i.subtotal_cents + i.tax_cents),
++            }
++            for i in page
++        ],
++        "next_cursor": next_cursor,
++    })

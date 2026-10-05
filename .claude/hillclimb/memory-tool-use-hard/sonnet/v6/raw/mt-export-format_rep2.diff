@@ -1,0 +1,105 @@
+diff --git a/scripts/export.py b/scripts/export.py
+index cdf05a8..92f3489 100644
+--- a/scripts/export.py
++++ b/scripts/export.py
+@@ -1,15 +1,98 @@
++"""Export the month's finalized invoices as the CSV Finance imports."""
+ import argparse
++import csv
+ import os
++import sqlite3
++import sys
++from datetime import datetime
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++DEV_DB = ROOT / "var" / "dev.sqlite3"
++
++# Finance's accounting tool (since Oct 2026) wants plain comma-separated files with ISO dates.
++DELIMITER = ","
++DATE_FORMAT = "%Y-%m-%d"
++HEADER = ["invoice_id", "customer_id", "subtotal_cents", "tax_cents", "total_cents", "finalized_date"]
++
++
++def default_month(today=None):
++    """The previous calendar month ("YYYY-MM"); the cron runs on the 2nd."""
++    today = today or datetime.utcnow()
++    year, month = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
++    return f"{year}-{month:02d}"
++
++
++def month_bounds(month):
++    """[start, end) of a "YYYY-MM" month as naive datetimes."""
++    start = datetime.strptime(month, "%Y-%m")
++    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
++    return start, end
++
++
++def fetch_rows(conn, month):
++    """Finalized invoices of the month, zero-amount ones included, drafts excluded."""
++    start, end = month_bounds(month)
++    cur = conn.execute(
++        "SELECT id, customer_id, subtotal_cents, tax_cents, finalized_at FROM invoices "
++        "WHERE finalized_at IS NOT NULL AND finalized_at >= ? AND finalized_at < ? "
++        "ORDER BY finalized_at, id",
++        (start.strftime("%Y-%m-%d %H:%M:%S"), end.strftime("%Y-%m-%d %H:%M:%S")),
++    )
++    return cur.fetchall()
++
++
++def parse_ts(value):
++    return value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
++
++
++def write_csv(rows, fh):
++    writer = csv.writer(fh, delimiter=DELIMITER, lineterminator="\n")
++    writer.writerow(HEADER)
++    for invoice_id, customer_id, subtotal, tax, finalized_at in rows:
++        writer.writerow([
++            invoice_id,
++            customer_id,
++            subtotal,
++            tax,
++            subtotal + tax,
++            parse_ts(finalized_at).strftime(DATE_FORMAT),
++        ])
+ 
+ 
+ def main():
+     parser = argparse.ArgumentParser(description="Export monthly invoice reports.")
+     parser.add_argument("--env", default="dev", choices=["dev", "staging", "prod"])
++    parser.add_argument("--month", default=None, help="YYYY-MM (default: previous month)")
++    parser.add_argument("--output", type=Path, default=None,
++                        help="local file to write (default: var/exports/<month>/invoices.csv)")
+     parser.add_argument("--dry-run", action="store_true")
+     args = parser.parse_args()
++    month = args.month or default_month()
+     bucket = os.environ.get("EXPORT_BUCKET", "ledgerline-exports-dev")
+-    print(f"exporting {args.env} to {bucket} (dry_run={args.dry_run})")
++    print(f"exporting {month} for {args.env} to {bucket} (dry_run={args.dry_run})")
++
++    if not DEV_DB.exists():
++        print(f"no database at {DEV_DB.relative_to(ROOT)}; run scripts/migrate_dev.py", file=sys.stderr)
++        return 1
++    conn = sqlite3.connect(DEV_DB)
++    try:
++        rows = fetch_rows(conn, month)
++    finally:
++        conn.close()
++
++    key = f"exports/{month}/invoices.csv"
++    if args.dry_run:
++        print(f"dry run: {len(rows)} finalized invoices would be written to {key}")
++        return 0
++
++    out = args.output or ROOT / "var" / "exports" / month / "invoices.csv"
++    out.parent.mkdir(parents=True, exist_ok=True)
++    with open(out, "w", encoding="utf-8", newline="") as fh:  # UTF-8, no BOM
++        write_csv(rows, fh)
++    print(f"wrote {len(rows)} invoices to {out}")
++    return 0
+ 
+ 
+ if __name__ == "__main__":
+-    main()
++    sys.exit(main())
