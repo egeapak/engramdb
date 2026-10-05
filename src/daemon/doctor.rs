@@ -79,6 +79,12 @@ pub async fn check_daemon() -> EnvironmentCheck {
         details.extend(tail.into_iter().map(|l| format!("  {l}")));
     }
 
+    // A folder the daemon refuses (another owner, group/other bits) makes
+    // every spawn fail the same way. It is not self-correcting, so it must not
+    // read as the ordinary "not running yet".
+    let daemon_dir = super::daemon_dir_for(&socket);
+    let folder_problem = super::transport::daemon_dir_problem(&daemon_dir);
+
     match super::query_status(&socket).await {
         Ok(Some(s)) => {
             details.push(format!(
@@ -100,6 +106,22 @@ pub async fn check_daemon() -> EnvironmentCheck {
         // *exists* while nothing answers means the next spawn will hit the
         // same obstruction this one did — it is not self-correcting, and
         // reporting it as "auto-spawned on the next MCP run" is simply wrong.
+        _ if folder_problem.is_some() => EnvironmentCheck {
+            name: "Embedding daemon".to_string(),
+            passed: false,
+            message: format!(
+                "the daemon folder is refused — every spawn will keep failing: {}",
+                folder_problem.map(|e| e.to_string()).unwrap_or_default()
+            ),
+            suggestion: Some(format!(
+                "Make {} yours with mode 700 (`chmod 700 {}`), or point the socket at a \
+                 private folder; until then models load in-process.",
+                daemon_dir.display(),
+                daemon_dir.display()
+            )),
+            details,
+            status: Some(CheckStatus::Fail),
+        },
         _ if socket.exists() => EnvironmentCheck {
             name: "Embedding daemon".to_string(),
             passed: false,
@@ -151,7 +173,7 @@ mod tests {
         // The pathological case: something owns the path but will not serve.
         // Reporting this as "auto-spawned on the next MCP run" is wrong — the
         // next run hits the same obstruction, forever.
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("d.sock");
         std::fs::write(&socket, b"not a socket").unwrap();
         global_with_socket(&socket, true);
@@ -170,12 +192,33 @@ mod tests {
         );
     }
 
+    /// A loose daemon folder makes every spawn fail, so doctor must say so —
+    /// not report the ordinary "not running, auto-spawned next time".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refused_daemon_folder_is_a_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let sock_dir = TempDir::new().unwrap();
+        std::fs::set_permissions(sock_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        global_with_socket(&sock_dir.path().join("d.sock"), true);
+
+        let check = check_daemon().await;
+
+        assert!(!check.passed, "got: {}", check.message);
+        assert_eq!(check.status, Some(CheckStatus::Fail));
+        assert!(check.message.contains("refused"), "{}", check.message);
+        assert!(
+            check.suggestion.is_some_and(|s| s.contains("chmod 700")),
+            "the check must name the fix"
+        );
+    }
+
     #[tokio::test]
     async fn absent_socket_is_informational_not_a_failure() {
         // The control: no socket at all is the ordinary cold-start state and
         // really is self-correcting, so it must stay Info. Without this the
         // test above could be satisfied by failing on everything.
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("never-created.sock");
         global_with_socket(&socket, true);
 
@@ -197,7 +240,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_daemon_short_circuits_before_the_socket_probe() {
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("d.sock");
         // Occupied *and* disabled: config wins, so this must not be a failure.
         std::fs::write(&socket, b"not a socket").unwrap();
@@ -227,7 +270,7 @@ mod tests {
         // The log is the only record of why a detached daemon died, so the
         // check has to show it — otherwise the user is told something is
         // wrong but not what. It lives in the daemon folder, beside the socket.
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("d.sock");
         let log = crate::daemon::daemon_log_path(&socket);
         std::fs::write(&log, "error: ORT dylib not found at /nope\n").unwrap();

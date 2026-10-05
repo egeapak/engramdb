@@ -23,7 +23,7 @@ Model-needing CLI commands (`query`, `add` / `create`, `update`, `reindex --embe
 - `--in-process` — or `ENGRAMDB_IN_PROCESS=1`, or `use_for_cli = false` in the global `[daemon]` — forces in-process loading and never contacts a daemon.
 - `enabled = false` in the global `[daemon]` disables the daemon for both CLI and MCP.
 
-Precedence (highest first): `--in-process` flag → `ENGRAMDB_IN_PROCESS` env → `[daemon].use_for_cli` → `--spawn-daemon` → default connect-only.
+Precedence (highest first): `--in-process` flag → `ENGRAMDB_IN_PROCESS` env → the global `[daemon].use_for_cli` → `--spawn-daemon` → default connect-only.
 
 ## Commands
 

@@ -34,10 +34,10 @@
 use std::path::Path;
 
 #[cfg(unix)]
-pub use unix::{bind_or_yield, connect, prepare_daemon_dir, Listener};
+pub use unix::{bind_or_yield, connect, daemon_dir_problem, prepare_daemon_dir, Listener};
 
 #[cfg(windows)]
-pub use windows::{bind_or_yield, connect, prepare_daemon_dir, Listener};
+pub use windows::{bind_or_yield, connect, daemon_dir_problem, prepare_daemon_dir, Listener};
 
 #[cfg(unix)]
 mod unix {
@@ -92,6 +92,16 @@ mod unix {
             .mode(DIR_MODE)
             .create(dir)?;
         verify_daemon_dir(dir, crate::daemon::current_euid())
+    }
+
+    /// Why an *existing* daemon folder would be refused, or `None` when it is
+    /// missing (it will be created private) or acceptable. Read-only: unlike
+    /// [`prepare_daemon_dir`] it creates nothing, so `doctor` can call it.
+    pub fn daemon_dir_problem(dir: &Path) -> Option<std::io::Error> {
+        if !dir.exists() {
+            return None;
+        }
+        verify_daemon_dir(dir, crate::daemon::current_euid()).err()
     }
 
     /// The ownership and mode check of [`prepare_daemon_dir`], split out so a
@@ -150,9 +160,11 @@ mod unix {
         // The socket is a real filesystem entry, so its directory must exist
         // before bind. (Windows named pipes have no parent directory, hence
         // this lives in the Unix transport rather than the shared server loop.)
-        if let Some(parent) = socket.parent() {
-            prepare_daemon_dir(parent)?;
-        }
+        //
+        // `daemon_dir_for` maps a bare relative name (`--socket d.sock`) to
+        // `.`, so the current directory is checked like any other folder —
+        // the same folder the log open checks — rather than skipped.
+        prepare_daemon_dir(&crate::daemon::daemon_dir_for(socket))?;
         match UnixListener::bind(socket) {
             Ok(l) => {
                 // Brief bind→chmod window with umask-default permissions; the
@@ -283,6 +295,11 @@ mod windows {
             return Ok(());
         }
         std::fs::create_dir_all(dir)
+    }
+
+    /// No mode bits to check on Windows; see [`prepare_daemon_dir`].
+    pub fn daemon_dir_problem(_dir: &Path) -> Option<std::io::Error> {
+        None
     }
 
     /// A bound named-pipe listener. Holds the next unconnected pipe instance;
@@ -576,6 +593,32 @@ mod tests {
                 .expect_err("a folder owned by another uid must be refused");
             assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
             assert!(err.to_string().contains("owned by uid"), "{err}");
+        }
+
+        /// A bare relative socket name lives in the current directory, and
+        /// that directory gets the same check as any other daemon folder (it
+        /// used to be skipped because the path's parent is empty).
+        #[tokio::test]
+        async fn relative_socket_checks_the_current_directory() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            // Process-global, but nextest runs each test in its own process.
+            std::env::set_current_dir(tmp.path()).unwrap();
+            assert!(
+                bind_or_yield(std::path::Path::new("rel.sock"))
+                    .await
+                    .is_err(),
+                "a relative socket in a 0755 cwd must be refused"
+            );
+            assert!(!tmp.path().join("rel.sock").exists());
+            assert!(super::super::daemon_dir_problem(std::path::Path::new(".")).is_some());
+
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(super::super::daemon_dir_problem(std::path::Path::new(".")).is_none());
+            assert!(bind_or_yield(std::path::Path::new("rel.sock"))
+                .await
+                .unwrap()
+                .is_some());
         }
 
         /// A file where the folder should be is refused, not bound beside.

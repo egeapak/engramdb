@@ -56,8 +56,10 @@ back to loading models in-process, so nothing ever fails because of it.
 
 You normally never touch it, but `engramdb daemon status|stop|restart` and
 `engramdb stats --daemon` are available, `engramdb doctor` reports its state,
-and it can be disabled with `enabled = false` under `[daemon]` in
-`.engramdb/config.toml`.
+and it can be disabled with `enabled = false` under `[daemon]` in the
+**global** config file (`~/.config/engramdb/config.toml` on Linux,
+`~/Library/Application Support/engramdb/config.toml` on macOS) — not in a
+project's `.engramdb/config.toml`, where `[daemon]` is ignored.
 
 ### Hooks
 
