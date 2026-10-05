@@ -277,6 +277,9 @@ All three failures are cross-module cases:
 
 ## Where to look
 
+Raw transcripts (`raw/`) and traces (`traces/`) are not on this branch: they are about 450 MB. They are on the branch `eval/memory-tool-use-artifacts`, which the trace links below and in each `report.html` refer to. The tracked `results.jsonl` files hold every graded row, so every number in this report can be recomputed without them; `regrade.py` needs the raw files.
+
+
 - `.claude/hillclimb/memory-tool-use-hard/{opus,sonnet}/report.html` — per-case scores per round, with links to every trace.
 - `.claude/hillclimb/memory-tool-use-hard/narrative.md` — the running summary.
 - `.claude/hillclimb/memory-tool-use-hard/{opus,sonnet}/vN/change.md` — each round's reason, prediction and result.

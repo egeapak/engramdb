@@ -10,3 +10,9 @@
 # the run instead.)
 *.snap.new
 *.pending-snap
+
+# Eval run transcripts and traces are too large for the repo; the summaries
+# (results.jsonl, change.md, build.json, report.html) are tracked.
+# The full set from the memory-tool-use climb is on eval/memory-tool-use-artifacts.
+.claude/hillclimb/**/raw/
+.claude/hillclimb/**/traces/
