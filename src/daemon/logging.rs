@@ -8,9 +8,9 @@
 //! fall back to in-process models by design); it was *invisible*, which is a
 //! different and worse thing.
 //!
-//! So an auto-spawned daemon writes to a file under
-//! [`engram_storage::paths::daemon_log_path`], and `engramdb doctor` surfaces
-//! its tail. A daemon run by hand in a terminal keeps writing to that terminal
+//! So an auto-spawned daemon writes to `daemon.log` in the daemon folder
+//! ([`super::daemon_log_path`] — beside the socket and the reclaim lock), and
+//! `engramdb doctor` surfaces its tail. A daemon run by hand in a terminal keeps writing to that terminal
 //! — see [`stderr_target`].
 
 use std::fs::{File, OpenOptions};
@@ -76,15 +76,17 @@ pub fn open_capped(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-/// Open the daemon log for a process about to be spawned, resolving the path
-/// and applying the size cap.
+/// Open the daemon log for the daemon serving `socket`, applying the size cap.
 ///
-/// Separate from [`open_capped`] only so the spawn site has one fallible call
-/// to handle rather than a path lookup plus an open.
-pub fn daemon_log_for_spawn() -> anyhow::Result<File> {
-    let path = engram_storage::paths::daemon_log_path()
-        .map_err(|e| anyhow::anyhow!("resolving the daemon log path: {e}"))?;
-    Ok(open_capped(&path)?)
+/// The daemon folder is created (or verified) first with the same 0700 /
+/// owner check the bind applies, so the log is never written into a folder
+/// the daemon would refuse to serve from. Separate from [`open_capped`] so the
+/// spawn site has one fallible call to handle.
+pub fn daemon_log_for_spawn(socket: &Path) -> anyhow::Result<File> {
+    let dir = super::daemon_dir_for(socket);
+    super::transport::prepare_daemon_dir(&dir)
+        .map_err(|e| anyhow::anyhow!("preparing the daemon folder: {e}"))?;
+    Ok(open_capped(&super::daemon_log_path(socket))?)
 }
 
 /// Read the last `max_lines` non-empty lines of the daemon log.
@@ -189,5 +191,37 @@ mod tests {
         assert_eq!(tail(&path, 2), vec!["three", "four"]);
         // Blank lines are dropped so the tail is all signal.
         assert_eq!(tail(&path, 10), vec!["one", "two", "three", "four"]);
+    }
+
+    /// The log lands in the socket's folder, and that folder is created
+    /// private, exactly as the bind would create it.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_log_goes_in_the_private_daemon_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let socket = tmp.path().join("run").join("d.sock");
+        writeln!(daemon_log_for_spawn(&socket).unwrap(), "hello").unwrap();
+        let log = tmp.path().join("run").join("daemon.log");
+        assert_eq!(crate::daemon::daemon_log_path(&socket), log);
+        assert!(std::fs::read_to_string(&log).unwrap().contains("hello"));
+        let mode = std::fs::metadata(tmp.path().join("run"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    /// A folder the bind would refuse gets no log either.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_log_refuses_a_loose_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("loose");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(daemon_log_for_spawn(&dir.join("d.sock")).is_err());
+        assert!(!dir.join("daemon.log").exists());
     }
 }

@@ -113,9 +113,17 @@ fn fixture_config() -> String {
     config.title.strategy = engramdb::types::TitleStrategy::Keyword;
     config.rerank.enabled = false;
     config.nli.enabled = false;
-    config.daemon.enabled = false;
     config.maintenance.enabled = false;
     toml::to_string_pretty(&config).expect("EngramConfig is plain data")
+}
+
+/// The fixture's global config: the daemon is disabled. Daemon settings are
+/// per user, not per project, so they go in `<ENGRAMDB_CONFIG_DIR>/config.toml`
+/// rather than in [`fixture_config`].
+fn fixture_global_config() -> String {
+    let mut config = engramdb::types::GlobalConfig::default();
+    config.daemon.enabled = false;
+    toml::to_string_pretty(&config).expect("GlobalConfig is plain data")
 }
 
 /// A fully isolated store plus the environment to talk to it.
@@ -148,11 +156,13 @@ impl Fixture {
         // problem instead of papering over it.
         let root = project.path().join("workspace");
         std::fs::create_dir_all(&root).unwrap();
+        let config = TempDir::new().unwrap();
+        std::fs::write(config.path().join("config.toml"), fixture_global_config()).unwrap();
         Self {
             root,
             project,
             data: TempDir::new().unwrap(),
-            config: TempDir::new().unwrap(),
+            config,
             registry: TempDir::new().unwrap(),
             model_cache: TempDir::new().unwrap(),
             home: TempDir::new().unwrap(),

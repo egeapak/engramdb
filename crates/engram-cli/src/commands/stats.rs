@@ -33,7 +33,7 @@ pub async fn run_stats(
     formatter: &OutputFormatter,
 ) -> Result<()> {
     if daemon {
-        return run_daemon_stats(dir, formatter).await;
+        return run_daemon_stats(formatter).await;
     }
 
     let store = if global {
@@ -145,14 +145,10 @@ pub async fn run_stats(
 /// Prefers a live query to the running daemon (authoritative, includes
 /// in-flight counts); falls back to the last snapshot persisted to the global
 /// LanceDB store when no daemon is currently running.
-async fn run_daemon_stats(dir: &Path, formatter: &OutputFormatter) -> Result<()> {
-    // `dir` is the dispatcher-resolved project directory (`--dir` or cwd),
-    // matching every other command — not a second `current_dir()` lookup
-    // that would ignore an explicit `--dir`.
-    let cfg = engramdb::storage::config::load_config_or_default(
-        &dir.join(".engramdb").join("config.toml"),
-    )
-    .await;
+async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
+    // The daemon is shared by every project, so its socket comes from the
+    // global config, whatever directory this runs in.
+    let cfg = engramdb::storage::config::load_global_config_or_default().await;
     let socket = engramdb::daemon::resolve_socket(None, &cfg.daemon);
     // A live query failure (e.g. a protocol-version mismatch with an older
     // daemon) must NOT abort the command — fall back to the persisted snapshot

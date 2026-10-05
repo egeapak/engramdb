@@ -13,5 +13,5 @@ max-threads = 1
 # builders (reindex re-embed) and the daemon-less semantic-query path —
 # belongs in this serialized group.
 [[profile.default.overrides]]
-filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query) | test(=server::tests::harvest_search_all_projects_rides_the_same_gate_as_harvest_list)"
+filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query) | test(=server::tests::harvest_search_all_projects_rides_the_same_gate_as_harvest_list) | test(=daemon::tests::daemon_loads_the_bundle_named_by_the_request_not_by_dir)"
 test-group = "ml-models"

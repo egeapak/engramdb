@@ -196,6 +196,15 @@ provider = "onnx"  # required when [embeddings] is present
 dimensions = 384   # required; must match the provider
 max_tokens = 256   # required
 
+```
+
+The shared daemon's settings are per user, not per project. They live in the
+**global** config file — `~/.config/engramdb/config.toml` on Linux,
+`~/Library/Application Support/engramdb/config.toml` on macOS — and EngramDB
+ignores (and warns about) a `[daemon]` section in a project config:
+
+```toml
+# <global config dir>/config.toml
 [daemon]
 enabled = true            # Delegate embedding/NLI/rerank to the shared daemon
 use_for_cli = true        # Also use the daemon from model-needing CLI commands
@@ -217,7 +226,7 @@ Each `engramdb serve` (stdio MCP) process is one-per-agent-session, so without
 coordination every concurrent session loads its own copy of the embedding (and
 optional NLI/reranker) models — hundreds of MB and a ~240 ms ONNX init each.
 
-When `[daemon].enabled` is `true` (the default), MCP processes delegate **all**
+When the global `[daemon].enabled` is `true` (the default), MCP processes delegate **all**
 model work to a single long-lived **daemon** over a per-user Unix domain
 socket, so each model loads exactly once machine-wide. Storage stays in the MCP
 process (it is already cross-process safe), so only inference is delegated.
@@ -235,7 +244,7 @@ process (it is already cross-process safe), so only inference is delegated.
   request — no agent restart needed.
 - **Usable from the CLI.** Model-needing CLI commands use a *running* daemon when
   reachable (connect-only by default — they don't spawn one). Override with
-  `--in-process` / `ENGRAMDB_IN_PROCESS=1` / `[daemon].use_for_cli = false`, or
+  `--in-process` / `ENGRAMDB_IN_PROCESS=1` / the global `[daemon].use_for_cli = false`, or
   let the CLI spawn one with `--spawn-daemon`.
 - **Graceful fallback.** If the daemon is disabled or unreachable, MCP and the
   CLI load models in-process exactly as before — operations never fail because
@@ -251,9 +260,10 @@ process (it is already cross-process safe), so only inference is delegated.
   ```
 
   The socket path resolves with precedence `--socket` flag >
-  `ENGRAMDB_DAEMON_SOCKET` env > `[daemon].socket_path` config > the
+  `ENGRAMDB_DAEMON_SOCKET` env > the global `[daemon].socket_path` > the
   default per-user runtime path. `status`/`stop`/`restart`/`run` all
-  accept `--socket` to target a non-default daemon.
+  accept `--socket` to target a non-default daemon. The socket's folder
+  also holds the daemon's lock and log, and must be yours with mode 0700.
 
 Daemon request metrics are persisted to the global store's LanceDB, so
 `stats --daemon` reports figures even when no daemon is currently running, and

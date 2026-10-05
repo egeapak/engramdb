@@ -42,9 +42,9 @@ Global settings & models
   ⚠ Hook configuration: not configured
   ℹ Install the Claude Code plugin to configure hooks automatically
   ○ Auto-maintenance: disabled
-  ○ Embedding daemon: disabled in config (models load in-process per MCP)
+  ○ Embedding daemon: disabled in the global config (models load in-process per MCP)
       socket: [RUNTIME]/d.sock
-      config: enabled=false, idle_timeout_secs=900
+      config: [CONFIG]/config.toml (enabled=false, idle_timeout_secs=900)
   Embeddings
 [ONNX_RUNTIME_CHECK]
     ✓ Embedding backend: auto (model: onnx)

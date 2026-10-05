@@ -159,7 +159,7 @@ async fn run_environment_check(
         .as_ref()
         .map(|s| s.project_dir.clone())
         .unwrap_or_else(|| dir.to_path_buf());
-    let daemon_check = engramdb::daemon::check_daemon(&check_dir).await;
+    let daemon_check = engramdb::daemon::check_daemon().await;
     let supported_hooks = crate::supported_hook_subcommands();
     let result =
         doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
@@ -290,7 +290,7 @@ async fn run_environment_check(
         } else {
             MemoryStore::open(&check_dir).await.ok()
         };
-        let daemon_check = engramdb::daemon::check_daemon(&check_dir).await;
+        let daemon_check = engramdb::daemon::check_daemon().await;
         let after =
             doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
         if !json_fix {

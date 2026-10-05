@@ -1163,9 +1163,16 @@ pub struct EngramConfig {
     #[serde(default)]
     pub stats: StatsConfig,
 
-    /// Shared embedding daemon settings
-    #[serde(default)]
-    pub daemon: DaemonConfig,
+    /// A `[daemon]` table left over in a **project** config.
+    ///
+    /// The daemon is one process shared by every project of a user, so its
+    /// settings come only from the global config file ([`GlobalConfig`]).
+    /// The table is still parsed so an old project config keeps loading, but
+    /// it is kept as raw TOML on purpose: nothing can read it as daemon
+    /// settings by mistake. The loader warns and `doctor` reports when it is
+    /// set; see [`EngramConfig::legacy_daemon_keys`].
+    #[serde(rename = "daemon", default, skip_serializing_if = "Option::is_none")]
+    pub legacy_daemon: Option<toml::Table>,
 
     /// Automatic title-generation settings
     #[serde(default)]
@@ -1678,6 +1685,12 @@ impl Default for HooksConfig {
 /// inference to a single long-lived daemon over a Unix domain socket, so the
 /// models load exactly once machine-wide. When disabled — or when the daemon
 /// is unreachable — each process falls back to loading the models in-process.
+///
+/// Read **only** from the global config file (`[daemon]` in
+/// `<global_config_dir>/config.toml`, see [`GlobalConfig`]), never from a
+/// project's `.engramdb/config.toml`: one daemon serves every project, so a
+/// per-project value would make the daemon's behavior depend on which project
+/// happened to spawn it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
     /// Master switch. When `true` (default) MCP delegates embedding / NLI /
@@ -1697,6 +1710,11 @@ pub struct DaemonConfig {
     /// used. Resolution precedence (highest first): an explicit `--socket`
     /// CLI flag, the `ENGRAMDB_DAEMON_SOCKET` env var, this config value,
     /// then the default per-user runtime path.
+    ///
+    /// The socket's parent directory is the daemon's folder: it also holds
+    /// the reclaim lock and `daemon.log`. The daemon creates it with mode
+    /// 0700, and refuses to bind when it exists with another owner or a
+    /// looser mode.
     #[serde(default)]
     pub socket_path: Option<String>,
 
@@ -1728,6 +1746,51 @@ impl Default for DaemonConfig {
             socket_path: None,
             use_for_cli: default_daemon_use_for_cli(),
         }
+    }
+}
+
+/// The global, per-user config file: `<global_config_dir>/config.toml`.
+///
+/// It holds the settings that belong to the user rather than to a project.
+/// Today that is only `[daemon]`: the daemon is one process shared by every
+/// project and session, so its settings must come from one place. Model
+/// selection (`[embeddings]`, `[nli]`, `[rerank]`, `[title]`) stays per
+/// project, because vectors are stored per project and checked against the
+/// project's manifest fingerprint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GlobalConfig {
+    /// Shared embedding daemon settings.
+    #[serde(default)]
+    pub daemon: DaemonConfig,
+}
+
+impl GlobalConfig {
+    /// Validate every section.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        self.daemon.validate()
+    }
+
+    /// Top-level keys of a global config file that this version does not
+    /// read. A user who puts `[embeddings]` here expects it to apply, so the
+    /// loader names these instead of ignoring them silently.
+    pub fn unknown_top_level_keys(table: &toml::Table) -> Vec<String> {
+        table
+            .keys()
+            .filter(|k| k.as_str() != "daemon")
+            .cloned()
+            .collect()
+    }
+}
+
+impl EngramConfig {
+    /// The `[daemon]` keys a project config still sets. They are ignored:
+    /// daemon settings come only from the global config file. Empty when the
+    /// project config has no `[daemon]` table (or an empty one).
+    pub fn legacy_daemon_keys(&self) -> Vec<String> {
+        self.legacy_daemon
+            .as_ref()
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -2020,7 +2083,6 @@ impl EngramConfig {
         self.nli.validate()?;
         self.rerank.validate()?;
         self.stats.validate()?;
-        self.daemon.validate()?;
         self.security.validate()?;
         self.review.validate()?;
         self.harvest.validate()?;
@@ -3255,8 +3317,8 @@ weight = 0.7
         assert!(d.enabled);
         assert_eq!(d.idle_timeout_secs, 900);
         assert_eq!(d.socket_path, None);
-        // Absent `[daemon]` section ⇒ defaults (enabled by default).
-        let cfg: EngramConfig = toml::from_str("").unwrap();
+        // Absent `[daemon]` section in the global file ⇒ defaults.
+        let cfg: GlobalConfig = toml::from_str("").unwrap();
         assert!(cfg.daemon.enabled);
         assert_eq!(cfg.daemon.idle_timeout_secs, 900);
         assert_eq!(cfg.daemon.socket_path, None);
@@ -3275,10 +3337,32 @@ weight = 0.7
         assert!(d.validate().is_err());
         d.idle_timeout_secs = 60;
         assert!(d.validate().is_ok());
-        // Surfaced through the top-level config validate too.
-        let mut cfg = EngramConfig::default();
+        // Surfaced through the global config validate too.
+        let mut cfg = GlobalConfig::default();
         cfg.daemon.idle_timeout_secs = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    /// An old project config with `[daemon]` still parses, the keys are
+    /// reported, and they are not validated as daemon settings (a project
+    /// value can no longer affect the daemon, so it cannot make the project
+    /// config invalid either).
+    #[test]
+    fn legacy_project_daemon_section_still_parses() {
+        let cfg: EngramConfig = toml::from_str(
+            "[daemon]\nenabled = false\nidle_timeout_secs = 30\nsocket_path = \"/run/x.sock\"\n",
+        )
+        .unwrap();
+        let mut keys = cfg.legacy_daemon_keys();
+        keys.sort();
+        assert_eq!(keys, ["enabled", "idle_timeout_secs", "socket_path"]);
+        assert!(cfg.validate().is_ok());
+
+        let cfg: EngramConfig = toml::from_str("").unwrap();
+        assert!(cfg.legacy_daemon_keys().is_empty());
+        // And the default config never writes the legacy table back out.
+        let out = toml::to_string_pretty(&EngramConfig::default()).unwrap();
+        assert!(!out.contains("[daemon]"), "{out}");
     }
 
     #[test]
@@ -3433,26 +3517,33 @@ weight = 0.7
 
     #[test]
     fn daemon_use_for_cli_defaults_true_and_is_overridable() {
-        let cfg: EngramConfig = toml::from_str("").unwrap();
+        let cfg: GlobalConfig = toml::from_str("").unwrap();
         assert!(cfg.daemon.use_for_cli);
-        let cfg: EngramConfig = toml::from_str("[daemon]\nuse_for_cli = false\n").unwrap();
+        let cfg: GlobalConfig = toml::from_str("[daemon]\nuse_for_cli = false\n").unwrap();
         assert!(!cfg.daemon.use_for_cli);
     }
 
     #[test]
     fn test_daemon_config_partial_toml() {
         // Only one field set; the rest fall back to defaults.
-        let cfg: EngramConfig = toml::from_str("[daemon]\nenabled = false\n").unwrap();
+        let cfg: GlobalConfig = toml::from_str("[daemon]\nenabled = false\n").unwrap();
         assert!(!cfg.daemon.enabled);
         assert_eq!(cfg.daemon.idle_timeout_secs, 900);
         assert_eq!(cfg.daemon.socket_path, None);
 
-        let cfg: EngramConfig =
+        let cfg: GlobalConfig =
             toml::from_str("[daemon]\nidle_timeout_secs = 30\nsocket_path = \"/run/x.sock\"\n")
                 .unwrap();
         assert!(cfg.daemon.enabled);
         assert_eq!(cfg.daemon.idle_timeout_secs, 30);
         assert_eq!(cfg.daemon.socket_path.as_deref(), Some("/run/x.sock"));
+    }
+
+    #[test]
+    fn global_config_names_unknown_top_level_keys() {
+        let table: toml::Table =
+            toml::from_str("[daemon]\nenabled = true\n[embeddings]\nprovider = \"x\"\n").unwrap();
+        assert_eq!(GlobalConfig::unknown_top_level_keys(&table), ["embeddings"]);
     }
 
     /// Unbounded-growth guard: telemetry retention must default to a finite

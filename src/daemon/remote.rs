@@ -11,12 +11,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::client::DaemonHandle;
-use super::protocol::{DaemonOp, DaemonRequest, DaemonResponse};
+use super::protocol::{DaemonOp, DaemonRequest, DaemonResponse, ModelSelection};
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::ops::EngineProviders;
 use crate::retrieval::reranker::{RerankScore, Reranker};
-use crate::types::{EmbeddingBackend, EngramConfig};
+use crate::types::EngramConfig;
 
 /// Short discriminant for a response, for error messages — never dump a full
 /// `DaemonResponse` (an `Embedded` carries every chunk vector).
@@ -34,19 +34,18 @@ fn response_kind(resp: &DaemonResponse) -> &'static str {
     }
 }
 
-/// Shared per-(store, backend) routing state for the remote providers.
+/// Shared routing state for the remote providers: the daemon handle and the
+/// model selection every request carries.
 struct RemoteCtx {
     handle: Arc<DaemonHandle>,
-    dir: String,
-    backend: Option<EmbeddingBackend>,
+    models: ModelSelection,
 }
 
 impl RemoteCtx {
     async fn send(&self, op: DaemonOp) -> Result<DaemonResponse> {
         self.handle
             .request(DaemonRequest {
-                dir: self.dir.clone(),
-                backend: self.backend,
+                models: Some(self.models.clone()),
                 op,
             })
             .await
@@ -174,8 +173,8 @@ impl crate::title::TitleGenerator for RemoteTitleProvider {
     }
 }
 
-/// Build the [`EngineProviders`] bundle backed by the daemon for the store at
-/// `dir` under `config`.
+/// Build the [`EngineProviders`] bundle backed by the daemon for `models`
+/// (taken from the client's project `config`).
 ///
 /// One round-trip fetches the embedding model's dimensionality and token
 /// limit (needed synchronously for chunking and vector-store schema
@@ -185,15 +184,10 @@ impl crate::title::TitleGenerator for RemoteTitleProvider {
 /// `config`, mirroring `resolve_engine_providers`.
 pub async fn remote_providers(
     handle: Arc<DaemonHandle>,
-    dir: String,
-    backend: Option<EmbeddingBackend>,
+    models: ModelSelection,
     config: &EngramConfig,
 ) -> Option<EngineProviders> {
-    let ctx = Arc::new(RemoteCtx {
-        handle,
-        dir,
-        backend,
-    });
+    let ctx = Arc::new(RemoteCtx { handle, models });
 
     let (dimensions, max_tokens, model_id) = match ctx.send(DaemonOp::Meta).await {
         Ok(DaemonResponse::Meta {

@@ -134,9 +134,9 @@ EngramDB writes to platform-standard locations via the `dirs` crate. Each respec
 | Purpose | macOS | Linux | Env override |
 |---------|-------|-------|--------------|
 | Models (embeddings, NLI, reranker) | `~/Library/Caches/engramdb/models/` | `~/.cache/engramdb/models/` | — |
-| Global config | `~/Library/Application Support/engramdb/` | `~/.config/engramdb/` | `ENGRAMDB_CONFIG_DIR` |
+| Global config (`registry.json`, `config.toml` with `[daemon]`) | `~/Library/Application Support/engramdb/` | `~/.config/engramdb/` | `ENGRAMDB_CONFIG_DIR` |
 | Global data + project registry | `~/Library/Application Support/engramdb/` | `~/.local/share/engramdb/` | `ENGRAMDB_DATA_DIR` |
-| Daemon endpoint | `$XDG_RUNTIME_DIR/engramdb/daemon.sock` (Linux) or the cache dir (macOS); a named pipe (`\\.\pipe\engramdb-<hash>`) on Windows | same | `ENGRAMDB_DAEMON_SOCKET` |
+| Daemon folder (socket, lock, log) | `~/Library/Caches/engramdb/daemon/` | `$XDG_RUNTIME_DIR/engramdb/` (else `~/.cache/engramdb/daemon/`); a named pipe (`\\.\pipe\engramdb-<hash>`) on Windows | `ENGRAMDB_DAEMON_SOCKET` |
 
 Per-project state lives in `<project>/.engramdb/`. The vector index and personal-visibility memories live under `<global_data_dir>/projects/<project_id>/`. See [projects-and-worktrees.md](./projects-and-worktrees.md) for the full layout.
 

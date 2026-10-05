@@ -6,7 +6,6 @@
 //! into [`crate::ops::doctor_environment`].
 
 use crate::ops::{CheckStatus, EnvironmentCheck};
-use std::path::Path;
 
 /// How many trailing daemon-log lines to surface. Enough to carry a panic
 /// message plus its context, short enough not to bury the rest of `doctor`.
@@ -15,24 +14,54 @@ const LOG_TAIL_LINES: usize = 10;
 /// Inspect the shared embedding daemon: configured? reachable? Informational
 /// only — the daemon is optional and auto-spawned by the next MCP run, so a
 /// stopped daemon is never a failure.
-pub async fn check_daemon(dir: &Path) -> EnvironmentCheck {
-    let config = crate::storage::config::load_config(&dir.join(".engramdb").join("config.toml"))
-        .await
-        .unwrap_or_default();
+///
+/// Takes no project directory: the daemon's settings come only from the
+/// global config file, whichever project `doctor` runs in. A project config
+/// that still sets `[daemon]` keys is reported by the project's own config
+/// check (`ops::doctor`), not here.
+pub async fn check_daemon() -> EnvironmentCheck {
+    let global_path = crate::storage::paths::global_config_path().ok();
+    let config = match &global_path {
+        Some(p) => match crate::storage::config::load_global_config(p).await {
+            Ok(c) => c,
+            Err(e) => {
+                return EnvironmentCheck {
+                    name: "Embedding daemon".to_string(),
+                    passed: false,
+                    message: format!("global config {} does not parse: {e}", p.display()),
+                    suggestion: Some(format!(
+                        "Fix the syntax in {}; until then every daemon setting is a default",
+                        p.display()
+                    )),
+                    details: vec![],
+                    status: Some(CheckStatus::Fail),
+                };
+            }
+        },
+        None => crate::types::GlobalConfig::default(),
+    };
     let socket = super::resolve_socket(None, &config.daemon);
     let mut details = vec![
         format!("socket: {}", socket.display()),
         format!(
-            "config: enabled={}, idle_timeout_secs={}",
-            config.daemon.enabled, config.daemon.idle_timeout_secs
+            "config: {} (enabled={}, idle_timeout_secs={})",
+            global_path
+                .as_deref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<no global config dir>".to_string()),
+            config.daemon.enabled,
+            config.daemon.idle_timeout_secs
         ),
     ];
+    if let Err(e) = config.validate() {
+        details.push(format!("invalid global [daemon] value: {e}"));
+    }
 
     if !config.daemon.enabled {
         return EnvironmentCheck {
             name: "Embedding daemon".to_string(),
             passed: true,
-            message: "disabled in config (models load in-process per MCP)".to_string(),
+            message: "disabled in the global config (models load in-process per MCP)".to_string(),
             suggestion: None,
             details,
             status: Some(CheckStatus::Info),
@@ -43,14 +72,18 @@ pub async fn check_daemon(dir: &Path) -> EnvironmentCheck {
     // auto-spawned daemon is detached, so this file is the only record of why
     // it failed; surfacing it here is what turns "the daemon isn't running"
     // into an actionable diagnosis.
-    let log_path = crate::storage::paths::daemon_log_path().ok();
-    if let Some(path) = &log_path {
-        let tail = super::logging::tail(path, LOG_TAIL_LINES);
-        if !tail.is_empty() {
-            details.push(format!("log: {}", path.display()));
-            details.extend(tail.into_iter().map(|l| format!("  {l}")));
-        }
+    let log_path = super::daemon_log_path(&socket);
+    let tail = super::logging::tail(&log_path, LOG_TAIL_LINES);
+    if !tail.is_empty() {
+        details.push(format!("log: {}", log_path.display()));
+        details.extend(tail.into_iter().map(|l| format!("  {l}")));
     }
+
+    // A folder the daemon refuses (another owner, group/other bits) makes
+    // every spawn fail the same way. It is not self-correcting, so it must not
+    // read as the ordinary "not running yet".
+    let daemon_dir = super::daemon_dir_for(&socket);
+    let folder_problem = super::transport::daemon_dir_problem(&daemon_dir);
 
     match super::query_status(&socket).await {
         Ok(Some(s)) => {
@@ -73,6 +106,22 @@ pub async fn check_daemon(dir: &Path) -> EnvironmentCheck {
         // *exists* while nothing answers means the next spawn will hit the
         // same obstruction this one did — it is not self-correcting, and
         // reporting it as "auto-spawned on the next MCP run" is simply wrong.
+        _ if folder_problem.is_some() => EnvironmentCheck {
+            name: "Embedding daemon".to_string(),
+            passed: false,
+            message: format!(
+                "the daemon folder is refused — every spawn will keep failing: {}",
+                folder_problem.map(|e| e.to_string()).unwrap_or_default()
+            ),
+            suggestion: Some(format!(
+                "Make {} yours with mode 700 (`chmod 700 {}`), or point the socket at a \
+                 private folder; until then models load in-process.",
+                daemon_dir.display(),
+                daemon_dir.display()
+            )),
+            details,
+            status: Some(CheckStatus::Fail),
+        },
         _ if socket.exists() => EnvironmentCheck {
             name: "Embedding daemon".to_string(),
             passed: false,
@@ -101,22 +150,22 @@ pub async fn check_daemon(dir: &Path) -> EnvironmentCheck {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
 
-    /// Point `[daemon].socket_path` at `socket` inside a throwaway project.
-    fn project_with_socket(socket: &Path) -> TempDir {
-        let tmp = TempDir::new().unwrap();
-        let engram = tmp.path().join(".engramdb");
-        std::fs::create_dir_all(&engram).unwrap();
-        std::fs::write(
-            engram.join("config.toml"),
-            format!(
-                "[daemon]\nenabled = true\nsocket_path = {:?}\n",
-                socket.display().to_string()
-            ),
-        )
-        .unwrap();
-        tmp
+    /// Write the global config (per-process temp dir under the test harness).
+    fn write_global(toml: &str) {
+        let path = crate::storage::paths::global_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, toml).unwrap();
+    }
+
+    /// Point the global `[daemon].socket_path` at `socket`.
+    fn global_with_socket(socket: &Path, enabled: bool) {
+        write_global(&format!(
+            "[daemon]\nenabled = {enabled}\nsocket_path = {:?}\n",
+            socket.display().to_string()
+        ));
     }
 
     #[tokio::test]
@@ -124,12 +173,12 @@ mod tests {
         // The pathological case: something owns the path but will not serve.
         // Reporting this as "auto-spawned on the next MCP run" is wrong — the
         // next run hits the same obstruction, forever.
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("d.sock");
         std::fs::write(&socket, b"not a socket").unwrap();
-        let project = project_with_socket(&socket);
+        global_with_socket(&socket, true);
 
-        let check = check_daemon(project.path()).await;
+        let check = check_daemon().await;
 
         assert!(
             !check.passed,
@@ -143,41 +192,61 @@ mod tests {
         );
     }
 
+    /// A loose daemon folder makes every spawn fail, so doctor must say so —
+    /// not report the ordinary "not running, auto-spawned next time".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn refused_daemon_folder_is_a_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let sock_dir = TempDir::new().unwrap();
+        std::fs::set_permissions(sock_dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        global_with_socket(&sock_dir.path().join("d.sock"), true);
+
+        let check = check_daemon().await;
+
+        assert!(!check.passed, "got: {}", check.message);
+        assert_eq!(check.status, Some(CheckStatus::Fail));
+        assert!(check.message.contains("refused"), "{}", check.message);
+        assert!(
+            check.suggestion.is_some_and(|s| s.contains("chmod 700")),
+            "the check must name the fix"
+        );
+    }
+
     #[tokio::test]
     async fn absent_socket_is_informational_not_a_failure() {
         // The control: no socket at all is the ordinary cold-start state and
         // really is self-correcting, so it must stay Info. Without this the
         // test above could be satisfied by failing on everything.
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("never-created.sock");
-        let project = project_with_socket(&socket);
+        global_with_socket(&socket, true);
 
-        let check = check_daemon(project.path()).await;
+        let check = check_daemon().await;
 
         assert!(check.passed, "a cold start is not a failure");
         assert_eq!(check.status, Some(CheckStatus::Info));
         assert!(check.message.contains("not running"));
+        let global = crate::storage::paths::global_config_path().unwrap();
+        assert!(
+            check
+                .details
+                .iter()
+                .any(|d| d.contains(&global.display().to_string())),
+            "the check must name the global config it read: {:?}",
+            check.details
+        );
     }
 
     #[tokio::test]
     async fn disabled_daemon_short_circuits_before_the_socket_probe() {
-        let sock_dir = TempDir::new().unwrap();
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("d.sock");
         // Occupied *and* disabled: config wins, so this must not be a failure.
         std::fs::write(&socket, b"not a socket").unwrap();
-        let tmp = TempDir::new().unwrap();
-        let engram = tmp.path().join(".engramdb");
-        std::fs::create_dir_all(&engram).unwrap();
-        std::fs::write(
-            engram.join("config.toml"),
-            format!(
-                "[daemon]\nenabled = false\nsocket_path = {:?}\n",
-                socket.display().to_string()
-            ),
-        )
-        .unwrap();
+        global_with_socket(&socket, false);
 
-        let check = check_daemon(tmp.path()).await;
+        let check = check_daemon().await;
 
         assert!(check.passed);
         assert_eq!(check.status, Some(CheckStatus::Info));
@@ -185,19 +254,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unparseable_global_config_is_reported() {
+        write_global("[daemon\n");
+        let check = check_daemon().await;
+        assert!(!check.passed);
+        assert!(
+            check.message.contains("does not parse"),
+            "{}",
+            check.message
+        );
+    }
+
+    #[tokio::test]
     async fn the_daemon_log_tail_is_surfaced() {
         // The log is the only record of why a detached daemon died, so the
         // check has to show it — otherwise the user is told something is
-        // wrong but not what.
-        let log = crate::storage::paths::daemon_log_path().unwrap();
-        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
-        std::fs::write(&log, "error: ORT dylib not found at /nope\n").unwrap();
-
-        let sock_dir = TempDir::new().unwrap();
+        // wrong but not what. It lives in the daemon folder, beside the socket.
+        let sock_dir = crate::daemon::private_tempdir();
         let socket = sock_dir.path().join("d.sock");
-        let project = project_with_socket(&socket);
+        let log = crate::daemon::daemon_log_path(&socket);
+        std::fs::write(&log, "error: ORT dylib not found at /nope\n").unwrap();
+        global_with_socket(&socket, true);
 
-        let check = check_daemon(project.path()).await;
+        let check = check_daemon().await;
 
         assert!(
             check
@@ -207,6 +286,5 @@ mod tests {
             "the daemon log tail must appear in the check details: {:?}",
             check.details
         );
-        let _ = std::fs::remove_file(&log);
     }
 }
