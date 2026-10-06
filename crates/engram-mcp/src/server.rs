@@ -335,10 +335,14 @@ struct ChallengeInput {
     #[schemars(description = "Memory ID")]
     id: String,
 
-    #[schemars(description = "Evidence contradicting this memory")]
+    #[schemars(
+        description = "Why the memory is wrong or outdated: the user's statement (\"we moved off structlog last week\"), or the line of a file you read that states the opposite. Either is enough evidence. Code that still matches the old memory does not make it current."
+    )]
     evidence: String,
 
-    #[schemars(description = "File where evidence was found")]
+    #[schemars(
+        description = "Repo file that contradicts the memory, when the evidence came from one"
+    )]
     source_file: Option<String>,
 
     #[schemars(
@@ -852,6 +856,10 @@ struct ScoredMemoryOutput {
     #[serde(flatten)]
     memory: MemoryOutput,
     score: f64,
+    /// Rank mode's fallback: a weak match returned because nothing cleared the
+    /// relevance threshold. Present only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    below_threshold: bool,
     score_breakdown: ScoreBreakdownOutput,
 }
 
@@ -1036,7 +1044,7 @@ impl EngramDbServer {
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_notice: Arc::default(),
             startup: StartupStatus::ready_receiver(),
-            tool_router: Self::tool_router(),
+            tool_router: Self::default_tool_router(),
         })
     }
 
@@ -1083,7 +1091,7 @@ impl EngramDbServer {
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_notice: Arc::default(),
             startup: StartupStatus::ready_receiver(),
-            tool_router: Self::tool_router(),
+            tool_router: Self::default_tool_router(),
         }
     }
 
@@ -1786,6 +1794,12 @@ impl EngramDbServer {
                  differs from the type default, and origin_task + generality=\"task\" \
                  for task-specific choices. Declare situation on query when debugging \
                  or weighing a design choice. \
+                 Save what cost you effort: when a command failed and finding the cause \
+                 took more than one try, and nothing in the repo or the error message states \
+                 that cause, create a hazard before you report back (the command, the \
+                 symptom, the cause and the fix). Save it yourself rather than offering to, \
+                 unless the user asked you not to save memories. Skip it when the docs or \
+                 the error already said what to do, or when the fix was a change to the code. \
                  All tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, \"global\", or \"group:<name>\") to operate on a different \
                  store's memories. \
@@ -1804,7 +1818,20 @@ impl EngramDbServer {
                  to more than the current project — e.g. you are working across a set of \
                  related repos — save it once to a shared store (project=\"group:<name>\" \
                  for that set, or project=\"global\" for everywhere) instead of only the \
-                 current project, so every relevant project surfaces it. Suggested, not required."
+                 current project, so every relevant project surfaces it. Suggested, not required. \
+                 Where to save: project facts, conventions, hazards and decisions go to this \
+                 store with create, including when the user says \"remember\". Claude Code's \
+                 file-based auto-memory is private to one machine and invisible to these \
+                 queries and to collaborators; keep it for personal collaboration preferences. \
+                 Challenge a memory as soon as a source states the opposite: the user saying \
+                 it is outdated (even if the code still matches it), or a file you read: a \
+                 dated doc, a dependency pin, existing code doing what the memory forbids. Do \
+                 not wait for the user to confirm a file-based conflict. Challenge first, then \
+                 work from the newer source and tell the user. Not contradictions: code that \
+                 merely doesn't mention the rule, code the memory itself calls legacy or an \
+                 exception, a narrower memory scoping an exception, a source that is clearly \
+                 older than the memory (an undated source still counts), a one-off or \
+                 hypothetical request, a memory already marked superseded."
                 .to_string();
             if let Some(w) = embedding_warning {
                 s.push_str("\n\n");
@@ -2137,7 +2164,7 @@ fn resolve_session_id() -> String {
 impl EngramDbServer {
     #[tool(
         name = "create",
-        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
+        description = "Store a new memory about the project (or globally with project=\"global\"). Use after discovering patterns, decisions, or hazards; after a failed command whose cause took more than one try to find and is not documented (save it yourself rather than offering to, unless the user asked you not to); and when the user asks you to remember something about the project: use this, not Claude Code's file-based auto-memory, which other sessions' queries and collaborators never see. Set `epistemic` (fact/observation/decision) when it differs from the type default; state `premise` and `invalidated_by` for decisions and observations."
     )]
     async fn memory_create(
         &self,
@@ -2314,6 +2341,9 @@ impl EngramDbServer {
             epistemic: epistemic_filter,
             include_invalidated: input.include_invalidated,
             situation,
+            // `[retrieval].rank_fallback` from config: an agent browsing by
+            // rank gets marked weak matches rather than an empty answer.
+            rank_fallback: None,
         };
 
         // Cross-store read fan-in (ops::query_memories_with_extra_stores). When
@@ -2393,6 +2423,7 @@ impl EngramDbServer {
             .map(|sm| ScoredMemoryOutput {
                 memory: memory_to_output(&sm.memory, include_details),
                 score: sm.score,
+                below_threshold: sm.score_breakdown.below_threshold,
                 score_breakdown: ScoreBreakdownOutput {
                     final_score: sm.score_breakdown.final_score,
                     semantic: sm.score_breakdown.semantic,
@@ -2410,12 +2441,19 @@ impl EngramDbServer {
             })
             .collect();
 
-        let r = serde_json::to_string(&serde_json::json!({
+        let hint =
+            ops::query::result_hint(mode, &result, engine.config().retrieval.relevance_threshold);
+        let mut body = serde_json::json!({
             "memories": memories,
             "total": result.total,
             "retrieval_quality": result.retrieval_quality,
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            "dropped_below_threshold": result.dropped_below_threshold,
+        });
+        if let Some(hint) = hint {
+            body["hint"] = serde_json::Value::String(hint);
+        }
+        let r = serde_json::to_string(&body)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         // Compaction rides the *read* path, not the write path. Fragments are
         // produced by writes but only ever paid for by reads, so a query is
         // both where the cost lands and a point with nothing else in flight.
@@ -2618,7 +2656,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "challenge",
-        description = "Flag a memory as potentially incorrect and mark for review."
+        description = "Flag a memory as wrong or outdated so it is reviewed and ranks lower. Use it as soon as a source states the opposite of the memory: the user saying it is out of date (even when the code has not caught up), or a file you read, such as a dated doc, a dependency pin, or existing code using what the memory forbids (pass it as `source_file`). A challenge flags the memory and does not rewrite it, so a file-based conflict needs no confirmation from the user first. Not contradictions: code that does not mention the rule, code the memory itself calls legacy or an exception, and a source that is clearly older than the memory (an undated source still counts). When you also know the replacement, `update` the memory or `create` the new one with `supersedes`."
     )]
     async fn memory_challenge(
         &self,
@@ -4163,11 +4201,65 @@ finds it and harvest_show digests it straight from the archive."
             .map(|t| t.name.to_string())
             .collect()
     }
+
+    /// The tool router with `[mcp].always_load`'s default set pinned.
+    fn default_tool_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
+        let mut router = Self::tool_router();
+        set_always_load(
+            &mut router,
+            &engramdb::types::McpConfig::default().always_load,
+        );
+        router
+    }
+
+    /// Pin `names` (and only them) as always loaded; see [`set_always_load`].
+    pub fn set_always_load(&mut self, names: &[String]) {
+        set_always_load(&mut self.tool_router, names);
+    }
+
+    /// `[mcp].always_load` from this project's config (defaults if absent).
+    async fn configured_always_load(&self) -> Vec<String> {
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        load_config_or_default(&config_path).await.mcp.always_load
+    }
 }
 
 // ---------------------------------------------------------------------------
 // ServerHandler implementation
 // ---------------------------------------------------------------------------
+
+/// Claude Code's per-tool `_meta` key that keeps a tool's schema loaded
+/// instead of deferring it behind ToolSearch. Other clients ignore it.
+pub const ALWAYS_LOAD_META_KEY: &str = "anthropic/alwaysLoad";
+
+/// Set `_meta["anthropic/alwaysLoad"] = true` on exactly the named tools.
+///
+/// Tools not named lose the key, so a config list replaces the default rather
+/// than adding to it. A name that matches no tool is reported and skipped:
+/// a typo in config must not fail server startup.
+fn set_always_load(
+    router: &mut rmcp::handler::server::tool::ToolRouter<EngramDbServer>,
+    names: &[String],
+) {
+    for name in names {
+        if !router.has_route(name) {
+            tracing::warn!("[mcp].always_load: no tool named {name:?}; ignoring it");
+        }
+    }
+    for route in router.map.values_mut() {
+        let pinned = names.iter().any(|n| n.as_str() == route.attr.name.as_ref());
+        let mut meta = route.attr.meta.take().unwrap_or_default();
+        if pinned {
+            meta.0.insert(
+                ALWAYS_LOAD_META_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        } else {
+            meta.0.remove(ALWAYS_LOAD_META_KEY);
+        }
+        route.attr.meta = (!meta.0.is_empty()).then_some(meta);
+    }
+}
 
 /// SEP-2549 cache hints for a hand-built result, as `(ttl_ms, cache_scope)`.
 ///
@@ -4195,7 +4287,10 @@ fn cache_hints(
     }
 }
 
-#[tool_handler]
+// `router = self.tool_router`: the default (`Self::tool_router()`) builds a
+// fresh router per request, which would drop the per-instance tool `_meta`
+// that `set_always_load` writes.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for EngramDbServer {
     /// What `#[tool_handler]` would generate, plus two things: the call waits
     /// for the deferred startup work, and the first result after the
@@ -4351,6 +4446,8 @@ impl ServerHandler for EngramDbServer {
                     mode: RetrievalMode::Rank,
                     path: Some(path.to_string()),
                     max_results: Some(10),
+                    // Presented as the file's relevant memories: no weak fallback.
+                    rank_fallback: Some(0),
                     ..RetrievalQuery::default()
                 };
                 let result = ops::query_memories(&engine, &query)
@@ -4434,6 +4531,8 @@ impl ServerHandler for EngramDbServer {
                         mode: RetrievalMode::Rank,
                         path,
                         max_results: Some(10),
+                        // Presented as the file's relevant memories: no weak fallback.
+                        rank_fallback: Some(0),
                         ..RetrievalQuery::default()
                     };
                     if let Ok(result) = ops::query_memories(&engine, &query).await {
@@ -4595,7 +4694,12 @@ pub async fn run_stdio(
         )
     });
 
-    let server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
+    let mut server = EngramDbServer::new_with_stats(dir, embedding_backend, stats.clone())?;
+    // Before the handshake, so the first `tools/list` already carries the
+    // alwaysLoad `_meta`. Reading config.toml is cheap; the slow startup work
+    // stays deferred.
+    let always_load = server.configured_always_load().await;
+    server.set_always_load(&always_load);
     let (stdin, stdout) = rmcp::transport::io::stdio();
     let transport = DiscoverProbeFilter::new(rmcp::transport::async_rw::AsyncRwTransport::<
         rmcp::RoleServer,
@@ -4859,8 +4963,12 @@ pub async fn run_sse(
         let warmup = EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())?
             .with_shared_model_caches(provider_cache.clone(), daemon.clone());
         warmup.run_startup().await?;
-        warmup.embedding_notice.get()
+        (
+            warmup.embedding_notice.get(),
+            warmup.configured_always_load().await,
+        )
     };
+    let (embedding_warning, always_load) = embedding_warning;
 
     let config = http_server_config();
     let ct = config.cancellation_token.clone();
@@ -4870,6 +4978,7 @@ pub async fn run_sse(
             let embedding_warning = embedding_warning.clone();
             let provider_cache = provider_cache.clone();
             let daemon = daemon.clone();
+            let always_load = always_load.clone();
             move || {
                 let mut server =
                     EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
@@ -4878,6 +4987,7 @@ pub async fn run_sse(
                 // A notice per connection: each session's instructions
                 // carry the warning, not only the first one's.
                 server.embedding_notice = Arc::new(EmbeddingNotice::new(embedding_warning.clone()));
+                server.set_always_load(&always_load);
                 Ok(server)
             }
         },

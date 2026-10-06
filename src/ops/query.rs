@@ -3,7 +3,9 @@
 //! Thin wrapper delegating to [`RetrievalEngine::query`]. See there for the
 //! semantics of [`RetrievalMode::Rank`] vs [`RetrievalMode::Filter`].
 
-use crate::retrieval::engine::{RetrievalEngine, RetrievalQuery, RetrievalResult, ScoredMemory};
+use crate::retrieval::engine::{
+    RetrievalEngine, RetrievalMode, RetrievalQuery, RetrievalResult, ScoredMemory,
+};
 use anyhow::Result;
 use std::collections::HashSet;
 
@@ -85,6 +87,67 @@ pub fn merge_scored_memories(
     });
     project.truncate(max);
     duplicates
+}
+
+/// What to tell the caller when a query found nothing it is confident in.
+///
+/// `None` when at least one result cleared the threshold. Otherwise one
+/// sentence naming what happened and what to try next: an empty answer with no
+/// explanation sent agents to read the store files directly.
+pub fn result_hint(
+    mode: RetrievalMode,
+    result: &RetrievalResult,
+    threshold: f64,
+) -> Option<String> {
+    let weak = !result.memories.is_empty()
+        && result
+            .memories
+            .iter()
+            .all(|sm| sm.score_breakdown.below_threshold);
+    match mode {
+        RetrievalMode::Rank if weak => Some(format!(
+            "No memory scored above the relevance threshold ({threshold}). These {} are the closest \
+             weak matches (below_threshold: true); {} more were dropped. Treat them as leads, not \
+             answers; retry with mode \"filter\" and literal terms to confirm.",
+            result.memories.len(),
+            result.dropped_below_threshold
+        )),
+        RetrievalMode::Rank if result.memories.is_empty() && result.dropped_below_threshold > 0 => {
+            Some(format!(
+                "0 of {} memories scored above the relevance threshold ({threshold}). Retry with \
+                 mode \"filter\" and literal terms, or with fewer words.",
+                result.dropped_below_threshold
+            ))
+        }
+        RetrievalMode::Rank if result.memories.is_empty() => {
+            Some("No memory in this store matches the filters.".to_string())
+        }
+        RetrievalMode::Filter if result.memories.is_empty() => Some(
+            "No memory matched these words. Filter mode needs a keyword, tag or scope match: \
+             retry with synonyms or the exact term, or with mode \"rank\" to browse by meaning."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Rank mode across stores. Each store may have returned its own fallback:
+/// weak matches marked `below_threshold` because nothing in that store cleared
+/// the threshold. Once merged, a confident result from any store makes every
+/// weak one noise, so they are dropped; when none is confident, only the best
+/// `fallback` weak ones are kept. `memories` must be sorted by score. Returns
+/// how many were removed, for `dropped_below_threshold`.
+pub fn reconcile_rank_fallback(memories: &mut Vec<ScoredMemory>, fallback: usize) -> usize {
+    let before = memories.len();
+    if memories
+        .iter()
+        .any(|sm| !sm.score_breakdown.below_threshold)
+    {
+        memories.retain(|sm| !sm.score_breakdown.below_threshold);
+    } else {
+        memories.truncate(fallback);
+    }
+    before - memories.len()
 }
 
 /// Whether a memory from a shared (group or everyone/global) store is visible
@@ -246,6 +309,7 @@ where
     for ((label, _), extra_result) in extras.iter().zip(extra_results) {
         match extra_result {
             Ok(extra_result) => {
+                result.dropped_below_threshold += extra_result.dropped_below_threshold;
                 let visible: Vec<ScoredMemory> = extra_result
                     .memories
                     .into_iter()
@@ -267,6 +331,17 @@ where
                 unreadable.push(label.clone());
             }
         }
+    }
+
+    // Each store applied rank mode's fallback on its own. Merged, a confident
+    // result from any store makes every weak one noise.
+    if query.mode == RetrievalMode::Rank {
+        let fallback = query
+            .rank_fallback
+            .unwrap_or(engine.config().retrieval.rank_fallback);
+        let removed = reconcile_rank_fallback(&mut result.memories, fallback);
+        result.dropped_below_threshold += removed;
+        result.total = result.total.saturating_sub(removed);
     }
 
     // P2: cross-store rerank equalization. Memories merged from stores embedded
@@ -354,6 +429,43 @@ mod tests {
             score,
             score_breakdown: ScoreBreakdown::default(),
         }
+    }
+
+    fn weak(id: &str, score: f64) -> ScoredMemory {
+        let mut sm = scored(id, score);
+        sm.score_breakdown.below_threshold = true;
+        sm
+    }
+
+    #[test]
+    fn reconcile_drops_weak_matches_when_any_store_is_confident() {
+        let mut merged = vec![weak("a", 0.40), scored("b", 0.39), weak("c", 0.30)];
+        let removed = reconcile_rank_fallback(&mut merged, 3);
+        assert_eq!(removed, 2);
+        assert_eq!(
+            merged
+                .iter()
+                .map(|m| m.memory.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_the_best_fallback_when_nothing_is_confident() {
+        let mut merged = vec![
+            weak("a", 0.40),
+            weak("b", 0.35),
+            weak("c", 0.30),
+            weak("d", 0.20),
+        ];
+        let removed = reconcile_rank_fallback(&mut merged, 3);
+        assert_eq!(removed, 1);
+        assert_eq!(merged.len(), 3);
+        assert!(merged.iter().all(|m| m.score_breakdown.below_threshold));
+
+        let mut empty: Vec<ScoredMemory> = vec![];
+        assert_eq!(reconcile_rank_fallback(&mut empty, 3), 0);
     }
 
     #[test]

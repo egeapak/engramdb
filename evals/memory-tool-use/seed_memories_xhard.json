@@ -1,0 +1,1814 @@
+[
+ {
+  "key": "money",
+  "type": "convention",
+  "title": "Money is integer cents, never float",
+  "content": "All monetary amounts are stored and passed as integer cents using the `Money` type in src/billing/money.py. Never use float for money. Field names end in `_cents`.",
+  "paths": [
+   "src/billing/"
+  ],
+  "tags": [
+   "billing",
+   "money"
+  ]
+ },
+ {
+  "key": "finalize",
+  "type": "hazard",
+  "title": "invoices.finalize() is not idempotent",
+  "content": "`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "billing",
+   "ledger"
+  ]
+ },
+ {
+  "key": "logging",
+  "type": "decision",
+  "title": "Use structlog, not stdlib logging",
+  "content": "We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.",
+  "paths": [
+   "src/"
+  ],
+  "tags": [
+   "logging"
+  ]
+ },
+ {
+  "key": "tests",
+  "type": "convention",
+  "title": "Run tests with make test-fast",
+  "content": "Run `make test-fast` for the unit suite (skips the Postgres and network integration tests). `make test` runs everything but needs `docker compose up db` first.",
+  "paths": [],
+  "tags": [
+   "testing",
+   "workflow"
+  ]
+ },
+ {
+  "key": "migrations",
+  "type": "hazard",
+  "title": "Never edit an applied migration",
+  "content": "Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.",
+  "paths": [
+   "migrations/"
+  ],
+  "tags": [
+   "database",
+   "migrations"
+  ]
+ },
+ {
+  "key": "flags",
+  "type": "convention",
+  "title": "Feature flags go through flags.is_on()",
+  "content": "Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.",
+  "paths": [
+   "src/flags.py",
+   "flags.toml"
+  ],
+  "tags": [
+   "flags"
+  ]
+ },
+ {
+  "key": "rounding",
+  "type": "decision",
+  "title": "Tax uses ROUND_HALF_EVEN",
+  "content": "Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.",
+  "paths": [
+   "src/billing/tax.py"
+  ],
+  "tags": [
+   "billing",
+   "tax"
+  ]
+ },
+ {
+  "key": "export",
+  "type": "hazard",
+  "title": "Staging EXPORT_BUCKET points at the prod bucket",
+  "content": "In staging, `EXPORT_BUCKET` points at the production bucket. Never run scripts/export.py against staging without `--dry-run`.",
+  "paths": [
+   "scripts/export.py"
+  ],
+  "tags": [
+   "ops",
+   "export"
+  ],
+  "stale": true
+ },
+ {
+  "key": "errors",
+  "type": "convention",
+  "title": "API errors use problem+json",
+  "content": "HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "errors"
+  ]
+ },
+ {
+  "key": "release",
+  "type": "convention",
+  "title": "Release by tagging vYYYY.MM.N",
+  "content": "Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.",
+  "paths": [],
+  "tags": [
+   "release",
+   "workflow"
+  ]
+ },
+ {
+  "key": "idem_header",
+  "type": "convention",
+  "title": "Mutating endpoints require an idempotency header",
+  "content": "Every new POST/PUT/PATCH endpoint must require the `X-Acme-Idempotency` header. Reject a request without it with 428 via errors.problem, and replay the stored response when the same key is seen again within 24 hours. checkout.py predates this rule and is grandfathered.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "idempotency"
+  ],
+  "logical": [
+   "api"
+  ]
+ },
+ {
+  "key": "refund_limits",
+  "type": "decision",
+  "title": "Large refunds need a second approver",
+  "content": "A refund of more than 50,000 cents ($500) must not be issued directly: create it with status `pending_approval` so a second person approves it in the admin tool. Refunds up to that amount are issued immediately with status `issued`. Agreed with Finance in June 2026 after a mistaken $9k refund.",
+  "paths": [
+   "src/billing/refunds.py"
+  ],
+  "tags": [
+   "billing",
+   "refunds"
+  ],
+  "logical": [
+   "billing.refunds"
+  ],
+  "criticality": 0.8
+ },
+ {
+  "key": "audit_events",
+  "type": "convention",
+  "title": "Money-moving operations emit an audit event",
+  "content": "Every new operation that moves money (refund, credit, write-off) logs an audit event through structlog named `ledger.<noun>_<past-tense verb>`, for example `ledger.refund_issued` or `ledger.credit_applied`, and the event must include `actor_id` (the user or service that triggered it). The audit pipeline indexes on these names. The older `invoice_finalized` event predates this and is mapped by the pipeline; do not rename it.",
+  "paths": [
+   "src/billing/"
+  ],
+  "tags": [
+   "billing",
+   "audit",
+   "logging"
+  ],
+  "logical": [
+   "billing.audit"
+  ]
+ },
+ {
+  "key": "webhook_sig",
+  "type": "hazard",
+  "title": "PSP webhooks must be verified before parsing",
+  "content": "Verify every payment-provider (PSP) webhook before calling get_json(): compute HMAC-SHA256 over the raw request body with the secret in the `PSP_WEBHOOK_SECRET` env var, compare it with hmac.compare_digest against the `Psp-Signature` header, and reject events whose `Psp-Timestamp` header is more than 300 seconds old (replay protection). Answer a failed check with 401 via errors.problem.",
+  "paths": [
+   "src/api/webhooks.py"
+  ],
+  "tags": [
+   "api",
+   "webhooks",
+   "security"
+  ],
+  "logical": [
+   "api.webhooks"
+  ],
+  "criticality": 0.8
+ },
+ {
+  "key": "jobs_queue",
+  "type": "convention",
+  "title": "Enqueueing background jobs",
+  "content": "Enqueue background work with `src.jobs.queue.enqueue(name, payload, dedupe_key=...)`. Job names are `<domain>.<verb>` (e.g. `invoices.send_reminder`); payloads are JSON with ids only, never objects. Always pass a `dedupe_key` derived from the business key (e.g. `f\"dunning:{invoice_id}:{attempt}\"`): webhooks and cron both redeliver, and the backend drops a job whose dedupe_key it has seen in the last 7 days.",
+  "paths": [
+   "src/jobs/"
+  ],
+  "tags": [
+   "jobs",
+   "queue"
+  ],
+  "logical": [
+   "jobs"
+  ]
+ },
+ {
+  "key": "dunning",
+  "type": "decision",
+  "title": "Failed-payment retry schedule",
+  "content": "When a charge fails, retry it on days 1, 3, 7, 14 after the failure (contractual, finance policy FP-12). If the day-14 retry also fails, mark the invoice `uncollectible` and stop. Never retry an invoice that has a refund in progress.",
+  "paths": [
+   "src/billing/dunning.py"
+  ],
+  "tags": [
+   "billing",
+   "payments",
+   "dunning"
+  ],
+  "logical": [
+   "billing.dunning"
+  ]
+ },
+ {
+  "key": "pii",
+  "type": "hazard",
+  "title": "No customer PII in logs",
+  "content": "Never log customer names, email addresses or postal addresses; log the customer id only. Our logs ship to a third-party vendor that is outside our data processing agreement.",
+  "paths": [
+   "src/",
+   "services/"
+  ],
+  "tags": [
+   "logging",
+   "privacy"
+  ],
+  "criticality": 0.7
+ },
+ {
+  "key": "api_pagination",
+  "type": "convention",
+  "title": "List endpoints use cursor pagination",
+  "content": "List endpoints take `page_size` (default 50, max 250) and an opaque `cursor`, and return `{\"items\": [...], \"next_cursor\": ...}` with next_cursor null on the last page. Never offset/limit pagination: invoice lists are large and offsets drift while Finance is writing.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "pagination"
+  ],
+  "logical": [
+   "api"
+  ]
+ },
+ {
+  "key": "api_money",
+  "type": "convention",
+  "title": "Money in API responses",
+  "content": "Public API responses render money as an object `{\"minor\": 1234, \"ccy\": \"USD\"}`, never a bare number and never a `*_cents` field. Internally keep integer `_cents` (the billing convention) and convert in the response serializer. checkout.py predates this and is grandfathered until /v2.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "money"
+  ],
+  "logical": [
+   "api"
+  ]
+ },
+ {
+  "key": "notifier_templates",
+  "type": "convention",
+  "title": "Notifier email templates",
+  "content": "Email templates live in services/notifier/templates/ as `<event>.mjml` and are compiled at build time. Every template needs a plain-text twin `<event>.txt` with the same variables, because some corporate mail gateways strip HTML. Template variables are snake_case.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "email"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "bf_ledger_api",
+  "type": "context",
+  "title": "Ledger posting API: background and quirks",
+  "content": "The external ledger (owned by the Finance Platform team) is the system of record for revenue. We post one entry per finalized invoice to its postings endpoint. Authentication is a service token injected by the sidecar, so our code never handles credentials. Each response carries a `ref` that we store on the invoice. A 409 means the ledger already holds a posting for that invoice. The ledger's p99 latency is about 4 seconds, and it has a maintenance window on Sundays 02:00-03:00 UTC during which it answers 503; their team asks that we do not hammer it during that window. Payload format: send the amount as an integer in the `amount_minor` field. The legacy `amount` field is deprecated, and since the ledger's August 2026 upgrade it is interpreted in whole currency units and silently truncated, so any posting code still sending `amount` must switch to `amount_minor`.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "billing",
+   "ledger"
+  ],
+  "logical": [
+   "billing.ledger"
+  ]
+ },
+ {
+  "key": "bf_export_csv",
+  "type": "context",
+  "title": "Monthly export: who consumes it and what it must contain",
+  "content": "scripts/export.py produces the monthly invoice report that Finance imports into their accounting tool at the start of each month. It runs from the ops cron on the 2nd at 06:00 UTC and writes one file per environment to EXPORT_BUCKET under `exports/<YYYY-MM>/invoices.csv`. Finance reconciles the totals against the ledger, so every finalized invoice of the month must appear exactly once, including zero-amount ones; drafts are excluded. Columns, in order: invoice id, customer id, subtotal, tax, total, finalized date. Amounts are integer cents with no currency symbol. Format requirements of the Finance import tool (it runs with a German locale and rejects anything else): the delimiter must be a semicolon (`;`), not a comma, and dates must be written `DD.MM.YYYY` (strftime `%d.%m.%Y`). UTF-8 without a BOM.",
+  "paths": [
+   "scripts/export.py"
+  ],
+  "tags": [
+   "export",
+   "finance"
+  ],
+  "logical": [
+   "ops.export"
+  ]
+ },
+ {
+  "key": "bf_tax_quebec",
+  "type": "decision",
+  "title": "How invoice tax is calculated",
+  "content": "Invoice tax is calculated on the invoice subtotal, not per line: sum the line totals first (line_total), apply the customer's rate once, then round. Rates are decimal fractions (0.0825 for 8.25%) and are passed in by the caller; tax.py never looks rates up itself. Tax-exempt customers pass rate 0 and still get a tax_cents of 0 written, so reports never show NULL. The result is stored in Invoice.tax_cents and is never recomputed after finalization, even if the rate later changes. One exception, from the 2025 Revenu Quebec audit: for customers whose region is `CA-QC`, tax is computed per line (round each line's tax, then sum), because QST must be shown per line. Branch on `region == \"CA-QC\"`.",
+  "paths": [
+   "src/billing/tax.py"
+  ],
+  "tags": [
+   "billing",
+   "tax"
+  ],
+  "logical": [
+   "billing.tax"
+  ]
+ },
+ {
+  "key": "bf_db_pool",
+  "type": "hazard",
+  "title": "Database connections in deployed environments",
+  "content": "In production and staging the app never connects to Postgres directly; every connection goes through a pooler on port 6432 that the platform team manages. Locally, docker-compose exposes Postgres itself on 5432 with no pooler, so the problems below only show up after deploy. The pool is sized at 20 server connections per service, and long transactions starve checkout, so keep transactions short and never hold one open across an HTTP call to the ledger. The pooler runs in transaction mode: session state does not survive between transactions (no SET session variables, no advisory locks across transactions, no LISTEN/NOTIFY), and server-side prepared statements fail with 'prepared statement does not exist'. With psycopg 3 you must connect with `prepare_threshold=None` to turn automatic prepared statements off.",
+  "paths": [
+   "src/",
+   "docker-compose.yml"
+  ],
+  "tags": [
+   "database",
+   "postgres"
+  ],
+  "logical": [
+   "database"
+  ],
+  "criticality": 0.7
+ },
+ {
+  "key": "bf_release_freeze",
+  "type": "context",
+  "title": "Release process: details and calendar",
+  "content": "Releases are tagged from main once the release checklist in the PR template is complete. The deploy pipeline promotes to staging automatically and to production after a manual approval in the CI UI by anyone on the billing team. Hotfixes follow the same path; there is no separate hotfix branch. Avoid releasing on Fridays after 14:00 UTC, because the on-call rotation hands over at 16:00 and nobody wants a fresh release during the handover. Database migrations ship in the same release as the code that needs them. Calendar constraint: there is a year-end code freeze from Dec 15 to Jan 5 while Finance runs the annual close. No production release may go out in that window, hotfixes included, unless a lead in #fin-eng signs off in the channel first.",
+  "paths": [],
+  "tags": [
+   "release",
+   "workflow"
+  ],
+  "logical": [
+   "release"
+  ]
+ },
+ {
+  "key": "bf_notifier_sandbox",
+  "type": "hazard",
+  "title": "Email provider: sandbox behaviour and limits",
+  "content": "The notifier sends through the email provider's HTTP API (provider.send). Production credentials exist only in the deployed function's environment. For development there is a separate sandbox account whose key is in the dev secrets store; export it as MAIL_API_KEY. The sandbox has the same API and response shapes, but it is rate-limited to 2 messages per second and capped at 500 messages a day for the whole team, so do not loop over large fixtures. Bounces and complaints are simulated with magic addresses from the provider's docs. Important: the sandbox silently drops (answers 202, never delivers) every message whose recipient is not on the `@sink.acme.test` domain, so a test that asserts delivery must send to an address such as `receipts@sink.acme.test` and read it back from the sink inbox API.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "email",
+   "testing"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "ci_old",
+  "type": "convention",
+  "title": "Rerunning CI builds",
+  "content": "CI runs on Jenkins (ci.acme.example). To rerun a failed or flaky build on a PR, comment `retest this please` on the PR; Jenkins picks it up within a minute.",
+  "paths": [],
+  "tags": [
+   "ci",
+   "workflow"
+  ],
+  "logical": [
+   "ci"
+  ]
+ },
+ {
+  "key": "ci_new",
+  "type": "convention",
+  "title": "Rerunning CI builds (current)",
+  "content": "Since 2026-08-12 CI runs on Buildkite; Jenkins was shut down, and PR comments such as `retest this please` do nothing now. To rerun a failed or flaky build, press Retry on the failed job in Buildkite, or run `bk build retry <build-number>` with the number from the PR check.",
+  "paths": [],
+  "tags": [
+   "ci",
+   "workflow"
+  ],
+  "logical": [
+   "ci"
+  ],
+  "supersedes": "ci_old"
+ },
+ {
+  "key": "notifier_owner_old",
+  "type": "context",
+  "title": "Who owns the notifier",
+  "content": "Dana Okafor owns services/notifier. Template and copy changes need her sign-off before merge.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "ownership"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "notifier_owner_new",
+  "type": "context",
+  "title": "Who owns the notifier (current)",
+  "content": "As of 2026-09-01 the notifier belongs to the Growth team (Dana Okafor moved to Platform). Template and copy changes are signed off in #growth-eng; any Growth engineer can approve.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "ownership"
+  ],
+  "logical": [
+   "notifier"
+  ],
+  "supersedes": "notifier_owner_old"
+ },
+ {
+  "key": "retention_old",
+  "type": "decision",
+  "title": "Invoice retention period",
+  "content": "Invoices and their lines are kept for 7 years after finalization, then purged. Use `RETENTION_DAYS = 2555`: legal defines the period in days.",
+  "paths": [
+   "scripts/"
+  ],
+  "tags": [
+   "retention",
+   "compliance"
+  ],
+  "logical": [
+   "compliance.retention"
+  ]
+ },
+ {
+  "key": "retention_new",
+  "type": "decision",
+  "title": "Invoice retention period (after the 2026 audit)",
+  "content": "Since the 2026 tax audit, invoices are kept 10 years after finalization. Use `RETENTION_DAYS = 3650` exactly; legal defines the period in days, so do not derive it from years. Never purge an invoice that has an open refund.",
+  "paths": [],
+  "tags": [
+   "retention",
+   "compliance"
+  ],
+  "logical": [
+   "compliance.retention"
+  ],
+  "supersedes": "retention_old"
+ },
+ {
+  "key": "fx_provider_old",
+  "type": "decision",
+  "title": "Where FX rates come from",
+  "content": "FX rates come from Open Exchange Rates (openexchangerates.org) with the app id in `OXR_APP_ID`. Fetch the daily `historical/<date>.json` endpoint with base USD.",
+  "paths": [
+   "src/billing/currency.py"
+  ],
+  "tags": [
+   "fx",
+   "currency"
+  ],
+  "logical": [
+   "billing.fx"
+  ]
+ },
+ {
+  "key": "fx_provider_new",
+  "type": "decision",
+  "title": "Where FX rates come from (current)",
+  "content": "Since 2026-07 FX rates come from the ECB euro reference feed, whose URL is configured in `ECB_FEED_URL`. The Open Exchange Rates contract ended and `OXR_APP_ID` was revoked; do not use it. The ECB feed is EUR-based, so derive USD cross rates by dividing by the USD rate. No API key is needed.",
+  "paths": [
+   "src/billing/currency.py"
+  ],
+  "tags": [
+   "fx",
+   "currency"
+  ],
+  "logical": [
+   "billing.fx"
+  ],
+  "supersedes": "fx_provider_old"
+ },
+ {
+  "key": "pdf_render",
+  "type": "context",
+  "title": "Invoice PDF rendering",
+  "content": "Invoice PDFs are rendered by `render_pdf()` in src/billing/pdf.py with wkhtmltopdf through the pdfkit wrapper. Fonts come from the container image's system fontconfig, so a font problem is an image problem, not a code problem: fix it in the Dockerfile.",
+  "paths": [
+   "src/billing/pdf.py"
+  ],
+  "tags": [
+   "pdf",
+   "invoices"
+  ],
+  "logical": [
+   "billing.pdf"
+  ],
+  "premise": "while invoice-pdf-v2 is off in flags.toml",
+  "invalidated_by": [
+   "flags.toml",
+   "src/billing/pdf.py"
+  ],
+  "stale": true
+ },
+ {
+  "key": "flask_routes",
+  "type": "convention",
+  "title": "Route decorators in the API blueprints",
+  "content": "Declare routes with `@bp.route(\"/path\", methods=[\"GET\"])`, never the `@bp.get` / `@bp.post` shortcuts: production pins Flask 1.1, which does not have them.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "flask"
+  ],
+  "logical": [
+   "api"
+  ],
+  "premise": "while production pins Flask 1.x",
+  "invalidated_by": [
+   "pyproject.toml"
+  ],
+  "stale": true
+ },
+ {
+  "key": "notifier_logging",
+  "type": "convention",
+  "title": "Logging in the notifier service",
+  "content": "The notifier runs as a serverless function and uses the stdlib logging module (`log = logging.getLogger(__name__)`), not structlog: the runtime's JSON log handler already structures records and structlog's renderer double-encodes them. Pass context with `extra={...}`.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "logging"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "reporting_money",
+  "type": "convention",
+  "title": "Money in the reporting service",
+  "content": "Unlike billing, the reporting service works in Decimal major units, because it aggregates FX-converted amounts where cents lose precision. Convert at the boundary with `Decimal(cents) / 100` and quantize every aggregate to 4 places with `Decimal(\"0.0001\")`; round to 2 places only when rendering.",
+  "paths": [
+   "services/reporting/"
+  ],
+  "tags": [
+   "reporting",
+   "money"
+  ],
+  "logical": [
+   "reporting"
+  ]
+ },
+ {
+  "key": "notifier_migrations",
+  "type": "context",
+  "title": "Notifier migrations",
+  "content": "services/notifier/migrations/ uses timestamped file names (YYYYMMDDHHMM_slug.sql). The notifier has not launched: none of these migrations has been applied to any shared database, so until launch (planned for 2026-11) fix a mistake by editing the file in place rather than adding a new migration.",
+  "paths": [
+   "services/notifier/migrations/"
+  ],
+  "tags": [
+   "notifier",
+   "migrations",
+   "database"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "notifier_flags",
+  "type": "convention",
+  "title": "Feature flags in the notifier",
+  "content": "The notifier is deployed separately and cannot read the root flags.toml. Its flags are environment variables named `NOTIFIER_FF_<NAME>` (upper snake case, value \"1\" to enable), read with `os.environ.get(\"NOTIFIER_FF_<NAME>\") == \"1\"`.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "flags"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "notifier_tests",
+  "type": "convention",
+  "title": "Running the notifier's tests",
+  "content": "The root test targets never collect services/notifier/tests. Run them from services/notifier with `python -m pytest --import-mode=importlib tests`: both the root and the notifier have a package named `tests`, and the default import mode resolves the wrong one.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "testing"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "fx_rounding",
+  "type": "decision",
+  "title": "Rounding in currency conversion",
+  "content": "Currency conversion rounds toward negative infinity (`decimal.ROUND_FLOOR`) to the target minor unit, so a conversion never credits a customer more than the rate allows. Treasury decision, April 2026; deliberately different from tax rounding.",
+  "paths": [
+   "src/billing/currency.py"
+  ],
+  "tags": [
+   "fx",
+   "currency",
+   "rounding"
+  ],
+  "logical": [
+   "billing.fx"
+  ]
+ },
+ {
+  "key": "owner_ledger",
+  "type": "context",
+  "title": "Ledger integration owner and review rule",
+  "content": "Priya Raman owns the ledger integration. Every change to src/billing/invoices.py needs her review before merge.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "ownership",
+   "ledger",
+   "review"
+  ],
+  "logical": [
+   "billing.ledger"
+  ]
+ },
+ {
+  "key": "proration_rounding",
+  "type": "decision",
+  "title": "Rounding in proration",
+  "content": "Proration keeps full Decimal precision for the unused fraction and rounds only the final amount, to the cent, with `decimal.ROUND_HALF_DOWN`: an exact half cent stays with Acme, because the customer is already receiving a credit (Billing Ops decision BOPS-41). Never round the daily or per-second rate on its own.",
+  "paths": [
+   "src/subscriptions/proration.py"
+  ],
+  "tags": [
+   "subscriptions",
+   "proration",
+   "rounding"
+  ],
+  "logical": [
+   "subscriptions.proration"
+  ]
+ },
+ {
+  "key": "payout_fee_rounding",
+  "type": "decision",
+  "title": "Rounding of the platform fee on payouts",
+  "content": "The platform fee is `gross_minor * rate_bps / 10_000`, rounded up to the next minor unit with `decimal.ROUND_CEILING`, so the platform never under-collects (seller agreement, clause 7.2). The fee is at least 30 minor units per payout.",
+  "paths": [
+   "src/payouts/fees.py"
+  ],
+  "tags": [
+   "payouts",
+   "fees",
+   "rounding"
+  ],
+  "logical": [
+   "payouts.fees"
+  ]
+ },
+ {
+  "key": "ingest_precision",
+  "type": "convention",
+  "title": "Amounts in settlement files",
+  "content": "Settlement files give amounts as decimal strings in major units. Never round them: parse with `Decimal(text)` and, when the value has more fractional digits than the currency's exponent allows, raise `SettlementPrecisionError` (a ValueError subclass; add it if it is missing) so the file goes to manual review. A rounded settlement amount no longer matches the PSP's own totals.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "money",
+   "rounding"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "refund_pct_rounding",
+  "type": "decision",
+  "title": "Rounding of percentage refunds",
+  "content": "A refund given as a percentage of an invoice (goodwill refunds from support) is rounded away from zero with `decimal.ROUND_UP`, in the customer's favour. Full and fixed-amount refunds are never rounded.",
+  "paths": [
+   "src/billing/refunds.py"
+  ],
+  "tags": [
+   "billing",
+   "refunds",
+   "rounding"
+  ],
+  "logical": [
+   "billing.refunds"
+  ]
+ },
+ {
+  "key": "jobs_retry_default",
+  "type": "convention",
+  "title": "Default retry policy for background jobs",
+  "content": "Unless a job has its own documented policy, enqueue it with the default retries: `max_attempts=5` and `backoff=\"exp\"` (exponential, base 2 seconds, capped at 10 minutes). The backend gives up silently after the last attempt, so a job whose failure matters needs its own policy.",
+  "paths": [
+   "src/jobs/"
+  ],
+  "tags": [
+   "jobs",
+   "queue",
+   "retries"
+  ],
+  "logical": [
+   "jobs"
+  ]
+ },
+ {
+  "key": "renewal_retry",
+  "type": "decision",
+  "title": "Retrying a failed renewal charge",
+  "content": "When a renewal charge fails, retry it 3 times on the job `subscriptions.retry_charge`, at 1 h, 6 h and 24 h after the failure (`delays_s=[3600, 21600, 86400]`). After the third failure set the subscription to `past_due` and hand the invoice to dunning (`schedule_retries`). Not the default exponential policy: card networks penalise rapid retries with higher decline rates.",
+  "paths": [
+   "src/subscriptions/renewals.py"
+  ],
+  "tags": [
+   "subscriptions",
+   "retries",
+   "payments"
+  ],
+  "logical": [
+   "subscriptions.renewals"
+  ]
+ },
+ {
+  "key": "bankco_transfers",
+  "type": "hazard",
+  "title": "BankCo transfers: retries and request ids",
+  "content": "Never retry a BankCo transfer automatically, not even after a timeout: BankCo may already have executed it, and a second request with a new id pays the seller twice. Enqueue transfer jobs with `max_attempts=1`; on any failure set the payout to `needs_review` and enqueue `payouts.manual_review`. A manual retry must reuse the transfer's original `bank_request_id`, which BankCo deduplicates on for 30 days. BankCo also rejects the whole transfer when the remittance text is longer than 35 characters (the SEPA limit), so cut it to 35 before sending.",
+  "paths": [
+   "src/payouts/"
+  ],
+  "tags": [
+   "payouts",
+   "bankco",
+   "retries"
+  ],
+  "logical": [
+   "payouts.bankco"
+  ],
+  "criticality": 0.9
+ },
+ {
+  "key": "ingest_retry",
+  "type": "convention",
+  "title": "Retrying truncated settlement files",
+  "content": "The PSP uploads large settlement files in parts, so a file can be read before it is complete. When parsing fails on a truncated file, retry inside the batch run: at most 4 attempts, a fixed 900-second wait between them, no backoff. After the last attempt move the file to the `quarantine/` prefix and carry on with the next file; never fail the whole run for one file.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "retries"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "notifier_retry",
+  "type": "convention",
+  "title": "Retrying failed email sends",
+  "content": "When the email provider call fails with a 5xx or a timeout, retry the send 4 times with waits of 30 s, 120 s, 480 s and 1920 s (`RETRY_WAITS_S`). A 4xx is never retried: the address or the template is wrong.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "email",
+   "retries"
+  ],
+  "logical": [
+   "notifier"
+  ],
+  "stale": true
+ },
+ {
+  "key": "ledger_maintenance_retry",
+  "type": "convention",
+  "title": "Ledger postings during maintenance",
+  "content": "The ledger answers 503 during its Sunday 02:00-03:00 UTC maintenance window. A posting that gets a 503 in that window is re-enqueued for 03:05 UTC rather than retried, so the ledger is not hammered while it comes back.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "ledger",
+   "retries"
+  ],
+  "logical": [
+   "billing.ledger"
+  ]
+ },
+ {
+  "key": "ingest_dedupe",
+  "type": "convention",
+  "title": "Settlement files are delivered more than once",
+  "content": "The PSP redelivers settlement files and reuses file names (`settlement_<date>.csv` can arrive twice with different content after a correction). Decide whether a file was already loaded by the SHA-256 of its bytes, stored in `loaded_files.content_sha256`, never by its name.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "dedupe"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "psp_event_dedupe",
+  "type": "convention",
+  "title": "PSP webhook events arrive at least once",
+  "content": "The PSP delivers every webhook event at least once. Record `event[\"id\"]` in the `psp_events` table before acting on it, and skip an event whose id is already there.",
+  "paths": [
+   "src/api/webhooks.py"
+  ],
+  "tags": [
+   "api",
+   "webhooks",
+   "dedupe"
+  ],
+  "logical": [
+   "api.webhooks"
+  ]
+ },
+ {
+  "key": "payouts_owner",
+  "type": "context",
+  "title": "Who reviews payout changes",
+  "content": "Payouts belong to Treasury Engineering: every change under src/payouts/ needs an approval from @acme/treasury-eng. A change that can alter who is paid or how much also needs a second approval from Ines Duarte (Treasury), because payout mistakes cannot be clawed back.",
+  "paths": [
+   "src/payouts/"
+  ],
+  "tags": [
+   "payouts",
+   "ownership",
+   "review"
+  ],
+  "logical": [
+   "payouts"
+  ]
+ },
+ {
+  "key": "subs_owner",
+  "type": "context",
+  "title": "Who reviews subscription changes",
+  "content": "Subscriptions are owned by the Billing Core team. Changes under src/subscriptions/ are reviewed by @acme/billing-core, and Lena Fischer must approve anything that changes plans or prices.",
+  "paths": [
+   "src/subscriptions/"
+  ],
+  "tags": [
+   "subscriptions",
+   "ownership",
+   "review"
+  ],
+  "logical": [
+   "subscriptions"
+  ],
+  "stale": true
+ },
+ {
+  "key": "ingest_owner",
+  "type": "context",
+  "title": "Who owns the ingest service",
+  "content": "The Data Platform team owns services/ingest. Ask in #data-platform; Tomasz Nowak is the tech lead and reviews changes to the file formats.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "ownership"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "reporting_owner",
+  "type": "context",
+  "title": "Who owns the reporting service",
+  "content": "Finance Analytics owns services/reporting. A change to how a report number is computed needs sign-off from the financial controller, Aiko Tanaka, before it ships.",
+  "paths": [
+   "services/reporting/"
+  ],
+  "tags": [
+   "reporting",
+   "ownership"
+  ],
+  "logical": [
+   "reporting"
+  ]
+ },
+ {
+  "key": "ingest_tests",
+  "type": "convention",
+  "title": "Running the ingest service's tests",
+  "content": "Run them from services/ingest with `python -m unittest discover -s tests -t .`. pytest is not installed in the ingest image, and the top-level directory has to be given because the root project also has a `tests` package.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "testing"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "payouts_tests",
+  "type": "convention",
+  "title": "Payout tests need the fake bank",
+  "content": "Tests that touch src/payouts/ must run with `PAYOUTS_FAKE_BANK=1`; without it the BankCo client tries the real sandbox and each test hangs for 60 seconds before it fails.",
+  "paths": [
+   "src/payouts/"
+  ],
+  "tags": [
+   "payouts",
+   "testing"
+  ],
+  "logical": [
+   "payouts"
+  ]
+ },
+ {
+  "key": "ingest_logging",
+  "type": "convention",
+  "title": "Logging in the ingest job",
+  "content": "ingest runs on the batch platform, which only collects JSON lines from stdout. Log by writing one JSON object per line to stdout with the keys `\"evt\"` (snake_case event name) and `\"ts\"` (ISO 8601 UTC), plus any fields. Do not use the logging module or structlog: their output is dropped there.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "logging"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "payouts_pii",
+  "type": "hazard",
+  "title": "Bank details are PII",
+  "content": "IBANs and account holder names are personal data. Never log, print or put them in an error message; use the payout id and at most the last four characters of the IBAN (`iban[-4:]`).",
+  "paths": [
+   "src/payouts/"
+  ],
+  "tags": [
+   "payouts",
+   "privacy",
+   "logging"
+  ],
+  "logical": [
+   "payouts"
+  ],
+  "criticality": 0.8
+ },
+ {
+  "key": "ingest_flags",
+  "type": "convention",
+  "title": "Feature toggles in ingest",
+  "content": "ingest cannot read flags.toml or environment variables on the batch platform. Its toggles live in services/ingest/ingest.toml under a `[features]` table (snake_case booleans), read once at start-up next to the `[source]` settings.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "flags"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "flags_lifecycle",
+  "type": "convention",
+  "title": "Remove flags after rollout",
+  "content": "A feature flag that has been fully on in production for 30 days is removed, together with the dead branch. Every flag in flags.toml carries an `# owner:` comment.",
+  "paths": [
+   "flags.toml"
+  ],
+  "tags": [
+   "flags"
+  ],
+  "logical": [
+   "flags"
+  ]
+ },
+ {
+  "key": "utc_everywhere",
+  "type": "convention",
+  "title": "Timestamps are aware UTC",
+  "content": "Store, compare and pass timestamps as timezone-aware UTC datetimes (`datetime.now(timezone.utc)`). Never use naive datetimes or the server's local time.",
+  "paths": [
+   "src/"
+  ],
+  "tags": [
+   "time"
+  ],
+  "logical": [
+   "time"
+  ]
+ },
+ {
+  "key": "renewal_tz",
+  "type": "decision",
+  "title": "When renewals run",
+  "content": "A subscription renews at 06:00 local time in the customer's time zone (`sub.customer_tz`), on the day its period ends: card approval rates are highest after the banks' overnight batch. Compute it with `zoneinfo.ZoneInfo(sub.customer_tz)` and convert to UTC for storage, so DST is handled.",
+  "paths": [
+   "src/subscriptions/renewals.py"
+  ],
+  "tags": [
+   "subscriptions",
+   "time"
+  ],
+  "logical": [
+   "subscriptions.renewals"
+  ]
+ },
+ {
+  "key": "reporting_tz",
+  "type": "convention",
+  "title": "Report months are UTC months",
+  "content": "Monthly reports cut months at midnight UTC: a report month is [first of the month 00:00 UTC, first of the next month 00:00 UTC).",
+  "paths": [
+   "services/reporting/"
+  ],
+  "tags": [
+   "reporting",
+   "time"
+  ],
+  "logical": [
+   "reporting"
+  ],
+  "stale": true
+ },
+ {
+  "key": "payout_batch_limit",
+  "type": "convention",
+  "title": "BankCo batch file size",
+  "content": "BankCo accepts at most 100 transfers per batch file. Split a larger payout run into several files with a running sequence number.",
+  "paths": [
+   "src/payouts/bankco.py"
+  ],
+  "tags": [
+   "payouts",
+   "bankco",
+   "limits"
+  ],
+  "logical": [
+   "payouts.bankco"
+  ],
+  "stale": true
+ },
+ {
+  "key": "backfill_batch",
+  "type": "hazard",
+  "title": "Backfill batch size",
+  "content": "Backfill scripts must keep `--batch-size` at 500 or below: larger batches hold the invoices row locks long enough to time out checkout requests (INC-2291).",
+  "paths": [
+   "scripts/"
+  ],
+  "tags": [
+   "ops",
+   "database",
+   "limits"
+  ],
+  "logical": [
+   "ops"
+  ]
+ },
+ {
+  "key": "ingest_chunk",
+  "type": "convention",
+  "title": "Inserting settlement rows",
+  "content": "Insert settlement rows in chunks of at most 1,000 rows per statement; one statement per file hits the database's 64 MB packet limit on the month-end files.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "database",
+   "limits"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "psp_rate_limit",
+  "type": "hazard",
+  "title": "PSP API rate limit",
+  "content": "The PSP allows 50 requests per second per API key, shared by every service that uses the key. Batch jobs that call it must stay under 20 requests per second.",
+  "paths": [
+   "src/billing/"
+  ],
+  "tags": [
+   "payments",
+   "limits"
+  ],
+  "logical": [
+   "billing.psp"
+  ]
+ },
+ {
+  "key": "payout_rows",
+  "type": "context",
+  "title": "What a payout row means",
+  "content": "In the billing warehouse a payout row has `gross_minor` (what buyers paid for the seller's sales), `fee_minor` (the platform fee) and `net_minor` (what the seller receives), in the payout currency. Only `fee_minor` is platform revenue: the gross is the seller's money passing through, and counting it as revenue overstated September's draft report by 30x.",
+  "paths": [
+   "src/payouts/"
+  ],
+  "tags": [
+   "payouts",
+   "reporting",
+   "money"
+  ],
+  "logical": [
+   "payouts"
+  ]
+ },
+ {
+  "key": "bankco_amounts",
+  "type": "convention",
+  "title": "Amounts in BankCo requests",
+  "content": "BankCo takes amounts as decimal strings in major units with exactly two decimals (\"1234.50\"). Format them from integer minor units with string arithmetic; never pass a float.",
+  "paths": [
+   "src/payouts/bankco.py"
+  ],
+  "tags": [
+   "payouts",
+   "bankco",
+   "money"
+  ],
+  "logical": [
+   "payouts.bankco"
+  ]
+ },
+ {
+  "key": "invoice_origin",
+  "type": "convention",
+  "title": "Every invoice needs an origin",
+  "content": "Pass `origin` to create_invoice(): since the ledger's September upgrade it rejects a posting whose invoice has no origin. The values are `\"API\"` for the public API, `\"RENEWAL_AUTO\"` for subscription renewals and `\"MANUAL\"` for the admin tool.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "billing",
+   "invoices",
+   "ledger"
+  ],
+  "logical": [
+   "billing.ledger"
+  ]
+ },
+ {
+  "key": "notifier_entry",
+  "type": "convention",
+  "title": "Sending email from another service",
+  "content": "Code outside services/notifier never imports the notifier. To send an email, enqueue the job `notifier.send_email` with the payload `{\"template\": <name>, \"customer_id\": ..., \"vars\": {...}}`. The notifier looks up the address itself, so no email address goes into a job payload.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "email",
+   "jobs"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "internal_api",
+  "type": "convention",
+  "title": "Calling the internal endpoints",
+  "content": "Endpoints under /internal/ are for our own services only. Every caller sends `X-Acme-Caller: <service name>` (the gateway rejects internal calls without it), and since these endpoints are POSTs the usual idempotency rule for mutating endpoints applies to them too.",
+  "paths": [
+   "src/api/internal.py"
+  ],
+  "tags": [
+   "api",
+   "internal"
+  ],
+  "logical": [
+   "api.internal"
+  ]
+ },
+ {
+  "key": "ingest_status",
+  "type": "context",
+  "title": "Settlement row statuses",
+  "content": "A settlement row's status is `\"pending\"`, `\"cleared\"` or `\"reversed\"`. Only `\"cleared\"` money has arrived and cannot be pulled back; a pending row can still be reversed by a chargeback. Anything that pays money out on the strength of a settlement must count cleared rows only.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "payments"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "payout_reserve",
+  "type": "decision",
+  "title": "Rolling reserve on seller payouts",
+  "content": "Treasury holds back a rolling reserve of 7.5% of each seller's cleared balance (`RESERVE_BPS = 750`) for 14 days, against chargebacks. Pay out only the balance minus the reserve; the reserve is released by a separate job.",
+  "paths": [
+   "src/payouts/batch.py"
+  ],
+  "tags": [
+   "payouts",
+   "treasury"
+  ],
+  "logical": [
+   "payouts.reserve"
+  ]
+ },
+ {
+  "key": "payout_min",
+  "type": "decision",
+  "title": "Minimum payout",
+  "content": "Balances below 25.00 in the payout currency (`MIN_PAYOUT_MINOR = 2500`) are not paid out; they carry over to the next run. BankCo charges a flat fee per transfer, so smaller payouts lose money.",
+  "paths": [
+   "src/payouts/batch.py"
+  ],
+  "tags": [
+   "payouts",
+   "treasury"
+  ],
+  "logical": [
+   "payouts"
+  ]
+ },
+ {
+  "key": "kyc_gate",
+  "type": "hazard",
+  "title": "Never pay an unverified seller",
+  "content": "A seller whose KYC check is not complete must never be paid, whatever their balance: the payout is held and Compliance is notified. Regulatory requirement, not a product choice.",
+  "paths": [
+   "src/payouts/"
+  ],
+  "tags": [
+   "payouts",
+   "compliance"
+  ],
+  "logical": [
+   "payouts"
+  ],
+  "criticality": 0.8
+ },
+ {
+  "key": "renewal_notice",
+  "type": "decision",
+  "title": "Renewal reminder timing",
+  "content": "The renewal reminder email goes out 7 days before a subscription renews (`RENEWAL_NOTICE_DAYS = 7`), as the consumer terms require. Annual plans get the same notice.",
+  "paths": [
+   "src/subscriptions/renewals.py"
+  ],
+  "tags": [
+   "subscriptions",
+   "email"
+  ],
+  "logical": [
+   "subscriptions.renewals"
+  ]
+ },
+ {
+  "key": "plan_ids",
+  "type": "convention",
+  "title": "Plan ids",
+  "content": "Plan ids are `plan_<tier>_<interval>` (for example `plan_pro_year`) and never change once a customer is on the plan; a price change is a new plan id.",
+  "paths": [
+   "src/subscriptions/plans.py"
+  ],
+  "tags": [
+   "subscriptions",
+   "plans"
+  ],
+  "logical": [
+   "subscriptions.plans"
+  ]
+ },
+ {
+  "key": "cancel_policy",
+  "type": "decision",
+  "title": "Cancelling a subscription",
+  "content": "Customers cancel at the end of the current period. Only support can cancel immediately, and an immediate cancellation refunds the unused part of the period.",
+  "paths": [
+   "src/subscriptions/"
+  ],
+  "tags": [
+   "subscriptions"
+  ],
+  "logical": [
+   "subscriptions"
+  ]
+ },
+ {
+  "key": "ingest_chargebacks",
+  "type": "context",
+  "title": "Chargebacks in settlement files",
+  "content": "Chargebacks appear in settlement files as rows with a negative amount and `type` = `chargeback`. They reduce the seller's balance and also open a dispute in the admin tool.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "payments"
+  ],
+  "logical": [
+   "ingest"
+  ]
+ },
+ {
+  "key": "subs_trials",
+  "type": "decision",
+  "title": "Free trials",
+  "content": "Trials last 14 days and end at the same time of day they started. A trial converts to a paid period only when the customer has a card on file; otherwise the subscription is cancelled with no invoice.",
+  "paths": [
+   "src/subscriptions/"
+  ],
+  "tags": [
+   "subscriptions"
+  ],
+  "logical": [
+   "subscriptions"
+  ]
+ },
+ {
+  "key": "commits",
+  "type": "convention",
+  "title": "Commit messages",
+  "content": "Commit messages follow Conventional Commits (`feat(billing): ...`, `fix(api): ...`), with the scope set to the top-level module.",
+  "paths": [],
+  "tags": [
+   "workflow",
+   "git"
+  ],
+  "logical": [
+   "workflow"
+  ]
+ },
+ {
+  "key": "branches",
+  "type": "convention",
+  "title": "Branch names",
+  "content": "Branch names are `<initials>/<ticket>-<slug>`, for example `pr/BILL-412-refund-limits`.",
+  "paths": [],
+  "tags": [
+   "workflow",
+   "git"
+  ],
+  "logical": [
+   "workflow"
+  ]
+ },
+ {
+  "key": "type_hints",
+  "type": "convention",
+  "title": "Type hints on public functions",
+  "content": "New public functions get type hints on every parameter and the return value. Existing untyped code is typed when it is touched, not in bulk PRs.",
+  "paths": [],
+  "tags": [
+   "style"
+  ],
+  "logical": [
+   "style"
+  ]
+ },
+ {
+  "key": "no_new_deps",
+  "type": "convention",
+  "title": "New third-party dependencies",
+  "content": "A new third-party dependency needs a short note in the PR on why the standard library is not enough. Prefer the standard library for dates, decimals and CSV.",
+  "paths": [],
+  "tags": [
+   "dependencies"
+  ],
+  "logical": [
+   "style"
+  ]
+ },
+ {
+  "key": "pathlib",
+  "type": "convention",
+  "title": "Paths",
+  "content": "Use pathlib.Path for file paths in new code, not os.path.",
+  "paths": [],
+  "tags": [
+   "style"
+  ],
+  "logical": [
+   "style"
+  ]
+ },
+ {
+  "key": "sql_params",
+  "type": "hazard",
+  "title": "SQL is always parameterised",
+  "content": "Never build SQL with f-strings or string concatenation; pass parameters to the driver. A pen test found an injection in an old report query.",
+  "paths": [
+   "src/",
+   "services/",
+   "scripts/"
+  ],
+  "tags": [
+   "database",
+   "security"
+  ],
+  "logical": [
+   "database"
+  ],
+  "criticality": 0.7
+ },
+ {
+  "key": "secrets_env",
+  "type": "hazard",
+  "title": "Secrets come from the environment",
+  "content": "Secrets (API keys, client secrets, webhook secrets) are read from environment variables at start-up. Never commit one, and never give one a default value in code.",
+  "paths": [],
+  "tags": [
+   "security"
+  ],
+  "logical": [
+   "security"
+  ]
+ },
+ {
+  "key": "python_versions",
+  "type": "context",
+  "title": "Python versions",
+  "content": "The billing app runs on Python 3.11 in production. The separately deployed services may run newer versions; each one's pyproject.toml is the source of truth.",
+  "paths": [],
+  "tags": [
+   "python"
+  ],
+  "logical": [
+   "platform"
+  ]
+ },
+ {
+  "key": "dataclasses",
+  "type": "convention",
+  "title": "Plain dataclasses for domain objects",
+  "content": "Domain objects are plain dataclasses. Do not introduce pydantic or attrs for them; validation lives at the API boundary.",
+  "paths": [
+   "src/"
+  ],
+  "tags": [
+   "style"
+  ],
+  "logical": [
+   "style"
+  ]
+ },
+ {
+  "key": "pr_size",
+  "type": "convention",
+  "title": "Pull request size",
+  "content": "Keep PRs under about 400 changed lines; split refactors from behaviour changes.",
+  "paths": [],
+  "tags": [
+   "workflow"
+  ],
+  "logical": [
+   "workflow"
+  ]
+ },
+ {
+  "key": "cutoff_v1",
+  "type": "context",
+  "title": "Same-day payout cutoff",
+  "content": "Payouts submitted to BankCo before 16:00 CET leave the same business day; later ones leave the next business day.",
+  "paths": [
+   "src/payouts/schedule.py"
+  ],
+  "tags": [
+   "payouts",
+   "bankco",
+   "time"
+  ],
+  "logical": [
+   "payouts.schedule"
+  ]
+ },
+ {
+  "key": "cutoff_v2",
+  "type": "context",
+  "title": "Same-day payout cutoff (June 2026)",
+  "content": "Since June 2026 BankCo's same-day cutoff is 14:00 CET; payouts submitted later leave the next business day.",
+  "paths": [
+   "src/payouts/schedule.py"
+  ],
+  "tags": [
+   "payouts",
+   "bankco",
+   "time"
+  ],
+  "logical": [
+   "payouts.schedule"
+  ],
+  "supersedes": "cutoff_v1"
+ },
+ {
+  "key": "cutoff_v3",
+  "type": "context",
+  "title": "Same-day payout cutoff (current)",
+  "content": "Since 2026-09-29 the same-day cutoff is 15:30 Europe/Amsterdam local time (BankCo's new SEPA Instant window), so DST applies. Payouts submitted later leave the next business day. src/payouts/schedule.py still has the previous cutoff; update it when you touch that file.",
+  "paths": [],
+  "tags": [
+   "payouts",
+   "bankco",
+   "time"
+  ],
+  "logical": [
+   "payouts.schedule"
+  ],
+  "supersedes": "cutoff_v2"
+ },
+ {
+  "key": "refund_window_v1",
+  "type": "decision",
+  "title": "Refund window",
+  "content": "Invoices can be refunded for 90 days after finalization.",
+  "paths": [
+   "src/billing/refunds.py"
+  ],
+  "tags": [
+   "billing",
+   "refunds"
+  ],
+  "logical": [
+   "billing.refunds"
+  ]
+ },
+ {
+  "key": "refund_window_v2",
+  "type": "decision",
+  "title": "Refund window (2026 terms)",
+  "content": "With the 2026 terms the refund window is 180 days after finalization (`REFUND_WINDOW_DAYS = 180`).",
+  "paths": [
+   "src/billing/refunds.py"
+  ],
+  "tags": [
+   "billing",
+   "refunds"
+  ],
+  "logical": [
+   "billing.refunds"
+  ],
+  "supersedes": "refund_window_v1"
+ },
+ {
+  "key": "refund_window_v3",
+  "type": "decision",
+  "title": "Refund window (current)",
+  "content": "Since the October 2026 terms update the refund window is 13 months, which legal fixed as `REFUND_WINDOW_DAYS = 395`, counted from the invoice's `finalized_at`. src/billing/refunds.py still has the old value. A refund outside the window is refused with a ValueError that names the window.",
+  "paths": [],
+  "tags": [
+   "billing",
+   "refunds"
+  ],
+  "logical": [
+   "billing.refunds"
+  ],
+  "supersedes": "refund_window_v2"
+ },
+ {
+  "key": "ingest_source_v1",
+  "type": "context",
+  "title": "Where settlement files come from",
+  "content": "The PSP drops settlement files on its SFTP server, `sftp.psp.example:/out/settlements/`, one file per day.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "psp"
+  ],
+  "logical": [
+   "ingest.source"
+  ]
+ },
+ {
+  "key": "ingest_source_v2",
+  "type": "context",
+  "title": "Where settlement files come from (S3)",
+  "content": "The PSP moved settlement files from SFTP to its S3 bucket `psp-settlements-eu`, prefix `daily/`.",
+  "paths": [
+   "services/ingest/"
+  ],
+  "tags": [
+   "ingest",
+   "psp"
+  ],
+  "logical": [
+   "ingest.source"
+  ],
+  "supersedes": "ingest_source_v1"
+ },
+ {
+  "key": "ingest_source_v3",
+  "type": "context",
+  "title": "Where settlement files come from (current)",
+  "content": "Since 2026-09-21 the PSP pushes settlement files into our own bucket, `acme-psp-inbound`, under `settlements/<YYYY>/<MM>/`. The PSP's `psp-settlements-eu` bucket is read-only now and will be deleted; ingest.toml still points at it and has to be updated.",
+  "paths": [],
+  "tags": [
+   "ingest",
+   "psp"
+  ],
+  "logical": [
+   "ingest.source"
+  ],
+  "supersedes": "ingest_source_v2"
+ },
+ {
+  "key": "sender_v1",
+  "type": "convention",
+  "title": "Sender address of customer emails",
+  "content": "Customer emails are sent from `billing@acme.example`.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "email"
+  ],
+  "logical": [
+   "notifier"
+  ]
+ },
+ {
+  "key": "sender_v2",
+  "type": "convention",
+  "title": "Sender address of customer emails (2025)",
+  "content": "Customer emails are sent from `noreply@acme.example`; replies go nowhere, and the footer says so.",
+  "paths": [
+   "services/notifier/"
+  ],
+  "tags": [
+   "notifier",
+   "email"
+  ],
+  "logical": [
+   "notifier"
+  ],
+  "supersedes": "sender_v1"
+ },
+ {
+  "key": "sender_v3",
+  "type": "convention",
+  "title": "Sender address of customer emails (current)",
+  "content": "Customer emails are sent from `receipts@mail.acme.example`. The dedicated `mail.` subdomain has its own SPF and DMARC records, and mail from the bare domain started landing in spam in September 2026.",
+  "paths": [],
+  "tags": [
+   "notifier",
+   "email"
+  ],
+  "logical": [
+   "notifier"
+  ],
+  "supersedes": "sender_v2"
+ },
+ {
+  "key": "bankco_api_v1",
+  "type": "context",
+  "title": "How payouts reach BankCo",
+  "content": "Payouts are sent to BankCo as SEPA XML batch files uploaded to BankCo's SFTP server.",
+  "paths": [
+   "src/payouts/bankco.py"
+  ],
+  "tags": [
+   "payouts",
+   "bankco"
+  ],
+  "logical": [
+   "payouts.bankco"
+  ]
+ },
+ {
+  "key": "bankco_api_v2",
+  "type": "context",
+  "title": "How payouts reach BankCo (REST v1)",
+  "content": "BankCo replaced SFTP with a REST API: `POST /v1/transfers`, authenticated with the `X-BankCo-Key` header (the key is in `BANKCO_API_KEY`).",
+  "paths": [
+   "src/payouts/bankco.py"
+  ],
+  "tags": [
+   "payouts",
+   "bankco"
+  ],
+  "logical": [
+   "payouts.bankco"
+  ],
+  "supersedes": "bankco_api_v1"
+ },
+ {
+  "key": "bankco_api_v3",
+  "type": "context",
+  "title": "How payouts reach BankCo (current)",
+  "content": "Since September 2026 transfers go to BankCo's v2 API: `POST /v2/payments`, authenticated with OAuth client credentials (`BANKCO_CLIENT_ID` and `BANKCO_CLIENT_SECRET`, token from `/oauth/token`). The v1 API and its API keys are switched off on 2026-10-31.",
+  "paths": [],
+  "tags": [
+   "payouts",
+   "bankco"
+  ],
+  "logical": [
+   "payouts.bankco"
+  ],
+  "supersedes": "bankco_api_v2"
+ },
+ {
+  "key": "psp_version_v1",
+  "type": "context",
+  "title": "PSP API version",
+  "content": "The PSP API is versioned in the path: call `https://api.psp.example/v2/...` with the key in `PSP_API_KEY` as a Bearer token.",
+  "paths": [
+   "src/billing/psp.py"
+  ],
+  "tags": [
+   "payments",
+   "psp"
+  ],
+  "logical": [
+   "billing.psp"
+  ]
+ },
+ {
+  "key": "psp_version_v2",
+  "type": "context",
+  "title": "PSP API version (dated versions)",
+  "content": "The PSP moved to dated API versions: no version in the path, and every request sends `Psp-Version: 2026-03-01`.",
+  "paths": [
+   "src/billing/psp.py"
+  ],
+  "tags": [
+   "payments",
+   "psp"
+  ],
+  "logical": [
+   "billing.psp"
+  ],
+  "supersedes": "psp_version_v1"
+ },
+ {
+  "key": "psp_version_v3",
+  "type": "context",
+  "title": "PSP API version (current)",
+  "content": "Pin `Psp-Version: 2026-09-15` on every PSP request. The 2026-03-01 version stops working on 2026-11-01, and the new version renames the charge's `customer` field to `customer_ref`. src/billing/psp.py still pins the old version.",
+  "paths": [],
+  "tags": [
+   "payments",
+   "psp"
+  ],
+  "logical": [
+   "billing.psp"
+  ],
+  "supersedes": "psp_version_v2"
+ }
+]

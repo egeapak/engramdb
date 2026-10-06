@@ -1,0 +1,16 @@
+[project]
+name = "ledgerline"
+version = "2026.9.1"
+requires-python = ">=3.10"
+dependencies = ["flask>=3.0", "structlog>=24.1", "requests>=2.32"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "postgres: needs the database from `docker compose up db`",
+    "integration: talks to the payments sandbox over the network",
+]

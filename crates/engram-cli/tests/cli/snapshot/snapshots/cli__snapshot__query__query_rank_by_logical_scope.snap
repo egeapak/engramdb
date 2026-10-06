@@ -6,6 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] query --mode rank -l core.lang --sho
 exit: 0
 --- stdout ---
 {
+  "dropped_below_threshold": 1,
   "memories": [
     {
       "breakdown": {
@@ -57,8 +58,58 @@ exit: 0
         "visibility": "Shared"
       },
       "score": 0.[PROJECT_ID]
+    },
+    {
+      "breakdown": {
+        "criticality": 0.6,
+        "decay": 0.0,
+        "final_score": 0.39,
+        "keyword": null,
+        "relevance": 0.6,
+        "rerank": null,
+        "scope": 0.65,
+        "scope_multiplier": 0.65,
+        "semantic": null,
+        "situation_multiplier": 1.0,
+        "trust": 1.0,
+        "trust_multiplier": 1.0
+      },
+      "memory": {
+        "accessed_at": "[TIMESTAMP]",
+        "challenges": [],
+        "confidence": 0.8,
+        "content": "Applies to every crate in the workspace.",
+        "created_at": "[TIMESTAMP]",
+        "criticality": 0.6,
+        "decay": {
+          "floor": 0.0,
+          "strategy": "none"
+        },
+        "epistemic": "fact",
+        "id": "[UUID]",
+        "logical": [
+          "core.style"
+        ],
+        "physical": [
+          "/"
+        ],
+        "provenance": {
+          "source": "human"
+        },
+        "status": "Active",
+        "summary": "Name variables in snake_case",
+        "supersedes": [],
+        "tags": [
+          "style"
+        ],
+        "title": "Name Variables Snake Case",
+        "type": "convention",
+        "updated_at": "[TIMESTAMP]",
+        "visibility": "Shared"
+      },
+      "score": 0.39
     }
   ],
-  "total": 1
+  "total": 2
 }
 --- stderr ---

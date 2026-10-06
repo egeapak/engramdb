@@ -86,6 +86,20 @@ pub async fn run_query(
     // match only weakly fall below it and silently vanish. `filter` mode uses
     // a looser threshold and surfaces keyword/tag/scope matches. The hint is a
     // no-op in JSON mode (structured output speaks for itself).
+    let weak = !result.memories.is_empty()
+        && result
+            .memories
+            .iter()
+            .all(|sm| sm.score_breakdown.below_threshold);
+    if weak {
+        formatter.print_hint(&format!(
+            "No memory cleared the rank relevance threshold; these are the {} closest weak \
+             matches ({} more were dropped). Treat them as leads, and confirm with `--mode filter` \
+             and literal terms.",
+            result.memories.len(),
+            result.dropped_below_threshold
+        ));
+    }
     if result.memories.is_empty() && had_query {
         match mode {
             RetrievalMode::Rank => formatter.print_hint(
@@ -155,6 +169,7 @@ async fn compute_query_result(
             .map(engramdb::ops::parse_situation)
             .transpose()?,
         include_invalidated: Some(params.include_invalidated),
+        rank_fallback: None,
     };
 
     // When querying a shared store directly (`--global`/`--group`), there is no

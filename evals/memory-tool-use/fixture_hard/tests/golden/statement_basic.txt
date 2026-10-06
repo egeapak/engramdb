@@ -1,0 +1,4 @@
+Statement for cus_1
+  inv_1             1234.56
+  inv_2               99.05
+  TOTAL             1333.61

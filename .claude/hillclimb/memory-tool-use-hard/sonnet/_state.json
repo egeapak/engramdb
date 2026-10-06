@@ -1,0 +1,205 @@
+{
+ "current_round": 4,
+ "reps": 3,
+ "model": "claude-sonnet-5-5",
+ "goal": {
+  "target": "cost_usd",
+  "direction": "lower",
+  "hold": [
+   "pass",
+   "no_false_create",
+   "no_spurious_revise"
+  ],
+  "incumbent": "v4",
+  "phase": "cost climb, started after the pass climb plateaued at round 2"
+ },
+ "approve_each_round": false,
+ "stop": "until plateau: <noise-floor gain on test pass for 3 rounds in a row, or a guardrail regresses outside noise",
+ "train_ids": [
+  "bf-db-pool",
+  "bf-notifier-sandbox",
+  "bf-release-freeze",
+  "dc-fx-fixtures",
+  "dc-runbook-export",
+  "dc-seed-dev",
+  "ds-fx-rounding",
+  "ds-notifier-flag",
+  "ds-notifier-migration",
+  "mm-dunning-job",
+  "mm-refund-endpoint",
+  "mm-refund-question",
+  "mt-export-format",
+  "mt-refund-after-drift",
+  "mt-reviewer",
+  "nh-ci-idea",
+  "nh-hypothetical-rounding",
+  "nh-offline-today",
+  "nh-print-oneoff",
+  "st-ci-rerun",
+  "st-flask-premise",
+  "st-retention"
+ ],
+ "test_ids": [
+  "bf-export-csv",
+  "bf-ledger-amount",
+  "bf-tax-quebec",
+  "dc-backfill-tz",
+  "dc-golden-statements",
+  "dc-ledger-smoke",
+  "ds-notifier-log",
+  "ds-notifier-tests",
+  "ds-reporting-money",
+  "mm-list-invoices",
+  "mm-receipt-email",
+  "mm-webhook-failed",
+  "mt-drift-dunning",
+  "mt-sandbox-region",
+  "mt-warnings-as-errors",
+  "mt-webhook-spec",
+  "nh-already-known",
+  "nh-curious-loguru",
+  "nh-other-project",
+  "nh-user-unsure-rounding",
+  "st-fx-provider",
+  "st-notifier-owner",
+  "st-pdf-premise"
+ ],
+ "harness_paths": [
+  "evals/memory-tool-use/run.py",
+  "evals/memory-tool-use/grade.py",
+  "evals/memory-tool-use/cases_hard.jsonl",
+  "evals/memory-tool-use/seed_memories_hard.json",
+  "evals/memory-tool-use/fixture_hard"
+ ],
+ "scope": {
+  "will_change": [
+   "MCP tool descriptions and instructions (crates/engram-mcp)",
+   "hook logic and rendering (crates/engram-cli/src/commands/hook.rs)",
+   "ENGRAM.md text (setup.rs)",
+   "retrieval and scoring (src/)",
+   "config defaults"
+  ],
+  "wont_touch": [
+   "the eval harness, cases, seeds and fixture during the loop"
+  ]
+ },
+ "metrics": [
+  {
+   "id": "pass",
+   "label": "pass",
+   "kind": "binary"
+  },
+  {
+   "id": "consulted_before_act",
+   "label": "consulted",
+   "kind": "binary"
+  },
+  {
+   "id": "query_before_act",
+   "label": "query first",
+   "kind": "binary"
+  },
+  {
+   "id": "fact_used",
+   "label": "fact used",
+   "kind": "binary"
+  },
+  {
+   "id": "explicit_create",
+   "label": "expl. create",
+   "kind": "binary"
+  },
+  {
+   "id": "implicit_capture",
+   "label": "impl. capture",
+   "kind": "binary"
+  },
+  {
+   "id": "costly_capture",
+   "label": "costly capture",
+   "kind": "binary"
+  },
+  {
+   "id": "no_false_create",
+   "label": "no false create",
+   "kind": "binary"
+  },
+  {
+   "id": "revise",
+   "label": "revise",
+   "kind": "binary"
+  },
+  {
+   "id": "no_spurious_revise",
+   "label": "no spur. revise",
+   "kind": "binary"
+  },
+  {
+   "id": "no_stale_fact",
+   "label": "no stale fact",
+   "kind": "binary"
+  }
+ ],
+ "perf_fields": [
+  {
+   "id": "memory_calls",
+   "label": "memory calls"
+  },
+  {
+   "id": "cost_usd",
+   "label": "cost",
+   "unit": "$"
+  },
+  {
+   "id": "latency_s",
+   "label": "latency",
+   "unit": "s"
+  },
+  {
+   "id": "turns",
+   "label": "turns"
+  },
+  {
+   "id": "hook_hit",
+   "label": "hook hit"
+  },
+  {
+   "id": "in_tokens",
+   "label": "in tok"
+  },
+  {
+   "id": "out_tokens",
+   "label": "out tok"
+  },
+  {
+   "id": "wrote_auto_memory",
+   "label": "auto-mem write"
+  },
+  {
+   "id": "failed_tool_calls",
+   "label": "failed calls"
+  }
+ ],
+ "best": {
+  "round": 4,
+  "basis": "cost climb incumbent; passed all three gates vs v2",
+  "whole": "131/135 (test 69/69)"
+ },
+ "cost_gates": {
+  "quality_band": "whole-set and test pass each at most 3 runs below v2; no_false_create and no_spurious_revise at most 3 runs below v2",
+  "cost_margin": "at least 5% lower $/case than v2 (noise bar ~2.5-2.8%)",
+  "mechanism": "the predicted mechanism shows in the telemetry (e.g. fewer get calls and memory-only turns)",
+  "stop": "two consecutive rounds fail to beat the incumbent beyond noise, or 3 rounds",
+  "pricing_basis": "total_cost_usd reported by Claude Code per run (cache-adjusted)",
+  "incumbent_cost_per_case": 0.1063
+ },
+ "confirm": {
+  "variants": [
+   "v4",
+   "v4b"
+  ],
+  "cost_per_case": "0.1060 (-10.2% vs v2, -6.4% vs baseline)",
+  "pass": "131.0/135, test 69.0/69",
+  "verdict": "v4 confirmed as the final configuration"
+ }
+}

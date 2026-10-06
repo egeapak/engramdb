@@ -27,7 +27,7 @@ pub use challenge::Challenge;
 pub use config::{
     ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
     EngramConfig, EpistemicConfig, GlobalConfig, HarvestConfig, HooksConfig, LogicalBonusConfig,
-    MaintenanceConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
+    MaintenanceConfig, McpConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
     ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, SituationConfig,
     SituationProfile, ThresholdsConfig, TrustWeights, COMPOSITION_METADATA_V1,
     CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO, DEFAULT_RERANK_MODEL,

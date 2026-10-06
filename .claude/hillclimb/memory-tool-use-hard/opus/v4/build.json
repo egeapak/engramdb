@@ -1,0 +1,9 @@
+{
+ "git_head_at_snapshot": "cfaf639",
+ "engramdb_sha256": "6b1ec7298c5a912c",
+ "plugin_json_sha256": "b8aa46111ddca458",
+ "engram_md_sha256": "5d091e2870347f2e",
+ "model": "claude-opus-5-5",
+ "fixture": "hard",
+ "engram_md": true
+}

@@ -936,10 +936,20 @@ impl OutputFormatter {
                         if show_scores {
                             obj["breakdown"] = serde_json::json!(sm.score_breakdown);
                         }
+                        // Rank mode's fallback: a weak match returned because
+                        // nothing cleared the relevance threshold.
+                        if sm.score_breakdown.below_threshold {
+                            obj["below_threshold"] = serde_json::Value::Bool(true);
+                        }
                         obj
                     }).collect::<Vec<_>>(),
                     "total": result.total,
                 });
+                let mut json_output = json_output;
+                if result.dropped_below_threshold > 0 {
+                    json_output["dropped_below_threshold"] =
+                        serde_json::json!(result.dropped_below_threshold);
+                }
                 outln!(
                     self,
                     "{}",
@@ -1966,6 +1976,8 @@ mod tests {
 
     fn test_score_breakdown() -> ScoreBreakdown {
         ScoreBreakdown {
+            below_threshold: false,
+            gate_score: None,
             final_score: 0.75,
             semantic: Some(0.8),
             keyword: None,
@@ -2188,6 +2200,8 @@ mod tests {
             }],
             total: 1,
             retrieval_quality: "full".to_string(),
+
+            dropped_below_threshold: 0,
         };
 
         let (formatter, cap) = OutputFormatter::capturing(OutputFormat::Json);
@@ -2211,6 +2225,8 @@ mod tests {
             memories: vec![],
             total: 0,
             retrieval_quality: "scope_only".to_string(),
+
+            dropped_below_threshold: 0,
         };
 
         for format in [
@@ -3086,6 +3102,8 @@ mod tests {
             ],
             total: 7,
             retrieval_quality: "full".to_string(),
+
+            dropped_below_threshold: 0,
         }
     }
 
@@ -3109,6 +3127,8 @@ mod tests {
             memories: vec![],
             total: 0,
             retrieval_quality: "scope_only".to_string(),
+
+            dropped_below_threshold: 0,
         };
         snap_formats("retrieval_empty", |f| {
             f.print_retrieval_result(&empty, true)

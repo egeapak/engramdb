@@ -1,0 +1,4 @@
+Round 1: widen the `challenge` trigger from "the user says a memory is outdated" to "a source states the opposite": the user, or a file Claude read (a dated doc, a dependency pin, existing code doing what the memory forbids). Same sentence lists what is not a contradiction (code that merely doesn't mention the rule, a narrower memory scoping an exception, a one-off or hypothetical request, an already-superseded memory).
+Touches: MCP server instructions, the `challenge` tool and `evidence`/`source_file` descriptions, ENGRAM.md "Keep memories honest".
+Why (analyzer, train traces only): 8 of 12 train revise failures name the conflict and then defer to the user. The Opus debrief: "`challenge` is for when the user says a memory is outdated. Here I only had a conflicting document". Step 6's wording over-narrowed the tool.
+Expected: dc-runbook-export flips on both models; st-flask-premise Opus reps 1-2. Watch no_spurious_revise on bf-db-pool and mm-dunning-job.

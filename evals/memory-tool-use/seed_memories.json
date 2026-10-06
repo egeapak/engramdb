@@ -1,0 +1,127 @@
+[
+ {
+  "key": "money",
+  "type": "convention",
+  "title": "Money is integer cents, never float",
+  "content": "All monetary amounts are stored and passed as integer cents using the `Money` type in src/billing/money.py. Never use float for money. Field names end in `_cents`.",
+  "paths": [
+   "src/billing/"
+  ],
+  "tags": [
+   "billing",
+   "money"
+  ]
+ },
+ {
+  "key": "finalize",
+  "type": "hazard",
+  "title": "invoices.finalize() is not idempotent",
+  "content": "`finalize()` in src/billing/invoices.py posts to the external ledger with no idempotency key. Calling it twice double-posts. Never add retries around it; use `finalize_once()`, which checks `invoice.ledger_ref` first.",
+  "paths": [
+   "src/billing/invoices.py"
+  ],
+  "tags": [
+   "billing",
+   "ledger"
+  ]
+ },
+ {
+  "key": "logging",
+  "type": "decision",
+  "title": "Use structlog, not stdlib logging",
+  "content": "We use `structlog` everywhere (`log = structlog.get_logger()`), never the stdlib `logging` module. Event keys are snake_case.",
+  "paths": [
+   "src/"
+  ],
+  "tags": [
+   "logging"
+  ]
+ },
+ {
+  "key": "tests",
+  "type": "convention",
+  "title": "Run tests with make test-fast",
+  "content": "Run `make test-fast` for the unit suite (skips the Postgres and network integration tests). `make test` runs everything but needs `docker compose up db` first.",
+  "paths": [],
+  "tags": [
+   "testing",
+   "workflow"
+  ]
+ },
+ {
+  "key": "migrations",
+  "type": "hazard",
+  "title": "Never edit an applied migration",
+  "content": "Files in migrations/ are applied in production. Never edit one; add a new file with the next 4-digit number, e.g. `0008_fix_customers.sql`.",
+  "paths": [
+   "migrations/"
+  ],
+  "tags": [
+   "database",
+   "migrations"
+  ]
+ },
+ {
+  "key": "flags",
+  "type": "convention",
+  "title": "Feature flags go through flags.is_on()",
+  "content": "Read feature flags only with `flags.is_on(\"name\")` from src/flags.py. Flag names are kebab-case and must be declared in flags.toml.",
+  "paths": [
+   "src/flags.py",
+   "flags.toml"
+  ],
+  "tags": [
+   "flags"
+  ]
+ },
+ {
+  "key": "rounding",
+  "type": "decision",
+  "title": "Tax uses ROUND_HALF_EVEN",
+  "content": "Tax amounts are rounded with banker's rounding (`decimal.ROUND_HALF_EVEN`), as decided with the finance team in March 2026. Do not use ROUND_HALF_UP.",
+  "paths": [
+   "src/billing/tax.py"
+  ],
+  "tags": [
+   "billing",
+   "tax"
+  ]
+ },
+ {
+  "key": "export",
+  "type": "hazard",
+  "title": "Staging EXPORT_BUCKET points at the prod bucket",
+  "content": "In staging, `EXPORT_BUCKET` points at the production bucket. Never run scripts/export.py against staging without `--dry-run`.",
+  "paths": [
+   "scripts/export.py"
+  ],
+  "tags": [
+   "ops",
+   "export"
+  ]
+ },
+ {
+  "key": "errors",
+  "type": "convention",
+  "title": "API errors use problem+json",
+  "content": "HTTP error responses use RFC 7807 problem+json built with `errors.problem(status, title, detail)` from src/api/errors.py. Do not return ad-hoc dicts.",
+  "paths": [
+   "src/api/"
+  ],
+  "tags": [
+   "api",
+   "errors"
+  ]
+ },
+ {
+  "key": "release",
+  "type": "convention",
+  "title": "Release by tagging vYYYY.MM.N",
+  "content": "Releases are cut by pushing a git tag `vYYYY.MM.N` (for example `v2026.09.2`). CI builds and publishes; never publish by hand.",
+  "paths": [],
+  "tags": [
+   "release",
+   "workflow"
+  ]
+ }
+]

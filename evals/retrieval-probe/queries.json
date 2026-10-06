@@ -1,0 +1,1343 @@
+[
+ {
+  "mode": "rank",
+  "query": "currency amount money representation billing",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "test",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "pq-tests",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "staging export bucket",
+  "path": null,
+  "situation": null,
+  "target": "export",
+  "case": "pq-export",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "migration customers add column",
+  "path": null,
+  "situation": "design_choice",
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "API endpoint error response convention",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice finalize ledger retries idempotency",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice discount amount",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "logging structlog",
+  "path": "src/billing/refunds.py",
+  "situation": "file_edit",
+  "target": "logging",
+  "case": "ed-refund-log",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "feature flag flags.is_on problem+json",
+  "path": null,
+  "situation": null,
+  "target": "flags",
+  "case": "ed-flag",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "migration applied",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "ed-migration-typo",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "finalize retry ledger idempotency network errors",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "problem+json API errors",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "ed-404",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "staging EXPORT_BUCKET export",
+  "path": null,
+  "situation": null,
+  "target": "export",
+  "case": "ed-export-since",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "celery background jobs enqueue",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-jobs-explicit",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "python version minimum requires-python 3.10",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-python-min",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "payments sandbox rate limit",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-sandbox-ratelimit",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya owner review ledger invoices",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "timestamp timezone UTC",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-timezone",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "payment gateway PAYMENTS_LIVE fake",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "wkhtmltopdf invoice PDF",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-debug-lesson",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "API version v1 v2 routes",
+  "path": null,
+  "situation": "design_choice",
+  "target": null,
+  "case": "nk-api-version",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "tax rounding",
+  "path": null,
+  "situation": null,
+  "target": "rounding",
+  "case": "ct-rounding",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "release tag",
+  "path": null,
+  "situation": null,
+  "target": "release",
+  "case": "ct-release",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "money currency amount cents",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "migration customers schema column",
+  "path": "migrations/0007_add_customers.sql",
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice finalize ledger",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice discount fields amount",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "structlog logging",
+  "path": null,
+  "situation": null,
+  "target": "logging",
+  "case": "ed-refund-log",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "ledger retry idempotency finalize network errors",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "tax rounding cents",
+  "path": null,
+  "situation": null,
+  "target": "rounding",
+  "case": "ed-tax",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "python version minimum requires-python 3.10 3.11",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-python-min",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "payments sandbox rate limit",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-sandbox-ratelimit",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "timezone UTC timestamps",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-timezone",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya ledger invoices review owner",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "wkhtmltopdf invoice PDF tests",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-debug-lesson",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "API version routes v1 v2",
+  "path": null,
+  "situation": "design_choice",
+  "target": null,
+  "case": "nk-api-version",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "test-fast make just test",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "ct-just",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "tests test-fast pytest",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "pq-tests",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "endpoint error response to client",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "migration customers add column",
+  "path": "migrations/0007_add_customers.sql",
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice discount amount fields",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v2"
+ },
+ {
+  "mode": "rank",
+  "query": "payments sandbox rate limit test flake",
+  "path": "tests/test_payments.py",
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-sandbox-ratelimit",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "wkhtmltopdf invoice PDF tests",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-debug-lesson",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "PAYMENTS_LIVE payment gateway fake",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "API version v1 v2 routes versioning",
+  "path": null,
+  "situation": "design_choice",
+  "target": null,
+  "case": "nk-api-version",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "release",
+  "path": null,
+  "situation": null,
+  "target": "release",
+  "case": "ct-release",
+  "variant": "v2"
+ },
+ {
+  "mode": "filter",
+  "query": "money currency cents amount",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "error",
+  "path": null,
+  "situation": "design_choice",
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v3"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice finalization",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "invoices finalize",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "migration",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "ed-migration-typo",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "problem+json",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "ed-404",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "staging EXPORT_BUCKET",
+  "path": null,
+  "situation": null,
+  "target": "export",
+  "case": "ed-export-since",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "timestamp UTC timezone",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-timezone",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "payment gateway fake env",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "wkhtmltopdf",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-debug-lesson",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "API versioning v1 v2 routes",
+  "path": null,
+  "situation": "design_choice",
+  "target": null,
+  "case": "nk-api-version",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "structlog",
+  "path": null,
+  "situation": null,
+  "target": "logging",
+  "case": "ct-loguru",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "make test-fast",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "ct-just",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "release tagging",
+  "path": null,
+  "situation": null,
+  "target": "release",
+  "case": "ct-release",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "money currency cents",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "migration customers",
+  "path": null,
+  "situation": "design_choice",
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "staging EXPORT_BUCKET prod bucket",
+  "path": null,
+  "situation": null,
+  "target": "export",
+  "case": "ed-export-since",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "jobs.enqueue celery background jobs",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-jobs-explicit",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "timestamps UTC timezone",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-timezone",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "payment gateway fake env",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "API versioning v1 v2 routes",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-api-version",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "problem+json errors",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "ed-404",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "payment gateway fake PAYMENTS_LIVE",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "wkhtmltopdf",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-debug-lesson",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "test-fast",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "ct-just",
+  "variant": "v3"
+ },
+ {
+  "mode": "filter",
+  "query": "logging structlog",
+  "path": null,
+  "situation": null,
+  "target": "logging",
+  "case": "pq-logging",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "money currency amount billing",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "tests",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "pq-tests",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "feature flags",
+  "path": null,
+  "situation": null,
+  "target": "flags",
+  "case": "pq-flags",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "error response endpoint",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v4"
+ },
+ {
+  "mode": "rank",
+  "query": "migration schema customers column",
+  "path": null,
+  "situation": "design_choice",
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "invoice finalize",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v4"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice discount",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v4"
+ },
+ {
+  "mode": "rank",
+  "query": "finalize retry network errors invoices",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "tax rounding money cents",
+  "path": null,
+  "situation": null,
+  "target": "rounding",
+  "case": "ed-tax",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "python version minimum",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-python-min",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya ledger integration invoices review owner",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "test-fast make test",
+  "path": null,
+  "situation": null,
+  "target": "tests",
+  "case": "ct-just",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "structlog logging loguru",
+  "path": null,
+  "situation": null,
+  "target": "logging",
+  "case": "ct-loguru",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "tax rounding ROUND_HALF_EVEN",
+  "path": null,
+  "situation": null,
+  "target": "rounding",
+  "case": "ct-rounding",
+  "variant": "v4"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice finalize",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "feature flag",
+  "path": null,
+  "situation": null,
+  "target": "flags",
+  "case": "ed-flag",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "python version minimum 3.10",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-python-min",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya owner review invoices ledger",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "wkhtmltopdf invoice PDF",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-debug-lesson",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "409 conflict HTTP status",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "ng-http409",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "staging EXPORT_BUCKET prod bucket export",
+  "path": null,
+  "situation": null,
+  "target": "export",
+  "case": "pq-export",
+  "variant": "v4"
+ },
+ {
+  "mode": "rank",
+  "query": "endpoint error response client",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v4"
+ },
+ {
+  "mode": "rank",
+  "query": "finalize retry network idempotency",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v4"
+ },
+ {
+  "mode": "filter",
+  "query": "currency money amount decimal cents",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "error response endpoint",
+  "path": null,
+  "situation": "design_choice",
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "customers schema migration column",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "invoice finalize",
+  "path": null,
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v5"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice discount",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "retry network errors finalize",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "payment gateway PAYMENTS_LIVE",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "customers schema migration",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "invoice",
+  "path": null,
+  "situation": null,
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "retry finalize network",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "jobs enqueue celery background",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-jobs-explicit",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "python version",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-python-min",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "staging EXPORT_BUCKET prod bucket",
+  "path": null,
+  "situation": "design_choice",
+  "target": "export",
+  "case": "pq-export",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "customers migration schema",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "invoices finalize",
+  "path": null,
+  "situation": null,
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "retry network billing",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "jobs enqueue celery background jobs",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-jobs-explicit",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "PAYMENTS_LIVE payment gateway",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "tax rounding",
+  "path": null,
+  "situation": "design_choice",
+  "target": "rounding",
+  "case": "ct-rounding",
+  "variant": "v5"
+ },
+ {
+  "mode": "filter",
+  "query": "currency money amount billing",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "release tag publish CI",
+  "path": null,
+  "situation": null,
+  "target": "release",
+  "case": "pq-release",
+  "variant": "v6"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice discount money decimal",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "money",
+  "case": "ed-discount",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya ledger owner review",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "currency amount money billing",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya review owner ledger invoices",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "release tag publish",
+  "path": null,
+  "situation": null,
+  "target": "release",
+  "case": "pq-release",
+  "variant": "v6"
+ },
+ {
+  "mode": "rank",
+  "query": "database migration schema customers column",
+  "path": null,
+  "situation": "design_choice",
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v6"
+ },
+ {
+  "mode": "rank",
+  "query": "finalize retry network errors idempotency",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v6"
+ },
+ {
+  "mode": "rank",
+  "query": "payments sandbox rate limit test flakes",
+  "path": "tests/test_payments.py",
+  "situation": "file_edit",
+  "target": null,
+  "case": "nk-sandbox-ratelimit",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "regex date ISO 8601 validation",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "ng-regex",
+  "variant": "v6"
+ },
+ {
+  "mode": "filter",
+  "query": "currency money amount",
+  "path": null,
+  "situation": null,
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v7"
+ },
+ {
+  "mode": "rank",
+  "query": "endpoint error response",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v7"
+ },
+ {
+  "mode": "filter",
+  "query": "retry network finalize",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v7"
+ },
+ {
+  "mode": "filter",
+  "query": "payment gateway PAYMENTS_LIVE",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v7"
+ },
+ {
+  "mode": "filter",
+  "query": "currency money amount",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v7"
+ },
+ {
+  "mode": "filter",
+  "query": "README spelling",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nc-readme",
+  "variant": "v7"
+ },
+ {
+  "mode": "rank",
+  "query": "database migration schema customers column",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v12"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice finalization finalize ledger",
+  "path": "src/billing/invoices.py",
+  "situation": "file_edit",
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya review owner invoices ledger integration",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "currency amount money representation billing",
+  "path": null,
+  "situation": null,
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "migration schema customers column",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v12"
+ },
+ {
+  "mode": "rank",
+  "query": "endpoint error response client convention",
+  "path": null,
+  "situation": null,
+  "target": "errors",
+  "case": "pq-errors",
+  "variant": "v12"
+ },
+ {
+  "mode": "rank",
+  "query": "invoice finalize ledger",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v12"
+ },
+ {
+  "mode": "rank",
+  "query": "export staging since dry-run",
+  "path": "scripts/export.py",
+  "situation": null,
+  "target": "export",
+  "case": "ed-export-since",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya review owner invoices ledger",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "currency amount money representation",
+  "path": null,
+  "situation": null,
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v12"
+ },
+ {
+  "mode": "rank",
+  "query": "migration schema customers column",
+  "path": null,
+  "situation": null,
+  "target": "migrations",
+  "case": "pq-migration",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "Priya owner review invoices ledger integration",
+  "path": "src/billing/invoices.py",
+  "situation": null,
+  "target": null,
+  "case": "nk-owner",
+  "variant": "v12"
+ },
+ {
+  "mode": "filter",
+  "query": "invoice finalize",
+  "path": null,
+  "situation": "design_choice",
+  "target": "finalize",
+  "case": "pq-finalize",
+  "variant": "v13"
+ },
+ {
+  "mode": "filter",
+  "query": "finalize retry network",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v13"
+ },
+ {
+  "mode": "filter",
+  "query": "jobs enqueue celery",
+  "path": null,
+  "situation": null,
+  "target": null,
+  "case": "nk-jobs-explicit",
+  "variant": "v13"
+ },
+ {
+  "mode": "filter",
+  "query": "PAYMENTS_LIVE payment gateway fake",
+  "path": null,
+  "situation": "debugging",
+  "target": null,
+  "case": "nk-env-var",
+  "variant": "v13"
+ },
+ {
+  "mode": "rank",
+  "query": "currency money amount representation",
+  "path": null,
+  "situation": "design_choice",
+  "target": "money",
+  "case": "pq-money",
+  "variant": "v13"
+ },
+ {
+  "mode": "filter",
+  "query": "retry network invoices finalize",
+  "path": null,
+  "situation": null,
+  "target": "finalize",
+  "case": "ed-finalize-retry",
+  "variant": "v13"
+ }
+]

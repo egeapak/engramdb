@@ -296,6 +296,78 @@ fn is_parent_directory(pattern: &str, current_path: &str) -> bool {
     }
 }
 
+/// Depth from the nearest pattern that *encloses* `current_path`: the file
+/// itself (0), its directory (1), each ancestor above (2, 3, …). `None` when
+/// nothing encloses it. Unlike [`proximity`], a pattern naming a sibling file
+/// does not enclose (it is about that other file), and neither does a
+/// root-wide pattern (`/`, `**/*.py`), which encloses every path.
+/// Whether a physical scope covers the whole project, or every file of a
+/// type: `/`, an empty pattern, or a glob whose directory segments are all
+/// `*`/`**` and whose file segment starts with a wildcard (`**`, `**/*`,
+/// `*.py`, `**/*.{ts,tsx}`). A glob that names a directory or a file
+/// (`**/migrations/*.py`, `**/Dockerfile`) is a real scope, even when nothing
+/// literal precedes its first wildcard.
+pub fn is_root_wide(pattern: &str) -> bool {
+    let p = pattern.trim().trim_end_matches('/');
+    if p.is_empty() {
+        return true;
+    }
+    if !is_glob_pattern(p) {
+        return false;
+    }
+    let mut segments: Vec<&str> = p.split('/').collect();
+    let file = segments.pop().unwrap_or_default();
+    segments.iter().all(|seg| matches!(*seg, "" | "*" | "**")) && file.starts_with('*')
+}
+
+pub fn enclosing_depth(patterns: &[String], current_path: &str) -> Option<usize> {
+    patterns
+        .iter()
+        .filter_map(|p| {
+            let p = p.trim();
+            if p.is_empty() || p == "/" {
+                return None;
+            }
+            if p == current_path {
+                return Some(0);
+            }
+            let dir = if is_glob_pattern(p) {
+                if is_root_wide(p) || !cached_matcher(p)?.is_match(current_path) {
+                    return None;
+                }
+                let base = p[..p.find(['*', '?', '[', '{'])?].trim_end_matches('/');
+                if base.is_empty() {
+                    return Some(floating_glob_depth(p, current_path));
+                }
+                base
+            } else {
+                p
+            };
+            is_parent_directory(dir, current_path)
+                .then(|| directory_depth_from_parent(dir, current_path))
+        })
+        .min()
+}
+
+/// Depth of a matched glob with no literal prefix (`**/migrations/*.py`):
+/// counted from the last literal directory segment of the pattern that the
+/// path contains, or from the project root when the pattern names no
+/// directory (`**/Dockerfile`).
+fn floating_glob_depth(pattern: &str, current_path: &str) -> usize {
+    let components: Vec<&str> = current_path.split('/').filter(|c| !c.is_empty()).collect();
+    let pattern_segments: Vec<&str> = pattern.split('/').collect();
+    let dir_segments = &pattern_segments[..pattern_segments.len().saturating_sub(1)];
+    let anchor = dir_segments
+        .iter()
+        .rev()
+        .find(|seg| !seg.is_empty() && !is_glob_pattern(seg));
+    let dirs = &components[..components.len().saturating_sub(1)];
+    match anchor.and_then(|a| dirs.iter().rposition(|c| c == a)) {
+        Some(i) => components.len() - 1 - i,
+        None => components.len(),
+    }
+}
+
 fn extract_directory(path: &str) -> &str {
     if let Some(pos) = path.rfind('/') {
         &path[..pos]
@@ -306,6 +378,44 @@ fn extract_directory(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enclosing_depth_skips_siblings_and_root_wide() {
+        let d = |s: &[&str]| {
+            super::enclosing_depth(
+                &s.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
+                "src/api/orders.rs",
+            )
+        };
+        assert_eq!(d(&["src/api/orders.rs"]), Some(0));
+        assert_eq!(d(&["src/api/"]), Some(1));
+        assert_eq!(d(&["src/api"]), Some(1));
+        assert_eq!(d(&["src/"]), Some(2));
+        assert_eq!(d(&["src/**/*.rs"]), Some(2));
+        assert_eq!(d(&["src/api/other.rs"]), None);
+        assert_eq!(d(&["/", "**/*"]), None);
+        // A glob with a literal part is a real scope even with no literal prefix.
+        assert_eq!(d(&["**/api/*.rs"]), Some(1));
+        assert_eq!(d(&["**/orders.rs"]), Some(3));
+        assert_eq!(d(&["**/*.rs"]), None);
+        assert_eq!(d(&["src/api/other.rs", "src/"]), Some(2));
+    }
+
+    #[test]
+    fn root_wide_means_wildcards_or_a_file_type() {
+        for p in ["", "/", "**", "**/*", "*", " ** ", "*.py", "**/*.{ts,tsx}"] {
+            assert!(super::is_root_wide(p), "{p:?}");
+        }
+        for p in [
+            "src/",
+            "**/migrations/*.py",
+            "**/Dockerfile",
+            "src/**/*.rs",
+            "Makefile",
+        ] {
+            assert!(!super::is_root_wide(p), "{p:?}");
+        }
+    }
+
     use super::*;
 
     const BASE: f64 = 0.82;

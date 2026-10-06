@@ -1,0 +1,3 @@
+[flags]
+# owner: billing-core
+invoice-pdf-v2 = true

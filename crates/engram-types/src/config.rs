@@ -123,7 +123,12 @@ impl Default for ScoringWeights {
 }
 
 /// Scoring configuration for different retrieval modes
+///
+/// `#[serde(default)]`: a partial `[retrieval.scoring]` section keeps every
+/// field it does not name at its default, instead of failing to parse (which
+/// made the whole config file fall back to defaults).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScoringConfig {
     /// Weights when both query and scope are provided
     pub with_query: ScoringWeights,
@@ -684,10 +689,24 @@ impl ReviewConfig {
 }
 
 /// Retrieval configuration
+///
+/// `#[serde(default)]`: a partial `[retrieval]` section (for example only
+/// `relevance_threshold = 0.3`) keeps the other fields at their defaults.
+/// Without it the section failed to parse and the whole config file was
+/// ignored, so the threshold could not be tuned at all.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RetrievalConfig {
-    /// Minimum relevance score threshold
+    /// Minimum relevance score threshold. In rank mode with query text it is
+    /// applied to the reranked score when a reranker ran.
     pub relevance_threshold: f64,
+
+    /// Rank mode: when no candidate clears `relevance_threshold`, return this
+    /// many of the best-scoring candidates, each marked `below_threshold`,
+    /// instead of an empty result. `0` keeps the empty result. Rank mode is
+    /// "browse by relevance"; an empty answer sent agents to read the store
+    /// files directly instead.
+    pub rank_fallback: usize,
 
     /// Maximum number of results to return
     pub max_results: usize,
@@ -703,6 +722,7 @@ impl Default for RetrievalConfig {
     fn default() -> Self {
         Self {
             relevance_threshold: 0.45,
+            rank_fallback: 3,
             max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
@@ -1195,6 +1215,10 @@ pub struct EngramConfig {
     #[serde(default)]
     pub hooks: HooksConfig,
 
+    /// MCP server surface settings (`[mcp]`)
+    #[serde(default)]
+    pub mcp: McpConfig,
+
     /// Memory content constraints (summary length, …)
     #[serde(default)]
     pub content: ContentConfig,
@@ -1646,6 +1670,43 @@ impl Default for EpistemicConfig {
     }
 }
 
+/// MCP server surface settings (`[mcp]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct McpConfig {
+    /// Tools the server marks `_meta["anthropic/alwaysLoad"] = true`.
+    ///
+    /// Claude Code defers MCP tools behind ToolSearch by default: the model
+    /// sees only their names and must load a schema before calling it. In
+    /// the memory-tool-use eval, Sonnet 5.5 took that step in 7 of 122 runs
+    /// and read `.engramdb/memories/` directly instead. Listing a tool here
+    /// keeps its schema in every request, at the cost of those tokens. Other
+    /// MCP clients ignore the key. An empty list defers every tool; unknown
+    /// names are ignored with a warning.
+    #[serde(default = "McpConfig::default_always_load")]
+    pub always_load: Vec<String>,
+}
+
+impl McpConfig {
+    /// The tools a session needs to read, record and correct memories.
+    pub const DEFAULT_ALWAYS_LOAD: [&'static str; 5] =
+        ["query", "get", "create", "update", "challenge"];
+
+    fn default_always_load() -> Vec<String> {
+        Self::DEFAULT_ALWAYS_LOAD
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            always_load: Self::default_always_load(),
+        }
+    }
+}
+
 /// Claude Code hook rendering settings (`[hooks]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HooksConfig {
@@ -1660,10 +1721,20 @@ pub struct HooksConfig {
     /// context injection (SessionStart uses its own fixed 2000-char cap).
     #[serde(default = "HooksConfig::default_prompt_context_budget")]
     pub prompt_context_budget: usize,
+
+    /// Characters of each injected memory's body to show under its summary
+    /// line. The top-ranked entry gets 2.5x this; a cut body ends with a
+    /// `get <id>` pointer. `0` shows summaries only.
+    #[serde(default = "HooksConfig::default_preview_chars")]
+    pub preview_chars: usize,
 }
 
 impl HooksConfig {
     fn default_prompt_context_budget() -> usize {
+        3000
+    }
+
+    fn default_preview_chars() -> usize {
         1000
     }
 }
@@ -1673,6 +1744,7 @@ impl Default for HooksConfig {
         Self {
             class_order: None,
             prompt_context_budget: Self::default_prompt_context_budget(),
+            preview_chars: Self::default_preview_chars(),
         }
     }
 }
@@ -2374,7 +2446,7 @@ mod tests {
         let parsed: EngramConfig = toml::from_str("").unwrap();
         assert_eq!(parsed.epistemic, EpistemicConfig::default());
         assert_eq!(parsed.hooks, HooksConfig::default());
-        assert_eq!(parsed.hooks.prompt_context_budget, 1000);
+        assert_eq!(parsed.hooks.prompt_context_budget, 3000);
         assert!(parsed.hooks.class_order.is_none());
         assert_eq!(parsed.content, ContentConfig::default());
     }
@@ -2633,6 +2705,34 @@ mod tests {
             loaded.retrieval.scoring.challenge_penalty,
             original.retrieval.scoring.challenge_penalty
         );
+    }
+
+    #[test]
+    fn test_retrieval_section_with_one_field_keeps_other_defaults() {
+        // Before #[serde(default)], this section failed to parse ("missing
+        // field max_results"), and the whole config file fell back to defaults,
+        // so the threshold could not be tuned at all.
+        let config: EngramConfig =
+            toml::from_str("[retrieval]\nrelevance_threshold = 0.3\n").unwrap();
+        let defaults = RetrievalConfig::default();
+        assert_eq!(config.retrieval.relevance_threshold, 0.3);
+        assert_eq!(config.retrieval.max_results, defaults.max_results);
+        assert_eq!(config.retrieval.rank_fallback, 3);
+        assert_eq!(
+            config.retrieval.scoring.with_query.semantic,
+            defaults.scoring.with_query.semantic
+        );
+
+        let config: EngramConfig =
+            toml::from_str("[retrieval.scoring]\nscope_multiplier_floor = 0.4\n").unwrap();
+        assert_eq!(config.retrieval.scoring.scope_multiplier_floor, 0.4);
+        assert_eq!(
+            config.retrieval.scoring.with_keyword.keyword,
+            defaults.scoring.with_keyword.keyword
+        );
+
+        let config: EngramConfig = toml::from_str("[retrieval]\nrank_fallback = 0\n").unwrap();
+        assert_eq!(config.retrieval.rank_fallback, 0);
     }
 
     #[test]

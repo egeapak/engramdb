@@ -1,0 +1,9 @@
+{
+ "git_head_at_snapshot": "2ccaf7e",
+ "engramdb_sha256": "9466b706912fe755",
+ "plugin_json_sha256": "02aafff020602e34",
+ "engram_md_sha256": "5399783716b36990",
+ "model": "claude-sonnet-5-5",
+ "fixture": "hard",
+ "engram_md": false
+}

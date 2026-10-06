@@ -1,0 +1,3 @@
+[source]
+bucket = "psp-settlements-eu"
+prefix = "daily/"

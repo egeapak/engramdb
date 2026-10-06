@@ -1,0 +1,3 @@
+Cost round 2 (v4): v3 (each memory once per session, in full) plus: fact and observation lines carry their premise as a check, "holds only while <premise>: check that before following it" (decisions already show it as "because ...").
+Why: in v3, with bodies shown whole, Sonnet followed a memory whose premise had lapsed (st-flask-premise 3/3 -> 0/3); the `get` it no longer made had been where it checked the memory against the repo.
+Result vs v2 (pre-registered gates): Opus $/case -5.5%, pass 130 -> 128 (test 67 -> 65), guardrails -1/-2; Sonnet $/case -9.9%, pass 133 -> 131 (test 68 -> 69), guardrails unchanged; gets ~0.1 per case, memory-only turns 0.5-0.8. All gates pass on both models. Adopted as the cost incumbent.

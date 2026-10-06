@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 
-use crate::types::{Decay, EngramConfig, Epistemic, Memory, ProvenanceSource, Situation, Status};
+use crate::types::{
+    Decay, EngramConfig, Epistemic, Memory, ProvenanceSource, ScoringWeights, Situation, Status,
+};
 
 use super::trust::trust_weight_from_config;
 
@@ -55,6 +57,23 @@ impl<'a> From<&'a Memory> for ScoreTarget<'a> {
 /// the breakdown components.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ScoreBreakdown {
+    /// Rank mode's fallback marker: nothing cleared the relevance threshold,
+    /// so this is one of the closest weak matches returned instead of an
+    /// empty result. Serialized only when set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub below_threshold: bool,
+
+    /// Rank mode's threshold value, when it is not `final_score`. Set only for
+    /// scope-only scoring with a path or logical context, to the memory's own
+    /// relevance (criticality × decay, minus any challenge penalty) when its
+    /// scope closely matches (see `composite_score_inner`), never below
+    /// `final_score`. The scope, trust and
+    /// situation multipliers then order the results instead of gating them:
+    /// as a product they kept a default-criticality (0.5) memory scoped to
+    /// the exact file under the threshold, so the file hook injected nothing.
+    #[serde(skip)]
+    pub gate_score: Option<f64>,
+
     /// The final composite score
     pub final_score: f64,
     /// Raw semantic (cosine) similarity score (if available)
@@ -193,6 +212,45 @@ impl<'a> ScoringContext<'a> {
     }
 }
 
+/// Weighted sum of the components a weight set uses, renormalized when a
+/// component is absent. Returns `(score, keyword, semantic)`, the last two
+/// being the raw component values that took part.
+///
+/// A component is active only when both its weight and its value are present.
+/// Semantic counts even at `Some(0.0)` ("checked, found nothing"): it consumes
+/// its weight at zero and scores lower than `None` (no evidence).
+fn weighted_base(
+    weights: &ScoringWeights,
+    keyword: Option<f64>,
+    semantic: Option<f64>,
+    relevance: f64,
+) -> (f64, Option<f64>, Option<f64>) {
+    let mut score = 0.0_f64;
+    let mut active_weight_sum = 0.0_f64;
+    let raw_keyword = match (weights.keyword, keyword) {
+        (Some(w), Some(v)) => {
+            score += w * v;
+            active_weight_sum += w;
+            Some(v)
+        }
+        _ => None,
+    };
+    let raw_semantic = match (weights.semantic, semantic) {
+        (Some(w), Some(v)) => {
+            score += w * v;
+            active_weight_sum += w;
+            Some(v)
+        }
+        _ => None,
+    };
+    score += weights.relevance * relevance;
+    active_weight_sum += weights.relevance;
+    if (active_weight_sum - 1.0).abs() > f64::EPSILON && active_weight_sum > f64::EPSILON {
+        score /= active_weight_sum;
+    }
+    (score, raw_keyword, raw_semantic)
+}
+
 /// Calculate the composite score for a memory in a given context.
 ///
 /// # Embedding availability note
@@ -210,6 +268,8 @@ impl<'a> ScoringContext<'a> {
 /// 1. **With keyword** (keyword_score is Some; semantic optional):
 ///    - Uses `config.retrieval.scoring.with_keyword` weights
 ///    - base = 0.45*keyword + 0.30*semantic + 0.25*(criticality*decay)
+///    - When semantic is also Some, base is at least the mode-2 formula for
+///      the same memory: a keyword hit can only add evidence, never lower it
 ///    - When semantic_score is None, the semantic weight drops out and the
 ///      remaining weights renormalize (≈ 0.64*keyword + 0.36*relevance).
 ///      The retrieval engine passes both signals when both matched, so the
@@ -356,40 +416,26 @@ fn composite_score_inner(
         &config.retrieval.scoring.scope_only
     };
 
-    // Dynamic weight accumulation: only add components when both weight and
-    // value are present. Track active weight sum for renormalization.
-    let mut score = 0.0;
-    let mut active_weight_sum = 0.0;
+    let (mut score, raw_keyword, raw_semantic) = weighted_base(
+        weights,
+        context.keyword_score,
+        context.semantic_score,
+        relevance,
+    );
 
-    // Keyword component
-    let raw_keyword =
-        if let (Some(kw_weight), Some(kw_score)) = (weights.keyword, context.keyword_score) {
-            score += kw_weight * kw_score;
-            active_weight_sum += kw_weight;
-            Some(kw_score)
-        } else {
-            None
-        };
-
-    // Semantic component — always include when Some, even at 0.0.
-    // sem=Some(0.0) means "checked, found nothing" and should consume its
-    // weight budget at zero, producing a lower score than sem=None (degraded).
-    let raw_semantic =
-        if let (Some(sem_weight), Some(sem_score)) = (weights.semantic, context.semantic_score) {
-            score += sem_weight * sem_score;
-            active_weight_sum += sem_weight;
-            Some(sem_score)
-        } else {
-            None
-        };
-
-    // Relevance is always active
-    score += weights.relevance * relevance;
-    active_weight_sum += weights.relevance;
-
-    // Renormalize if active weights don't sum to 1.0
-    if (active_weight_sum - 1.0).abs() > f64::EPSILON && active_weight_sum > f64::EPSILON {
-        score /= active_weight_sum;
+    // A keyword hit is extra evidence, so it must never score a memory below
+    // the semantic-only formula for the same memory. The keyword formula gives
+    // a partial match (one or two of four words) kw ≈ 0.1–0.35, which used to
+    // put the memory that matched the query below unrelated ones scored on
+    // semantic similarity alone.
+    if context.keyword_score.is_some() && context.semantic_score.is_some() {
+        let (semantic_only, _, _) = weighted_base(
+            &config.retrieval.scoring.with_query,
+            None,
+            context.semantic_score,
+            relevance,
+        );
+        score = score.max(semantic_only);
     }
 
     // Apply scope as a post-multiplier.
@@ -424,13 +470,16 @@ fn composite_score_inner(
     // Apply challenge penalty as flat subtraction, sized per epistemic class
     // (§7.2): observation 0.20 / fact 0.15 / decision 0.05 by default; a
     // legacy `Flat` config value applies to all classes.
-    if target.status == Status::Challenged {
-        score -= config
+    let challenge_penalty = if target.status == Status::Challenged {
+        config
             .retrieval
             .scoring
             .challenge_penalty
-            .penalty_for(target.epistemic);
-    }
+            .penalty_for(target.epistemic)
+    } else {
+        0.0
+    };
+    score -= challenge_penalty;
 
     // Safety clamp to [0, 1]. `f64::clamp` propagates NaN, and `criticality`
     // is parsed from untrusted files with `f64::parse` (which accepts "NaN" /
@@ -443,7 +492,48 @@ fn composite_score_inner(
         0.0
     };
 
+    // Scope-only with context: a memory whose own scope matches clears the
+    // threshold on its own relevance. Under a path that is any physical
+    // pattern matching the path at any depth (the file, a sibling, an
+    // ancestor directory such as a service root), or a related logical
+    // scope — but not a root-wide pattern (`/`, or a glob made only of `*`
+    // and `**`, see `physical::is_root_wide`): `/` is what a memory saved without paths gets, it matches every
+    // file, and every such memory would otherwise ride along on every file
+    // edit. Under a logical-only context it is a related declared logical
+    // scope — an unscoped memory there only gets the neutral floor, which is
+    // not a match.
+    let scope_only = context.keyword_score.is_none()
+        && context.semantic_score.is_none()
+        && context.query.is_none();
+    let gate_score = (scope_only && has_scope_context).then(|| {
+        let matched = if let Some(path) = context.path {
+            let scoring = &config.retrieval.scoring;
+            let physical = target.physical.iter().any(|p| {
+                !crate::scope::physical::is_root_wide(p)
+                    && crate::scope::physical::proximity(
+                        std::slice::from_ref(p),
+                        path,
+                        scoring.depth_decay_base,
+                        scoring.depth_decay_floor,
+                    ) > 0.0
+            });
+            let logical = !context.logical.is_empty()
+                && crate::scope::logical::proximity(target.logical, context.logical) > 0.0;
+            scope_score > 0.0 && (physical || logical)
+        } else {
+            scope_score > 0.0 && !target.logical.is_empty()
+        };
+        let own = relevance - challenge_penalty;
+        if matched && own.is_finite() {
+            own.clamp(0.0, 1.0).max(score)
+        } else {
+            score
+        }
+    });
+
     ScoreBreakdown {
+        below_threshold: false,
+        gate_score,
         final_score: score,
         semantic: raw_semantic,
         keyword: raw_keyword,
@@ -1111,10 +1201,12 @@ mod tests {
 
         let breakdown = composite_score(&memory, &context, &config, now);
 
-        // Should use with_keyword weights: kw=0.45, sem=0.30, rel=0.25
-        // base = 0.45*0.7 + 0.30*0.9 + 0.25*0.8 = 0.315 + 0.27 + 0.20 = 0.785
-        // * scope_mult(1.0) * trust(1.0) = 0.785
-        assert!((breakdown.final_score - 0.785).abs() < 0.01);
+        // with_keyword weights: kw=0.45, sem=0.30, rel=0.25
+        //   0.45*0.7 + 0.30*0.9 + 0.25*0.8 = 0.315 + 0.27 + 0.20 = 0.785
+        // semantic-only (with_query) for the same memory: 0.55*0.9 + 0.45*0.8 = 0.855
+        // A keyword hit never scores below semantic-only, so base = 0.855
+        // * scope_mult(1.0) * trust(1.0) = 0.855
+        assert!((breakdown.final_score - 0.855).abs() < 0.01);
         assert_eq!(breakdown.keyword, Some(0.7));
         assert_eq!(breakdown.semantic, Some(0.9));
     }
@@ -1368,6 +1460,32 @@ mod tests {
         assert!(
             at_small >= at_tiny,
             "scores should be monotonically increasing"
+        );
+    }
+
+    #[test]
+    fn test_keyword_hit_never_scores_below_semantic_only() {
+        let memory = create_test_memory();
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        // The measured failure: "migration schema customers column" matched one
+        // word (kw ≈ 0.10) of the right memory, whose semantic similarity was 0.53.
+        for (kw, sem) in [(0.10, 0.53), (0.0, 0.9), (0.35, 0.4), (1.0, 0.2)] {
+            let with_kw = ScoringContext::with_keyword(None, &[], "q", kw, Some(sem));
+            let sem_only = ScoringContext::with_semantic(None, &[], "q", sem);
+            let a = composite_score(&memory, &with_kw, &config, now).final_score;
+            let b = composite_score(&memory, &sem_only, &config, now).final_score;
+            assert!(
+                a >= b - 1e-12,
+                "kw={kw} sem={sem}: keyword hit scored {a} < semantic-only {b}"
+            );
+        }
+        // A strong keyword match still beats semantic-only, as before.
+        let strong = ScoringContext::with_keyword(None, &[], "q", 1.0, Some(0.2));
+        let weak = ScoringContext::with_semantic(None, &[], "q", 0.2);
+        assert!(
+            composite_score(&memory, &strong, &config, now).final_score
+                > composite_score(&memory, &weak, &config, now).final_score
         );
     }
 

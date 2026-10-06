@@ -1,0 +1,316 @@
+commit c9bd73f29a58ef5e35aaf806e2e2649f1f6a2353
+Author: Claude <noreply@anthropic.com>
+Date:   Sun Oct 4 10:17:57 2026 +0000
+
+    Pick PreToolUse memories by nearest enclosing scope (hill climb round 2, tests pending)
+    
+    The file hook took its 5 memories by score, so a memory about a sibling
+    file (same proximity as the directory) or a high-criticality
+    project-wide hazard took every slot from the directory's own
+    conventions. It now takes a pool of 25 and keeps the nearest enclosing
+    scopes first: the file, its directory, then each ancestor; sibling-file
+    and root-wide scopes last; score orders within a depth. Body previews
+    follow the caller's ranking, which for the other hooks is still score.
+    
+    Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+    Claude-Session: https://claude.ai/code/session_01Wgfo8G35EfHSR9QqdqvxwL
+
+diff --git a/crates/engram-cli/src/commands/hook.rs b/crates/engram-cli/src/commands/hook.rs
+index 7378a13..eba8675 100644
+--- a/crates/engram-cli/src/commands/hook.rs
++++ b/crates/engram-cli/src/commands/hook.rs
+@@ -412,6 +412,11 @@ const DEFAULT_PREVIEW_CHARS: usize = 160;
+ /// A memory and the lines it renders to, as the budgeted formatter builds them.
+ type RenderedEntry<'a> = (&'a ScoredMemory, Vec<String>);
+ 
++/// PreToolUse injects this many memories, chosen from a gated pool of up to
++/// `PRE_TOOL_USE_POOL` by nearest enclosing scope.
++const PRE_TOOL_USE_MAX_RESULTS: usize = 5;
++const PRE_TOOL_USE_POOL: usize = 25;
++
+ /// Shortest body preview worth showing; below this a preview is dropped.
+ const MIN_PREVIEW_CHARS: usize = 40;
+ 
+@@ -493,9 +498,9 @@ fn format_class_context_with_budget(
+     }
+     let included: usize = sections.iter().map(|(_, e)| e.len()).sum();
+ 
+-    // Pass 2, best score first: add body previews while the budget lasts.
+-    // Every entry gets a normal preview before the best match is extended
+-    // to the longer one, which used to go to whichever entry rendered first
++    // Pass 2, in the caller's ranking: add body previews while the budget
++    // lasts. Every entry gets a normal preview before the first-ranked one is
++    // extended to the longer one, which used to go to whichever entry rendered first
+     // (a broader decision ahead of an exact-file hazard, under file_edit's
+     // class order) and starve the rest. A preview that does not fit whole
+     // is cut shorter rather than dropped.
+@@ -505,12 +510,16 @@ fn format_class_context_with_budget(
+             .enumerate()
+             .flat_map(|(si, (_, e))| (0..e.len()).map(move |ei| (si, ei)))
+             .collect();
+-        order.sort_by(|a, b| {
+-            let score = |(si, ei): &(usize, usize)| sections[*si].1[*ei].0.score;
+-            score(b)
+-                .partial_cmp(&score(a))
+-                .unwrap_or(std::cmp::Ordering::Equal)
+-        });
++        // The caller's ranking: engine score order for SessionStart and
++        // UserPromptSubmit, nearest enclosing scope for PreToolUse.
++        let rank = |&(si, ei): &(usize, usize)| {
++            let sm: &ScoredMemory = sections[si].1[ei].0;
++            memories
++                .iter()
++                .position(|m| std::ptr::eq(m, sm))
++                .unwrap_or(usize::MAX)
++        };
++        order.sort_by_key(rank);
+         let rounds = order
+             .iter()
+             .map(|&slot| (slot, preview_chars, MIN_PREVIEW_CHARS))
+@@ -633,13 +642,16 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
+         mode: RetrievalMode::Rank,
+         // Hooks inject "relevant memories": never a weak fallback match.
+         rank_fallback: Some(0),
+-        path: Some(relative_path),
++        path: Some(relative_path.clone()),
+         logical: vec![],
+         query: None,
+         types: None,
+         tags: None,
+         min_criticality: None,
+-        max_results: Some(5),
++        // The whole gated pool: the cut to PRE_TOOL_USE_MAX_RESULTS is made
++        // below by scope nearness, and a score-ordered top 5 has already
++        // lost what it should keep.
++        max_results: Some(PRE_TOOL_USE_POOL),
+         include_expired: Some(false),
+         // Content, not Summary: Summary makes the engine clear `content`, and
+         // the body preview below then rendered as an empty line.
+@@ -657,31 +669,32 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
+     };
+ 
+     // Task-scoped memories are suppressed from hook injection (§8.3) unless
+-    // the session declared their task, and the surviving list is ordered by
+-    // FileEdit class rank (§8.1: decisions first, then facts — hazards
+-    // leading — then observations).
++    // the session declared their task. The rest are picked by nearest
++    // enclosing scope: the file, its directory, then each ancestor;
++    // sibling-file and root-wide scopes last. Stable, so score orders within
++    // a depth. By score alone, a memory about another file in the same
++    // directory (the same proximity as the directory itself) or a
++    // high-criticality project-wide one took every slot from the directory's
++    // own conventions. Declared loss: in a directory with 5+ scoped memories,
++    // ancestor-scoped ones are not re-injected on each edit; SessionStart and
++    // `query` still surface them.
+     let current_task = session_task_for(input, dir);
+     let mut memories = suppress_task_scoped(result.memories, current_task.as_deref());
+-    let class_order = engine.config().hooks.class_order.clone();
+     memories.sort_by_key(|sm| {
+-        (
+-            class_rank(
+-                sm.memory.epistemic,
+-                Some(Situation::FileEdit),
+-                class_order.as_deref(),
+-            ),
+-            (sm.memory.epistemic == Epistemic::Fact && sm.memory.type_ != MemoryType::Hazard) as u8,
+-        )
++        engramdb::scope::physical::enclosing_depth(&sm.memory.physical, &relative_path)
++            .unwrap_or(usize::MAX)
+     });
++    memories.truncate(PRE_TOOL_USE_MAX_RESULTS);
+     if memories.is_empty() {
+         return Ok(None);
+     }
+ 
+     // §8.1/§8.2 class-grouped rendering (same formatter as SessionStart /
+     // UserPromptSubmit): decisions carry their "— because {premise}" clause
+-    // atomically, facts show "revisit if" globs, groups get class headers.
+-    // The pre-sort above still matters — group_by_class is stable, so the
+-    // hazard-first ordering inside the facts group survives.
++    // atomically, facts show "revisit if" globs, groups get class headers,
++    // and group_by_class puts hazards first among facts. `memories` stays in
++    // selection order, which the body previews follow.
++    let class_order = engine.config().hooks.class_order.clone();
+     let budget = engine.config().hooks.prompt_context_budget;
+     let context = format_class_context_with_budget(
+         "[EngramDB] Relevant memories for this file:",
+@@ -2026,29 +2039,30 @@ mod tests {
+         assert!(ctx.contains(PREVIEW_TRUST_NOTE));
+     }
+ 
+-    /// The long preview goes to the best score, not to whichever entry the
+-    /// class order renders first.
++    /// The long preview goes to the caller's first-ranked entry, not to
++    /// whichever entry the class order renders first.
+     #[test]
+-    fn test_longer_preview_follows_score_not_render_order() {
++    fn test_longer_preview_follows_caller_rank_not_render_order() {
+         let body = "x".repeat(600);
+-        let first = Memory::new(MemoryType::Convention, "First", &body, Provenance::human());
+-        let second = Memory::new(MemoryType::Convention, "Second", &body, Provenance::human());
+-        let mut low = scored(first);
+-        low.score = 0.4;
+-        let ctx =
+-            format_class_context_with_budget("[H]", &[low, scored(second)], 5000, None, None, 160);
++        let fact = Memory::new(MemoryType::Convention, "Fact", &body, Provenance::human());
++        let decision = Memory::new(MemoryType::Decision, "Decision", &body, Provenance::human());
++        let ctx = format_class_context_with_budget(
++            "[H]",
++            &[scored(fact), scored(decision)],
++            5000,
++            Some(Situation::FileEdit),
++            None,
++            160,
++        );
+         let previews: Vec<usize> = ctx
+             .lines()
+             .filter(|l| l.starts_with("  x"))
+             .map(|l| l.trim_start().chars().take_while(|c| *c == 'x').count())
+             .collect();
++        // FileEdit renders the decision first; the fact was ranked first.
+         assert_eq!(previews, vec![160, 400], "{ctx}");
+     }
+ 
+-    /// Every summary line is placed before any body, and a body that does
+-    /// not fit whole is cut shorter instead of dropped. Regression: the
+-    /// first entry's long body left the exact-file hazard truncated and the
+-    /// next memory with no body at all.
+     #[test]
+     fn test_tight_budget_keeps_every_summary_and_shortens_previews() {
+         let body = "y".repeat(600);
+@@ -2642,6 +2656,68 @@ mod tests {
+         assert!(ctx.contains("Use async everywhere"));
+     }
+ 
++    /// PreToolUse picks by nearest enclosing scope: a directory's own
++    /// conventions beat a higher-scoring memory about a sibling file and a
++    /// project-wide hazard, which used to take every slot.
++    #[tokio::test]
++    async fn test_pre_tool_use_keeps_directory_scope_over_siblings_and_ancestors() {
++        let temp_dir = TempDir::new().unwrap();
++        let api = temp_dir.path().join("src/api");
++        std::fs::create_dir_all(&api).unwrap();
++        std::fs::write(api.join("orders.rs"), "").unwrap();
++        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
++            .await
++            .unwrap();
++        let mk = |t: MemoryType, title: &str, scope: &str, crit: f64| {
++            let mut m = Memory::new(t, title, "body text", Provenance::human());
++            m.physical = vec![scope.to_string()];
++            m.criticality = crit;
++            m
++        };
++        store
++            .create(&mk(
++                MemoryType::Hazard,
++                "Sibling hazard",
++                "src/api/other.rs",
++                0.9,
++            ))
++            .await
++            .unwrap();
++        store
++            .create(&mk(MemoryType::Hazard, "Project-wide hazard", "src/", 0.9))
++            .await
++            .unwrap();
++        for i in 1..=5 {
++            store
++                .create(&mk(
++                    MemoryType::Convention,
++                    &format!("Dir rule {i}"),
++                    "src/api/",
++                    0.5,
++                ))
++                .await
++                .unwrap();
++        }
++        let input = serde_json::json!({
++            "tool_name": "Edit",
++            "tool_input": { "file_path": api.join("orders.rs").to_str().unwrap() }
++        })
++        .to_string();
++        let out = process_hook_input(&input, temp_dir.path(), store)
++            .await
++            .unwrap()
++            .expect("the directory rules are injected");
++        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
++        let ctx = parsed["hookSpecificOutput"]["additionalContext"]
++            .as_str()
++            .unwrap();
++        for i in 1..=5 {
++            assert!(ctx.contains(&format!("Dir rule {i}")), "{ctx}");
++        }
++        assert!(!ctx.contains("Sibling hazard"), "{ctx}");
++        assert!(!ctx.contains("Project-wide hazard"), "{ctx}");
++    }
++
+     #[tokio::test]
+     async fn test_process_hook_input_with_unrelated_file() {
+         let (temp_dir, store) = setup_store_with_memories().await;
+diff --git a/src/scope/physical.rs b/src/scope/physical.rs
+index 1970233..1a90966 100644
+--- a/src/scope/physical.rs
++++ b/src/scope/physical.rs
+@@ -296,6 +296,37 @@ fn is_parent_directory(pattern: &str, current_path: &str) -> bool {
+     }
+ }
+ 
++/// Depth from the nearest pattern that *encloses* `current_path`: the file
++/// itself (0), its directory (1), each ancestor above (2, 3, …). `None` when
++/// nothing encloses it. Unlike [`proximity`], a pattern naming a sibling file
++/// does not enclose (it is about that other file), and neither does a
++/// root-wide pattern (`/`, `**/*.py`), which encloses every path.
++pub fn enclosing_depth(patterns: &[String], current_path: &str) -> Option<usize> {
++    patterns
++        .iter()
++        .filter_map(|p| {
++            let p = p.trim();
++            if p.is_empty() || p == "/" {
++                return None;
++            }
++            if p == current_path {
++                return Some(0);
++            }
++            let dir = if is_glob_pattern(p) {
++                let base = p[..p.find(['*', '?', '[', '{'])?].trim_end_matches('/');
++                if base.is_empty() || !cached_matcher(p)?.is_match(current_path) {
++                    return None;
++                }
++                base
++            } else {
++                p
++            };
++            is_parent_directory(dir, current_path)
++                .then(|| directory_depth_from_parent(dir, current_path))
++        })
++        .min()
++}
++
+ fn extract_directory(path: &str) -> &str {
+     if let Some(pos) = path.rfind('/') {
+         &path[..pos]
+@@ -306,6 +337,24 @@ fn extract_directory(path: &str) -> &str {
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn enclosing_depth_skips_siblings_and_root_wide() {
++        let d = |s: &[&str]| {
++            super::enclosing_depth(
++                &s.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
++                "src/api/orders.rs",
++            )
++        };
++        assert_eq!(d(&["src/api/orders.rs"]), Some(0));
++        assert_eq!(d(&["src/api/"]), Some(1));
++        assert_eq!(d(&["src/api"]), Some(1));
++        assert_eq!(d(&["src/"]), Some(2));
++        assert_eq!(d(&["src/**/*.rs"]), Some(2));
++        assert_eq!(d(&["src/api/other.rs"]), None);
++        assert_eq!(d(&["/", "**/*.rs"]), None);
++        assert_eq!(d(&["src/api/other.rs", "src/"]), Some(2));
++    }
++
+     use super::*;
+ 
+     const BASE: f64 = 0.82;
