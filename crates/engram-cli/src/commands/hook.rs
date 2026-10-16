@@ -873,32 +873,6 @@ fn sanitize_min_criticality(v: f64) -> f64 {
 // New hook events (§8.5)
 // ---------------------------------------------------------------------------
 
-/// Situation-inference keyword tables for UserPromptSubmit (§8.5.1). Cheap
-/// substring heuristics — the only place Debugging/DesignChoice can be
-/// inferred automatically.
-const DEBUGGING_KEYWORDS: &[&str] = &["error", "failing", "why does", "debug", "panic", "crash"];
-const DESIGN_KEYWORDS: &[&str] = &[
-    "should we",
-    "choose",
-    " vs ",
-    "design",
-    "approach",
-    "architecture",
-];
-
-/// Infer a situation from the submitted prompt text (`None` when no keyword
-/// table matches — neutral scoring).
-fn infer_situation(prompt: &str) -> Option<Situation> {
-    let lower = prompt.to_lowercase();
-    if DEBUGGING_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return Some(Situation::Debugging);
-    }
-    if DESIGN_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return Some(Situation::DesignChoice);
-    }
-    None
-}
-
 /// Extract the `session_id` field every hook event carries.
 fn extract_session_id(input: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(input).ok()?;
@@ -1000,7 +974,7 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
     let config_path = dir.join(".engramdb").join("config.toml");
     let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
 
-    let situation = infer_situation(&prompt);
+    let situation = engramdb::prompt_intent::keyword_situation(&prompt);
     let query = RetrievalQuery {
         mode: RetrievalMode::Filter,
         query: Some(prompt),
@@ -2607,24 +2581,6 @@ mod tests {
         let kept = suppress_task_scoped(memories, None);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].memory.summary, "Project-wide decision");
-    }
-
-    #[test]
-    fn test_infer_situation_keyword_tables() {
-        assert_eq!(
-            infer_situation("why does the test panic here?"),
-            Some(Situation::Debugging)
-        );
-        assert_eq!(
-            infer_situation("Should we choose sqlite vs postgres?"),
-            Some(Situation::DesignChoice)
-        );
-        // Debugging wins when both match (checked first).
-        assert_eq!(
-            infer_situation("error in the design"),
-            Some(Situation::Debugging)
-        );
-        assert_eq!(infer_situation("add a new field to the struct"), None);
     }
 
     #[test]

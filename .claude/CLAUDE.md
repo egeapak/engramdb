@@ -17,7 +17,7 @@ This is a **Cargo workspace** (`[workspace] members = ["crates/*"]`). The per-la
 - `engram-mcp` — the `rmcp` MCP server surface; depends on the core.
 - `engram-cli` — Clap CLI + the `engramdb` binary; depends on the core and `engram-mcp`.
 
-The residual **core** is the top-level `engramdb` lib crate (`src/lib.rs`): `daemon`, `ops`, `retrieval`, `scope`, `scoring`, `search`. It re-exports the extracted crates under their historical module paths (`engramdb::storage`, `::embeddings`, `::types`, …) so every `crate::<module>` / `engramdb::<module>` reference keeps resolving unchanged. **The dependency edges only point inward**: the extracted leaf crates must never `use` the core, and `engram-cli`/`engram-mcp` are front-ends that depend on the core (never re-exported from it — that would invert the DAG).
+The residual **core** is the top-level `engramdb` lib crate (`src/lib.rs`): `daemon`, `ops`, `prompt_intent`, `retrieval`, `scope`, `scoring`, `search`. It re-exports the extracted crates under their historical module paths (`engramdb::storage`, `::embeddings`, `::types`, …) so every `crate::<module>` / `engramdb::<module>` reference keeps resolving unchanged. **The dependency edges only point inward**: the extracted leaf crates must never `use` the core, and `engram-cli`/`engram-mcp` are front-ends that depend on the core (never re-exported from it — that would invert the DAG).
 
 ## Code Quality (mandatory)
 
