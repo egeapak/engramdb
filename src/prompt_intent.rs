@@ -201,6 +201,12 @@ pub struct PrototypeParams {
     /// the user needed, so a positive margin trades missed skips for fewer
     /// wrong ones.
     pub gate_margin: f32,
+    /// Length guard: a prompt with more words than this is never skipped,
+    /// whatever its scores. Turn control is short, and a longer prompt that
+    /// opens with an acknowledgement ("looks good, push it and open a PR")
+    /// embeds close to the acknowledgement seeds while still carrying a task.
+    /// `None` turns the guard off.
+    pub max_skip_words: Option<usize>,
 }
 
 impl Default for PrototypeParams {
@@ -208,6 +214,7 @@ impl Default for PrototypeParams {
         Self {
             top_k: 3,
             gate_margin: 0.05,
+            max_skip_words: Some(7),
         }
     }
 }
@@ -235,6 +242,7 @@ pub struct ClassScores {
 }
 
 /// Nearest-seed classifier over embedding vectors. See the module docs.
+#[derive(Clone)]
 pub struct PrototypeClassifier {
     seeds: Vec<(Label, Vec<f32>)>,
     params: PrototypeParams,
@@ -290,11 +298,13 @@ impl PrototypeClassifier {
         prompt: &str,
     ) -> Result<PromptDecision> {
         let v = provider.embed(prompt).await?;
-        Ok(self.classify_vector(&v))
+        Ok(self.classify_embedded(prompt, &v))
     }
 
-    /// Classify an already-embedded prompt. Pure: no model call.
-    pub fn classify_vector(&self, prompt_vec: &[f32]) -> PromptDecision {
+    /// Classify a prompt whose embedding is already computed. Pure: no model
+    /// call. `prompt` is the text `prompt_vec` was embedded from; the length
+    /// guard reads it.
+    pub fn classify_embedded(&self, prompt: &str, prompt_vec: &[f32]) -> PromptDecision {
         let q = normalized(prompt_vec.to_vec());
         let score = |label: Label| self.class_score(&q, label);
         let scores = ClassScores {
@@ -305,7 +315,12 @@ impl PrototypeClassifier {
         };
 
         let best_task = scores.debugging.max(scores.design).max(scores.other);
-        let needs_context = scores.no_context <= best_task + self.params.gate_margin;
+        let too_long_to_skip = self
+            .params
+            .max_skip_words
+            .is_some_and(|max| prompt.split_whitespace().count() > max);
+        let needs_context =
+            too_long_to_skip || scores.no_context <= best_task + self.params.gate_margin;
 
         // A skipped prompt has no situation: nothing will be retrieved for it.
         let situation = if !needs_context {
@@ -532,8 +547,8 @@ mod tests {
         // A margin far below zero makes the gate skip anything that is not
         // clearly a task.
         let eager = c.with_params(PrototypeParams {
-            top_k: 3,
             gate_margin: -1.0,
+            ..PrototypeParams::default()
         });
         let d = eager
             .classify(&FamilyEmbedder, "ok, rename it")
@@ -543,9 +558,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn length_guard_keeps_long_prompts() {
+        let c = classifier().await;
+        // Eight words of pure turn control: the scores say skip, the guard
+        // (default seven words) keeps it.
+        let long = "ok ok thanks thanks sure sure cool cool";
+        let d = c.classify(&FamilyEmbedder, long).await.unwrap();
+        assert!(d.needs_context, "scores: {:?}", d.scores);
+
+        // With the guard off, the same prompt is skipped.
+        let unguarded = c.with_params(PrototypeParams {
+            max_skip_words: None,
+            ..PrototypeParams::default()
+        });
+        let d = unguarded.classify(&FamilyEmbedder, long).await.unwrap();
+        assert!(!d.needs_context, "scores: {:?}", d.scores);
+
+        // At the limit the guard does not apply.
+        let d = unguarded
+            .with_params(PrototypeParams::default())
+            .classify(&FamilyEmbedder, "ok thanks sure cool ok thanks sure")
+            .await
+            .unwrap();
+        assert!(!d.needs_context, "scores: {:?}", d.scores);
+    }
+
+    #[tokio::test]
     async fn zero_vector_scores_zero_not_nan() {
         let c = classifier().await;
-        let d = c.classify_vector(&[0.0; 5]);
+        let d = c.classify_embedded("", &[0.0; 5]);
         for s in [
             d.scores.debugging,
             d.scores.design,
@@ -565,7 +606,7 @@ mod tests {
             &FamilyEmbedder,
             PrototypeParams {
                 top_k: 0,
-                gate_margin: 0.0,
+                ..PrototypeParams::default()
             },
         )
         .await;

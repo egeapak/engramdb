@@ -5,13 +5,12 @@
 //! 1. **Situation** (debugging / design choice / none). Baseline: the shipped
 //!    keyword tables (`keyword_situation`). Candidate: the nearest-seed
 //!    `PrototypeClassifier` over the default ONNX embedding model.
-//! 2. **Context gate** (search, or skip a turn-control prompt). Baselines:
-//!    the shipped behavior (always search) and a word-list rule written for
-//!    this evaluation (skip when every word is a turn-control word).
-//!    Candidate: the prototype's gate.
+//! 2. **Context gate** (search, or skip a turn-control prompt). Baseline:
+//!    the shipped behavior (always search). Candidate: the prototype's gate,
+//!    swept over its score margin and its length guard (`max_skip_words`).
 //!
 //! Data: `examples/data/prompt_intent_eval.json` (150 hand-labelled prompts).
-//! The same author wrote the seeds, the word list and the labels, so treat
+//! The same author wrote the seeds and the labels, so treat
 //! the absolute numbers as optimistic; the comparison between methods on the
 //! tagged subsets is the useful signal.
 //!
@@ -50,24 +49,6 @@ fn label(s: Option<Situation>) -> &'static str {
         Some(Situation::DesignChoice) => "design_choice",
         _ => "none",
     }
-}
-
-/// Turn-control words for the word-list gate baseline. Not used by the
-/// product; it shows how far a rule with no model gets.
-const TURN_CONTROL_WORDS: &[&str] = &[
-    "ok", "okay", "k", "thanks", "thank", "you", "so", "much", "yes", "y", "yep", "yeah", "sure",
-    "thing", "continue", "go", "ahead", "on", "proceed", "lgtm", "great", "good", "nice", "cool",
-    "awesome", "perfect", "fine", "by", "me", "alright", "do", "it", "that", "please", "looks",
-    "job", "carry", "next", "approved", "hmm", "makes", "sense", "no", "stop", "wait",
-];
-
-fn word_list_needs_context(prompt: &str) -> bool {
-    let lower = prompt.to_lowercase();
-    let words: Vec<&str> = lower
-        .split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .filter(|w| !w.is_empty())
-        .collect();
-    words.is_empty() || !words.iter().all(|w| TURN_CONTROL_WORDS.contains(w))
 }
 
 /// Accuracy, macro-F1 and a confusion matrix for one situation predictor.
@@ -201,7 +182,7 @@ impl GateReport {
 
     fn print(&self, name: &str) {
         println!(
-            "  {name:<28} accuracy {:>5.1}%  skips caught {:>2}/{}  wrong skips {:>2}/{}",
+            "  {name:<50} accuracy {:>5.1}%  skips caught {:>2}/{}  wrong skips {:>2}/{}",
             pct(self.correct, self.total),
             self.skips_caught,
             self.skips_possible,
@@ -260,7 +241,7 @@ async fn main() -> Result<()> {
 
     let t = Instant::now();
     for v in &vectors {
-        std::hint::black_box(classifier.classify_vector(v));
+        std::hint::black_box(classifier.classify_embedded("timing", v));
     }
     let classify_us = t.elapsed().as_secs_f64() * 1e6 / vectors.len() as f64;
 
@@ -289,7 +270,7 @@ async fn main() -> Result<()> {
             .find(|l| *l == item.situation)
             .with_context(|| format!("unknown situation label {:?}", item.situation))?;
         keyword.add(item, gold, label(keyword_situation(&item.prompt)));
-        let d = classifier.classify_vector(v);
+        let d = classifier.classify_embedded(&item.prompt, v);
         // Score the situation on its own: a gate skip forces `None`, which
         // would count gate errors twice.
         let pred = if d.needs_context {
@@ -306,16 +287,14 @@ async fn main() -> Result<()> {
     proto.print("prototype (top_k=3)");
 
     for k in [1, 5] {
-        let c = PrototypeClassifier::build(&provider, PrototypeParams::default())
-            .await?
-            .with_params(PrototypeParams {
-                top_k: k,
-                ..PrototypeParams::default()
-            });
+        let c = classifier.clone().with_params(PrototypeParams {
+            top_k: k,
+            ..PrototypeParams::default()
+        });
         let mut r = SituationReport::new();
         for (item, v) in items.iter().zip(&vectors) {
             let gold = LABELS.into_iter().find(|l| *l == item.situation).unwrap();
-            let d = c.classify_vector(v);
+            let d = c.classify_embedded(&item.prompt, v);
             r.add(
                 item,
                 gold,
@@ -336,52 +315,49 @@ async fn main() -> Result<()> {
     // --- 2. Context gate.
     println!("\n2. Context gate");
     let mut always = GateReport::default();
-    let mut words = GateReport::default();
     for item in &items {
         always.add(item.needs_context, true);
-        words.add(item.needs_context, word_list_needs_context(&item.prompt));
     }
     always.print("always search (shipped)");
-    words.print("word-list rule");
 
+    let default = PrototypeParams::default();
     let mut gate_misses = Vec::new();
-    for margin in [-0.05f32, 0.0, 0.05, 0.10, 0.15] {
-        let c = PrototypeClassifier::build(&provider, PrototypeParams::default())
-            .await?
-            .with_params(PrototypeParams {
+    for guard in [None, Some(3), Some(5), Some(7)] {
+        for margin in [0.0f32, 0.05, 0.10] {
+            let params = PrototypeParams {
                 gate_margin: margin,
-                ..PrototypeParams::default()
-            });
-        let mut r = GateReport::default();
-        for (item, v) in items.iter().zip(&vectors) {
-            let d = c.classify_vector(v);
-            r.add(item.needs_context, d.needs_context);
-            if margin == PrototypeParams::default().gate_margin
-                && d.needs_context != item.needs_context
-            {
-                gate_misses.push(format!(
-                    "    gold {:<5} pred {:<5} (no_context {:.3} vs best task {:.3}) {}",
-                    item.needs_context,
-                    d.needs_context,
-                    d.scores.no_context,
-                    d.scores.debugging.max(d.scores.design).max(d.scores.other),
-                    item.prompt
-                ));
+                max_skip_words: guard,
+                ..default
+            };
+            let c = classifier.clone().with_params(params);
+            let mut r = GateReport::default();
+            for (item, v) in items.iter().zip(&vectors) {
+                let d = c.classify_embedded(&item.prompt, v);
+                r.add(item.needs_context, d.needs_context);
+                if params == default && d.needs_context != item.needs_context {
+                    gate_misses.push(format!(
+                        "    gold {:<5} pred {:<5} (no_context {:.3} vs best task {:.3}) {}",
+                        item.needs_context,
+                        d.needs_context,
+                        d.scores.no_context,
+                        d.scores.debugging.max(d.scores.design).max(d.scores.other),
+                        item.prompt
+                    ));
+                }
             }
+            let guard_text = guard.map_or("off".to_string(), |n| format!("{n} words"));
+            let default_mark = if params == default { " (default)" } else { "" };
+            r.print(&format!(
+                "prototype margin {margin:+.2}, guard {guard_text}{default_mark}"
+            ));
         }
-        let default_mark = if margin == PrototypeParams::default().gate_margin {
-            " (default)"
-        } else {
-            ""
-        };
-        r.print(&format!("prototype margin {margin:+.2}{default_mark}"));
     }
 
     println!("\nPrototype situation errors (gold -> predicted):");
     for m in &proto_misses {
         println!("{m}");
     }
-    println!("\nPrototype gate errors at the default margin:");
+    println!("\nPrototype gate errors at the default parameters:");
     for m in &gate_misses {
         println!("{m}");
     }
