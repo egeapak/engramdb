@@ -1,0 +1,3337 @@
+{
+ "description": "Hand-written realistic agent/user turn pairs across many project types, each labelled for whether the memory system should search, merged and shuffled with a seeded script.",
+ "items": [
+  {
+   "last": "I added debug logging to the tooltip init.",
+   "prompt": "TypeError: Cannot read properties of null (reading 'addEventListener')\n    at initTooltips (tooltips.js:18:9)\n    at HTMLDocument.<anonymous> (main.js:7:3)\n\ngetting this on the settings page now, fix pls",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've tidied the imports in `pricing/`.",
+   "prompt": "the app shows KWD prices with 3 decimals but everything else with 2 — is that handled correctly in `formatPrice`? check against ISO 4217",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Do you want the CLI to read the token from `~/.config/mytool/credentials` as a fallback when `MYTOOL_TOKEN` isn't set?",
+   "prompt": "yeah",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll add a pre-commit hook running `ruff` and `black --check`. Sound good?",
+   "prompt": "sounds good",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Applied the patch on the dev board; the UART output is clean now.",
+   "prompt": "finally lol. thank you",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'm going to add a `// TODO: document` to every function missing docs.",
+   "prompt": "please don't do that",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "In short: `useMemo` caches a computed value, `useCallback` caches the function itself, which only matters when it's passed to a memoized child.",
+   "prompt": "got it, makes sense",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Updated the email regex to allow `+` in the local part.",
+   "prompt": "also dots pls, someone had a.b@x.com rejected",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can port the remaining 4 Jest test files to Vitest the same way. Should I?",
+   "prompt": "excellent",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I set up the virtualenv in `.venv`.",
+   "prompt": "install the deps from requirements-dev.txt and run the test suite, tell me what fails",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "All set: the session map is now behind a `tokio::sync::RwLock`, the deadlock repro no longer hangs, and `cargo nextest run` passes 418/418.",
+   "prompt": "perfect",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Just to make sure I build the right thing: you want the CSV export to include archived projects too, not just active ones, right?",
+   "prompt": "right",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can't tell from the logs whether the 500 comes from nginx or from the app. Want me to add request IDs to both?",
+   "prompt": "yes",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Want the notebook cells that do the training loop moved into `train.py` so we can run it from the CLI?",
+   "prompt": "yup",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The A/B analysis notebook is done: uplift is +3.4% with p=0.02.",
+   "prompt": "nice, thats what we hoped for",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Done — the S3 upload now streams instead of buffering the whole file in memory. I could also add a retry with exponential backoff on 5xx responses from S3 if you want.",
+   "prompt": "sure",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Understood, I won't touch the Makefile — it's shared with the firmware team.",
+   "prompt": "ok",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Fixed the typo in the onboarding email template and redeployed the `mailer` worker.",
+   "prompt": "thanks! now can you look at why the welcome email goes out twice for users who sign up via google oauth? i think theres a duplicate event somewhere in auth/callbacks.py",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Linted, no issues.",
+   "prompt": "can you add an endpoint `GET /users/:id/activity` that returns the last 50 audit log entries for that user, paginated",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Should I also handle the case where the uploaded image is HEIC?",
+   "prompt": "ya iphones send those a lot",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've applied the Prettier config to the frontend.",
+   "prompt": "whats the difference between our `useSession` and `useAuth` hooks? they look almost the same",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've updated the seed data with the new product categories.",
+   "prompt": "how does the `seed.ts` script decide which tenant to use? i keep getting data in the wrong tenant",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Should I bump the major version since the config format changed?",
+   "prompt": "no, keep it",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I can help with anything else in the repo.",
+   "prompt": "Refactor `src/game/physics.cpp` so the collision broadphase uses a uniform grid instead of the O(n²) loop. Keep the public API of `PhysicsWorld` unchanged and add a benchmark under `bench/` comparing old vs new with 1k, 5k and 10k bodies.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The yellow warning in the build log is just webpack's deprecation notice for `optimization.namedModules`. It's harmless and goes away when we move to webpack 5.",
+   "prompt": "fine",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The only clean fix is to vendor the patched `libyaml` under `third_party/` until upstream cuts a release. It's ~3k lines. Should I do that?",
+   "prompt": "alright",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "That's why the results differ slightly between the GPU and CPU paths — the GPU uses fused multiply-add.",
+   "prompt": "interesting, didnt know that",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I added a fallback to the in-memory cache when Redis is down. It's logged at WARN.",
+   "prompt": "make it error level, we need to page on that",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll wait for your next instruction.",
+   "prompt": "write a migration that renames `customer_ref` to `customer_id` in the payments table without downtime",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I bumped the poll timeout on the Kafka consumer test and it passed 3 times locally. Is it still flaky in your CI runs?",
+   "prompt": "nah",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can write the docstrings in Google style or NumPy style. The repo seems to mix both.",
+   "prompt": "numpy",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'm about to run `terraform apply` against the prod workspace.",
+   "prompt": "WAIT dont",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Should I target the iOS or the Android build first for the push notification fix?",
+   "prompt": "both",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Bad news: the geocoding API just doesn't support batch requests, so 10k addresses will always be 10k calls. We're stuck with client-side rate limiting.",
+   "prompt": "hmm ok",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Added the `Cmd+K` shortcut for the command palette. On Windows/Linux it's currently unbound.",
+   "prompt": "ctrl+k there",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Ok, I staged the changes but didn't commit.",
+   "prompt": "commit + push",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "FYI the model checkpoint is saved at `runs/exp42/best.pt` (val loss 0.183).",
+   "prompt": "cool",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I hope that clarifies the borrow issue with the iterator.",
+   "prompt": "it does, thx a lot",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Fixed the `react/jsx-key` warning.",
+   "prompt": "our bundle is 4mb, can you run the analyzer and tell me the top 5 biggest deps",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Started rewriting `styles/main.css` in Tailwind utility classes...",
+   "prompt": "stop, dont convert the css",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I've updated the docs index.",
+   "prompt": "pls add a CONTRIBUTING section about how to run the e2e tests locally with docker compose",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "If you can live without the dark-mode tweaks in this release, I'll ship the accessibility fixes today and do dark mode tomorrow. Deal?",
+   "prompt": "deal",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Want me to switch the CI runners to ARM to cut costs?",
+   "prompt": "no, too risky right now",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Should I run the full Playwright e2e suite too? It takes ~12 minutes, but it's the only thing that covers the checkout redirect.",
+   "prompt": "yep",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Here's what's left on the checklist:\n- [x] schema\n- [x] API\n- [ ] admin UI\n- [ ] docs",
+   "prompt": "next one",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'm going to delete the unused feature flags from LaunchDarkly.",
+   "prompt": "leave the flags alone, product still uses some",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "So you want the leaderboard to reset weekly on Monday 00:00 UTC, but keep all-time stats in a separate table — correct?",
+   "prompt": "yes exactly",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "All done with the type migration.",
+   "prompt": "merci! now pls make the date pickers use the user locale instead of hardcoded en-US",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I'm planning to add a GitHub Action that runs `tflint` and `terraform validate` on every PR touching `infra/`. Ok?",
+   "prompt": "ok cool",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I ran the formatter; it touched 212 files because of the new `line-length = 100`.",
+   "prompt": "put that in its own commit",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "So the extra rows came from the LEFT JOIN on `tags` — every tag duplicated the parent row. The GROUP BY I added collapses them back, and the totals match the finance sheet now.",
+   "prompt": "right",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "For the timeout I'm thinking 5s by default, overridable with `HTTP_TIMEOUT_MS`. Would that work, or do you want it in the YAML config instead?",
+   "prompt": "that works",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I removed the dead code from the old onboarding flow.",
+   "prompt": "can we get rid of moment.js entirely? replace with date-fns where its used",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've resolved the merge conflicts in `vision/`.",
+   "prompt": "the build on the jetson is broken since the cuda 12 upgrade, `nvcc fatal : Unsupported gpu architecture 'compute_53'`. can you fix the CMakeLists",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Fixed 8 of the 14 lint warnings. Do you want me to keep going with the remaining 6?",
+   "prompt": "keep going",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "While I'm in there, I could also add a `CODEOWNERS` entry for `packages/payments` so the payments team gets auto-requested.",
+   "prompt": "sure why not",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The model trains now, but val loss plateaus around 0.41 after epoch 3. Could be the LR schedule — it's a flat 3e-4 right now.",
+   "prompt": "try cosine w/ warmup",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Okay, the README now mentions Windows support.",
+   "prompt": "lol we dont support windows, revert that and mention WSL instead",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Pull request merged.",
+   "prompt": "thank u so much",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I changed the CORS config to allow `https://app.example.com` and redeployed. Does the preflight pass now?",
+   "prompt": "no",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Ok, the 1.12 release is out on all stores.",
+   "prompt": "great. done for the week 🍻",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I suggest caching the compiled regexes in a `once_cell::sync::Lazy` instead of rebuilding them per call. Should I?",
+   "prompt": "yes do it",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'd skip writing tests for the throwaway migration script, since we're deleting it right after the backfill.",
+   "prompt": "fine by me",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Pushed the fix to your branch.",
+   "prompt": "ok thx, ill take it from here",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "That's everything I found: 11 raw SQL strings outside `repositories/`.",
+   "prompt": "ok so then lets write a test that fails if anyone adds a new raw sql query outside the repository layer",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The flamegraph shows ~70% of request time in JSON serialization, so the DB isn't the bottleneck at all.",
+   "prompt": "ya",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Rewrote the report query using a CTE. It's more readable, but EXPLAIN shows it's ~2x slower because Postgres 11 materializes CTEs.",
+   "prompt": "go back to the old one then",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Fixed the import cycle between `models.user` and `models.team` by moving the type hints under `TYPE_CHECKING`. Want me to run the full test suite?",
+   "prompt": "yes pls",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Fixed the race in `ws_handler` by holding the lock during broadcast. Want me to write a test that reproduces the old race?",
+   "prompt": "yes if its not too hard",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I wrote the template parser with regexes. It works for the samples but will probably break on nested braces.",
+   "prompt": "rewrite it with a proper tokenizer",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Done, the branch is pushed.",
+   "prompt": "perfect thanks. last thing for today: open a draft PR with a description summarizing the changes",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Updated the Swagger docs for the `/orders` endpoints.",
+   "prompt": "lets add rate limiting to the public api, 100 req/min per api key, using the redis we already have",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Two approaches for the pagination:\n1. offset/limit — simplest, but slow past page ~500\n2. keyset pagination on `(created_at, id)` — fast, but no jumping to arbitrary pages\n\nWhich do you prefer?",
+   "prompt": "2",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Which env should I run the integration tests against? I'll default to `dev` unless you say otherwise. Ok?",
+   "prompt": "ok",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "PR is up: #562.",
+   "prompt": "bye",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Here's the summary of the codebase layout you asked for: `core/` is domain logic, `adapters/` wraps external services, `web/` is the FastAPI app.",
+   "prompt": "ok. where should a new 'export to pdf' feature live given that structure? propose files and then implement a stub",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Can I go ahead and delete the `tmp_debug/` folder? It has ~2GB of old core dumps.",
+   "prompt": "sure thing",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Here's the explanation: CPython's GIL means threads won't speed up CPU-bound code, which is why the multiprocessing version is faster.",
+   "prompt": "oh ok i see, thanks",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The `useCart` hook is now memoized and the re-render storm is gone on the product page. The same pattern exists in `useWishlist` and `useRecentlyViewed` — should I apply it there too?",
+   "prompt": "yes",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "FYI the GitHub Actions cache got evicted, so the next CI run will be slow (~20 min) while it rebuilds. Nothing's broken.",
+   "prompt": "kk",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I updated the README with the new setup steps.",
+   "prompt": "pls bump node to 20 in .nvmrc, the dockerfile and the CI matrix",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Does that answer your question about why the `Rigidbody2D` jitters? It's interpolation being off while the camera follows in `LateUpdate`.",
+   "prompt": "yes",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Fixed the panel layout on tablets. On phones the sidebar still overlaps the content below 400px.",
+   "prompt": "phones too pls",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The `build-arm64` job failed on a network timeout pulling the base image. Should I rerun it?",
+   "prompt": "ya",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Sorry about that, I've undone the change to the hot path.",
+   "prompt": "np. instead, add it behind a config option `experimental.fast_path` defaulting to false",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The new caching layer cuts DB reads by ~60% in the load test. Ready to roll it out?",
+   "prompt": "roll it to 10% first",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've pushed the fix for the off-by-one in the pager.",
+   "prompt": "where is the retry policy for the sqs consumer configured",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Ok, the rollback worked and traffic is back on the old version.",
+   "prompt": "lets write a smoke test that runs after every deploy and hits /health, /login and /api/products, fails the pipeline if any non-200",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The linter flagged 23 `no-explicit-any` violations in `src/legacy/`. I left them alone since it's legacy code.",
+   "prompt": "fix them anyway",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The PR description is updated.",
+   "prompt": "what tests cover the `ReconcileInventory` job? i want to change it and dont want to break stuff",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The data pipeline ran successfully end to end on yesterday's partition.",
+   "prompt": "how many rows did the dedup step drop? and can u make it log that number every run",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The water shader compiles on Metal now.",
+   "prompt": "does it compile on vulkan too? run the glslang validator on all the shaders in assets/shaders",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I can add a `--dry-run` flag to `deploy.sh` that prints the kubectl commands instead of running them. Want that?",
+   "prompt": "awesome",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The linter is happy now.",
+   "prompt": "good stuff",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Shall I regenerate `poetry.lock` with the new `pydantic>=2.5` constraint? It'll bump a few transitive deps.",
+   "prompt": "👌",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The test passes now — I changed the assertion to compare sorted lists.",
+   "prompt": "ok but WHY did it fail before? i want to understand, not just have it green",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Next I'd update the Helm values for staging to use the new image tag `v1.8.2`. Proceed?",
+   "prompt": "ok 👍",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Option A: keep Redux and add RTK Query. Option B: move to TanStack Query and drop Redux for server state entirely. B is less code long-term but a bigger diff now.",
+   "prompt": "B",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can generate the TypeScript types from the OpenAPI spec with `openapi-typescript` and replace the hand-written ones in `src/api/types.ts`. Want me to?",
+   "prompt": "cool",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Note: I didn't touch `prod.tfvars`, only `dev.tfvars`.",
+   "prompt": "k",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Upstream already fixed it in 0.17.4; I bumped us to that and the warning's gone.",
+   "prompt": "👍",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Would you mind if I leave the flaky test quarantined rather than fixing it today? The fix needs a change in the test harness.",
+   "prompt": "sure why not",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'd leave the verbose logging in place until after the launch — it's cheap and it'll help if anything goes sideways. We can strip it next sprint.",
+   "prompt": "sounds good",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Fixed the null pointer in the config parser and added a regression test. All 312 tests pass.",
+   "prompt": "ty!",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'd rather not hand-edit the generated gRPC stubs; I'll regenerate them with protoc 25 and commit the output instead. Fine?",
+   "prompt": "fine by me",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "PR #977 is merged into main and the release branch has been cut. I deleted `fix/email-index`.",
+   "prompt": "lgtm",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Done — v4.0.0 is tagged and published to npm.",
+   "prompt": "🎉🎉",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I've merged dependabot's 5 open PRs.",
+   "prompt": "Can you audit our `useEffect` usage in `src/pages`? I suspect a bunch of them are missing deps or should be event handlers instead. List them with a recommendation each.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The signup API returns 201 now with the created user.",
+   "prompt": "is our password hashing using bcrypt or argon2? and what cost factor",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "It'd take about 10 minutes to add a `--json` output mode to `lsdeps`. Want it?",
+   "prompt": "sure",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I could also switch us to structured logging with `tracing` instead of `log`.",
+   "prompt": "maybe another time",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The firmware boots on the dev board. I couldn't test on the rev C hardware since I don't know which port it's on.",
+   "prompt": "flash it on rev c, its /dev/ttyUSB1",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Hotfix is live and the checkout errors stopped.",
+   "prompt": "phew. thanks man",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The Python package builds as a wheel now.",
+   "prompt": "make it also build for arm64 macos in the release workflow using cibuildwheel",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Any other endpoints you want rate-limited?",
+   "prompt": "nope",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I have 7 small fixup commits on `feat/rate-limit`. Should I squash them into one before pushing so the history stays clean?",
+   "prompt": "👍",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Logs are rotated daily now via logrotate.",
+   "prompt": "can you also ship them to loki? we have a promtail config in ops/ already but its not wired",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Regenerated `poetry.lock`; only `pydantic`, `pydantic-core` and `annotated-types` changed. Tests pass.",
+   "prompt": "👌",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Sure, happy to help with anything.",
+   "prompt": "explain what this regex does: `^(?=.*\\d)(?=.*[a-z])(?=.*[A-Z]).{8,}$`",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The new endpoint is documented in the OpenAPI spec under `Payments`.",
+   "prompt": "Can you explain how the `OrderStateMachine` handles a refund after a partial shipment? I need to understand it before the meeting tomorrow.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've run the benchmarks; the numbers are in `bench/results.md`.",
+   "prompt": "Can you compare those numbers with the ones from last month (they're in the git history of the same file) and tell me which functions regressed?",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The type error is gone but now `useQuery` returns `unknown` for `data` in `ProjectList.tsx`.",
+   "prompt": "fix that too",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Switched `cli/main.c` to `getopt_long`. `--help` now prints usage, and the existing short flags behave exactly as before.",
+   "prompt": "nice",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Shall I write a quick benchmark comparing `serde_json` and `simd-json` on our actual payloads before we decide?",
+   "prompt": "sure",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Do you want me to also fix the same typo in the Spanish and German translation files?",
+   "prompt": "yep",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've enabled `strict: true` in `tsconfig.json`.",
+   "prompt": "ok now fix all the new type errors, theres like 140",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I could squash the commits if you prefer a single one.",
+   "prompt": "nope its fine as is",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Should I apply the same fix to the deprecated v1 client?",
+   "prompt": "no, v1 is going away anyway",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Fixed the typo in the error message.",
+   "prompt": "thx",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The scraper works but got rate-limited (HTTP 429) after ~300 requests.",
+   "prompt": "add a delay, like 1s between requests",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "That compiles now, but I had to wrap the FFI call to `hal_spi_transfer` in an `unsafe` block.",
+   "prompt": "can u add a comment explaining why its safe",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I bumped `react-native-reanimated` to 3.6.1 and cleared the Metro cache. Is the Android build working on your side now?",
+   "prompt": "no",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I think a single SQLite file is fine at your scale; no need for Postgres yet.",
+   "prompt": "ok yeah agree, lets keep sqlite",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I think the 'save' bug might be user error — the form requires the email to be confirmed first.",
+   "prompt": "no its not, happens with confirmed emails too. dig deeper",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Generated the types from the OpenAPI spec and replaced `src/api/types.ts`. `tsc --noEmit` is clean and no call sites needed changes.",
+   "prompt": "cool",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Ok, I've reverted the experimental changes in `search/`.",
+   "prompt": "write a script that finds all unused i18n keys in src/locales/en.json and prints them",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "That's all the context: the old `legacy_auth` module is only imported by the admin CLI, so deleting it is safe whenever you get to it.",
+   "prompt": "ok",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Should I keep going with the rest of the refactor?",
+   "prompt": "lets pause here, i need to review first",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The cert renewal is automated with certbot now.",
+   "prompt": "does nginx reload after renewal? check the deploy hook",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Peak memory dropped from 1.4GB to 380MB after switching to the streaming reader.",
+   "prompt": "wow thats huge, thank you!",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Benchmark results:\n- baseline: 182 ms\n- arena allocator: 121 ms\n- arena + SIMD: 97 ms",
+   "prompt": "go with the last one",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Before I continue, I'll reformat the whole repo with the new prettier config.",
+   "prompt": "pls dont, it'll wreck everyone's branches",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Upgraded to Spring Boot 3.2; all integration tests pass.",
+   "prompt": "sweet, ty",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Proposal: move the shared protobufs into `packages/proto`, generate Go + TS from a single `buf.gen.yaml`, and delete the two copies. I'll start with the Go side. Sgtm?",
+   "prompt": "sgtm",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "So to sum up: writes bump the version key, and readers compare their cached version on every hit, so stale entries are never served even if eviction lags.",
+   "prompt": "Ok I get it now, thanks. Could you write that up as a doc comment at the top of `cache/invalidate.go` so the next person doesn't have to ask?",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Want me to generate a migration for the new column too?",
+   "prompt": "no",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Added the feature flag `new_checkout`, defaulting to off everywhere.",
+   "prompt": "default it to on in staging",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Running the full test suite now (takes ~15 min)...",
+   "prompt": "cancel that, i need the machine",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Let me know if there's anything else.",
+   "prompt": "yeah actually — set up a staging env in vercel that deploys from the `develop` branch, and add the env vars from .env.staging.example",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Snapshots updated and committed; the whole suite is green.",
+   "prompt": "great",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "That should fix the hot reload issue — it was Vite's `server.watch.usePolling` setting under WSL.",
+   "prompt": "yep",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "All Jest tests are ported to Vitest; the suite runs in 9s instead of 41s.",
+   "prompt": "excellent",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Let me know if you want me to look at anything else.",
+   "prompt": "sure",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Done with the code review comments.",
+   "prompt": "thank you, ill re-review later",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Heads up: the nightly Airflow DAG takes about 40 minutes, so the new partitions won't show up in the dashboard until after 3am UTC. Nothing to do on your side.",
+   "prompt": "k",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Here's the diff for the `users` index change:\n\n```sql\nCREATE INDEX CONCURRENTLY idx_users_email_lower ON users (lower(email));\n```\n\nIf it looks right I'll commit it and open the PR.",
+   "prompt": "lgtm",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I generated the migration but haven't run it. Heads up, it drops the `legacy_score` column.",
+   "prompt": "run it on local",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The Terraform plan is clean: no changes.",
+   "prompt": "we need a new s3 bucket for user uploads with versioning, SSE-KMS and a lifecycle rule moving objects to glacier after 90d. add it to infra/storage.tf",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I think that covers the bulk-edit feature.",
+   "prompt": "write the release notes for it, user facing, short",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "That's the full list of TODOs in the repo (37 total).",
+   "prompt": "make github issues for the ones in `core/` and label them tech-debt",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Let me know what you want to work on next.",
+   "prompt": "add a `--verbose` flag to the cli that prints the http requests and response codes",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Pushed `feat/rate-limit` and opened PR #318. CI passed (lint, unit, integration) in 6m12s.",
+   "prompt": "👍",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "This PR is getting big (34 files). It'd make sense to split it: one PR for the Redux → Zustand migration, one for the UI tweaks. Want me to split it that way?",
+   "prompt": "makes sense",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'd keep the sync API for now — going async would ripple through 30 modules for very little gain.",
+   "prompt": "agreed",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'll go ahead and delete the old `assets-legacy` S3 bucket.",
+   "prompt": "dont delete anything yet",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Lighthouse mobile score is 62. The biggest item is the unoptimized hero images (2.1MB total).",
+   "prompt": "fix the images",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Got it — I'll wait for you to share the credentials.",
+   "prompt": "ok, brb",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I think the rest of the PR looks fine; the only real issue was the missing `await` in `saveDraft`.",
+   "prompt": "agree",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The k8s secret `worker-creds` is created in the `jobs` namespace.",
+   "prompt": "mount it into the worker deployment as env vars and restart",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The pipeline is green on main.",
+   "prompt": "great, now add a step that builds and pushes the docs site to gh-pages on tag",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Shall I also refactor the tests to use pytest fixtures?",
+   "prompt": "nah leave them",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The animation is smooth on desktop now. Want me to check it on lower-end Android?",
+   "prompt": "pls, use the emulator with the pixel 3 profile",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The reason the Spark job OOMs is the skewed join on `customer_id` — a handful of keys have millions of rows, so one executor gets all of them. Salting the key spreads them out across partitions.",
+   "prompt": "makes sense",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "All of Priya's review comments are addressed and she approved the PR.",
+   "prompt": "lgtm",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I can add type annotations to the remaining 12 functions in `etl/transform.py` so `mypy --strict` passes. Want me to?",
+   "prompt": "please",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Before I touch the shader: the outline should be 2px in screen space, not world space, right?",
+   "prompt": "right",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll set the HPA to min 2 / max 10 replicas with a 70% CPU target. Sound right?",
+   "prompt": "ok perfect",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Everything's done for JIRA-2291.",
+   "prompt": "ok cya tomorrow",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The deploy step timed out waiting for the ECS service to stabilize. Might just be slow today, the tasks look healthy in the console.",
+   "prompt": "try again",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've finished the investigation; the root-cause writeup is above. Short version: the webhook is retried by Stripe and we don't dedupe.",
+   "prompt": "great writeup. now implement the fix you proposed (option 2, the idempotency key) and add tests",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "That's basically it: Terraform wants to recreate the NAT gateway because the `subnet_id` changed upstream, not because of anything in your diff. Once the subnet is stable the plan will be clean.",
+   "prompt": "sure",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I reverted the change to `Podfile.lock` but kept the Swift changes. The build now picks up the older Firebase SDK.",
+   "prompt": "hmm no, revert everything",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Unfortunately there's no way to make the Arduino Uno do a floating-point FFT at 44.1kHz — it simply doesn't have the cycles. You'd need an ESP32 or a Teensy 4 for that.",
+   "prompt": "alright",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I added a unit test for `Bitset::set_range`.",
+   "prompt": "can u check whether `std::vector<bool>` is causing the perf problem in `Bitset::scan`? i read its weird",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Uploaded the build artifacts to the release.",
+   "prompt": "whats the signing config for the android release build? i need to rotate the keystore",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I can generate a sequence diagram for the OAuth flow if that's helpful.",
+   "prompt": "nah im good",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I refactored the reducer, but I'm not 100% sure the `UNDO` action still behaves the same.",
+   "prompt": "write a test for it then",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Thanks for the extra context on the billing rules, that clears up the proration question.",
+   "prompt": "sure thing",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The SQL files are formatted with sqlfluff.",
+   "prompt": "add a db index for the slow query in reports — the one filtering on `org_id` and `created_at`",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Changed the Gradle JVM args to `-Xmx4g` in `gradle.properties`. That should stop the daemon from dying mid-build.",
+   "prompt": "same error",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've documented all the env vars in `.env.example`.",
+   "prompt": "what does `FEATURE_X_ROLLOUT` actually do? is it still used anywhere",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Here is the proposed folder structure:\n```\napps/\n  web/\n  admin/\npackages/\n  ui/\n  config/\n```",
+   "prompt": "looks good, go",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've restarted the Celery workers with `--pool=prefork`. Is the queue draining now?",
+   "prompt": "nope",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Helm release `api-staging` upgraded to `v1.8.2`, all 4 pods Ready, smoke test passed.",
+   "prompt": "ok 👍",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "That's why the Docker image is 1.9GB — the build stage's `node_modules` was copied into the final image. Multi-stage fixes it, which is what the new Dockerfile does.",
+   "prompt": "y",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "All done. The bug was a missing `break` in the `switch` in `handle_cmd`.",
+   "prompt": "classic lol. thanks",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Should I add a regression test for the missing null terminator in `uart_read_line`?",
+   "prompt": "absolutely",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I created the ticket for the checkout perf work.",
+   "prompt": "can you write a k6 load test for the checkout flow, ramp to 200 VUs over 5 min",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Shall I use `pnpm` or stick with `npm` for the new package?",
+   "prompt": "pnpm",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The backfill script is in `scripts/backfill.py`.",
+   "prompt": "run it with --dry-run against staging and paste me the output",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Formatted and linted, no warnings.",
+   "prompt": "great thx. one more: the `/health` endpoint should also check the redis connection and return 503 if its down",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Here's a draft of the `retry_with_jitter` helper in `net/retry.py`. I haven't wired it into the HTTP client yet.",
+   "prompt": "wire it in",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "In other words, the stutter isn't the network — it's the GC pause every ~2s from allocating new vectors each frame.",
+   "prompt": "yes exactly",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Done! TestFlight build 214 is uploaded and processing.",
+   "prompt": "ok!",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The fix is ready locally. Should I hold off on pushing until you've checked the numbers in the notebook?",
+   "prompt": "please",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Here's what I'd change in the k8s manifests:\n- resource limits on `worker`\n- liveness probe on `api`\n- a PodDisruptionBudget for `api`",
+   "prompt": "all three",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Would a nightly batch be acceptable for the search index refresh, or do you need it near-realtime? Nightly is a lot simpler — a single cron job.",
+   "prompt": "works",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I added logging around the payment webhook; the next failure should show the raw payload.",
+   "prompt": "it failed again, here: {\"error\":\"signature_mismatch\",\"ts\":1729012233}",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Could you try `make flash` again on your board? I fixed the linker script so `.bss` no longer overlaps the bootloader region.",
+   "prompt": "works",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I finished the accessibility pass on the navbar.",
+   "prompt": "now do the footer and the modal dialogs, focus trap + aria labels",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've written the Dockerfile, but `docker build` fails on `apk add` because the Alpine mirror is unreachable from here.",
+   "prompt": "use debian slim instead",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Okay, the old branch is deleted.",
+   "prompt": "set up a husky pre-push hook that runs the typecheck",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The ETL job finished; 4.2M rows loaded into `fact_sales`.",
+   "prompt": "nice nice",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I made the change in `src/routes/admin.py`. Want me to also apply it to `src/routes/public.py`?",
+   "prompt": "yes plz",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Rebuilt the Unity addressables and re-uploaded the bundle to the CDN. Do the textures load in the editor now?",
+   "prompt": "nope",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Okay, I'll keep that in mind.",
+   "prompt": "please convert all the `var` declarations in public/js to let/const, no other changes",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The notebook runs top-to-bottom now without errors.",
+   "prompt": "convert the notebook into a proper python module with a `main()` and argparse for the data path and epochs",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Plan: (1) add the column, (2) dual write, (3) backfill, (4) switch reads, (5) drop the old column. I'll do 1 and 2 in this PR.",
+   "prompt": "do 3 too",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Done, all three handlers now use the shared `validateBody` middleware.",
+   "prompt": "how does the auth middleware decide which routes are public? i cant find the list anywhere",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Here's the error from the integration run:\n```\npsycopg2.OperationalError: FATAL: sorry, too many clients already\n```",
+   "prompt": "?? fix",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Done.",
+   "prompt": "Ok next: the `orders` list endpoint needs filtering by status and date range. Use query params `status=` (comma separated) and `from`/`to` (ISO dates). Validate them, return 400 on garbage, and update the OpenAPI spec and tests.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The 429s are coming from GitHub's secondary rate limit, not our code — we fire too many concurrent requests from the same token.",
+   "prompt": "yeah makes sense",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The CSV has 4 columns with mixed date formats (`DD/MM/YYYY` and `YYYY-MM-DD`).",
+   "prompt": "normalize them to iso",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll leave the protobuf layout alone for now, since the monorepo migration next quarter will change it anyway.",
+   "prompt": "sgtm",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I tried bumping the healthcheck timeout to 30s but it still fails intermittently. Should I dig into the readiness probe config?",
+   "prompt": "pls do",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The `orders` and `billing` services both define their own `Money` type with slightly different rounding. Should I consolidate them into `libs/money`?",
+   "prompt": "yes",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'd suggest we drop the legacy `/v1/search` endpoint entirely and 301 to `/v2/search` — traffic on v1 is under 0.1%. Should I go ahead?",
+   "prompt": "agreed",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Applied the fix to the date parser; `2024-02-29` now parses correctly. Want me to look at the timezone issue next?",
+   "prompt": "ya go",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Done, tests green (1,204 passed).",
+   "prompt": "great job. next: migrate the remaining class components in src/components/legacy to function components with hooks",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The flaky test is fixed and I re-ran CI three times; all green.",
+   "prompt": "good",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "So that's why `[10, 9, 1].sort()` gives `[1, 10, 9]` — without a comparator it compares elements as strings.",
+   "prompt": "TIL, thanks",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I've cleaned up the unused imports across the workspace.",
+   "prompt": "why is `cargo build --release` so much slower than debug on this project? like 6 min vs 40s",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The users table is now sortable by every column.",
+   "prompt": "add a search box above the table that filters by name and email, debounced 300ms",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Done. I also left a note in the PR about the flaky test.",
+   "prompt": "appreciate it",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Got it: you want the button disabled while the request is in flight. Done in `SubmitButton.tsx`.",
+   "prompt": "and show a spinner",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Should the CLI print errors as JSON when `--output json` is passed, or keep them human-readable on stderr?",
+   "prompt": "json",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Added `--dry-run` to `deploy.sh`; it prints every kubectl command with the resolved namespace. README has an example now.",
+   "prompt": "awesome",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "To pick up the new `DATABASE_URL` I need to restart the docker compose stack, which will drop your local Postgres connections. Ok if I restart it?",
+   "prompt": "k",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can show you the diff or just commit it directly. Which do you want?",
+   "prompt": "show diff first",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can't find where `CURRENCY_PRECISION` is defined — it's referenced in 6 places but there's no declaration in the repo.",
+   "prompt": "check the generated folder",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Next step: I'll wire the new `/v2/invoices` endpoint into the Flutter client, add a repository test with a mocked Dio adapter, and update the API docs. Sound good?",
+   "prompt": "sounds good",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll go through each compiler warning one by one now.",
+   "prompt": "no, ignore warnings for now",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Feel free to ping me if the import breaks again.",
+   "prompt": "sure",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Your branch is up to date with `origin/main`.",
+   "prompt": "rebase my branch feat/notifications on main and fix conflicts if any",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Done!",
+   "prompt": "thanks a lot. now can you write unit tests for `parseDuration` in utils/time.ts, it has none",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I updated `webpack.config.js` to use `ts-loader` for `.tsx` files. Can you try `npm run build` again?",
+   "prompt": "still failing\n\nERROR in ./src/index.tsx\nModule parse failed: Unexpected token (12:4)",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can either add `tenant_id` as nullable now and backfill later, or make it NOT NULL with a default. Which one?",
+   "prompt": "nullable + backfill",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Ok, I've added the env var to the build settings.",
+   "prompt": "can u make the unity build script also produce a dedicated server build for linux",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "That should be everything you need to understand how the plugin loader resolves entry points.",
+   "prompt": "yeah clear now, thanks",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The rename touches 41 files. I've done `src/`; `tests/` is next.",
+   "prompt": "continue",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll stand by.",
+   "prompt": "translate the error messages in `errors.py` to Turkish too, add a `tr` locale file",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've installed the dependencies with `npm ci`.",
+   "prompt": "run `npm audit` and fix whatever is high or critical without major version bumps",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I pushed the hotfix to `main`.",
+   "prompt": "thanks!! can you also backport it to the 2.x branch, customers on LTS are hitting it",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "`go mod tidy` wants to upgrade `google.golang.org/grpc` from 1.58 to 1.62. Accept that?",
+   "prompt": "accept",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "So the reason the ESP32 resets is the brownout detector: the radio draws a spike on TX and the 3.3V rail dips below 2.43V. A bigger bulk cap near the module usually fixes it. Does that match what you're seeing on the scope?",
+   "prompt": "yes",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Ok, I'll stop here for today — the branch is pushed, and I left TODOs in `ThemeProvider.tsx` where dark mode still needs work.",
+   "prompt": "deal",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Shall I schedule a `VACUUM FULL` on the events table tonight?",
+   "prompt": "dont, the dba team handles that",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Want me to also add a Grafana panel for the new consumer lag metric?",
+   "prompt": "nah",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Push succeeded.",
+   "prompt": "why did CI fail on the lint step? it passed locally",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I'll bump the minimum iOS deployment target to 15.0 so we can use the newer SwiftUI APIs. That ok with you?",
+   "prompt": "ok!",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Moved the env parsing into `config.ts`. The old direct `process.env` reads in 9 files still work, they're just duplicated now.",
+   "prompt": "clean those up too",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Training finished: 12 epochs, best val F1 0.884 at epoch 9. Checkpoint saved.",
+   "prompt": "nice. now plot the confusion matrix for the val set and save it as a png in reports/",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Your feature flag is live for internal users.",
+   "prompt": "make the admin dashboard show which users have the flag on",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Updated README section below. If it reads well I'll push it:\n\n> ## Running locally\n> `make dev` starts the API and the worker with hot reload...",
+   "prompt": "lgtm",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Here's the coverage report (overall 71%).",
+   "prompt": "ok which files are under 50% and are actually important? rank them",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Should I add the same `@retry` decorator to the S3 and GCS clients?",
+   "prompt": "cool",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Did my explanation of the two-phase commit flow make sense?",
+   "prompt": "yes",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Do you want me to write tests for the `slugify` helper?",
+   "prompt": "skip it for now",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'm going to restart the production database to apply the `max_connections` change.",
+   "prompt": "NO. not during business hours",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The fix is in and the tests pass. Do you also want me to bump the package version to 1.4.0 and update the CHANGELOG?",
+   "prompt": "no",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I've drafted the Alembic migration that adds `orders.fulfilled_at` and backfills it from `shipments.delivered_at`. It touches ~1.2M rows so it'll take a minute or two on staging. Want me to run it against staging now?",
+   "prompt": "ok",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I think the bug is either in the debounce hook or in the search API. Which do you want me to investigate first?",
+   "prompt": "debounce",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Summary of the review comments: 1) naming in `ledger.ts`, 2) missing error handling in `sync()`, 3) a nit about import order.",
+   "prompt": "address 1 and 2, ignore the nit",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I set the default locale to `en-US` in `i18n.ts`. Is that what you meant by 'default to English'?",
+   "prompt": "no",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "We should probably add a CHECK constraint so `quantity` can't go negative. Shall I add it in this migration?",
+   "prompt": "agreed",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Wrapped up; the branch is pushed.",
+   "prompt": "morning! picking this back up — can you summarize whats left on the offline sync feature and then start on conflict resolution",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Since both services parse the same config, it'd be simpler to move the parsing into the shared `config` crate. Want me to do that?",
+   "prompt": "yeah makes sense",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I can also write a migration guide for the v3 API if you want.",
+   "prompt": "not needed, we'll do that later ourselves",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Profiling report saved to `perf/report.html`.",
+   "prompt": "ok whats the top hotspot and can you optimize it",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The service is healthy again; p99 is back to 140ms.",
+   "prompt": "write a postmortem draft for today's outage in docs/postmortems/, timeline from the slack thread i pasted earlier",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Nice catch, fixed the string comparison in `TokenValidator`.",
+   "prompt": "can you grep for other places using `==` to compare strings in the java code",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Want me to add response caching to this endpoint as well?",
+   "prompt": "no thanks, not needed",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Created issue #1043 for the memory leak.",
+   "prompt": "Actually let's just fix it now. The leak is in `ws/server.js` I'm pretty sure — connections that close without a proper close frame never get removed from `clients`.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I moved the cron to 02:15 instead of 02:00 so it no longer collides with the backup window. Deployed to prod.",
+   "prompt": "that works",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The Grafana dashboard JSON is exported to `ops/dashboards/api.json` and committed.",
+   "prompt": "ok cool. next thing: our docker images are only tagged `latest`, i want them tagged with the git sha too in the github action, and keep latest for main",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Here's the diff for the sync task.",
+   "prompt": "Thanks. Separate question: is it safe to call `db.session.commit()` inside the Celery task the way `tasks/sync.py` does? I feel like we're sharing sessions across tasks.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I'm going to replace the `std::sync::Mutex` around the session map with `tokio::sync::RwLock`, since reads dominate and we hold it across an `.await`. That ok with you?",
+   "prompt": "perfect",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "That's merged.",
+   "prompt": "the ios app crashes on launch on ios 16 only, crashlytics says EXC_BAD_ACCESS in `ImageCache.shared`. pls investigate",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Let me know if the new docs page reads well.",
+   "prompt": "it does, thx",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "All migrations applied on staging.",
+   "prompt": "how do i connect to the prod read replica from my laptop? is there a bastion",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "All 3 lambdas deployed via SAM.",
+   "prompt": "set up cloudwatch alarms on error rate > 1% for each of them, notify the sns topic ops-alerts",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Fixed the horizontal overflow on the pricing table at 375px.",
+   "prompt": "add dark mode support to the pricing page using the existing `--color-*` css vars",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I think that's everything for the shader cleanup. Anything else you want changed before you review?",
+   "prompt": "nope",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Deployed to prod; error rate is back to baseline (0.02%).",
+   "prompt": "awesome, thanks a lot 🙏",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Want me to open an issue upstream on `vite-plugin-pwa` with the minimal repro?",
+   "prompt": "👍",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "That should fix it. I changed the `useEffect` dependencies so it only refetches when `orgId` changes.",
+   "prompt": "nope, still refetching on every render",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Okay, I've stopped the reindex job.",
+   "prompt": "thanks",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "That's done.",
+   "prompt": "the godot web export shows a black screen in safari. chrome is fine. any idea? check the export presets",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Want me to also add Zod schemas for the request bodies so validation errors return 400 instead of 500?",
+   "prompt": "yes please",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I generated the weekly churn report.",
+   "prompt": "schedule it to run every monday at 9 and email it to the team list",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Deployed `v2.14.0` to staging; smoke tests pass.",
+   "prompt": "ok now prod. same steps, and post the release in #deploys when done",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The compose file is updated with the new volume.",
+   "prompt": "add a healthcheck to the postgres service and make the api depend_on it being healthy",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "There are 3 TODOs left in `scheduler.go`: the backoff cap, the jitter, and the metrics hook. Want me to tackle them?",
+   "prompt": "first two yes, leave the third",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The tilemap was offset by half a pixel because of texture filtering; pixel-snapping the camera fixes it, which is what the change does.",
+   "prompt": "right",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'll need the Sentry DSN for the staging env to finish the integration. Do you have it?",
+   "prompt": "its in 1password under 'sentry staging', i exported it as SENTRY_DSN in your shell",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'm going to add `#[must_use]` to the builder methods so a dropped result produces a warning. Ok?",
+   "prompt": "good",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Added the `tflint` + `terraform validate` workflow; it ran on this PR and passed. It only triggers on changes under `infra/`.",
+   "prompt": "ok cool",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Rolled back to Helm revision 41.",
+   "prompt": "find out what in v1.9.0 caused the crashloop, check the pod logs from the failed rollout",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I think I misunderstood — did you want the burndown chart grouped by week or by sprint?",
+   "prompt": "sprint",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've done the first half of the refactor. Would you like me to stop here and let you review before I continue?",
+   "prompt": "yes please",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The service account has the right IAM roles now.",
+   "prompt": "set up workload identity for the gke deployment so we can drop the json key",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Want a short design doc for the event-sourcing approach before I implement it?",
+   "prompt": "yes, short one",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Removed the stray `console.log`s.",
+   "prompt": "how does the websocket reconnect logic work in `realtime/client.ts`? there's like 3 timers",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Done. Anything else?",
+   "prompt": "yes: the `/search` endpoint ignores the `lang` param. make it filter by language and add a test",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Found the root cause of the flaky `test_checkout_flow`: it depends on wall-clock time crossing midnight. I can inject a fake clock via the `Clock` protocol — should I go ahead with that?",
+   "prompt": "great",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Test coverage for `billing/` went from 61% to 78%. The remaining gaps are mostly in error branches.",
+   "prompt": "cover the error branches too",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Is this the stack trace you're seeing?\n\n```\nTypeError: Cannot read properties of undefined (reading 'map')\n    at OrderList (OrderList.tsx:42)\n```\n\nIf so I'll guard the empty-response case.",
+   "prompt": "yes thats it",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I wasn't sure whether to keep the deprecated `--legacy` flag, so I left it in for now.",
+   "prompt": "remove it",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Injected a fake clock into `test_checkout_flow` and ran it 200 times in a loop with zero failures. Pushed to your branch.",
+   "prompt": "great",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I've verified the nightly backup restores correctly into a scratch instance.",
+   "prompt": "great, thats a relief",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Want me to set up Renovate too?",
+   "prompt": "not right now",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Done, the PR is ready for review.",
+   "prompt": "add a loading skeleton to the profile page instead of the spinner",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "`process_batch` is 240 lines. I could split it into `validate`, `transform` and `persist`.",
+   "prompt": "yeah split it",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll now update all 200 snapshot files to match the new output.",
+   "prompt": "no no stop, dont update snapshots blindly",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The only way to kill the N+1 here without rewriting the serializer is `prefetch_related('line_items__product')`. It makes the queryset a bit ugly. Want me to add it?",
+   "prompt": "hmm ok",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Final benchmark: the new tokenizer is 3.2x faster on the 1GB corpus.",
+   "prompt": "amazing work!!",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I'm not sure the `strncpy` replacement is correct — it doesn't null-terminate when the source is exactly `n` bytes long.",
+   "prompt": "then use snprintf",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I've added the CI badge to the README.",
+   "prompt": "write a dockerfile for the rust service using cargo-chef for layer caching, distroless final image",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The CMake build works on Linux and macOS. I haven't tried MSVC — there's no Windows box in this environment.",
+   "prompt": "can you at least check the windows job in CI",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "So in short, the AUC drop is from the label leak being removed, not a regression — the old 0.97 was inflated.",
+   "prompt": "yup",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Delete the 14 stale feature-flag branches older than 6 months? I listed them above.",
+   "prompt": "y",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Everything's merged and the release is tagged.",
+   "prompt": "cheers, have a good one",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I added the `onError` callback to the uploader component. Shall I also show a toast to the user?",
+   "prompt": "yes and log it to sentry too",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "To recap: the Lambda cold start was 2.8s because of the bundled AWS SDK v2; switching to the v3 modular client got it down to 620ms. That's what you were after?",
+   "prompt": "yep",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Bumped the version to 0.9.1 in `pyproject.toml`.",
+   "prompt": "publish it to pypi using the token in the env, and tag the release",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "All good on my end, nothing pending.",
+   "prompt": "is there any place where we log the user's password or token by accident? grep around the logging calls in services/",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Which branch should I base this on — `main` or `release/2.4`?",
+   "prompt": "release/2.4",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "So the memory leak was the `resize` listener never being removed on unmount — every navigation added one more. The cleanup function in the effect fixes it.",
+   "prompt": "yes thats it",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I could replace the hand-rolled argv parser in `cli/main.c` with `getopt_long`, which gives us `--help` and long flags for free. Want me to switch it over?",
+   "prompt": "nice",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Your PR has been approved by both reviewers.",
+   "prompt": "great, merge it with squash. then cut release 2.5.0",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Fixed.",
+   "prompt": "the app freezes for ~2s when opening the photo picker on android 13, profile it and see whats blocking the main thread",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Since it's Friday afternoon I'd hold the prod deploy until Monday. The PR is ready whenever.",
+   "prompt": "sounds good",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Found 3 more places where we compare floats with `==` in the physics step (`integrate`, `resolve_contacts`, `sleep_check`). Fix those too?",
+   "prompt": "yes",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Should I keep the old `fetchUser` helper around as a deprecated wrapper for one release?",
+   "prompt": "no",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Do you want the retries on all endpoints, or just the idempotent GETs?",
+   "prompt": "just gets",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Okay.",
+   "prompt": "add sentry to the flask app, only enable it when SENTRY_DSN is set",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "That's how the event loop works in this codebase: everything on the UI thread goes through `Dispatcher.post`, and the image resize currently runs inline there.",
+   "prompt": "thanks for explaining. so can we move the image resizing off the main thread? use a worker pool",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I'm going to run `terraform apply` on the `dev` workspace now — it will replace the bastion host. Ok?",
+   "prompt": "k",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'm done with the refactor of the shipping module.",
+   "prompt": "awesome 🎉 now let's do the same for the billing module, extract the stripe calls behind an interface",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Two options for the lodash vulnerability:\n- (A) pin `lodash@4.17.21` via `resolutions` — quick and safe\n- (B) remove lodash entirely — touches ~40 files\n\nI'd go with A for now, ok?",
+   "prompt": "fine",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I'll start refactoring the auth module now, beginning with `SessionManager`.",
+   "prompt": "hold on, let me check with the team first",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The docs site is live at the new URL.",
+   "prompt": "👏",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I fixed the off-by-one in the ring buffer's wraparound.",
+   "prompt": "now make the ring buffer lock-free for single producer single consumer, it's written from the ISR",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I couldn't find any references to `oldAuth` anymore outside its own package.",
+   "prompt": "ok then delete the oldAuth package and its tests",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Before I write the cleanup job: the retention window for raw events is 30 days, not 90 like the old README says?",
+   "prompt": "correct",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I wrote the GraphQL resolver for `user.orders`. It's N+1 right now — one query per user.",
+   "prompt": "add a dataloader",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "PR #221 is up with the new cursor pagination.",
+   "prompt": "great. unrelated, but why does `npm test` take 3 minutes locally? it used to be 40s. can you profile it",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Wrote the summary of the data retention policy.",
+   "prompt": "how are we handling GDPR deletion requests right now? is there a job or is it manual",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The release notes for 3.2 are in `CHANGELOG.md`.",
+   "prompt": "ty. can u also set up dependabot for npm and github-actions, weekly",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Basically the borrow checker complains because `self.items.iter()` keeps an immutable borrow alive while you call `self.push()`. Collecting into a Vec first ends the borrow.",
+   "prompt": "yeah",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Merged the hotfix into `main` and `release/4.1`.",
+   "prompt": "the scheduler is sending duplicate reminders when the user's timezone is ahead of UTC, see ticket SUP-882. find out why",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I'm stuck on the auth test: it needs a JWT signed with the test key and I'm not sure where that key lives.",
+   "prompt": "look in tests/fixtures, theres a pem",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I updated the dependencies and the lockfile.",
+   "prompt": "Hey, new task. We need a CLI command `acme users import <file.csv>` that reads users from a CSV (email, name, role), validates them, and creates them via the existing `UserService`. Dry-run by default, `--commit` to actually write. Print a summary table at the end.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Unit tests pass. I haven't checked the Storybook stories yet.",
+   "prompt": "check storybook",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Summary: we use optimistic locking via the `version` column, so concurrent updates fail with a 409 rather than silently overwriting each other.",
+   "prompt": "ok thats what i thought",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The calendar view renders with the new event cards.",
+   "prompt": "events spanning midnight show on the wrong day for users in UTC-5. pls fix",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "So the deadlock happens because the two goroutines acquire `mu` and `cacheMu` in opposite order. Consistent lock ordering fixes it.",
+   "prompt": "ahh that makes sense now",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Merged main into your branch locally, but there's a conflict in `package-lock.json`.",
+   "prompt": "just regenerate it",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "Fixed the bug with the empty cart badge.",
+   "prompt": "the checkout page is slow on first load, like 4s LCP. find whats blocking",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Done. The migration runs fine, but there's a warning about the deprecated `datetime.utcnow()` in two places.",
+   "prompt": "fix the warnings as well",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The Makefile targets are documented in `make help`.",
+   "prompt": "make the `make test` target also run the unit tests under `firmware/tests` using the host gcc build",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've reverted that commit on main.",
+   "prompt": "pls cherry-pick the fix from release/3.1 into main",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Migration applied on staging, backfill finished in 94s, and `pytest tests/orders` is green (212 passed). Nothing else pending on this one.",
+   "prompt": "ok",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Tests pass on all three Python versions in CI.",
+   "prompt": "nice job, ty",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Fixed: the off-by-one came from `BETWEEN` being inclusive on both ends, so the last day was counted twice. Tests updated and passing.",
+   "prompt": "correct",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "That's the whole migration done. Let me know if you need anything else.",
+   "prompt": "thats all for today, thanks",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Cleaned up the `utils` folder, 6 files removed.",
+   "prompt": "how is the JWT refresh token rotation implemented? where do we invalidate old refresh tokens",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Got it, I'll leave the API untouched.",
+   "prompt": "but please update the client SDK to handle the new error codes 409 and 422",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The flame graph is attached to the PR.",
+   "prompt": "is `Arc<Mutex<HashMap>>` the right choice here or should we use dashmap? explain the tradeoff for our access pattern",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Would you like me to write a blog post draft about this migration?",
+   "prompt": "haha no",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I think the right call is to not upgrade to Next 15 until the app router caching issues settle down.",
+   "prompt": "absolutely",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "Honestly I don't think we need a cache in front of this query; EXPLAIN shows an index-only scan at ~4ms p99. Adding Redis would mostly add failure modes.",
+   "prompt": "agreed",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "I fixed the unchecked `Optional.get()` in `InvoiceService.calculateTax`. There are similar unchecked calls in `ShippingService` and `RefundService`.",
+   "prompt": "do the same there",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I fixed the compile warnings in the HAL layer.",
+   "prompt": "add a watchdog timer to the main loop in firmware/src/main.c, 2s timeout, kick it every iteration",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Two snapshot tests fail because the button label changed from 'Submit' to 'Save'. Should I update the snapshots?",
+   "prompt": "great",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The cleanup cron job is disabled.",
+   "prompt": "why is the `events` table 300GB? which columns are taking the space",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Done with the cleanup.",
+   "prompt": "pls write a `justfile` with recipes for build, test, lint, fmt and run, mirroring whats in the Makefile",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "Shall I open a PR for this?",
+   "prompt": "no ill do it myself",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I need to stop the local Kafka container to change the advertised listeners. Your consumer in the other terminal will disconnect. Ok to proceed?",
+   "prompt": "kk",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  },
+  {
+   "last": "HPA applied: min 2, max 10, 70% CPU. It scaled to 3 under the load test and back down after 5 minutes.",
+   "prompt": "ok perfect",
+   "search": false,
+   "tags": [
+    "paired",
+    "no_action"
+   ]
+  },
+  {
+   "last": "The flaky test is quarantined with `@pytest.mark.flaky`.",
+   "prompt": "Write a GitHub Actions workflow that runs pytest on Python 3.10, 3.11 and 3.12, caches pip, and uploads the coverage report as an artifact. Only on PRs to main.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I wrote 3 unit tests for the happy path of `parse_manifest`. Edge cases (empty file, BOM, CRLF line endings) aren't covered yet.",
+   "prompt": "add the edge cases",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "I updated `config/dev.yaml` with the new ports.",
+   "prompt": "when i run `docker compose up` i get:\n\nError response from daemon: driver failed programming external connectivity on endpoint db: Bind for 0.0.0.0:5432 failed: port is already allocated\n\nhow do i fix",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "The query returns in 80ms now. I could also add a composite index to get it under 10ms.",
+   "prompt": "add the index",
+   "search": true,
+   "tags": [
+    "refers_back"
+   ]
+  },
+  {
+   "last": "The model is exported to ONNX and the outputs match PyTorch within 1e-5.",
+   "prompt": "sick 🔥",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "The build is fixed and pushed to `develop`.",
+   "prompt": "great work",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "Committed as `chore: bump deps`.",
+   "prompt": "thx, can u now check if any of the bumped deps have breaking changes we need to handle? esp axios and zod",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I've made the primary button blue (`--color-brand-600`).",
+   "prompt": "Also, while you're in the design system: the `Card` component has hard-coded padding, make it take a `padding` prop with sm/md/lg and default md.",
+   "search": true,
+   "tags": [
+    "self_contained"
+   ]
+  },
+  {
+   "last": "I'll keep monitoring the canary rollout and report back.",
+   "prompt": "no need, im watching it",
+   "search": false,
+   "tags": [
+    "no_action"
+   ]
+  },
+  {
+   "last": "I can't get the test DB up without your AWS creds. Should I fall back to the dockerized localstack instead? It's slower but works offline.",
+   "prompt": "ok",
+   "search": true,
+   "tags": [
+    "paired",
+    "refers_back"
+   ]
+  }
+ ]
+}

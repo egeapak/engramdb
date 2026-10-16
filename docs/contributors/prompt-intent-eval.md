@@ -198,6 +198,98 @@ What the per-item scores show:
   Laya 361 ms p50 / 431 ms p95 per call with the previous message, plus 13.8 s
   to load.
 
+## Trained gate classifiers
+
+The zero-shot results above left training as the remaining option. This
+section trains three classifiers on the same gate label and scores them on
+three test sets.
+
+### Data
+
+| Set | File | Pairs (search / skip) | Written by |
+|---|---|---|---|
+| Training | `examples/data/prompt_turn_train.json` | 360 (240 / 120) | A separate model run that saw no other data file |
+| Held-out (small) | `examples/data/prompt_turn_eval.json` | 60 (40 / 20) | The author of this document (the set above) |
+| Realistic | `examples/data/prompt_turn_test_realistic.json` | 400 (267 / 133) | A separate model run, brief "realistic sessions across many project types" |
+| Adversarial | `examples/data/prompt_turn_test_hard.json` | 300 (200 / 100) | A separate model run, brief "hard cases that mislead a surface-level classifier" |
+
+No test pair repeats a training pair. Short replies do repeat as text ("yes",
+"ok"): 102 of the 400 realistic prompts and 67 of the 300 adversarial prompts
+also appear in the training set, always with different previous messages.
+The adversarial set includes 34 non-English pairs, written in Spanish, German,
+Turkish and Hindi in Latin script.
+
+All data is model-written. None of it comes from real sessions.
+
+### Classifiers
+
+1. **Linear head on frozen MiniLM embeddings** (`examples/prompt_gate_classifier.rs`,
+   Rust). Logistic regression on the prompt embedding, the previous-message
+   embedding (last 300 characters), their product, or a joint embedding of
+   both texts. The L2 strength and the threshold are chosen by 5-fold
+   cross-validation on the training set: the most accurate setting with at
+   most 5% wrong skips. The model is 385–1153 weights.
+2. **Fine-tuned MiniLM-L12 pair classifier**
+   (`tools/prompt-turn-eval/minilm_gate_finetune.py`). The whole 33M-parameter
+   encoder is trained for 4 epochs, with the same threshold rule.
+3. **Fine-tuned Laya** (`convaiinnovations/laya`, 421M parameters) with
+   `laya-train`, either heads only (`--freeze-encoder`, 6 epochs) or the
+   whole model (4 epochs), with one `noul` question. Laya was too slow to
+   cross-validate on this CPU, so its threshold was not chosen on training
+   data. The table shows a 0.2 cut-off, and `laya_gate_eval.py` prints the
+   full sweep.
+
+### Results
+
+Accuracy, then wrong skips (work requests skipped) and skips caught. Always
+searching scores 66.7% on every set, with no wrong skips and no skips caught.
+
+| Classifier | Held-out 60 | Realistic 400 | Adversarial 300 |
+|---|---|---|---|
+| Linear, prompt + previous message | 90.0%, 0/40 wrong, 14/20 caught | 75.2%, 15/267, 49/133 | 73.0%, 6/200, 25/100 |
+| Linear, joint text + prompt | 90.0%, 0/40, 14/20 | 78.2%, 11/267, 57/133 | 75.3%, 9/200, 35/100 |
+| Fine-tuned MiniLM, seed 0 | 81.7%, 11/40, 20/20 | 85.5%, 55/267, 130/133 | 68.0%, 77/200, 81/100 |
+| Fine-tuned MiniLM, seed 1 | 86.7%, 7/40, 19/20 | 89.0%, 8/267, 97/133 | 77.3%, 23/200, 55/100 |
+| Laya zero-shot, P ≥ 0.1 | 71.7%, 9/40, 12/20 | 63.0%, 70/267, 55/133 | 56.7%, 59/200, 29/100 |
+| Laya, heads only, P ≥ 0.3 | 68.3%, 0/40, 1/20 | 69.8%, 1/267, 13/133 | 68.3%, 2/200, 7/100 |
+| **Laya, full fine-tune, P ≥ 0.2** | 90.0%, 5/40, 19/20 | **94.2%, 4/267, 114/133** | 81.3%, 28/200, 72/100 |
+
+Costs on 4 CPU cores:
+
+| Classifier | Training | Inference per pair | Size |
+|---|---|---|---|
+| Linear head | under 1 s | one extra MiniLM embedding (~3 ms) + a dot product | 1.5–4.6 KB |
+| Fine-tuned MiniLM | ~5 min (with CV) | 13 ms (PyTorch fp32) | 33M parameters, ~130 MB fp32 |
+| Laya, full fine-tune | 58 min, 8.4 GB RAM | ~200 ms batched (PyTorch fp32) | 421M parameters, ~1.7 GB fp32 |
+
+### What this shows
+
+- **The 60-pair set was too small to judge with.** The linear head scored
+  90% with no wrong skips there, and 73–78% with 3–5% wrong skips on the 700
+  new pairs. Cross-validation on the training set (72.5%) predicted the
+  larger sets better than the small held-out set did.
+- **A linear head on frozen embeddings is not enough.** It barely beats
+  always searching, because the decision depends on how the reply relates to
+  the previous message. Separate embeddings cannot express that relation.
+- **Fine-tuning the encoder is necessary, and model size matters.**
+  - Fine-tuned MiniLM learns the task but is unstable. The two seeds differ by
+    47 wrong skips on the realistic set, and neither meets the 5% rule
+    reliably.
+  - The fully fine-tuned Laya is the only classifier that is both accurate and
+    safe on realistic data: 94.2% accuracy, 1.5% wrong skips, and 86% of
+    skips caught.
+  - Training only Laya's heads does nothing.
+- **Adversarial pairs remain hard for every classifier.** Fine-tuned Laya
+  wrongly skips 14% of the adversarial work requests. Most of them are
+  "no"/"nope" answering "Did that fix it?" (meaning it is still broken) and
+  pasted stack traces after "Pushed the fix". Its missed skips are numbered or
+  lettered choices that mean "stop" ("2" after "Reply 1 to continue, 2 to wrap
+  up"). The training set has almost none of these patterns, so this looks like
+  a gap in training coverage, not a limit of the model.
+- **Each Laya and MiniLM configuration was trained once (MiniLM twice).** The
+  MiniLM seed spread shows that single runs can mislead. Treat the Laya
+  numbers as one sample.
+
 ## Conclusions
 
 1. **Situation: the prototype is a clear improvement** (54% to 86%), with the
@@ -220,10 +312,15 @@ What the per-item scores show:
    limited, because the hook already drops memories it injected earlier in
    the same session. This needs a retrieval evaluation (fixture memories plus
    expected hits), not a classification one.
-5. **A trained gate is the path to skipping.** Train a small classifier on
-   (previous message, prompt) pairs from harvested transcript copies, labelled
-   once offline. That is the same move as Laya's fine-tuning, at the size of
-   a classification head on the MiniLM embeddings EngramDB already computes.
+5. **A trained gate is viable, but not at the size of a head on the
+   embeddings EngramDB already computes.** Only a fine-tuned cross-encoder
+   that reads both texts together worked. A fully fine-tuned Laya reached
+   94.2% with 1.5% wrong skips on realistic pairs. A fine-tuned MiniLM is
+   about 15 times faster per pair and 13 times smaller, but varies too much
+   between training runs. A
+   shippable gate needs more and harder training data (the adversarial
+   failure patterns above, and real pairs from harvested transcripts),
+   several seeds, and an ONNX export served by the daemon.
 6. **Before wiring anything in,** build the evaluation sets from real prompts
    (harvested transcripts) and re-measure. Both current sets are small and
    written by the same author as the seeds.
@@ -239,6 +336,17 @@ cargo run --release --example prompt_turn_eval
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install laya==0.4.8
 python tools/prompt-turn-eval/laya_turn_eval.py examples/data/prompt_turn_eval.json
+
+# Trained gate classifiers
+cargo run --release --example prompt_gate_classifier
+python tools/prompt-turn-eval/minilm_gate_finetune.py examples/data/prompt_turn_train.json \
+    examples/data/prompt_turn_eval.json 0,1 \
+    examples/data/prompt_turn_test_realistic.json examples/data/prompt_turn_test_hard.json
+python tools/prompt-turn-eval/to_laya_jsonl.py examples/data/prompt_turn_train.json train.jsonl
+laya-train --data train.jsonl --base convaiinnovations/laya --out laya-gate \
+    --epochs 4 --micro-batch 8 --grad-accum 1 --device cpu --seed 0 --max-len 256
+python tools/prompt-turn-eval/laya_gate_eval.py laya-gate examples/data/prompt_turn_eval.json \
+    examples/data/prompt_turn_test_realistic.json examples/data/prompt_turn_test_hard.json
 ```
 
 The example prints the per-prompt errors for both prototype decisions after
