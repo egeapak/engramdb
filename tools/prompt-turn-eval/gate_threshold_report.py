@@ -7,7 +7,9 @@ Rule: the most accurate threshold whose validation wrong-skip rate is at most 5%
 import json, os, sys
 
 probs_dir, ckpt, val_path, tests = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
-GRID = [round(0.05 * k, 2) for k in range(1, 20)]
+# 0.01-0.03 were added after the first two retrained seeds hit the 0.05 floor
+# without meeting the 5% rule on validation.
+GRID = [0.01, 0.02, 0.03] + [round(0.05 * k, 2) for k in range(1, 20)]
 
 def load(path):
     items = json.load(open(path))["items"]

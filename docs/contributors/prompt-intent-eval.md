@@ -290,6 +290,76 @@ Costs on 4 CPU cores:
   MiniLM seed spread shows that single runs can mislead. Treat the Laya
   numbers as one sample.
 
+### Retraining Laya with a targeted supplement
+
+The failure patterns above came from the adversarial set. To check that the
+fixes are not just fitted to that set, a separate model run wrote two new
+files without seeing any other data:
+
+- `examples/data/prompt_turn_train_supplement.json`: 360 training pairs (202
+  search, 158 skip) covering nine patterns:
+  - negative answers that mean "keep working";
+  - "yes" that means "stop";
+  - pasted errors and stack traces;
+  - numbered or lettered choices that include a stop option;
+  - declines;
+  - symbol-only replies;
+  - other languages;
+  - long agent messages;
+  - thanks combined with a new request.
+- `examples/data/prompt_turn_test_hard2.json`: 300 fresh adversarial test
+  pairs (200 / 100). The brief asked for failure modes in general and did
+  not name the nine patterns.
+
+The original 360 and the supplement were merged and split once
+(`split_gate_data.py`, random seed 0): 612 training pairs and 108 validation
+pairs. Laya was fully fine-tuned on the 612 with seeds 0, 1 and 2, using the
+same settings as before (`retrain_driver.sh`). Each seed took 27–29 minutes
+on 4 cores. The earlier 58-minute run shared the CPU with another job.
+
+At fixed cut-offs (accuracy, wrong skips, skips caught):
+
+| Checkpoint | Realistic 400, P ≥ 0.1 | Adversarial 300, P ≥ 0.1 | Fresh adversarial 300, P ≥ 0.1 | Fresh adversarial 300, P ≥ 0.5 |
+|---|---|---|---|---|
+| Original data only (seed 0) | 93.8%, 4/267, 112/133 | 80.3%, 22/200, 63/100 | 78.3%, 34/200, 69/100 | 78.7%, 46/200, 82/100 |
+| + supplement, seed 0 | 93.8%, 4/267, 112/133 | 85.7%, 20/200, 77/100 | 87.7%, 15/200, 78/100 | 87.0%, 20/200, 81/100 |
+| + supplement, seed 1 | 96.0%, 6/267, 123/133 | 87.7%, 29/200, 92/100 | 88.3%, 29/200, 94/100 | 86.0%, 38/200, 96/100 |
+| + supplement, seed 2 | 95.5%, 3/267, 118/133 | 85.3%, 24/200, 80/100 | 85.3%, 29/200, 85/100 | 85.0%, 30/200, 85/100 |
+
+With the cut-off chosen on the validation split (the most accurate cut-off
+with at most 5% wrong skips, from a grid down to 0.01):
+
+| Checkpoint | Cut-off | Realistic 400 | Fresh adversarial 300 |
+|---|---|---|---|
+| + supplement, seed 0 | 0.03 | 86.0%, 1/267, 78/133 | 83.0%, 5/200, 54/100 |
+| + supplement, seed 1 | 0.02 | 94.8%, 3/267, 115/133 | 87.7%, 18/200, 81/100 |
+| + supplement, seed 2 | 0.01 (no cut-off met the rule; never skips) | 66.8%, 0/267, 0/133 | 66.7%, 0/200, 0/100 |
+| Original data only | 0.01 (no cut-off met the rule on its 51 unseen validation pairs; never skips) | 66.8%, 0/267, 0/133 | 66.7%, 0/200, 0/100 |
+
+What this shows:
+
+- **The supplement helps on data it did not shape.** On the fresh adversarial
+  set, all three seeds beat the original model by 6–10 accuracy points at
+  either cut-off. Wrong skips fall from 34 to 15–29 at P ≥ 0.1. The realistic
+  set does not get worse.
+- **The gate is still not safe.** At the cut-offs that give useful accuracy,
+  every seed wrongly skips 7–19% of the work requests in the adversarial
+  sets. The safety rule picks very different cut-offs per seed. One seed ends
+  up never skipping, and another catches only 54% of the skips.
+- **The remaining errors are confident.** All three seeds score some
+  correctly labelled work requests below 0.04:
+  - "lol no" after "the tests pass, so the Safari bug is fixed, right?"
+  - "nah" after "I'm about to delete the legacy endpoints. Want me to keep
+    the /v1/health one around?"
+
+  They also score "1" after "Reply 1 to wrap up, or 2 to have me keep going"
+  above 0.98. Such replies carry meaning only by mapping onto the exact
+  question or option. More data of the same size moved them very little.
+- **Seed variance is large.** For the same data, the three seeds differ by up
+  to 14 wrong skips and 16 caught skips on the fresh adversarial set at
+  P ≥ 0.1. Any shipped gate needs several seeds, and an ensemble or a margin
+  chosen across them.
+
 ## Conclusions
 
 1. **Situation: the prototype is a clear improvement** (54% to 86%), with the
@@ -312,15 +382,15 @@ Costs on 4 CPU cores:
    limited, because the hook already drops memories it injected earlier in
    the same session. This needs a retrieval evaluation (fixture memories plus
    expected hits), not a classification one.
-5. **A trained gate is viable, but not at the size of a head on the
-   embeddings EngramDB already computes.** Only a fine-tuned cross-encoder
-   that reads both texts together worked. A fully fine-tuned Laya reached
-   94.2% with 1.5% wrong skips on realistic pairs. A fine-tuned MiniLM is
-   about 15 times faster per pair and 13 times smaller, but varies too much
-   between training runs. A
-   shippable gate needs more and harder training data (the adversarial
-   failure patterns above, and real pairs from harvested transcripts),
-   several seeds, and an ONNX export served by the daemon.
+5. **A trained gate is not yet safe enough to ship.** Only a fully
+   fine-tuned cross-encoder that reads both texts together learns the task.
+   Fine-tuned Laya reaches 94–96% on realistic pairs, and a targeted training
+   supplement lifts it from 78% to 85–88% on fresh adversarial pairs. But every
+   seed still wrongly skips 7–19% of the adversarial work requests at useful
+   cut-offs, often with high confidence, and the seeds disagree. Fine-tuned
+   MiniLM is about 15 times faster per pair but less stable. The next levers
+   are real pairs from harvested transcripts, an ensemble of seeds, and a
+   design that searches when unsure, not a larger synthetic set.
 6. **Before wiring anything in,** build the evaluation sets from real prompts
    (harvested transcripts) and re-measure. Both current sets are small and
    written by the same author as the seeds.
@@ -347,6 +417,16 @@ laya-train --data train.jsonl --base convaiinnovations/laya --out laya-gate \
     --epochs 4 --micro-batch 8 --grad-accum 1 --device cpu --seed 0 --max-len 256
 python tools/prompt-turn-eval/laya_gate_eval.py laya-gate examples/data/prompt_turn_eval.json \
     examples/data/prompt_turn_test_realistic.json examples/data/prompt_turn_test_hard.json
+
+# Retraining with the supplement (WORK_DIR holds laya-venv and laya-data)
+python tools/prompt-turn-eval/split_gate_data.py $WORK_DIR/laya-data/aug 0.15 \
+    examples/data/prompt_turn_train.json examples/data/prompt_turn_train_supplement.json
+python tools/prompt-turn-eval/to_laya_jsonl.py $WORK_DIR/laya-data/aug/train.json $WORK_DIR/laya-data/aug/train.jsonl
+WORK_DIR=$WORK_DIR tools/prompt-turn-eval/retrain_driver.sh
+for s in 0 1 2; do
+  python tools/prompt-turn-eval/gate_threshold_report.py $WORK_DIR laya-ckpt-aug-s$s $WORK_DIR/laya-data/aug/val.json \
+      examples/data/prompt_turn_test_realistic.json examples/data/prompt_turn_test_hard2.json
+done
 ```
 
 The example prints the per-prompt errors for both prototype decisions after
