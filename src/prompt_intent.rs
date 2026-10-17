@@ -14,17 +14,22 @@
 //!   tables, first match wins. It needs no model, which is why the hook uses
 //!   it, and it matches inside words ("terror" is Debugging, "redesign" is
 //!   DesignChoice).
-//! - [`PrototypeClassifier`] is an **unwired prototype**: it embeds a fixed set
-//!   of labelled seed prompts once, then labels a prompt by its nearest seeds
-//!   (mean of the top-`k` cosine similarities per class). It needs an
-//!   [`EmbeddingProvider`], which the hook does not load today; wiring it in
-//!   means reaching the shared daemon from the hook, with
-//!   [`keyword_situation`] as the fallback when no daemon is running.
+//! - [`PrototypeClassifier`] embeds a fixed set of labelled seed prompts once
+//!   (cached on disk per model, see [`PrototypeClassifier::load_or_build`]),
+//!   then labels a prompt by its nearest seeds (mean of the top-`k` cosine
+//!   similarities per class). It needs an [`EmbeddingProvider`]; the hook uses
+//!   it for the situation only when a daemon is already running, and falls
+//!   back to [`keyword_situation`] otherwise. Its context gate
+//!   ([`PromptDecision::needs_context`]) is **not** used by the hook: the
+//!   evaluations in `docs/contributors/prompt-intent-eval.md` found no gate
+//!   safe enough, and a search costs only milliseconds.
 //!
 //! `examples/prompt_intent_eval.rs` measures both against
 //! `examples/data/prompt_intent_eval.json`. The seeds below are deliberately
 //! worded differently from that set: a seed that duplicates an eval prompt
 //! would score as a perfect match and inflate the result.
+
+use std::path::Path;
 
 use anyhow::{ensure, Result};
 
@@ -275,6 +280,45 @@ impl PrototypeClassifier {
         })
     }
 
+    /// [`Self::build`], reusing seed vectors cached in `cache_dir` when they
+    /// were embedded by the same model.
+    ///
+    /// Embedding the seeds costs one batch call (~100 ms in-process), which a
+    /// hook process cannot amortize: it handles one prompt and exits. The
+    /// cache file is named by a digest of the model id, the dimensions and
+    /// every seed (label and text), so a model swap or a seed edit misses
+    /// instead of reading stale vectors. A missing, unreadable or malformed
+    /// file falls back to embedding; a failed write is logged and ignored.
+    pub async fn load_or_build(
+        provider: &dyn EmbeddingProvider,
+        params: PrototypeParams,
+        cache_dir: &Path,
+    ) -> Result<Self> {
+        ensure!(params.top_k > 0, "top_k must be at least 1");
+        let model_id = provider.model_id();
+        let path = cache_dir.join(seed_cache_name(&model_id, provider.dimensions()));
+        if let Some(vectors) = read_seed_cache(&path, provider.dimensions()) {
+            let seeds = SEEDS
+                .iter()
+                .zip(vectors)
+                .map(|((label, _), v)| (*label, v))
+                .collect();
+            return Ok(Self {
+                seeds,
+                params,
+                model_id,
+            });
+        }
+        let built = Self::build(provider, params).await?;
+        if let Err(e) = write_seed_cache(&path, &built.seeds) {
+            tracing::debug!(
+                "prompt-intent seed cache write to {} failed (non-fatal): {e}",
+                path.display()
+            );
+        }
+        Ok(built)
+    }
+
     /// The embedding model the seeds were embedded with.
     pub fn model_id(&self) -> &str {
         &self.model_id
@@ -358,6 +402,70 @@ impl PrototypeClassifier {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Seed-cache file layout: magic, then `count` and `dim` as little-endian
+/// `u32`, then `count * dim` normalized little-endian `f32` values in
+/// [`SEEDS`] order.
+const SEED_CACHE_MAGIC: &[u8; 8] = b"EDBPIS01";
+
+/// File name of the seed cache for one model. The digest covers everything
+/// the vectors depend on, so any change produces a new name.
+fn seed_cache_name(model_id: &str, dimensions: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(SEED_CACHE_MAGIC);
+    h.update(model_id.as_bytes());
+    h.update((dimensions as u64).to_le_bytes());
+    for (label, text) in SEEDS {
+        h.update(format!("{label:?}\0{text}\0").as_bytes());
+    }
+    let digest = h.finalize();
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("prompt_intent_seeds-{hex}.bin")
+}
+
+fn read_seed_cache(path: &Path, dimensions: usize) -> Option<Vec<Vec<f32>>> {
+    let bytes = std::fs::read(path).ok()?;
+    let header = SEED_CACHE_MAGIC.len() + 8;
+    if bytes.len() < header || &bytes[..SEED_CACHE_MAGIC.len()] != SEED_CACHE_MAGIC {
+        return None;
+    }
+    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let (count, dim) = (word(8), word(12));
+    if count != SEEDS.len() || dim != dimensions || bytes.len() != header + count * dim * 4 {
+        return None;
+    }
+    let floats: Vec<f32> = bytes[header..]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    if floats.iter().any(|f| !f.is_finite()) {
+        return None;
+    }
+    Some(floats.chunks_exact(dim).map(<[f32]>::to_vec).collect())
+}
+
+fn write_seed_cache(path: &Path, seeds: &[(Label, Vec<f32>)]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let dim = seeds.first().map_or(0, |(_, v)| v.len());
+    let mut bytes = Vec::with_capacity(SEED_CACHE_MAGIC.len() + 8 + seeds.len() * dim * 4);
+    bytes.extend_from_slice(SEED_CACHE_MAGIC);
+    bytes.extend_from_slice(&(seeds.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&(dim as u32).to_le_bytes());
+    for (_, v) in seeds {
+        for f in v {
+            bytes.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    // Temp-then-rename, so a concurrent reader sees the old file or the new
+    // one, never a partial write.
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(&bytes)?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// Scale to unit length so a dot product is a cosine. A zero vector stays
@@ -598,6 +706,103 @@ mod tests {
         // All-tied scores fall through to "needs context, no situation".
         assert!(d.needs_context);
         assert_eq!(d.situation, None);
+    }
+
+    /// Counts batch calls (the seed embedding) and can pose as another model.
+    struct CountingEmbedder {
+        batches: std::sync::atomic::AtomicUsize,
+        model: &'static str,
+    }
+
+    impl CountingEmbedder {
+        fn new(model: &'static str) -> Self {
+            Self {
+                batches: std::sync::atomic::AtomicUsize::new(0),
+                model,
+            }
+        }
+        fn batches(&self) -> usize {
+            self.batches.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for CountingEmbedder {
+        async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            FamilyEmbedder.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            self.batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FamilyEmbedder.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            FamilyEmbedder.dimensions()
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+        fn model_id(&self) -> String {
+            self.model.into()
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_cache_is_reused_per_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let params = PrototypeParams::default();
+        let a = CountingEmbedder::new("model-a");
+
+        let first = PrototypeClassifier::load_or_build(&a, params, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(a.batches(), 1, "first load embeds the seeds");
+        let second = PrototypeClassifier::load_or_build(&a, params, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(a.batches(), 1, "second load reads the cache");
+
+        // The cached classifier decides exactly like the freshly built one.
+        for prompt in [
+            "the server segfault is a bug",
+            "compare the tradeoff",
+            "ok thanks",
+        ] {
+            let v = a.embed(prompt).await.unwrap();
+            assert_eq!(
+                first.classify_embedded(prompt, &v),
+                second.classify_embedded(prompt, &v)
+            );
+        }
+
+        // Another model misses the cache and embeds its own seeds.
+        let b = CountingEmbedder::new("model-b");
+        PrototypeClassifier::load_or_build(&b, params, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(b.batches(), 1);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn corrupt_seed_cache_falls_back_to_embedding() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let a = CountingEmbedder::new("model-a");
+        let path = dir.path().join(seed_cache_name("model-a", a.dimensions()));
+        for bad in [
+            b"short".to_vec(),
+            [SEED_CACHE_MAGIC.as_slice(), &[0u8; 8]].concat(),
+            vec![0u8; 4096],
+        ] {
+            std::fs::write(&path, &bad).unwrap();
+            let before = a.batches();
+            PrototypeClassifier::load_or_build(&a, PrototypeParams::default(), dir.path())
+                .await
+                .unwrap();
+            assert_eq!(a.batches(), before + 1, "a bad file must be re-embedded");
+        }
+        // The last fallback rewrote a valid file.
+        assert!(read_seed_cache(&path, a.dimensions()).is_some());
     }
 
     #[tokio::test]

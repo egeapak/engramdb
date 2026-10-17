@@ -1,7 +1,10 @@
 # Prompt-intent prototype: evaluation
 
-Status: **prototype, not wired into the hook.** The UserPromptSubmit hook still
-uses the keyword tables and still searches on every prompt.
+Status: **the situation classifier is wired into the UserPromptSubmit hook;
+the context gate is parked.** The hook uses the classifier when a shared daemon
+is already running (keyword tables otherwise), searches on every prompt, and
+adds a second search on the tail of the agent's previous message. Its seed
+vectors are cached per model in the model cache directory.
 
 ## What is being decided
 

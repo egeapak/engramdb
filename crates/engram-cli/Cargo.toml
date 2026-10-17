@@ -76,6 +76,8 @@ assert_cmd = "2"
 predicates = "3"
 regex = "1"
 tempfile = "3"
+# Stub `EmbeddingProvider`s in the hook tests implement an `async_trait` trait.
+async-trait = "0.1"
 insta = { version = "1.48.0", features = ["filters"] }
 # `in_memory` pulls in `vt100` and gives us `InMemoryTerm`, the only way to see
 # what a `ProgressBar` renders (its normal draw target is hidden under a pipe).

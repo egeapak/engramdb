@@ -715,16 +715,18 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Hook { command } => {
-            // Hooks fire on every Read/Write/Edit, never embed (query: None)
-            // and never create memories — they deliberately skip provider
-            // resolution (no `backend`), see `build_engine_without_providers`.
+            // Hooks fire on every Read/Write/Edit and never create memories —
+            // they deliberately skip provider resolution (no `backend`), see
+            // `build_engine_without_providers`. The one model use is
+            // UserPromptSubmit's situation classifier, which reaches only an
+            // already running daemon (none with `--in-process`).
             let result = match command {
                 Some(HookCommand::PreToolUse) => commands::run_hook_pre_tool_use(&dir).await,
                 Some(HookCommand::SessionStart { min_criticality }) => {
                     commands::run_hook_session_start(&dir, min_criticality).await
                 }
                 Some(HookCommand::UserPromptSubmit) => {
-                    commands::run_hook_user_prompt_submit(&dir).await
+                    commands::run_hook_user_prompt_submit(&dir, in_process_flag).await
                 }
                 Some(HookCommand::PostToolUse) => commands::run_hook_post_tool_use(&dir).await,
                 Some(HookCommand::SessionEnd) => {

@@ -785,6 +785,60 @@ pub fn summarize_session(transcript_path: &Path) -> Result<SessionSummary> {
     Ok(parse_session(transcript_path, opts)?.summary)
 }
 
+/// How far from the end of a transcript [`last_assistant_text`] reads.
+pub const LAST_ASSISTANT_TAIL_BYTES: u64 = 1_048_576;
+
+/// The text of the newest main-session assistant message in a transcript, or
+/// `None` when there is none in the last `tail_bytes` of the file.
+///
+/// Reads only the tail, so the cost does not grow with the session: the
+/// UserPromptSubmit hook calls this on every prompt. Records are scanned
+/// newest first and the first assistant record with non-empty text wins;
+/// several text blocks in that record are joined with a newline. Subagent
+/// (`isSidechain`) records are skipped. A record cut by the tail boundary, a
+/// record that does not parse, and an assistant message larger than the tail
+/// are all skipped, which only means an older message (or `None`) is
+/// returned; the caller treats the result as optional search context.
+pub fn last_assistant_text(transcript_path: &Path, tail_bytes: u64) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(transcript_path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(tail_bytes);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if start > 0 && !lines.is_empty() {
+        // The first line starts mid-record.
+        lines.remove(0);
+    }
+    lines.iter().rev().find_map(|line| {
+        let record: serde_json::Value = serde_json::from_str(line).ok()?;
+        if record
+            .get("isSidechain")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let message = record.get("message")?;
+        if message.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            return None;
+        }
+        let parts: Vec<&str> = message
+            .get("content")?
+            .as_array()?
+            .iter()
+            .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n"))
+    })
+}
+
 /// List every transcript that belongs to one of `project_paths`.
 ///
 /// Attribution is by the `cwd` recorded *inside* each transcript, with the
@@ -933,6 +987,82 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    fn assistant_record(blocks: serde_json::Value, sidechain: bool) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "isSidechain": sidechain,
+            "message": { "role": "assistant", "content": blocks }
+        })
+        .to_string()
+    }
+
+    fn write_jsonl(dir: &Path, lines: &[String]) -> PathBuf {
+        let path = dir.join("session.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn last_assistant_text_returns_the_newest_main_session_text() {
+        let tmp = TempDir::new().unwrap();
+        let path = write_jsonl(
+            tmp.path(),
+            &[
+                assistant_record(serde_json::json!([{"type": "text", "text": "old"}]), false),
+                padded_prompt("a prompt", 0),
+                assistant_record(
+                    serde_json::json!([
+                        {"type": "text", "text": "  I committed the fix. "},
+                        {"type": "tool_use", "id": "t", "name": "Bash", "input": {}},
+                        {"type": "text", "text": "Should I push it?"}
+                    ]),
+                    false,
+                ),
+                // Newer, but a subagent turn and a text-free tool call: both skipped.
+                assistant_record(
+                    serde_json::json!([{"type": "text", "text": "subagent"}]),
+                    true,
+                ),
+                assistant_record(
+                    serde_json::json!([{"type": "tool_use", "id": "u", "name": "Read", "input": {}}]),
+                    false,
+                ),
+                "not json".to_string(),
+            ],
+        );
+        assert_eq!(
+            last_assistant_text(&path, LAST_ASSISTANT_TAIL_BYTES).as_deref(),
+            Some("I committed the fix.\nShould I push it?")
+        );
+    }
+
+    #[test]
+    fn last_assistant_text_reads_only_the_tail() {
+        let tmp = TempDir::new().unwrap();
+        let early = assistant_record(
+            serde_json::json!([{"type": "text", "text": "early"}]),
+            false,
+        );
+        let late = assistant_record(serde_json::json!([{"type": "text", "text": "late"}]), false);
+        let filler = padded_prompt("filler", 4096);
+        let path = write_jsonl(tmp.path(), &[early.clone(), filler.clone(), late]);
+        assert_eq!(last_assistant_text(&path, 64).as_deref(), None);
+        assert_eq!(last_assistant_text(&path, 200).as_deref(), Some("late"));
+
+        // With no assistant record inside the tail, nothing is returned; the
+        // record the boundary cuts through is never parsed as a whole one.
+        let path = write_jsonl(tmp.path(), &[early, filler]);
+        assert_eq!(last_assistant_text(&path, 2048), None);
+        assert_eq!(
+            last_assistant_text(&path, 1 << 20).as_deref(),
+            Some("early")
+        );
+        assert_eq!(
+            last_assistant_text(&tmp.path().join("missing.jsonl"), 1024),
+            None
+        );
+    }
 
     /// A valid user-prompt record whose text is padded to make the whole
     /// serialized line at least `target_bytes` long.

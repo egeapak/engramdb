@@ -140,7 +140,9 @@ When the file is an EngramDB memory file (`.engramdb/memories/<slug>_<id>.md`), 
 
 ### `UserPromptSubmit`
 
-Runs a `filter`-mode query with your prompt text as the query. It also infers a situation from the prompt: debugging-flavored wording ("error", "failing", "panic", …) ranks observations higher; design-flavored wording ("should we", "approach", "architecture", …) ranks prior decisions higher. Output is capped at `[hooks].prompt_context_budget` characters.
+Runs a `filter`-mode query with your prompt text as the query, on every prompt. When that leaves room, a second query on the end of Claude's previous message (`[hooks].previous_message_chars`, default 300 characters) fills it, so a short reply such as "push it" or "yes" surfaces memories about what it answers; the prompt's own matches always come first.
+
+It also infers a situation from the prompt: debugging (a failure is being investigated) ranks observations higher, and a design choice ranks prior decisions higher. When the shared daemon is already running, an embedding classifier decides, which also catches prompts such as "the tests hang forever" that contain no tell-tale word; otherwise keyword tables do ("error", "failing", "panic", … / "should we", "approach", "architecture", …). The hook never starts the daemon or loads a model itself. Output is capped at `[hooks].prompt_context_budget` characters.
 
 ### `PostToolUse (Write|Edit|MultiEdit)`
 
