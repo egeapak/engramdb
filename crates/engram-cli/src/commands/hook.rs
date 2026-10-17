@@ -11,9 +11,10 @@
 //! hooks never create memories, so no engine-side model is ever used.
 //! Skipping provider resolution avoids a ~240ms ONNX session init (plus the
 //! T5 encoder+decoder init) on every hook invocation. The one exception is
-//! UserPromptSubmit's situation classifier, which borrows the embedding model
-//! of a shared daemon only when one is already running; it never spawns a
-//! daemon or loads a model itself (see [`SituationModel`]).
+//! UserPromptSubmit's situation classifier, which needs the embedding model:
+//! it uses a shared daemon that is already running, else loads the embedding
+//! model alone in this process (~300 ms), once per prompt. It never spawns a
+//! daemon (see [`SituationModel`]).
 
 use anyhow::Result;
 use engramdb::retrieval::engine::{DetailLevel, RetrievalMode, RetrievalQuery, ScoredMemory};
@@ -960,18 +961,38 @@ fn extract_prompt(input: &str) -> Option<String> {
 /// Where the UserPromptSubmit hook gets an embedding model for the situation
 /// classifier.
 pub(crate) enum SituationModel {
-    /// A shared daemon that is already running, if any (production). The hook
-    /// never spawns one and never loads a model in-process.
-    Daemon,
-    /// Keyword tables only: `--in-process` / `ENGRAMDB_IN_PROCESS`, and tests
-    /// that must not reach a daemon running on the developer's machine.
-    KeywordOnly,
-    /// A given provider and seed-cache directory (tests).
+    /// A shared daemon that is already running, else the embedding model
+    /// loaded in this process (production). Never spawns a daemon.
+    DaemonOrInProcess,
+    /// The embedding model loaded in this process, never the daemon
+    /// (`--in-process` / `ENGRAMDB_IN_PROCESS`).
+    InProcess,
+    /// Keyword tables only: tests that must not reach a daemon or load a
+    /// model on the developer's machine.
     #[cfg(test)]
-    Provider(
-        std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>,
-        std::path::PathBuf,
-    ),
+    KeywordOnly,
+    /// A given provider (tests).
+    #[cfg(test)]
+    Provider(std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>),
+}
+
+/// The embedding model alone, loaded in this process: NLI, the reranker and
+/// T5 titling are switched off first, because the classifier needs none of
+/// them and each is another ONNX session to initialize. `None` when no
+/// embedding backend loads (no ONNX runtime, no cached model offline, …).
+async fn in_process_embedder(
+    config: &engramdb::types::EngramConfig,
+) -> Option<std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>> {
+    let mut config = config.clone();
+    config.nli.enabled = false;
+    config.rerank.enabled = false;
+    config.title.strategy = engramdb::types::TitleStrategy::Keyword;
+    tokio::task::spawn_blocking(move || {
+        engramdb::ops::resolve_engine_providers(&config, None, 1).embedding
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The prompt's situation: the embedding classifier when a model is at hand
@@ -986,32 +1007,30 @@ async fn prompt_situation(
     if !config.hooks.situation_classifier {
         return keyword_situation(prompt);
     }
-    let (provider, cache_dir) = match model {
-        SituationModel::KeywordOnly => return keyword_situation(prompt),
-        SituationModel::Daemon => {
+    let provider = match model {
+        SituationModel::DaemonOrInProcess => {
             let cell = engramdb::daemon::DaemonCell::new();
-            let provider = engramdb::daemon::resolve_daemon_providers(&cell, config, None)
+            match engramdb::daemon::resolve_daemon_providers(&cell, config, None)
                 .await
-                .and_then(|p| p.embedding);
-            match (provider, engramdb::storage::paths::model_cache_dir()) {
-                (Some(p), Ok(dir)) => (p, dir),
-                _ => return keyword_situation(prompt),
+                .and_then(|p| p.embedding)
+            {
+                Some(p) => Some(p),
+                None => in_process_embedder(config).await,
             }
         }
+        SituationModel::InProcess => in_process_embedder(config).await,
         #[cfg(test)]
-        SituationModel::Provider(p, dir) => (std::sync::Arc::clone(p), dir.clone()),
+        SituationModel::KeywordOnly => None,
+        #[cfg(test)]
+        SituationModel::Provider(p) => Some(std::sync::Arc::clone(p)),
     };
-    let decision = match PrototypeClassifier::load_or_build(
-        provider.as_ref(),
-        PrototypeParams::default(),
-        &cache_dir,
-    )
-    .await
+    let Some(provider) = provider else {
+        return keyword_situation(prompt);
+    };
+    // Seeds and prompt in one batch, nothing cached between calls.
+    match PrototypeClassifier::classify_once(provider.as_ref(), PrototypeParams::default(), prompt)
+        .await
     {
-        Ok(classifier) => classifier.classify(provider.as_ref(), prompt).await,
-        Err(e) => Err(e),
-    };
-    match decision {
         // The classifier's context gate is deliberately ignored: the hook
         // searches on every prompt (see `prompt_intent`'s module docs).
         Ok(d) => d.situation,
@@ -1066,8 +1085,9 @@ fn text_tail(text: &str, max_chars: usize) -> &str {
 /// prompt's matches always rank first.
 ///
 /// Retrieval is keyword-only: the engine has no providers. The one model use
-/// is the optional situation classifier, which reaches only a daemon that is
-/// already running (see [`SituationModel`]).
+/// is the optional situation classifier, which uses a daemon that is already
+/// running or else loads the embedding model in this process (see
+/// [`SituationModel`]).
 #[cfg(test)]
 async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<String>> {
     process_user_prompt_submit_with(input, dir, &SituationModel::KeywordOnly).await
@@ -1164,9 +1184,9 @@ pub async fn run_hook_user_prompt_submit(dir: &Path, in_process: bool) -> Result
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let model = if in_process {
-        SituationModel::KeywordOnly
+        SituationModel::InProcess
     } else {
-        SituationModel::Daemon
+        SituationModel::DaemonOrInProcess
     };
     if let Ok(Some(json)) = process_user_prompt_submit_with(&input, dir, &model).await {
         println!("{}", json);
@@ -3326,22 +3346,18 @@ mod tests {
         }
     }
 
-    fn stub_model(fail: bool, cache: &Path) -> SituationModel {
-        SituationModel::Provider(
-            std::sync::Arc::new(FamilyEmbedder { fail }),
-            cache.to_path_buf(),
-        )
+    fn stub_model(fail: bool) -> SituationModel {
+        SituationModel::Provider(std::sync::Arc::new(FamilyEmbedder { fail }))
     }
 
     #[tokio::test]
     async fn prompt_situation_uses_the_classifier_and_falls_back_to_keywords() {
-        let cache = TempDir::new().unwrap();
         let mut config = engramdb::types::EngramConfig::default();
         // No keyword-table word: the tables see nothing.
         let prompt = "the tests hang forever on my machine";
         assert_eq!(engramdb::prompt_intent::keyword_situation(prompt), None);
 
-        let model = stub_model(false, cache.path());
+        let model = stub_model(false);
         assert_eq!(
             prompt_situation(prompt, &config, &model).await,
             Some(Situation::Debugging)
@@ -3352,7 +3368,7 @@ mod tests {
         // A failing model, a keyword-only model and the config switch all
         // fall back to the keyword tables.
         let keyword_prompt = "why does this panic";
-        for model in [stub_model(true, cache.path()), SituationModel::KeywordOnly] {
+        for model in [stub_model(true), SituationModel::KeywordOnly] {
             assert_eq!(prompt_situation(prompt, &config, &model).await, None);
             assert_eq!(
                 prompt_situation(keyword_prompt, &config, &model).await,

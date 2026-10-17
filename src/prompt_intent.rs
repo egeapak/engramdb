@@ -14,12 +14,13 @@
 //!   tables, first match wins. It needs no model, which is why the hook uses
 //!   it, and it matches inside words ("terror" is Debugging, "redesign" is
 //!   DesignChoice).
-//! - [`PrototypeClassifier`] embeds a fixed set of labelled seed prompts once
-//!   (cached on disk per model, see [`PrototypeClassifier::load_or_build`]),
-//!   then labels a prompt by its nearest seeds (mean of the top-`k` cosine
-//!   similarities per class). It needs an [`EmbeddingProvider`]; the hook uses
-//!   it for the situation only when a daemon is already running, and falls
-//!   back to [`keyword_situation`] otherwise. Its context gate
+//! - [`PrototypeClassifier`] embeds a fixed set of labelled seed prompts, then
+//!   labels a prompt by its nearest seeds (mean of the top-`k` cosine
+//!   similarities per class). The hook calls
+//!   [`PrototypeClassifier::classify_once`], which embeds the seeds and the
+//!   prompt in one batch and keeps nothing, so there is no cache to go stale.
+//!   It needs an [`EmbeddingProvider`]; the hook falls back to
+//!   [`keyword_situation`] when none loads. Its context gate
 //!   ([`PromptDecision::needs_context`]) is **not** used by the hook: the
 //!   evaluations in `docs/contributors/prompt-intent-eval.md` found no gate
 //!   safe enough, and a search costs only milliseconds.
@@ -28,8 +29,6 @@
 //! `examples/data/prompt_intent_eval.json`. The seeds below are deliberately
 //! worded differently from that set: a seed that duplicates an eval prompt
 //! would score as a perfect match and inflate the result.
-
-use std::path::Path;
 
 use anyhow::{ensure, Result};
 
@@ -212,6 +211,10 @@ pub struct PrototypeParams {
     /// embeds close to the acknowledgement seeds while still carrying a task.
     /// `None` turns the guard off.
     pub max_skip_words: Option<usize>,
+    /// How many seeds per class are embedded (the first ones in [`SEEDS`]
+    /// order). Every hook call embeds them anew, so this is the cost knob:
+    /// fewer seeds embed faster and decide less reliably.
+    pub seeds_per_class: usize,
 }
 
 impl Default for PrototypeParams {
@@ -220,8 +223,32 @@ impl Default for PrototypeParams {
             top_k: 3,
             gate_margin: 0.05,
             max_skip_words: Some(7),
+            // 6 measured best on examples/data/prompt_intent_eval.json:
+            // 89.3% at ~40 ms per call in-process, against 87.3% at ~75 ms
+            // for all 12 and 78.0% at ~23 ms for 3.
+            seeds_per_class: 6,
         }
     }
+}
+
+/// The first `per_class` seeds of every class, in [`SEEDS`] order.
+fn selected_seeds(per_class: usize) -> Vec<(Label, &'static str)> {
+    let mut taken: Vec<(Label, usize)> = Vec::new();
+    SEEDS
+        .iter()
+        .filter(|(label, _)| {
+            let n = match taken.iter_mut().find(|(l, _)| l == label) {
+                Some((_, n)) => n,
+                None => {
+                    taken.push((*label, 0));
+                    &mut taken.last_mut().unwrap().1
+                }
+            };
+            *n += 1;
+            *n <= per_class
+        })
+        .copied()
+        .collect()
 }
 
 /// What the prototype classifier decided about one prompt, with the class
@@ -259,16 +286,62 @@ impl PrototypeClassifier {
     /// only valid for vectors from the same model; [`Self::model_id`] records
     /// which one.
     pub async fn build(provider: &dyn EmbeddingProvider, params: PrototypeParams) -> Result<Self> {
-        ensure!(params.top_k > 0, "top_k must be at least 1");
-        let texts: Vec<&str> = SEEDS.iter().map(|(_, t)| *t).collect();
+        Self::check(params)?;
+        let seeds = selected_seeds(params.seeds_per_class);
+        let texts: Vec<&str> = seeds.iter().map(|(_, t)| *t).collect();
         let vectors = provider.embed_batch(&texts).await?;
+        Self::from_vectors(&seeds, vectors, params, provider.model_id())
+    }
+
+    /// Embed the seeds and `prompt` in **one** batch call and classify it.
+    ///
+    /// For a caller that classifies a single prompt and exits (the
+    /// UserPromptSubmit hook): nothing is kept between calls, so there is no
+    /// cache to go stale when the model or [`SEEDS`] change, at the cost of
+    /// embedding the seeds every time ([`PrototypeParams::seeds_per_class`]).
+    pub async fn classify_once(
+        provider: &dyn EmbeddingProvider,
+        params: PrototypeParams,
+        prompt: &str,
+    ) -> Result<PromptDecision> {
+        Self::check(params)?;
+        let seeds = selected_seeds(params.seeds_per_class);
+        let mut texts: Vec<&str> = seeds.iter().map(|(_, t)| *t).collect();
+        texts.push(prompt);
+        let mut vectors = provider.embed_batch(&texts).await?;
         ensure!(
-            vectors.len() == SEEDS.len(),
+            vectors.len() == texts.len(),
+            "provider returned {} vectors for {} texts",
+            vectors.len(),
+            texts.len()
+        );
+        let prompt_vec = vectors.pop().expect("length checked above");
+        let classifier = Self::from_vectors(&seeds, vectors, params, provider.model_id())?;
+        Ok(classifier.classify_embedded(prompt, &prompt_vec))
+    }
+
+    fn check(params: PrototypeParams) -> Result<()> {
+        ensure!(params.top_k > 0, "top_k must be at least 1");
+        ensure!(
+            params.seeds_per_class > 0,
+            "seeds_per_class must be at least 1"
+        );
+        Ok(())
+    }
+
+    fn from_vectors(
+        seeds: &[(Label, &str)],
+        vectors: Vec<Vec<f32>>,
+        params: PrototypeParams,
+        model_id: String,
+    ) -> Result<Self> {
+        ensure!(
+            vectors.len() == seeds.len(),
             "provider returned {} vectors for {} seeds",
             vectors.len(),
-            SEEDS.len()
+            seeds.len()
         );
-        let seeds = SEEDS
+        let seeds = seeds
             .iter()
             .zip(vectors)
             .map(|((label, _), v)| (*label, normalized(v)))
@@ -276,47 +349,8 @@ impl PrototypeClassifier {
         Ok(Self {
             seeds,
             params,
-            model_id: provider.model_id(),
+            model_id,
         })
-    }
-
-    /// [`Self::build`], reusing seed vectors cached in `cache_dir` when they
-    /// were embedded by the same model.
-    ///
-    /// Embedding the seeds costs one batch call (~100 ms in-process), which a
-    /// hook process cannot amortize: it handles one prompt and exits. The
-    /// cache file is named by a digest of the model id, the dimensions and
-    /// every seed (label and text), so a model swap or a seed edit misses
-    /// instead of reading stale vectors. A missing, unreadable or malformed
-    /// file falls back to embedding; a failed write is logged and ignored.
-    pub async fn load_or_build(
-        provider: &dyn EmbeddingProvider,
-        params: PrototypeParams,
-        cache_dir: &Path,
-    ) -> Result<Self> {
-        ensure!(params.top_k > 0, "top_k must be at least 1");
-        let model_id = provider.model_id();
-        let path = cache_dir.join(seed_cache_name(&model_id, provider.dimensions()));
-        if let Some(vectors) = read_seed_cache(&path, provider.dimensions()) {
-            let seeds = SEEDS
-                .iter()
-                .zip(vectors)
-                .map(|((label, _), v)| (*label, v))
-                .collect();
-            return Ok(Self {
-                seeds,
-                params,
-                model_id,
-            });
-        }
-        let built = Self::build(provider, params).await?;
-        if let Err(e) = write_seed_cache(&path, &built.seeds) {
-            tracing::debug!(
-                "prompt-intent seed cache write to {} failed (non-fatal): {e}",
-                path.display()
-            );
-        }
-        Ok(built)
     }
 
     /// The embedding model the seeds were embedded with.
@@ -402,70 +436,6 @@ impl PrototypeClassifier {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
-/// Seed-cache file layout: magic, then `count` and `dim` as little-endian
-/// `u32`, then `count * dim` normalized little-endian `f32` values in
-/// [`SEEDS`] order.
-const SEED_CACHE_MAGIC: &[u8; 8] = b"EDBPIS01";
-
-/// File name of the seed cache for one model. The digest covers everything
-/// the vectors depend on, so any change produces a new name.
-fn seed_cache_name(model_id: &str, dimensions: usize) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(SEED_CACHE_MAGIC);
-    h.update(model_id.as_bytes());
-    h.update((dimensions as u64).to_le_bytes());
-    for (label, text) in SEEDS {
-        h.update(format!("{label:?}\0{text}\0").as_bytes());
-    }
-    let digest = h.finalize();
-    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-    format!("prompt_intent_seeds-{hex}.bin")
-}
-
-fn read_seed_cache(path: &Path, dimensions: usize) -> Option<Vec<Vec<f32>>> {
-    let bytes = std::fs::read(path).ok()?;
-    let header = SEED_CACHE_MAGIC.len() + 8;
-    if bytes.len() < header || &bytes[..SEED_CACHE_MAGIC.len()] != SEED_CACHE_MAGIC {
-        return None;
-    }
-    let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
-    let (count, dim) = (word(8), word(12));
-    if count != SEEDS.len() || dim != dimensions || bytes.len() != header + count * dim * 4 {
-        return None;
-    }
-    let floats: Vec<f32> = bytes[header..]
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-    if floats.iter().any(|f| !f.is_finite()) {
-        return None;
-    }
-    Some(floats.chunks_exact(dim).map(<[f32]>::to_vec).collect())
-}
-
-fn write_seed_cache(path: &Path, seeds: &[(Label, Vec<f32>)]) -> std::io::Result<()> {
-    use std::io::Write;
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let dim = seeds.first().map_or(0, |(_, v)| v.len());
-    let mut bytes = Vec::with_capacity(SEED_CACHE_MAGIC.len() + 8 + seeds.len() * dim * 4);
-    bytes.extend_from_slice(SEED_CACHE_MAGIC);
-    bytes.extend_from_slice(&(seeds.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&(dim as u32).to_le_bytes());
-    for (_, v) in seeds {
-        for f in v {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-    }
-    // Temp-then-rename, so a concurrent reader sees the old file or the new
-    // one, never a partial write.
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(&bytes)?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
 }
 
 /// Scale to unit length so a dot product is a cosine. A zero vector stays
@@ -616,7 +586,11 @@ mod tests {
     #[tokio::test]
     async fn build_embeds_every_seed_and_records_the_model() {
         let c = classifier().await;
-        assert_eq!(c.seed_count(), SEEDS.len());
+        // Four classes, `seeds_per_class` each.
+        assert_eq!(
+            c.seed_count(),
+            4 * PrototypeParams::default().seeds_per_class
+        );
         assert_eq!(c.model_id(), "family-stub");
     }
 
@@ -708,23 +682,8 @@ mod tests {
         assert_eq!(d.situation, None);
     }
 
-    /// Counts batch calls (the seed embedding) and can pose as another model.
-    struct CountingEmbedder {
-        batches: std::sync::atomic::AtomicUsize,
-        model: &'static str,
-    }
-
-    impl CountingEmbedder {
-        fn new(model: &'static str) -> Self {
-            Self {
-                batches: std::sync::atomic::AtomicUsize::new(0),
-                model,
-            }
-        }
-        fn batches(&self) -> usize {
-            self.batches.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
+    /// Counts batch calls.
+    struct CountingEmbedder(std::sync::atomic::AtomicUsize);
 
     #[async_trait]
     impl EmbeddingProvider for CountingEmbedder {
@@ -732,8 +691,7 @@ mod tests {
             FamilyEmbedder.embed(text).await
         }
         async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-            self.batches
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             FamilyEmbedder.embed_batch(texts).await
         }
         fn dimensions(&self) -> usize {
@@ -743,66 +701,57 @@ mod tests {
             512
         }
         fn model_id(&self) -> String {
-            self.model.into()
+            "counting-stub".into()
         }
     }
 
     #[tokio::test]
-    async fn seed_cache_is_reused_per_model() {
-        let dir = tempfile::TempDir::new().unwrap();
+    async fn classify_once_uses_one_batch_and_matches_build() {
+        let p = CountingEmbedder(std::sync::atomic::AtomicUsize::new(0));
         let params = PrototypeParams::default();
-        let a = CountingEmbedder::new("model-a");
-
-        let first = PrototypeClassifier::load_or_build(&a, params, dir.path())
+        let built = PrototypeClassifier::build(&FamilyEmbedder, params)
             .await
             .unwrap();
-        assert_eq!(a.batches(), 1, "first load embeds the seeds");
-        let second = PrototypeClassifier::load_or_build(&a, params, dir.path())
-            .await
-            .unwrap();
-        assert_eq!(a.batches(), 1, "second load reads the cache");
-
-        // The cached classifier decides exactly like the freshly built one.
         for prompt in [
             "the server segfault is a bug",
-            "compare the tradeoff",
+            "compare the tradeoff, what do you recommend",
+            "rename and move the file",
             "ok thanks",
         ] {
-            let v = a.embed(prompt).await.unwrap();
-            assert_eq!(
-                first.classify_embedded(prompt, &v),
-                second.classify_embedded(prompt, &v)
-            );
-        }
-
-        // Another model misses the cache and embeds its own seeds.
-        let b = CountingEmbedder::new("model-b");
-        PrototypeClassifier::load_or_build(&b, params, dir.path())
-            .await
-            .unwrap();
-        assert_eq!(b.batches(), 1);
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
-    }
-
-    #[tokio::test]
-    async fn corrupt_seed_cache_falls_back_to_embedding() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let a = CountingEmbedder::new("model-a");
-        let path = dir.path().join(seed_cache_name("model-a", a.dimensions()));
-        for bad in [
-            b"short".to_vec(),
-            [SEED_CACHE_MAGIC.as_slice(), &[0u8; 8]].concat(),
-            vec![0u8; 4096],
-        ] {
-            std::fs::write(&path, &bad).unwrap();
-            let before = a.batches();
-            PrototypeClassifier::load_or_build(&a, PrototypeParams::default(), dir.path())
+            let before = p.0.load(std::sync::atomic::Ordering::SeqCst);
+            let once = PrototypeClassifier::classify_once(&p, params, prompt)
                 .await
                 .unwrap();
-            assert_eq!(a.batches(), before + 1, "a bad file must be re-embedded");
+            assert_eq!(p.0.load(std::sync::atomic::Ordering::SeqCst), before + 1);
+            let v = FamilyEmbedder.embed(prompt).await.unwrap();
+            assert_eq!(once, built.classify_embedded(prompt, &v), "{prompt}");
         }
-        // The last fallback rewrote a valid file.
-        assert!(read_seed_cache(&path, a.dimensions()).is_some());
+    }
+
+    #[test]
+    fn seeds_per_class_takes_the_first_seeds_of_every_class() {
+        assert_eq!(selected_seeds(usize::MAX).len(), SEEDS.len());
+        let three = selected_seeds(3);
+        assert_eq!(three.len(), 12);
+        for label in [
+            Label::Debugging,
+            Label::Design,
+            Label::Other,
+            Label::NoContext,
+        ] {
+            let mine: Vec<&str> = three
+                .iter()
+                .filter(|(l, _)| *l == label)
+                .map(|(_, t)| *t)
+                .collect();
+            let first: Vec<&str> = SEEDS
+                .iter()
+                .filter(|(l, _)| *l == label)
+                .map(|(_, t)| *t)
+                .take(3)
+                .collect();
+            assert_eq!(mine, first);
+        }
     }
 
     #[tokio::test]
@@ -813,6 +762,16 @@ mod tests {
                 top_k: 0,
                 ..PrototypeParams::default()
             },
+        )
+        .await;
+        assert!(err.is_err());
+        let err = PrototypeClassifier::classify_once(
+            &FamilyEmbedder,
+            PrototypeParams {
+                seeds_per_class: 0,
+                ..PrototypeParams::default()
+            },
+            "x",
         )
         .await;
         assert!(err.is_err());

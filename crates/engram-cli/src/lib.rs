@@ -718,8 +718,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             // Hooks fire on every Read/Write/Edit and never create memories —
             // they deliberately skip provider resolution (no `backend`), see
             // `build_engine_without_providers`. The one model use is
-            // UserPromptSubmit's situation classifier, which reaches only an
-            // already running daemon (none with `--in-process`).
+            // UserPromptSubmit's situation classifier: a running daemon's
+            // embedding model, else the embedding model alone in-process
+            // (`--in-process` skips the daemon).
             let result = match command {
                 Some(HookCommand::PreToolUse) => commands::run_hook_pre_tool_use(&dir).await,
                 Some(HookCommand::SessionStart { min_criticality }) => {

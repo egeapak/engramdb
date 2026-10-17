@@ -1,10 +1,11 @@
 # Prompt-intent prototype: evaluation
 
 Status: **the situation classifier is wired into the UserPromptSubmit hook;
-the context gate is parked.** The hook uses the classifier when a shared daemon
-is already running (keyword tables otherwise), searches on every prompt, and
-adds a second search on the tail of the agent's previous message. Its seed
-vectors are cached per model in the model cache directory.
+the context gate is parked.** The hook uses the classifier with a running
+daemon's model, or else loads the embedding model in-process (keyword tables
+when neither is available). It searches on every prompt, and adds a second
+search on the tail of the agent's previous message. Nothing is cached: each
+call embeds the seeds and the prompt in one batch.
 
 ## What is being decided
 
@@ -120,6 +121,26 @@ The two wrong skips left at the default are short commands: "push it" and "now
 the docs". No length guard can separate them from "ok go" or "sure thing".
 They need short task seeds in the `Other` class, or a larger margin (0.10 has
 one wrong skip but catches two fewer skips).
+
+### Seeds per class, without a cache
+
+The hook keeps nothing between prompts, so every call embeds the seeds and the
+prompt together (`PrototypeClassifier::classify_once`, one batch call). The
+number of seeds per class is then the cost knob. Same 150 prompts, two runs
+with identical accuracy:
+
+| Seeds per class | Seeds embedded | Situation accuracy | Macro-F1 | Per prompt, in-process (p50 / p95) |
+|---|---|---|---|---|
+| 3 | 12 | 78.0% | 0.784 | 23–24 ms / 32–34 ms |
+| **6 (default)** | 24 | **89.3%** | **0.891** | 38–41 ms / 53–68 ms |
+| 12 | 48 | 87.3% | 0.869 | 74–77 ms / 93–109 ms |
+
+The default of 6 was chosen on this set, so its accuracy is optimistic. The 12
+row differs from the 86.0% above because the prompt is embedded inside the same
+batch as the seeds, and padding inside a batch changes the quantized model's
+output slightly. End to end, the release hook took 24–31 ms with the keyword tables, 78–100 ms
+with a running daemon, and 285–371 ms when it loaded the embedding model
+in-process (5 runs each, 4 cores, idle machine).
 
 ### Latency
 

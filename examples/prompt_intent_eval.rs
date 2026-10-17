@@ -312,6 +312,45 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Seeds per class: accuracy, and the per-prompt cost of `classify_once`
+    // (seeds + prompt in one batch, nothing cached), as the hook runs it.
+    println!("\n  seeds per class (classify_once embeds seeds + prompt each call):");
+    for n in [3, 6, 12] {
+        let params = PrototypeParams {
+            seeds_per_class: n,
+            top_k: n.min(3),
+            ..PrototypeParams::default()
+        };
+        let mut r = SituationReport::new();
+        let mut once_ms = Vec::new();
+        for item in &items {
+            let gold = LABELS.into_iter().find(|l| *l == item.situation).unwrap();
+            let t = Instant::now();
+            let d = PrototypeClassifier::classify_once(&provider, params, &item.prompt).await?;
+            once_ms.push(t.elapsed().as_secs_f64() * 1e3);
+            r.add(
+                item,
+                gold,
+                if d.needs_context {
+                    label(d.situation)
+                } else {
+                    "none"
+                },
+            );
+        }
+        once_ms.sort_by(f64::total_cmp);
+        println!(
+            "    {n:>2} per class ({:>2} seeds, top_k {}): accuracy {:>5.1}%  macro-F1 {:.3}  \
+             per prompt p50 {:.1} ms / p95 {:.1} ms",
+            4 * n,
+            params.top_k,
+            pct(r.correct, r.total),
+            r.macro_f1(),
+            percentile(&once_ms, 0.5),
+            percentile(&once_ms, 0.95)
+        );
+    }
+
     // --- 2. Context gate.
     println!("\n2. Context gate");
     let mut always = GateReport::default();
