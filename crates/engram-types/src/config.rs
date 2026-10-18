@@ -1730,9 +1730,10 @@ pub struct HooksConfig {
 
     /// UserPromptSubmit: infer the prompt's situation (debugging / design
     /// choice / neither) with the embedding classifier in
-    /// `engramdb::prompt_intent`, when a shared daemon is already running.
-    /// The hook never starts a daemon or loads a model itself; without a
-    /// running daemon, or with this off, it uses the keyword tables.
+    /// `engramdb::prompt_intent`. It uses the model of a shared daemon that is
+    /// already running (never starting one), else loads the embedding model
+    /// alone in the hook process when its files are already cached. With no
+    /// model available, or with this off, the keyword tables decide.
     #[serde(default = "HooksConfig::default_situation_classifier")]
     pub situation_classifier: bool,
 

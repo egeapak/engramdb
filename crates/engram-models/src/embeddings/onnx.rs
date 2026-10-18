@@ -37,6 +37,24 @@ pub struct OnnxModelSpec {
     pub hf_override: Option<HfModelFile>,
 }
 
+impl OnnxModelSpec {
+    /// The HuggingFace repo this model's files are cached under.
+    pub fn cache_repo(&self) -> String {
+        match self.hf_override {
+            Some(o) => o.repo.to_string(),
+            None => TextEmbedding::get_model_info(&self.fastembed_model)
+                .map(|info| info.model_code.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Whether this model is already in the model cache, so loading it needs
+    /// no download.
+    pub fn is_cached(&self) -> bool {
+        engram_storage::paths::hf_repo_cached(&self.cache_repo())
+    }
+}
+
 /// all-MiniLM-L6-v2: 384-dimensional, 256 token context (fp32).
 pub const ONNX_ALL_MINILM: OnnxModelSpec = OnnxModelSpec {
     fastembed_model: EmbeddingModel::AllMiniLML6V2,
@@ -362,12 +380,7 @@ impl OnnxProvider {
         // Offline mode: don't let fastembed reach the network. If the model
         // isn't already cached, fail fast rather than downloading it.
         if engram_storage::paths::offline_enabled() {
-            let repo = match spec.hf_override {
-                Some(o) => o.repo.to_string(),
-                None => TextEmbedding::get_model_info(&spec.fastembed_model)
-                    .map(|info| info.model_code.clone())
-                    .unwrap_or_default(),
-            };
+            let repo = spec.cache_repo();
             if !engram_storage::paths::hf_repo_cached(&repo) {
                 anyhow::bail!(
                     "offline mode (ENGRAMDB_OFFLINE) and model '{}' ({}) is not cached",

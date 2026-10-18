@@ -91,7 +91,7 @@ for seed in SEEDS:
     best = None
     for t in THRESHOLDS:
         c = counts(oof, train_items, t)
-        if c["wrong_skips"] / 240 <= MAX_WRONG_SKIP_RATE and (best is None or c["correct"] > best[1]["correct"]):
+        if c["wrong_skips"] / sum(i["search"] for i in train_items) <= MAX_WRONG_SKIP_RATE and (best is None or c["correct"] > best[1]["correct"]):
             best = (t, c)
     print(f"\nseed {seed}")
     for t in THRESHOLDS:
@@ -115,7 +115,7 @@ for seed in SEEDS:
         for tg in i.get("tags", []):
             a, n = tags.get(tg, (0, 0)); tags[tg] = (a + ((p >= t) == i["search"]), n + 1)
     print("  by tag: " + ", ".join(f"{k} {a}/{n}" for k, (a, n) in sorted(tags.items())))
-    print("  held-out sweep: " + "  ".join(f"{x}: {counts(ps, eval_items, x)['correct']}/60 wrong {counts(ps, eval_items, x)['wrong_skips']}" for x in THRESHOLDS))
+    print("  held-out sweep: " + "  ".join(f"{x}: {counts(ps, eval_items, x)['correct']}/{len(eval_items)} wrong {counts(ps, eval_items, x)['wrong_skips']}" for x in THRESHOLDS))
     for p, i in zip(ps, eval_items):
         if (p >= t) != i["search"]:
             print(f"    gold {'search' if i['search'] else 'skip  '} P {p:.2f}  {i['prompt'][:30]:<30} | {i['last'][-60:]}")

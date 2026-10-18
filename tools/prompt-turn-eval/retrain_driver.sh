@@ -5,7 +5,7 @@
 # Probabilities land in $WORK_DIR; score them with gate_threshold_report.py.
 # Set SEEDS to override the default "0 1 2".
 set -u
-S=${WORK_DIR:?set WORK_DIR to a scratch directory holding laya-venv, laya-data and scripts}
+S=${WORK_DIR:?set WORK_DIR to a scratch directory holding laya-venv and laya-data}
 D=${DATA_DIR:-$(cd "$(dirname "$0")/../../examples/data" && pwd)}
 TOOLS=$(cd "$(dirname "$0")" && pwd)
 cd "$S"

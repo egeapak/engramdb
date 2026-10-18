@@ -976,23 +976,19 @@ pub(crate) enum SituationModel {
     Provider(std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>),
 }
 
-/// The embedding model alone, loaded in this process: NLI, the reranker and
-/// T5 titling are switched off first, because the classifier needs none of
-/// them and each is another ONNX session to initialize. `None` when no
-/// embedding backend loads (no ONNX runtime, no cached model offline, …).
+/// The embedding model alone, loaded in this process — only when its ONNX
+/// files are already cached ([`engramdb::ops::cached_onnx_embedding_provider`]).
+/// Never downloads a model and never falls back to Ollama, either of which
+/// could stall the prompt for seconds; `None` sends the hook to the keyword
+/// tables instead.
 async fn in_process_embedder(
     config: &engramdb::types::EngramConfig,
 ) -> Option<std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>> {
-    let mut config = config.clone();
-    config.nli.enabled = false;
-    config.rerank.enabled = false;
-    config.title.strategy = engramdb::types::TitleStrategy::Keyword;
-    tokio::task::spawn_blocking(move || {
-        engramdb::ops::resolve_engine_providers(&config, None, 1).embedding
-    })
-    .await
-    .ok()
-    .flatten()
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || engramdb::ops::cached_onnx_embedding_provider(&config))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The prompt's situation: the embedding classifier when a model is at hand
@@ -1031,9 +1027,13 @@ async fn prompt_situation(
     match PrototypeClassifier::classify_once(provider.as_ref(), PrototypeParams::default(), prompt)
         .await
     {
-        // The classifier's context gate is deliberately ignored: the hook
-        // searches on every prompt (see `prompt_intent`'s module docs).
-        Ok(d) => d.situation,
+        // The hook searches every prompt whatever the gate says (see
+        // `prompt_intent`'s module docs). A prompt the gate would skip
+        // embeds near the acknowledgement seeds, where the classifier has no
+        // situation evidence, so the keyword tables decide it: "ok, it still
+        // panics" stays Debugging, "ok thanks" stays neutral.
+        Ok(d) if d.needs_context => d.situation,
+        Ok(_) => keyword_situation(prompt),
         Err(e) => {
             tracing::debug!("prompt situation classifier failed (non-fatal): {e}");
             keyword_situation(prompt)
@@ -1128,36 +1128,43 @@ async fn process_user_prompt_submit_with(
         ..Default::default()
     };
 
-    let mut found = match engramdb::ops::query_memories(&engine, &query).await {
-        Ok(r) => r.memories,
+    let current_task = session_task_for(input, dir);
+    // Task-scoped and already-shown memories are dropped from each result set
+    // before the slots are counted, so a prompt whose matches were all shown
+    // earlier in the session still gets the previous message's matches.
+    let visible = |memories: Vec<ScoredMemory>| {
+        drop_already_shown(
+            suppress_task_scoped(memories, current_task.as_deref()),
+            input,
+            dir,
+        )
+    };
+    let mut memories = match engramdb::ops::query_memories(&engine, &query).await {
+        Ok(r) => visible(r.memories),
         Err(e) => {
             tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
             return Ok(None);
         }
     };
-    if let Some(previous) = previous.filter(|_| found.len() < PROMPT_POOL) {
+    if let Some(previous) = previous.filter(|_| memories.len() < PROMPT_MAX_RESULTS) {
         let context_query = RetrievalQuery {
             query: Some(previous),
             ..query.clone()
         };
         match engramdb::ops::query_memories(&engine, &context_query).await {
             Ok(r) => {
-                for m in r.memories {
-                    if found.len() >= PROMPT_POOL {
+                for m in visible(r.memories) {
+                    if memories.len() >= PROMPT_MAX_RESULTS {
                         break;
                     }
-                    if !found.iter().any(|f| f.memory.id == m.memory.id) {
-                        found.push(m);
+                    if !memories.iter().any(|f| f.memory.id == m.memory.id) {
+                        memories.push(m);
                     }
                 }
             }
             Err(e) => tracing::debug!("Hook previous-message retrieval failed (non-fatal): {e}"),
         }
     }
-
-    let current_task = session_task_for(input, dir);
-    let memories = suppress_task_scoped(found, current_task.as_deref());
-    let mut memories = drop_already_shown(memories, input, dir);
     memories.truncate(PROMPT_MAX_RESULTS);
     if memories.is_empty() {
         return Ok(None);
@@ -3362,8 +3369,13 @@ mod tests {
             prompt_situation(prompt, &config, &model).await,
             Some(Situation::Debugging)
         );
-        // Turn control has no situation.
+        // Turn control has no situation; a gate-skipped prompt falls to the
+        // keyword tables, which still see a failure word.
         assert_eq!(prompt_situation("ok thanks", &config, &model).await, None);
+        assert_eq!(
+            prompt_situation("ok thanks sure, it panics", &config, &model).await,
+            Some(Situation::Debugging)
+        );
 
         // A failing model, a keyword-only model and the config switch all
         // fall back to the keyword tables.

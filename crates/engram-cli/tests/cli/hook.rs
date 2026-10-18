@@ -1,9 +1,11 @@
 //! Integration tests for `engramdb hook pre-tool-use` / `session-start`.
 //!
-//! The hook handlers must never load ML models (their queries carry no query
-//! text, so retrieval is scope_only). These tests pin that down by running
-//! the hooks with an empty `ENGRAMDB_MODEL_CACHE_DIR` and `ENGRAMDB_OFFLINE=1`
-//! (see CLAUDE.md "Test isolation"): if a hook ever tried to require an
+//! The hook handlers must never require ML models: the file hooks' queries
+//! carry no query text (retrieval is scope_only), and UserPromptSubmit's one
+//! model use — the situation classifier — falls back to keyword tables when
+//! no model is available. These tests pin that down by running the hooks
+//! with an empty `ENGRAMDB_MODEL_CACHE_DIR` and `ENGRAMDB_OFFLINE=1` (see
+//! CLAUDE.md "Test isolation"): if a hook ever came to require an
 //! embedding/NLI/reranker/T5 model, it could not load one here, and the
 //! output below would change.
 
@@ -202,6 +204,54 @@ fn hook_event_handlers_malformed_stdin_are_silent() {
                 String::from_utf8_lossy(&output.stdout)
             );
         }
+    }
+}
+
+/// UserPromptSubmit with a real prompt and nothing to classify with: no
+/// daemon on the (private, empty) socket, and no embedding model in the
+/// cache. The situation classifier must give up quietly and the keyword
+/// path must still answer — from the prompt itself, and from the agent's
+/// previous message for a reply that names no topic.
+#[test]
+fn hook_user_prompt_submit_without_any_model_uses_keywords() {
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+    let no_daemon = TempDir::new().unwrap();
+    let transcript = project.path().join("transcript.jsonl");
+    let record = serde_json::json!({
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [
+            {"type": "text", "text": "Should I remove the blocking calls in async code next?"}
+        ]}
+    });
+    std::fs::write(&transcript, format!("{record}\n")).unwrap();
+
+    for prompt in ["are blocking calls in async allowed?", "yes"] {
+        let input = serde_json::json!({
+            "session_id": format!("s-{}", prompt.len()),
+            "prompt": prompt,
+            "transcript_path": transcript.to_str().unwrap(),
+        })
+        .to_string();
+        let output = hook_cmd(project.path(), &["user-prompt-submit"], &empty_cache)
+            .env("ENGRAMDB_DAEMON_SOCKET", no_daemon.path().join("d.sock"))
+            .write_stdin(input)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Avoid blocking calls in async"),
+            "prompt {prompt:?} should surface the memory: {stdout}"
+        );
+        assert!(
+            !no_daemon.path().join("d.sock").exists(),
+            "the hook must never start a daemon"
+        );
     }
 }
 

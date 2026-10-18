@@ -1,9 +1,11 @@
 """Score a Laya checkpoint (base or fine-tuned) on prompt_turn_*.json test files.
 
 Usage: laya_gate_eval.py <checkpoint or hub id> <test.json> [<test.json> ...]
-Prints accuracy, skips caught and wrong skips at several P(work) cut-offs.
+Prints accuracy, skips caught and wrong skips at several P(work) cut-offs, and
+writes each set's probabilities to $GATE_PROBS_DIR/<test file>.<checkpoint>.probs.json
+($GATE_PROBS_DIR defaults to the current directory; point it outside the repo).
 """
-import json, sys, time
+import json, os, sys, time
 import torch
 from laya import Agent
 
@@ -37,4 +39,5 @@ for path in sys.argv[2:]:
             pred = p >= th
             c += pred == i["search"]; ws += i["search"] and not pred; sc += (not i["search"]) and not pred
         print(f"  P(work) >= {th}: acc {100 * c / n:5.1f}%  skips caught {sc:3}/{ns:<3}  wrong skips {ws:3}/{n - ns}")
-    json.dump(ps, open(path.split('/')[-1] + "." + sys.argv[1].strip('/').split('/')[-1] + ".probs.json", "w"))
+    name = path.split('/')[-1] + "." + sys.argv[1].strip('/').split('/')[-1] + ".probs.json"
+    json.dump(ps, open(os.path.join(os.environ.get("GATE_PROBS_DIR", "."), name), "w"))

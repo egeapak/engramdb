@@ -132,7 +132,12 @@ async fn main() -> Result<()> {
     let embedder = OnnxProvider::new().context("default ONNX embedding model did not load")?;
     let nli = OnnxNliProvider::with_spec_on(&DEFAULT_NLI_MODEL, Backend::Cpu)
         .context("default NLI model did not load")?;
-    let classifier = PrototypeClassifier::build(&embedder, PrototypeParams::default()).await?;
+    // Published with 12 seeds per class (the shipped default is 6).
+    let params = PrototypeParams {
+        seeds_per_class: 12,
+        ..PrototypeParams::default()
+    };
+    let classifier = PrototypeClassifier::build(&embedder, params).await?;
 
     // Prototype decision per item (prompt text only).
     let mut proto = Vec::with_capacity(items.len());

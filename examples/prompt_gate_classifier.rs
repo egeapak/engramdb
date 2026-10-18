@@ -10,7 +10,9 @@
 //! - Training data: `examples/data/prompt_turn_train.json` (360 pairs,
 //!   written by a separate model run that never saw the evaluation set).
 //! - Evaluation data: `examples/data/prompt_turn_eval.json` (60 held-out
-//!   pairs, the same set as `prompt_turn_eval.rs`).
+//!   pairs, the same set as `prompt_turn_eval.rs`), plus
+//!   `prompt_turn_test_realistic.json` (400) and `prompt_turn_test_hard.json`
+//!   (300) when present, written by separate model runs.
 //! - The L2 strength and the skip threshold are chosen by 5-fold
 //!   cross-validation on the training set only; the evaluation set is scored
 //!   once with the chosen values.

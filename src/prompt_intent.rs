@@ -10,10 +10,10 @@
 //!
 //! Two implementations live here:
 //!
-//! - [`keyword_situation`] is the shipped heuristic: lowercase substring
-//!   tables, first match wins. It needs no model, which is why the hook uses
-//!   it, and it matches inside words ("terror" is Debugging, "redesign" is
-//!   DesignChoice).
+//! - [`keyword_situation`] is the fallback: lowercase substring tables, first
+//!   match wins. It needs no model, so the hook uses it whenever no embedding
+//!   model is available, and it matches inside words ("terror" is Debugging,
+//!   "redesign" is DesignChoice).
 //! - [`PrototypeClassifier`] embeds a fixed set of labelled seed prompts, then
 //!   labels a prompt by its nearest seeds (mean of the top-`k` cosine
 //!   similarities per class). The hook calls
@@ -255,7 +255,8 @@ fn selected_seeds(per_class: usize) -> Vec<(Label, &'static str)> {
 /// scores it decided from (for inspection and threshold tuning).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PromptDecision {
-    /// `Some(Debugging)`, `Some(DesignChoice)`, or `None` (neither).
+    /// `Some(Debugging)`, `Some(DesignChoice)`, or `None` (neither, or a
+    /// prompt the gate skips).
     pub situation: Option<Situation>,
     /// `false` when the prompt is turn control and the hook should not
     /// search at all.
@@ -400,7 +401,8 @@ impl PrototypeClassifier {
         let needs_context =
             too_long_to_skip || scores.no_context <= best_task + self.params.gate_margin;
 
-        // A skipped prompt has no situation: nothing will be retrieved for it.
+        // A skipped prompt has no situation: its debugging / design / other
+        // scores are all low, and the larger of them is noise.
         let situation = if !needs_context {
             None
         } else if scores.debugging >= scores.design && scores.debugging > scores.other {

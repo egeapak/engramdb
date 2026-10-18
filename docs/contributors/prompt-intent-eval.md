@@ -39,8 +39,10 @@ A skipped prompt gets no situation, because nothing is retrieved for it.
 | Gate | Always search (shipped) | — |
 | Gate | Nearest-seed prototype, with a length guard | `prompt_intent::PrototypeClassifier` |
 
-The prototype embeds 48 labelled seed prompts once (12 per class: debugging,
-design, other, no-context). For a prompt, each class score is the mean of the
+In the measurements of sections 1 and 2 the prototype embeds 48 labelled seed
+prompts once (12 per class: debugging, design, other, no-context), and each
+prompt separately. The shipped default is 6 per class, embedded together with
+the prompt on every call; see "Seeds per class, without a cache" below. For a prompt, each class score is the mean of the
 top-3 cosine similarities to that class's seeds. The gate skips only when the
 no-context score beats the best task score by more than `gate_margin` (default
 0.05), and only when the prompt has at most `max_skip_words` words (default 7).
@@ -147,18 +149,17 @@ in-process (5 runs each, 4 cores, idle machine).
 | Step | Time |
 |---|---|
 | Model load (in-process, files in the OS page cache) | 199–213 ms |
-| Seed embedding (once per process) | 94–103 ms |
+| Seed embedding, 48 seeds (as measured here; the hook now embeds 24 with the prompt) | 94–103 ms |
 | Prompt embedding, warm | p50 2.9–3.3 ms, p95 6.1–8.2 ms |
 | Classification from the vector | 12–19 µs |
 
 The first run after a container restart loaded the model in about 4 s, because
 the model file was not yet in the OS page cache.
 
-A hook process that loads the model itself pays about 300 ms per prompt, which
-is why the hook loads no model today. Through the shared daemon, the per-prompt
-cost is the warm embedding plus a socket round trip. The seed vectors must then
-be cached by the daemon (keyed by `model_id`), or every hook pays the 100 ms
-seed embedding again.
+A hook process that loads the model itself pays the model load on every prompt.
+Through a running daemon, the cost is one batch embedding plus a socket round
+trip. The shipped hook does both, depending on whether a daemon is running, and
+caches nothing; see "Seeds per class, without a cache" for the measured cost.
 
 ## Context gate with the previous message
 
@@ -289,7 +290,7 @@ Costs on 4 CPU cores:
 ### What this shows
 
 - **The 60-pair set was too small to judge with.** The linear head scored
-  90% with no wrong skips there, and 73–78% with 3–5% wrong skips on the 700
+  90% with no wrong skips there, and 73–78% with 3–6% wrong skips on the 700
   new pairs. Cross-validation on the training set (72.5%) predicted the
   larger sets better than the small held-out set did.
 - **A linear head on frozen embeddings is not enough.** It barely beats
@@ -366,9 +367,10 @@ What this shows:
   set, all three seeds beat the original model by 6–10 accuracy points at
   either cut-off. Wrong skips fall from 34 to 15–29 at P ≥ 0.1. The realistic
   set does not get worse.
-- **The gate is still not safe.** At the cut-offs that give useful accuracy,
-  every seed wrongly skips 7–19% of the work requests in the adversarial
-  sets. The safety rule picks very different cut-offs per seed. One seed ends
+- **The gate is still not safe.** At the fixed cut-offs (0.1 and 0.5), every
+  seed wrongly skips 7–19% of the work requests in the adversarial sets. The
+  one setting with few wrong skips (seed 0 at its validation cut-off, 2.5%)
+  catches only 54% of the skips. The safety rule picks very different cut-offs per seed. One seed ends
   up never skipping, and another catches only 54% of the skips.
 - **The remaining errors are confident.** All three seeds score some
   correctly labelled work requests below 0.04:
@@ -387,14 +389,14 @@ What this shows:
 ## Conclusions
 
 1. **Situation: the prototype is a clear improvement** (54% to 86%), with the
-   largest gain on prompts that state an intent without a table word. It needs
-   an embedding, so it is only usable in the hook through the daemon, with
-   `keyword_situation` as the fallback.
+   largest gain on prompts that state an intent without a table word. **It is
+   wired into the hook:** it uses a running daemon's embedding model, else loads
+   the model in-process when its files are cached, with `keyword_situation` as
+   the fallback.
 2. **Gate: the prototype with the length guard is usable, but not yet safe
    enough to ship.** It catches 29 of 30 turn-control prompts and wrongly skips
-   2 of 120 task prompts, both 2–3 word commands. Fix those with short task
-   seeds before wiring it in, and re-measure on real prompts, because the seeds
-   would then be informed by this evaluation's errors.
+   2 of 120 task prompts, both 2–3 word commands. Point 3 supersedes this: the
+   gate is parked, and the hook searches every prompt.
 3. **Gate, revised by the previous-message evaluation: do not skip yet.** Once
    approvals count as work, no model tried here (the prototype, NLI, Laya
    zero-shot) beats "always search" without wrong skips. The prompt alone
@@ -415,9 +417,10 @@ What this shows:
    MiniLM is about 15 times faster per pair but less stable. The next levers
    are real pairs from harvested transcripts, an ensemble of seeds, and a
    design that searches when unsure, not a larger synthetic set.
-6. **Before wiring anything in,** build the evaluation sets from real prompts
+6. **Before reviving the gate,** build the evaluation sets from real prompts
    (harvested transcripts) and re-measure. Both current sets are small and
-   written by the same author as the seeds.
+   written by the same author as the seeds; the same holds for re-tuning the
+   situation classifier's seeds.
 
 ## Reproduce
 
@@ -439,7 +442,7 @@ python tools/prompt-turn-eval/minilm_gate_finetune.py examples/data/prompt_turn_
 python tools/prompt-turn-eval/to_laya_jsonl.py examples/data/prompt_turn_train.json train.jsonl
 laya-train --data train.jsonl --base convaiinnovations/laya --out laya-gate \
     --epochs 4 --micro-batch 8 --grad-accum 1 --device cpu --seed 0 --max-len 256
-python tools/prompt-turn-eval/laya_gate_eval.py laya-gate examples/data/prompt_turn_eval.json \
+GATE_PROBS_DIR=$WORK_DIR python tools/prompt-turn-eval/laya_gate_eval.py laya-gate examples/data/prompt_turn_eval.json \
     examples/data/prompt_turn_test_realistic.json examples/data/prompt_turn_test_hard.json
 
 # Retraining with the supplement (WORK_DIR holds laya-venv and laya-data)

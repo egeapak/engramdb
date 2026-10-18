@@ -547,6 +547,33 @@ fn resolve_provider(
     None
 }
 
+/// The configured embedding model as a single in-process ONNX session, **only
+/// when its files are already in the model cache**; otherwise `None`.
+///
+/// For latency-bound callers (the UserPromptSubmit hook) that would rather do
+/// without a model than wait: unlike [`resolve_engine_providers`] this never
+/// downloads a model and never falls back to Ollama (whose client waits up to
+/// its request timeout when no server answers). It loads nothing else — no
+/// NLI, reranker or T5. Blocking: run it off the async runtime.
+pub fn cached_onnx_embedding_provider(
+    config: &crate::types::EngramConfig,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    #[cfg(feature = "onnxruntime")]
+    {
+        let specs = provider_specs(config.embeddings.provider.as_str())?;
+        if !specs.onnx.is_cached() {
+            return None;
+        }
+        OnnxProvider::try_with_model_intra(specs.onnx, None)
+            .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        let _ = config;
+        None
+    }
+}
+
 /// Intra-op threads for each ONNX session of an embedding pool:
 /// `ENGRAMDB_ONNX_INTRA_THREADS` when set, else
 /// [`EmbeddingsConfig::session_intra_threads`](crate::types::config::EmbeddingsConfig::session_intra_threads)

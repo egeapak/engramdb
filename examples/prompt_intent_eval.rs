@@ -226,7 +226,13 @@ async fn main() -> Result<()> {
     provider.embed("warm up").await?;
 
     let build_start = Instant::now();
-    let classifier = PrototypeClassifier::build(&provider, PrototypeParams::default()).await?;
+    // Sections 1 and 2 were published with 12 seeds per class; the shipped
+    // default is 6 (see the seeds-per-class sweep below).
+    let measured = PrototypeParams {
+        seeds_per_class: 12,
+        ..PrototypeParams::default()
+    };
+    let classifier = PrototypeClassifier::build(&provider, measured).await?;
     let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
 
     // Embed every prompt once; every parameter setting below reuses them.
@@ -289,7 +295,7 @@ async fn main() -> Result<()> {
     for k in [1, 5] {
         let c = classifier.clone().with_params(PrototypeParams {
             top_k: k,
-            ..PrototypeParams::default()
+            ..measured
         });
         let mut r = SituationReport::new();
         for (item, v) in items.iter().zip(&vectors) {
@@ -359,7 +365,7 @@ async fn main() -> Result<()> {
     }
     always.print("always search (shipped)");
 
-    let default = PrototypeParams::default();
+    let default = measured;
     let mut gate_misses = Vec::new();
     for guard in [None, Some(3), Some(5), Some(7)] {
         for margin in [0.0f32, 0.05, 0.10] {
