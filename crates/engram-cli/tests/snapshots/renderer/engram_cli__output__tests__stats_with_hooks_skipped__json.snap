@@ -1,0 +1,38 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "total": 0,
+  "by_type": [],
+  "by_status": [],
+  "by_scope": [],
+  "expired": 0,
+  "oldest": null,
+  "newest": null,
+  "avg_criticality": 0.0,
+  "hooks": {
+    "since": "2026-10-01T09:30:00Z",
+    "by_hook": {
+      "pre-tool-use": {
+        "calls": 120,
+        "errors": 0,
+        "avg": 14.2,
+        "p50": 11.0,
+        "p95": 30.5,
+        "p99": 61.3
+      },
+      "user-prompt-submit": {
+        "calls": 8,
+        "errors": 2,
+        "avg": 301.4,
+        "p50": 290.0,
+        "p95": 410.2,
+        "p99": 410.2
+      }
+    },
+    "skipped_lines": 3
+  }
+}
+--- stderr ---

@@ -1236,6 +1236,9 @@ impl OutputFormatter {
         if let Some(rt) = &stats.runtime {
             print_runtime_pretty(self, rt);
         }
+        if let Some(hooks) = &stats.hooks {
+            print_hooks_pretty(self, hooks);
+        }
     }
 
     fn print_stats_plain(&self, stats: &Stats) {
@@ -1247,6 +1250,19 @@ impl OutputFormatter {
             outln!(self, "Calls: {}", rt.view.usage.total_calls);
             if rt.view.queries.total > 0 {
                 outln!(self, "Hit rate: {:.3}", rt.view.queries.hit_rate);
+            }
+        }
+        if let Some(hooks) = &stats.hooks {
+            for (hook, t) in &hooks.by_hook {
+                outln!(
+                    self,
+                    "Hook {}: calls={} errors={} p50={:.1} p99={:.1}",
+                    hook,
+                    t.calls,
+                    t.errors,
+                    t.p50,
+                    t.p99
+                );
             }
         }
     }
@@ -1588,6 +1604,43 @@ fn print_runtime_pretty(f: &OutputFormatter, rt: &engramdb::telemetry::RuntimeSn
     }
 }
 
+/// Pretty-print per-hook call counts and latency percentiles.
+fn print_hooks_pretty(f: &OutputFormatter, hooks: &engramdb::telemetry::hooks::HookStatsView) {
+    match hooks.since {
+        Some(since) => outln!(
+            f,
+            "\nHook calls (since {}):",
+            since.format("%Y-%m-%d %H:%M:%S UTC")
+        ),
+        None => outln!(f, "\nHook calls:"),
+    }
+    for (hook, t) in &hooks.by_hook {
+        let errors = if t.errors > 0 {
+            format!(", {} errors", t.errors)
+        } else {
+            String::new()
+        };
+        outln!(
+            f,
+            "  {}: {} calls{}, p50 {:.1} ms, p99 {:.1} ms (avg {:.1}, p95 {:.1})",
+            hook,
+            t.calls,
+            errors,
+            t.p50,
+            t.p99,
+            t.avg,
+            t.p95
+        );
+    }
+    if hooks.skipped_lines > 0 {
+        outln!(
+            f,
+            "  ({} unreadable log line(s) skipped)",
+            hooks.skipped_lines
+        );
+    }
+}
+
 /// Read access to what a [`OutputFormatter::capturing`] formatter buffered.
 #[cfg(test)]
 pub(crate) struct Capture {
@@ -1697,6 +1750,11 @@ pub struct Stats {
     /// been recorded yet.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<engramdb::telemetry::RuntimeSnapshot>,
+    /// Per-hook call counts and latency percentiles, read from the
+    /// project's `.engramdb/state/hook_stats.jsonl`. `None` when no hook has
+    /// recorded a call (or `[stats].enabled` is false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<engramdb::telemetry::hooks::HookStatsView>,
 }
 
 /// The JSON body for a running daemon, shared by `daemon status` and
@@ -2461,6 +2519,7 @@ mod tests {
             newest: None,
             avg_criticality: 0.62,
             runtime: None,
+            hooks: None,
         };
         let v = serde_json::to_value(&stats).unwrap();
         assert_eq!(v["total"], 10);
@@ -2781,6 +2840,7 @@ mod tests {
             newest: None,
             avg_criticality: 0.75,
             runtime: Some(rt),
+            hooks: None,
         }
     }
 
@@ -3170,6 +3230,72 @@ mod tests {
 
     // ---- stats ----------------------------------------------------------
 
+    fn hook_stats_fixture(skipped_lines: u64) -> engramdb::telemetry::hooks::HookStatsView {
+        use engramdb::telemetry::hooks::{HookStatsView, HookTimingStats};
+        let mut by_hook = std::collections::BTreeMap::new();
+        by_hook.insert(
+            "pre-tool-use".to_string(),
+            HookTimingStats {
+                calls: 120,
+                errors: 0,
+                avg: 14.2,
+                p50: 11.0,
+                p95: 30.5,
+                p99: 61.3,
+            },
+        );
+        by_hook.insert(
+            "user-prompt-submit".to_string(),
+            HookTimingStats {
+                calls: 8,
+                errors: 2,
+                avg: 301.4,
+                p50: 290.0,
+                p95: 410.2,
+                p99: 410.2,
+            },
+        );
+        HookStatsView {
+            since: Some(fixed(2026, 10, 1, 9, 30, 0)),
+            by_hook,
+            skipped_lines,
+        }
+    }
+
+    #[test]
+    fn snap_stats_with_hooks() {
+        let stats = Stats {
+            total: 1,
+            by_type: vec![(MemoryType::Decision, 1)],
+            by_status: vec![(Status::Active, 1)],
+            by_scope: vec![],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.5,
+            runtime: None,
+            hooks: Some(hook_stats_fixture(0)),
+        };
+        snap_formats("stats_with_hooks", |f| f.print_stats(&stats));
+    }
+
+    #[test]
+    fn snap_stats_with_hooks_and_skipped_lines() {
+        let stats = Stats {
+            total: 0,
+            by_type: vec![],
+            by_status: vec![],
+            by_scope: vec![],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.0,
+            runtime: None,
+            hooks: Some(hook_stats_fixture(3)),
+        };
+        snap_formats("stats_with_hooks_skipped", |f| f.print_stats(&stats));
+    }
+
     #[test]
     fn snap_stats_without_runtime() {
         let stats = Stats {
@@ -3182,6 +3308,7 @@ mod tests {
             newest: Some(fixed(2026, 1, 1, 0, 0, 0)),
             avg_criticality: 0.75,
             runtime: None,
+            hooks: None,
         };
         snap_formats("stats_plain_counts", |f| f.print_stats(&stats));
     }

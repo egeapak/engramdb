@@ -66,7 +66,7 @@ pub async fn run_stats(
         &store.project_dir.join(".engramdb/config.toml"),
     )
     .await;
-    let collector = StatsCollector::new(cfg.stats);
+    let collector = StatsCollector::new(cfg.stats.clone());
     let _ = engramdb::telemetry::persistence::hydrate_collector(&collector).await;
     let project_id = store.project_id.clone();
     let runtime = collector.snapshot(&project_id, all_projects);
@@ -74,6 +74,14 @@ pub async fn run_stats(
         || runtime.view.queries.total > 0
         || !runtime.view.timings_ms.tool.is_empty()
         || runtime.by_project.as_ref().is_some_and(|m| !m.is_empty());
+
+    // Hook processes log to the project's own state dir (see
+    // `engramdb::telemetry::hooks`); the global store has no hooks of its own.
+    let hooks = if global {
+        Default::default()
+    } else {
+        engramdb::telemetry::hooks::load_summary(&store.project_dir, cfg.stats.retention_days)
+    };
 
     let stats = Stats {
         total: store_stats.total,
@@ -85,6 +93,7 @@ pub async fn run_stats(
         newest: store_stats.newest,
         avg_criticality: store_stats.avg_criticality,
         runtime: if runtime_present { Some(runtime) } else { None },
+        hooks: (cfg.stats.enabled && !hooks.is_empty()).then_some(hooks),
     };
 
     formatter.print_stats(&stats);

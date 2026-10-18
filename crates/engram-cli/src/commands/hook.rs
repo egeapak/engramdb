@@ -1877,10 +1877,91 @@ pub fn warn_unknown_hook(name: Option<&str>) {
     }
 }
 
+/// The name a hook call is recorded under in the per-project hook log — the
+/// clap subcommand name, so `stats` output matches the command Claude Code
+/// runs. `None` for [`HookCommand::Unknown`] (and a bare `engramdb hook`):
+/// that name comes from a config this binary does not understand, and
+/// recording it would let any string become a stats key.
+///
+/// [`HookCommand::Unknown`]: crate::app::HookCommand::Unknown
+pub fn stats_name(command: &crate::app::HookCommand) -> Option<&'static str> {
+    use crate::app::HookCommand;
+    match command {
+        HookCommand::PreToolUse => Some("pre-tool-use"),
+        HookCommand::SessionStart { .. } => Some("session-start"),
+        HookCommand::UserPromptSubmit => Some("user-prompt-submit"),
+        HookCommand::PostToolUse => Some("post-tool-use"),
+        HookCommand::SessionEnd => Some("session-end"),
+        HookCommand::PreCompact => Some("pre-compact"),
+        HookCommand::Unknown(_) => None,
+    }
+}
+
+/// Record one hook call (count, wall time, outcome) in the project's hook
+/// log. Best-effort: a failure is logged at debug level and never changes the
+/// hook's exit status or output, which Claude Code parses.
+///
+/// `elapsed` runs from `cli::run` entry to handler return, so it includes
+/// worktree resolution and config loading but not process start-up (binary
+/// load, Tokio runtime start), which no in-process clock can see.
+pub fn record_hook_stats(dir: &Path, name: &str, elapsed: std::time::Duration, ok: bool) {
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    if let Err(e) = engramdb::telemetry::hooks::record_hook_call(dir, name, ms, ok) {
+        tracing::debug!("hook stats: could not record `{name}` (non-fatal): {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+    /// Every hook is recorded under its clap subcommand name, and no name is
+    /// missed: a new `HookCommand` variant must get a `stats_name` arm (the
+    /// match is exhaustive) whose name is the one Claude Code runs.
+    #[test]
+    fn stats_name_matches_every_subcommand_name() {
+        use crate::app::HookCommand;
+        let named: Vec<&str> = [
+            HookCommand::PreToolUse,
+            HookCommand::SessionStart {
+                min_criticality: 0.6,
+            },
+            HookCommand::UserPromptSubmit,
+            HookCommand::PostToolUse,
+            HookCommand::SessionEnd,
+            HookCommand::PreCompact,
+        ]
+        .iter()
+        .map(|c| stats_name(c).expect("known hook has a stats name"))
+        .collect();
+        let mut supported = crate::supported_hook_subcommands();
+        supported.sort();
+        let mut named_sorted: Vec<String> = named.iter().map(|s| s.to_string()).collect();
+        named_sorted.sort();
+        assert_eq!(named_sorted, supported);
+        assert_eq!(
+            stats_name(&HookCommand::Unknown(vec!["x".into()])),
+            None,
+            "unknown hook names must never become stats keys"
+        );
+    }
+
+    #[test]
+    fn record_hook_stats_writes_one_line_in_an_initialized_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".engramdb/memories")).unwrap();
+        record_hook_stats(
+            tmp.path(),
+            "pre-tool-use",
+            std::time::Duration::from_millis(7),
+            true,
+        );
+        let loaded = engramdb::telemetry::hooks::load_hook_calls(tmp.path()).unwrap();
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records[0].hook, "pre-tool-use");
+        assert!((loaded.records[0].ms - 7.0).abs() < 1e-9);
+    }
 
     // Finding #21: the SessionStart criticality threshold must be sanitized.
     #[test]

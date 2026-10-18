@@ -140,6 +140,8 @@ pub fn supported_hook_subcommands() -> Vec<String> {
 /// # Returns
 /// Ok(()) on success, or an error if the command fails
 pub async fn run(cli: Cli) -> Result<()> {
+    // Start of the hook-latency clock (see `commands::hook::record_hook_stats`).
+    let started = std::time::Instant::now();
     // Initialize tracing so warnings (e.g. from reindex) are visible.
     // Defaults to WARN level; override with RUST_LOG env var.
     //
@@ -721,6 +723,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             // UserPromptSubmit's situation classifier: a running daemon's
             // embedding model, else the embedding model alone in-process
             // (`--in-process` skips the daemon).
+            let stats_name = command.as_ref().and_then(commands::hook::stats_name);
             let result = match command {
                 Some(HookCommand::PreToolUse) => commands::run_hook_pre_tool_use(&dir).await,
                 Some(HookCommand::SessionStart { min_criticality }) => {
@@ -751,6 +754,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             // already swallow store/retrieval errors themselves; this catches
             // what they can't (non-UTF-8 stdin, JSON emit failures) so the
             // hook degrades to "no context" instead of breaking the session.
+            if let Some(name) = stats_name.filter(|_| config.stats.enabled) {
+                commands::hook::record_hook_stats(&dir, name, started.elapsed(), result.is_ok());
+            }
             if let Err(e) = result {
                 tracing::warn!("engramdb hook failed (continuing without context): {e}");
             }

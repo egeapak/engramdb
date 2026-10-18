@@ -11,6 +11,10 @@
 //! - [`StatsScope`]: RAII guard placed at the top of every MCP tool handler.
 //!   On drop it records the elapsed time and success/error outcome.
 //!
+//! Hook calls are recorded separately by [`hooks`]: each hook is its own
+//! short-lived process, so it appends a line to a per-project JSONL log
+//! instead of going through the collector and its flush task.
+//!
 //! Persistence is handled by [`persistence`]: events are appended to a
 //! per-project LanceDB `stats_events` table so counters survive restarts.
 //!
@@ -19,6 +23,9 @@
 //! `ToolCounters` aren't part of the library API.
 
 pub(crate) mod collector;
+// Hook processes are short-lived and record through a JSONL log, not the
+// collector; see the module docs.
+pub mod hooks;
 // `persistence` is `pub` (not `pub(crate)`) because the top-level `engramdb`
 // crate's `ops` / `mcp` / `cli` layers drive flush/hydrate directly across the
 // crate boundary.
