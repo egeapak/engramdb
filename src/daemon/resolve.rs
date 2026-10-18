@@ -251,6 +251,25 @@ async fn remote_for(
     super::remote_providers(handle, ModelSelection::from_config(config, backend), config).await
 }
 
+/// Providers from an **already running** daemon, or `None`: never spawns one
+/// and never loads a model in-process.
+///
+/// For latency-bound callers that can do without models — the hooks, which
+/// fall back to keyword heuristics. A one-shot in-process load (~240 ms of
+/// ONNX init per call) is exactly the cost those callers must not pay, so
+/// unlike [`resolve_providers_with`] there is no fallback. Honors the global
+/// `[daemon].enabled` like every other resolve.
+pub async fn resolve_daemon_providers(
+    cell: &DaemonCell,
+    config: &EngramConfig,
+    backend: Option<EmbeddingBackend>,
+) -> Option<EngineProviders> {
+    let daemon = crate::storage::config::load_global_config_or_default()
+        .await
+        .daemon;
+    remote_for(cell, &daemon, config, backend, DaemonPolicy::ConnectOnly).await
+}
+
 /// [`resolve_providers_with`] with the one-shot [`InProcessFallback::Single`]
 /// fallback — the CLI's default shape.
 pub async fn resolve_providers(

@@ -1305,6 +1305,58 @@ async fn resolve_providers_connect_only_uses_live_daemon() {
     std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
 }
 
+/// The hooks' resolver: a live daemon's providers, otherwise `None` — no
+/// spawn, no in-process load, and nothing when the daemon is disabled.
+#[tokio::test]
+async fn resolve_daemon_providers_never_falls_back() {
+    use super::protocol::DaemonOp;
+    use crate::daemon::resolve::{resolve_daemon_providers, DaemonCell};
+
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("hook.sock");
+    std::env::set_var("ENGRAMDB_DAEMON_SOCKET", &socket);
+    let config = crate::types::EngramConfig::default();
+    write_global_config("[daemon]\nenabled = true\n");
+
+    // Nothing listening: no providers, and no daemon was spawned.
+    assert!(resolve_daemon_providers(&DaemonCell::new(), &config, None)
+        .await
+        .is_none());
+    assert!(
+        !socket.exists(),
+        "the hook resolver must never spawn a daemon"
+    );
+
+    spawn_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+            build: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+        DaemonOp::Meta => DaemonResponse::Meta {
+            dimensions: 8,
+            max_tokens: 64,
+            model_id: "onnx/hook-stub".to_string(),
+        },
+        _ => DaemonResponse::Error {
+            message: "not implemented in stub".to_string(),
+        },
+    });
+    poll_until_connectable(&socket).await;
+
+    let providers = resolve_daemon_providers(&DaemonCell::new(), &config, None)
+        .await
+        .expect("a live daemon's providers");
+    assert_eq!(providers.embedding.expect("embedding").dimensions(), 8);
+
+    // Disabled globally: the live daemon is not used.
+    write_global_config("[daemon]\nenabled = false\n");
+    assert!(resolve_daemon_providers(&DaemonCell::new(), &config, None)
+        .await
+        .is_none());
+
+    std::env::remove_var("ENGRAMDB_DAEMON_SOCKET");
+}
+
 // ---------------------------------------------------------------------------
 // Heartbeat: pings keep daemon alive past idle; cell self-heals after kill
 // ---------------------------------------------------------------------------

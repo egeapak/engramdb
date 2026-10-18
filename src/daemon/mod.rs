@@ -42,7 +42,8 @@ pub use doctor::check_daemon;
 pub use protocol::{DaemonStatus, ModelSelection, RequestCounts, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use resolve::{
-    resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy, InProcessFallback,
+    resolve_daemon_providers, resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy,
+    InProcessFallback,
 };
 pub use server::run_daemon;
 

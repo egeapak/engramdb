@@ -1727,6 +1727,23 @@ pub struct HooksConfig {
     /// `get <id>` pointer. `0` shows summaries only.
     #[serde(default = "HooksConfig::default_preview_chars")]
     pub preview_chars: usize,
+
+    /// UserPromptSubmit: infer the prompt's situation (debugging / design
+    /// choice / neither) with the embedding classifier in
+    /// `engramdb::prompt_intent`. It uses the model of a shared daemon that is
+    /// already running (never starting one), else loads the embedding model
+    /// alone in the hook process when its files are already cached. With no
+    /// model available, or with this off, the keyword tables decide.
+    #[serde(default = "HooksConfig::default_situation_classifier")]
+    pub situation_classifier: bool,
+
+    /// UserPromptSubmit: characters from the end of the agent's previous
+    /// message used for a second keyword search, whose results fill the
+    /// slots the prompt's own search leaves free. Short replies such as
+    /// "push it" or "yes" carry their topic in the message they answer.
+    /// `0` turns the second search off.
+    #[serde(default = "HooksConfig::default_previous_message_chars")]
+    pub previous_message_chars: usize,
 }
 
 impl HooksConfig {
@@ -1737,6 +1754,14 @@ impl HooksConfig {
     fn default_preview_chars() -> usize {
         1000
     }
+
+    fn default_situation_classifier() -> bool {
+        true
+    }
+
+    fn default_previous_message_chars() -> usize {
+        300
+    }
 }
 
 impl Default for HooksConfig {
@@ -1745,6 +1770,8 @@ impl Default for HooksConfig {
             class_order: None,
             prompt_context_budget: Self::default_prompt_context_budget(),
             preview_chars: Self::default_preview_chars(),
+            situation_classifier: Self::default_situation_classifier(),
+            previous_message_chars: Self::default_previous_message_chars(),
         }
     }
 }

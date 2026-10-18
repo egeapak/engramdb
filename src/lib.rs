@@ -1,5 +1,6 @@
 pub mod daemon;
 pub mod ops;
+pub mod prompt_intent;
 pub mod retrieval;
 pub mod scope;
 pub mod scoring;

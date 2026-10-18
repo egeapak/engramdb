@@ -1,0 +1,1805 @@
+{
+ "description": "Hand-written agent/user turn pairs, combined from curated pools of agent messages (proposals, offers, finished work, explanations) and user replies, labelled by whether the reply asks the agent for further work.",
+ "items": [
+  {
+   "last": "I'd bump the lockfile now rather than wait for the upstream patch, since the fix we need is already in 2.4.1. Shall I?",
+   "prompt": "ok",
+   "search": true
+  },
+  {
+   "last": "The `Repo.preload` call here runs inside the loop. I can move it outside so everything loads in one query. Do you want that?",
+   "prompt": "yes, thank you",
+   "search": true
+  },
+  {
+   "last": "The new `ExportButton` component is in place, wired to the `/export` endpoint, with a loading state and an error toast.",
+   "prompt": "add a comment explaining it",
+   "search": true
+  },
+  {
+   "last": "The `.env.example` is missing the three Stripe variables the app now requires at startup. Want me to add them with placeholder values?",
+   "prompt": "please do",
+   "search": true
+  },
+  {
+   "last": "There are two failing tests, one in `auth_test.go` and one in `billing_test.go`. Which should I look at first?",
+   "prompt": "billing",
+   "search": true
+  },
+  {
+   "last": "Should the new setting live in `config.toml` or be an environment variable? I lean towards the config file, but either works.",
+   "prompt": "env var",
+   "search": true
+  },
+  {
+   "last": "The Celery task retries forever because `max_retries=None` disables the limit, and that exception is always treated as retryable.",
+   "prompt": "can you verify that's actually it?",
+   "search": true
+  },
+  {
+   "last": "The slow page is fixed by adding `select_related('author')`; it now issues 3 queries instead of 120.",
+   "prompt": "clean up the leftover debug prints",
+   "search": true
+  },
+  {
+   "last": "I bumped React to 18.3 and everything builds. The only warning is a deprecated lifecycle method in `Modal.jsx`. Want me to fix that too?",
+   "prompt": "leave that for another pr",
+   "search": false
+  },
+  {
+   "last": "The deploy script now quotes all its variables and passes shellcheck with no warnings.",
+   "prompt": "and the ci config?",
+   "search": true
+  },
+  {
+   "last": "The Terraform plan wants to recreate the RDS instance because the parameter group name changed. I'd rather add a `lifecycle` block to prevent that. Should I?",
+   "prompt": "yes pls",
+   "search": true
+  },
+  {
+   "last": "The Java service's heap is capped at 512MB but the container has 2GB. I'd set `-XX:MaxRAMPercentage=75` in the deployment manifest. Should I make that change?",
+   "prompt": "go for it",
+   "search": true
+  },
+  {
+   "last": "Tree shaking can't drop that code because the package is published as CommonJS, so its imports aren't statically analyzable.",
+   "prompt": "how do we currently handle database migrations in this repo?",
+   "search": true
+  },
+  {
+   "last": "Just to check: the bucket should be private and only accessed through signed URLs?",
+   "prompt": "yes, that's right",
+   "search": true
+  },
+  {
+   "last": "Plan: add an index on `events(user_id, created_at)`, then rewrite the dashboard query to use it. Shall I?",
+   "prompt": "sgtm",
+   "search": true
+  },
+  {
+   "last": "I updated `pyproject.toml` to require `httpx>=0.27` and regenerated the lockfile. All 186 tests pass.",
+   "prompt": "where did you put it?",
+   "search": true
+  },
+  {
+   "last": "Tree shaking can't drop that code because the package is published as CommonJS, so its imports aren't statically analyzable.",
+   "prompt": "can you find all the places this happens",
+   "search": true
+  },
+  {
+   "last": "That's everything: the cron job is scheduled, and the alert posts to #ops when it fails.",
+   "prompt": "alright",
+   "search": false
+  },
+  {
+   "last": "SSH asks for the passphrase every time because no agent is running in that shell; `ssh-add` only lasts as long as the agent does.",
+   "prompt": "can you check if we do that anywhere else?",
+   "search": true
+  },
+  {
+   "last": "I wrote the unit tests for `RateLimiter`: 9 cases including burst and refill timing, all passing.",
+   "prompt": "push it",
+   "search": true
+  },
+  {
+   "last": "Should I switch to `pathlib` throughout the module, or only in the new functions to keep the diff small?",
+   "prompt": "throughout",
+   "search": true
+  },
+  {
+   "last": "The `new_checkout` feature flag is added and defaults to off in production.",
+   "prompt": "can you add a dark mode toggle to the settings page",
+   "search": true
+  },
+  {
+   "last": "Heads up: the staging cluster has scheduled maintenance tomorrow morning. Nothing needs to change on our side.",
+   "prompt": "ok",
+   "search": false
+  },
+  {
+   "last": "I can fix this in the client by retrying, or on the server by making the endpoint idempotent. Or both. What do you want?",
+   "prompt": "both please",
+   "search": true
+  },
+  {
+   "last": "I replaced the custom logger with `tracing` in the server crate. Want me to do the same in the CLI crate?",
+   "prompt": "definitely",
+   "search": true
+  },
+  {
+   "last": "Caching headers are set: static assets get a year with `immutable`, HTML gets `no-cache`.",
+   "prompt": "hmm not quite, the old behavior should stay behind a flag",
+   "search": true
+  },
+  {
+   "last": "The 502s come from the load balancer's 60-second idle timeout. The report endpoint takes about 75 seconds, so the LB closes the connection before the app responds.",
+   "prompt": "hm, can you dig a bit deeper",
+   "search": true
+  },
+  {
+   "last": "The difference is that `Arc` gives shared ownership across threads, while `Rc` is single-threaded and cheaper because it skips the atomic operations.",
+   "prompt": "makes sense, thanks",
+   "search": false
+  },
+  {
+   "last": "I wrote the benchmark, and the new hashing function is about 3x faster on large inputs. Want me to add it to the CI perf dashboard?",
+   "prompt": "sure, go",
+   "search": true
+  },
+  {
+   "last": "I'm going to leave the flaky e2e test quarantined for now; it's tracked in issue #219.",
+   "prompt": "ok sure",
+   "search": false
+  },
+  {
+   "last": "The worker now logs structured JSON, with the job id on every line.",
+   "prompt": "commit it",
+   "search": true
+  },
+  {
+   "last": "The migration `0042_add_status_to_invoices` is written and applied locally; `make test` is green.",
+   "prompt": "the tests too",
+   "search": true
+  },
+  {
+   "last": "It turned out the Kafka consumer group was rebalancing every time a pod restarted, which explains the lag spikes.",
+   "prompt": "yeah",
+   "search": false
+  },
+  {
+   "last": "The benchmark shows the new allocator saves about 18% on the parse step. The numbers are in `bench/results.md`.",
+   "prompt": "run the full suite again",
+   "search": true
+  },
+  {
+   "last": "The Gradle build is slow on CI because the configuration cache is disabled and every job resolves dependencies from scratch.",
+   "prompt": "ah of course",
+   "search": false
+  },
+  {
+   "last": "The CI matrix still tests Python 3.8, which is end of life. I'd drop it and add 3.13 instead. Want me to make that change?",
+   "prompt": "don't, not yet",
+   "search": false
+  },
+  {
+   "last": "The cart store is refactored to use derived stores, and the total updates correctly now.",
+   "prompt": "brilliant, cheers",
+   "search": false
+  },
+  {
+   "last": "Should the rate limit be per user or per API key?",
+   "prompt": "per api key",
+   "search": true
+  },
+  {
+   "last": "So to summarize, the deadlock happened because the two workers acquired the table locks in opposite orders.",
+   "prompt": "correct",
+   "search": false
+  },
+  {
+   "last": "The 502s come from the load balancer's 60-second idle timeout. The report endpoint takes about 75 seconds, so the LB closes the connection before the app responds.",
+   "prompt": "how do we fix it?",
+   "search": true
+  },
+  {
+   "last": "The API looks stale because the CDN caches GET responses for 5 minutes and the endpoint sends no `Cache-Control` header.",
+   "prompt": "huh, TIL",
+   "search": false
+  },
+  {
+   "last": "The only way to fix this without a breaking change is to add a new method and deprecate the old one. Is that fine?",
+   "prompt": "that's fine",
+   "search": true
+  },
+  {
+   "last": "The Redis cache is in place and p95 latency on `/search` dropped from 800ms to 120ms. Should I add metrics for the hit rate as well?",
+   "prompt": "do it!",
+   "search": true
+  },
+  {
+   "last": "I renamed the env var to `API_BASE_URL` everywhere and updated `.env.example` and the deployment docs.",
+   "prompt": "perfect",
+   "search": false
+  },
+  {
+   "last": "I traced the 500s to a missing null check in `OrderSerializer.to_json`. The fix is a two-line guard plus a test. Want me to apply it?",
+   "prompt": "absolutely",
+   "search": true
+  },
+  {
+   "last": "I can set up a nightly workflow that runs the slow end-to-end tests, so they're off the PR path. Want it?",
+   "prompt": "ok lgtm",
+   "search": true
+  },
+  {
+   "last": "I've added a GitHub Actions workflow that builds the docs on every push to main and deploys them to Pages.",
+   "prompt": "find out why the docker image grew by 300MB in the last release",
+   "search": true
+  },
+  {
+   "last": "I converted the remaining class components in `settings/` to hooks and updated the snapshots. Want me to do the `admin/` folder next?",
+   "prompt": "fine, go ahead",
+   "search": true
+  },
+  {
+   "last": "The Gradle build is slow on CI because the configuration cache is disabled and every job resolves dependencies from scratch.",
+   "prompt": "does that affect the mobile app too?",
+   "search": true
+  },
+  {
+   "last": "I rebased the branch on main and resolved the two conflicts in `router.go`. Should I push it?",
+   "prompt": "nah, leave it",
+   "search": false
+  },
+  {
+   "last": "The `Error` enum has grown to 40 variants. I'd split it per module with `thiserror` and keep a top-level wrapper. Do you want me to try that?",
+   "prompt": "do eet",
+   "search": true
+  },
+  {
+   "last": "The service starts before the database is ready because compose's `depends_on` only waits for the container to start, not for Postgres to accept connections.",
+   "prompt": "go ahead and fix it",
+   "search": true
+  },
+  {
+   "last": "The 2.0 changelog is missing the breaking change to the config format. I can add a migration note with a before/after example. Shall I?",
+   "prompt": "go on then",
+   "search": true
+  },
+  {
+   "last": "The migration is merged and applied. Did you want anything else changed in it?",
+   "prompt": "nope",
+   "search": false
+  },
+  {
+   "last": "In other words, the container was OOMKilled because the old JVM ignored the cgroup limit when sizing its heap.",
+   "prompt": "exactly",
+   "search": false
+  },
+  {
+   "last": "I left the production log level at INFO, as you had it.",
+   "prompt": "fine",
+   "search": false
+  },
+  {
+   "last": "Postgres picks a sequential scan there because the table only has a few thousand rows, so reading it whole is cheaper than walking the index.",
+   "prompt": "sounds good",
+   "search": false
+  },
+  {
+   "last": "I can implement the cache in-process with an LRU, or in Redis so it's shared across pods. Which do you prefer?",
+   "prompt": "redis",
+   "search": true
+  },
+  {
+   "last": "I wrote a `docker-compose.yml` for local dev with Postgres, Redis and Mailhog.",
+   "prompt": "good stuff",
+   "search": false
+  },
+  {
+   "last": "Before merging I'd squash the 11 WIP commits into two: one for the feature and one for the tests. Is that okay?",
+   "prompt": "do it",
+   "search": true
+  },
+  {
+   "last": "I can write a short ADR documenting why we chose SQLite for the local cache, since the question keeps coming up in reviews. Should I draft it?",
+   "prompt": "y",
+   "search": true
+  },
+  {
+   "last": "Seeding the test database requires the Postgres container. Okay if I start it with `docker compose up -d db`?",
+   "prompt": "ok cool",
+   "search": true
+  },
+  {
+   "last": "The segfault comes from `make_name` returning a pointer to a stack buffer, which is invalid as soon as the function returns.",
+   "prompt": "any other places like that?",
+   "search": true
+  },
+  {
+   "last": "Done. I renamed `getCwd` to `currentDir` across the 23 files that used it, and the build passes.",
+   "prompt": "do the same for the other services",
+   "search": true
+  },
+  {
+   "last": "The login form shows nothing when the API returns 429. I'd add a toast with the retry-after time. Should I implement that?",
+   "prompt": "yeah please",
+   "search": true
+  },
+  {
+   "last": "Cache misses spike every hour because all keys were written with the same 3600-second TTL at deploy time, so they all expire together.",
+   "prompt": "ah, got it",
+   "search": false
+  },
+  {
+   "last": "I bumped React to 18.3 and everything builds. The only warning is a deprecated lifecycle method in `Modal.jsx`. Want me to fix that too?",
+   "prompt": "yeah",
+   "search": true
+  },
+  {
+   "last": "Done. Image resizing now runs in a background job, so uploads return immediately.",
+   "prompt": "undo that",
+   "search": true
+  },
+  {
+   "last": "The flaky test is fixed by seeding the random generator. I can also scan the other test files for the same pattern. Want that?",
+   "prompt": "yes but dont push yet",
+   "search": true
+  },
+  {
+   "last": "The GraphQL resolver for `posts` runs one query per author, a classic N+1. Adding a DataLoader would batch them. Should I implement it?",
+   "prompt": "ok, please",
+   "search": true
+  },
+  {
+   "last": "Should I put the shared types in a new package or keep them in `common/`?",
+   "prompt": "new package",
+   "search": true
+  },
+  {
+   "last": "I'd like to rename `utils/helpers2.ts` to something meaningful, like `utils/dateFormat.ts`, and update the imports. Okay?",
+   "prompt": "yes!!",
+   "search": true
+  },
+  {
+   "last": "For the date picker I found three candidates: react-day-picker, flatpickr, and the MUI one. Which should I integrate?",
+   "prompt": "the first one",
+   "search": true
+  },
+  {
+   "last": "The benchmark shows the new allocator saves about 18% on the parse step. The numbers are in `bench/results.md`.",
+   "prompt": "bye!",
+   "search": false
+  },
+  {
+   "last": "Do you still want to support Python 3.8? If not, I'll drop it from the classifiers and tox.ini.",
+   "prompt": "nah",
+   "search": true
+  },
+  {
+   "last": "Two options for the queue: SQS, which is managed but AWS-only, or RabbitMQ, which we'd host ourselves. Which way should I go?",
+   "prompt": "sqs",
+   "search": true
+  },
+  {
+   "last": "I can target the patch at the 3.x branch, main, or both. Where should it go?",
+   "prompt": "main only",
+   "search": true
+  },
+  {
+   "last": "I found three call sites still using the old two-argument `parse_config`. Should I update them to the new signature?",
+   "prompt": "yes",
+   "search": true
+  },
+  {
+   "last": "`git rebase` replays your commits on top of main, while `git merge` adds a merge commit and keeps history as it is. For a shared branch, merging is the safer choice.",
+   "prompt": "so what do we change?",
+   "search": true
+  },
+  {
+   "last": "I could also convert the remaining callbacks in this file to async/await while I'm here. Want that?",
+   "prompt": "sure",
+   "search": true
+  },
+  {
+   "last": "The Terraform changes are applied to staging: two new security groups and the updated ALB listener rule.",
+   "prompt": "love it",
+   "search": false
+  },
+  {
+   "last": "Worker A locks `accounts` then `ledger`, while worker B takes them in the opposite order. Under load each holds one lock and waits for the other, which is the deadlock.",
+   "prompt": "is that also why the worker is slow?",
+   "search": true
+  },
+  {
+   "last": "I split `server.js` into `routes/`, `middleware/` and `db/` modules. Behavior is unchanged and the integration tests pass.",
+   "prompt": "ok now squash",
+   "search": true
+  },
+  {
+   "last": "The tzdata update moved the DST rule for that zone, which is why the timestamps shifted by an hour. Does that match what you saw?",
+   "prompt": "yes",
+   "search": false
+  },
+  {
+   "last": "I updated `pyproject.toml` to require `httpx>=0.27` and regenerated the lockfile. All 186 tests pass.",
+   "prompt": "lol ok. anyway, the search box should debounce input by 300ms, can you add that",
+   "search": true
+  },
+  {
+   "last": "Worker A locks `accounts` then `ledger`, while worker B takes them in the opposite order. Under load each holds one lock and waits for the other, which is the deadlock.",
+   "prompt": "cool, now let's write the release notes for 3.1 from the merged PRs",
+   "search": true
+  },
+  {
+   "last": "Done. I renamed `getCwd` to `currentDir` across the 23 files that used it, and the build passes.",
+   "prompt": "ty!",
+   "search": false
+  },
+  {
+   "last": "The 502s come from the load balancer's 60-second idle timeout. The report endpoint takes about 75 seconds, so the LB closes the connection before the app responds.",
+   "prompt": "great, next: migrate the user service from express to fastify",
+   "search": true
+  },
+  {
+   "last": "I replaced the regex email check with the validator library and added the cases from the bug report as tests.",
+   "prompt": "add a CONTRIBUTING section explaining how to run the test suite locally",
+   "search": true
+  },
+  {
+   "last": "I can write these tests with pytest fixtures, or keep the unittest style the file already uses. Your call?",
+   "prompt": "pytest",
+   "search": true
+  },
+  {
+   "last": "The migration `0042_add_status_to_invoices` is written and applied locally; `make test` is green.",
+   "prompt": "do that for staging too",
+   "search": true
+  },
+  {
+   "last": "The failures were in the unit and the integration jobs, and after the rebase both are green. Which run were you looking at?",
+   "prompt": "both",
+   "search": false
+  },
+  {
+   "last": "The test passes locally but fails in CI because CI runs with `TZ=UTC` while your machine is on CET. The assertion compares a formatted local time string.",
+   "prompt": "good to know",
+   "search": false
+  },
+  {
+   "last": "I added input validation to the signup endpoint with zod schemas. Want me to share the schemas with the frontend form?",
+   "prompt": "no need",
+   "search": false
+  },
+  {
+   "last": "Both internal callers of the v1 routes are migrated now. Should I keep the v1 routes around for another release?",
+   "prompt": "no",
+   "search": true
+  },
+  {
+   "last": "The flaky `test_upload_resume` fails when the temp dir is shared between workers. I can give each test its own `tmp_path`. Want me to fix it that way?",
+   "prompt": "actually no, leave it as is",
+   "search": false
+  },
+  {
+   "last": "I split `server.js` into `routes/`, `middleware/` and `db/` modules. Behavior is unchanged and the integration tests pass.",
+   "prompt": "thanks!",
+   "search": false
+  },
+  {
+   "last": "The connection pool is set to 100 per pod, and with 12 pods that exceeds Postgres `max_connections`. I'd drop it to 20 for now. Should I change it?",
+   "prompt": "yes please",
+   "search": true
+  },
+  {
+   "last": "Do you want me to commit now, or keep iterating on the failing tests first?",
+   "prompt": "not now",
+   "search": true
+  },
+  {
+   "last": "I rebased the branch on main and resolved the two conflicts in `router.go`. Should I push it?",
+   "prompt": "sure",
+   "search": true
+  },
+  {
+   "last": "So the flaky test was a race between the cache warmup and the first request, and serializing them removes it. Does that explanation make sense?",
+   "prompt": "yes",
+   "search": false
+  },
+  {
+   "last": "The C# project targets .NET 8 now, and the nullable warnings in `Models/` are fixed.",
+   "prompt": "simplify it",
+   "search": true
+  },
+  {
+   "last": "The remote still has the stale `feature/old-auth` branch from last quarter. Should I delete it as well?",
+   "prompt": "yes",
+   "search": true
+  },
+  {
+   "last": "Is the old `legacy_auth` module still used anywhere you know of? If not, I'll delete it along with its tests.",
+   "prompt": "not really",
+   "search": true
+  },
+  {
+   "last": "Semver treats 0.x releases specially: going from 0.4 to 0.5 is allowed to break the API, which is why cargo didn't pick up the new version automatically.",
+   "prompt": "noted",
+   "search": false
+  },
+  {
+   "last": "I could make `timeout` a constructor argument or a builder method. Which fits the API better?",
+   "prompt": "builder",
+   "search": true
+  },
+  {
+   "last": "I replaced the regex email check with the validator library and added the cases from the bug report as tests.",
+   "prompt": "that did it",
+   "search": false
+  },
+  {
+   "last": "I tagged v1.8.0 and drafted the GitHub release with the changelog. Want me to publish it?",
+   "prompt": "no, i'll do that myself",
+   "search": false
+  },
+  {
+   "last": "The README quickstart still references `yarn`, but the repo moved to pnpm. I can rewrite that section and the contributing guide. Want me to?",
+   "prompt": "yes",
+   "search": true
+  },
+  {
+   "last": "The deploy script now quotes all its variables and passes shellcheck with no warnings.",
+   "prompt": "thanks, now add retries to the http client with a max of 3 attempts",
+   "search": true
+  },
+  {
+   "last": "Everything is green on staging. Should I go ahead and deploy to production?",
+   "prompt": "not yet",
+   "search": false
+  },
+  {
+   "last": "Want me to add type hints to the rest of the module as well?",
+   "prompt": "nah",
+   "search": false
+  },
+  {
+   "last": "Upgraded the Spring Boot parent to 3.3.2. The app starts and the actuator endpoints respond.",
+   "prompt": "that's exactly what i needed",
+   "search": false
+  },
+  {
+   "last": "The worker now logs structured JSON, with the job id on every line.",
+   "prompt": "beautiful",
+   "search": false
+  },
+  {
+   "last": "I noticed `fetchProfile` and `fetchSettings` duplicate the same retry logic. I could extract a shared `withRetry` helper. Should I do that refactor now?",
+   "prompt": "sounds good",
+   "search": true
+  },
+  {
+   "last": "The workflow ran twice because both the `push` and `pull_request` triggers fire for commits on a branch in the same repo.",
+   "prompt": "yep",
+   "search": false
+  },
+  {
+   "last": "The `new_checkout` feature flag is added and defaults to off in production.",
+   "prompt": "split that into two commits",
+   "search": true
+  },
+  {
+   "last": "Postgres chose a sequential scan because the planner estimates the filter matches 40% of the table, and at that selectivity the index would be slower.",
+   "prompt": "ok but whats the fix",
+   "search": true
+  },
+  {
+   "last": "PR #318 is open with the logging changes and CI is green. Do you want me to request reviews from the platform team?",
+   "prompt": "proceed",
+   "search": true
+  },
+  {
+   "last": "Upgraded the Spring Boot parent to 3.3.2. The app starts and the actuator endpoints respond.",
+   "prompt": "convert the config parsing from yaml to toml, keeping backwards compat for one release",
+   "search": true
+  },
+  {
+   "last": "Your Dockerfile copies the whole repo before `npm ci`, so every code change busts the dependency layer. I can reorder it so dependencies stay cached. Go ahead?",
+   "prompt": "sure, why not",
+   "search": true
+  },
+  {
+   "last": "I tested the new layout in Firefox and Safari and it holds up at every breakpoint.",
+   "prompt": "works for me",
+   "search": false
+  },
+  {
+   "last": "Upgraded the Spring Boot parent to 3.3.2. The app starts and the actuator endpoints respond.",
+   "prompt": "rename it to something clearer",
+   "search": true
+  },
+  {
+   "last": "Pushed the fix to the branch; CI is green.",
+   "prompt": "👍",
+   "search": false
+  },
+  {
+   "last": "The migration is slow because adding a column with a default rewrites the whole table on MySQL 5.7. On 8.0 it would be instant.",
+   "prompt": "can you confirm by checking the logs",
+   "search": true
+  },
+  {
+   "last": "The `test` target in the Makefile doesn't fail when one of the sub-makes fails, so CI reports green on broken builds. Should I patch it?",
+   "prompt": "sure thing",
+   "search": true
+  },
+  {
+   "last": "Cache misses spike every hour because all keys were written with the same 3600-second TTL at deploy time, so they all expire together.",
+   "prompt": "check the other services for the same thing",
+   "search": true
+  },
+  {
+   "last": "So the bug is really in how the ORM batches inserts when one row fails validation, not in our code.",
+   "prompt": "agreed",
+   "search": false
+  },
+  {
+   "last": "I added input validation to the signup endpoint with zod schemas. Want me to share the schemas with the frontend form?",
+   "prompt": "ok go",
+   "search": true
+  },
+  {
+   "last": "Worker A locks `accounts` then `ledger`, while worker B takes them in the opposite order. Under load each holds one lock and waits for the other, which is the deadlock.",
+   "prompt": "ohh that explains it",
+   "search": false
+  },
+  {
+   "last": "I can add a pre-commit config with ruff and black so formatting stops showing up in code review. Do you want that?",
+   "prompt": "k go",
+   "search": true
+  },
+  {
+   "last": "The cart store is refactored to use derived stores, and the total updates correctly now.",
+   "prompt": "make it configurable",
+   "search": true
+  },
+  {
+   "last": "So you want every route under `/admin` to require the new `admin` scope, enforced in one middleware rather than per handler?",
+   "prompt": "exactly",
+   "search": true
+  },
+  {
+   "last": "The Go module still requires `golang.org/x/net` v0.17, which has a known CVE. Bumping to the latest patch should be safe. Shall I upgrade it and run the tests?",
+   "prompt": "alright, go",
+   "search": true
+  },
+  {
+   "last": "I can add OpenAPI annotations to the remaining 9 endpoints so the generated client stops missing them. Go ahead?",
+   "prompt": "yes do it",
+   "search": true
+  },
+  {
+   "last": "The borrow checker rejected the closure because it held a mutable borrow of `self` across the `await`. Is it clear now why the clone fixes it?",
+   "prompt": "yes",
+   "search": false
+  },
+  {
+   "last": "I wrote `scripts/dedupe_users.sql`, which merges duplicate accounts by email. Against a copy of prod it merged 214 rows.",
+   "prompt": "yay it works",
+   "search": false
+  },
+  {
+   "last": "`git rebase` replays your commits on top of main, while `git merge` adds a merge commit and keeps history as it is. For a shared branch, merging is the safer choice.",
+   "prompt": "Please add pagination to the /orders endpoint, 50 items per page by default.",
+   "search": true
+  },
+  {
+   "last": "I updated `pyproject.toml` to require `httpx>=0.27` and regenerated the lockfile. All 186 tests pass.",
+   "prompt": "revert that",
+   "search": true
+  },
+  {
+   "last": "Caching headers are set: static assets get a year with `immutable`, HTML gets `no-cache`.",
+   "prompt": "solid",
+   "search": false
+  },
+  {
+   "last": "I committed the fix as `fix(auth): handle expired refresh tokens` on your branch. Nothing is pushed yet.",
+   "prompt": "no, i meant the other config file",
+   "search": true
+  },
+  {
+   "last": "That's everything on my list for the logging cleanup. Anything else you want me to look at?",
+   "prompt": "not really",
+   "search": false
+  },
+  {
+   "last": "I can generate the TypeScript types from the Prisma schema instead of maintaining them by hand. Want me to wire that into the build?",
+   "prompt": "don't touch it",
+   "search": false
+  },
+  {
+   "last": "The pagination on `/api/v2/items` uses OFFSET, which gets slow past page 500. I'd switch it to keyset pagination on `(created_at, id)`. Want me to?",
+   "prompt": "go ahead",
+   "search": true
+  },
+  {
+   "last": "The webpack setup could move to Vite with mostly equivalent plugins, and dev server startup would drop from about 40 seconds to a few. Want me to attempt the migration on a branch?",
+   "prompt": "hmm wait a sec, let me check something first",
+   "search": false
+  },
+  {
+   "last": "I fixed the timezone bug in `formatDate` and added three tests covering DST transitions. Want me to also update the docs page that shows the old output?",
+   "prompt": "not this time",
+   "search": false
+  },
+  {
+   "last": "The coroutine scope in `SyncWorker` is never cancelled, so jobs keep running after logout. I can tie it to the lifecycle owner. Shall I go ahead?",
+   "prompt": "yeah sure",
+   "search": true
+  },
+  {
+   "last": "I suspect the leak is in the connection pool, since the open-socket count climbs steadily. Want me to confirm it with a heap profile?",
+   "prompt": "sounds right",
+   "search": true
+  },
+  {
+   "last": "Done. Image resizing now runs in a background job, so uploads return immediately.",
+   "prompt": "can you profile the startup time of the cli and tell me what's slow",
+   "search": true
+  },
+  {
+   "last": "The cron runs at 02:00 UTC, which is why the report only shows up mid-morning for the Tokyo office.",
+   "prompt": "right",
+   "search": false
+  },
+  {
+   "last": "CLI errors now include the file path and line number, for example `config.yaml:12: unknown key 'timout'`.",
+   "prompt": "now the docs",
+   "search": true
+  },
+  {
+   "last": "To pick up the new feature flags I have to restart the local dev server, which will drop your current session. OK to restart it?",
+   "prompt": "ok",
+   "search": true
+  },
+  {
+   "last": "Should the retry delay be a fixed 1 second, or exponential with jitter?",
+   "prompt": "exponential",
+   "search": true
+  },
+  {
+   "last": "The service starts before the database is ready because compose's `depends_on` only waits for the container to start, not for Postgres to accept connections.",
+   "prompt": "right, i forgot about that",
+   "search": false
+  },
+  {
+   "last": "The worker now logs structured JSON, with the job id on every line.",
+   "prompt": "make it smaller",
+   "search": true
+  },
+  {
+   "last": "I shortened the README intro and moved the architecture details into `docs/architecture.md`.",
+   "prompt": "amazing, thank you so much",
+   "search": false
+  },
+  {
+   "last": "The lint job passes again after removing the unused imports. Should I make `no-unused-vars` an error so it doesn't regress?",
+   "prompt": "ok, proceed",
+   "search": true
+  },
+  {
+   "last": "Got it, I won't touch anything in the payments module.",
+   "prompt": "ok",
+   "search": false
+  },
+  {
+   "last": "The CSS grid layout for the dashboard is done. It collapses to a single column under 640px.",
+   "prompt": "can you double check the edge cases",
+   "search": true
+  },
+  {
+   "last": "The proto definitions have the new `priority` field, and the Go and Python stubs are regenerated.",
+   "prompt": "no, use the env var instead of hardcoding it",
+   "search": true
+  },
+  {
+   "last": "The service starts before the database is ready because compose's `depends_on` only waits for the container to start, not for Postgres to accept connections.",
+   "prompt": "where is that configured?",
+   "search": true
+  },
+  {
+   "last": "Your `useEffect` re-subscribes to the websocket on every render because `options` is a new object each time. Memoizing it with `useMemo` should stop the reconnect storm. Apply that?",
+   "prompt": "ya",
+   "search": true
+  },
+  {
+   "last": "The CSS grid layout for the dashboard is done. It collapses to a single column under 640px.",
+   "prompt": "add an index on sessions.expires_at and a job that purges expired rows nightly",
+   "search": true
+  },
+  {
+   "last": "Floats can't represent 0.1 exactly, so summing prices as floats drifts by fractions of a cent. Storing integer cents avoids that.",
+   "prompt": "which file?",
+   "search": true
+  },
+  {
+   "last": "I removed the `lodash` dependency and replaced its six call sites with native methods. The bundle is 24KB smaller.",
+   "prompt": "nice, appreciate it",
+   "search": false
+  },
+  {
+   "last": "The memory leak is fixed: the listener is removed on unmount and the heap stays flat over 10 minutes. Want me to write a short postmortem note?",
+   "prompt": "yes, and add a test",
+   "search": true
+  },
+  {
+   "last": "The Go module still requires `golang.org/x/net` v0.17, which has a known CVE. Bumping to the latest patch should be safe. Shall I upgrade it and run the tests?",
+   "prompt": "pause, i need to ask the team first",
+   "search": false
+  },
+  {
+   "last": "I set up Sentry in the Flask app, and errors from the worker processes are reported too.",
+   "prompt": "can u benchmark it",
+   "search": true
+  },
+  {
+   "last": "All 412 tests pass now, and the coverage report is up to 87%.",
+   "prompt": "great",
+   "search": false
+  },
+  {
+   "last": "Floats can't represent 0.1 exactly, so summing prices as floats drifts by fractions of a cent. Storing integer cents avoids that.",
+   "prompt": "upgrade the kotlin gradle plugin to 2.0 and fix any compile errors",
+   "search": true
+  },
+  {
+   "last": "Your regex is catastrophically backtracking: the nested `(a+)+` lets the engine try exponentially many splits on a long non-matching input.",
+   "prompt": "rename the `tmp` package to `scratch` and fix all the imports",
+   "search": true
+  },
+  {
+   "last": "I replaced the regex email check with the validator library and added the cases from the bug report as tests.",
+   "prompt": "again",
+   "search": true
+  },
+  {
+   "last": "I wrote `scripts/dedupe_users.sql`, which merges duplicate accounts by email. Against a copy of prod it merged 214 rows.",
+   "prompt": "does that handle empty input?",
+   "search": true
+  },
+  {
+   "last": "The borrow checker rejects that closure because it captures `self` mutably while `self.items` is still borrowed by the iterator. Collecting the keys first breaks the overlap.",
+   "prompt": "nice. now write integration tests for the payment webhook handler",
+   "search": true
+  },
+  {
+   "last": "I found three ways to cut build time: ccache, precompiled headers, or splitting the target. Want me to try one of them, or all?",
+   "prompt": "all three",
+   "search": true
+  },
+  {
+   "last": "The state looks stale because React batches updates; the `console.log` runs before the re-render that carries the new value.",
+   "prompt": "interesting",
+   "search": false
+  },
+  {
+   "last": "Is it just the README that needs the new install command, or the docs site as well?",
+   "prompt": "that's it",
+   "search": true
+  },
+  {
+   "last": "Here's the proposed table: `orders(id, customer_id, total_cents, created_at)` with an index on `customer_id`. If that looks right I'll write the migration next.",
+   "prompt": "perfect",
+   "search": true
+  },
+  {
+   "last": "The PHP 8.3 upgrade is done in the Dockerfile and the composer constraints, and I fixed two deprecated `${}` interpolations.",
+   "prompt": "check it didnt break the api tests",
+   "search": true
+  },
+  {
+   "last": "The Terraform changes are applied to staging: two new security groups and the updated ALB listener rule.",
+   "prompt": "that broke the build lol",
+   "search": true
+  },
+  {
+   "last": "The proto definitions have the new `priority` field, and the Go and Python stubs are regenerated.",
+   "prompt": "now add tests",
+   "search": true
+  },
+  {
+   "last": "The config loader now reads `APP_ENV` and falls back to `development` when it's unset.",
+   "prompt": "thx",
+   "search": false
+  },
+  {
+   "last": "PR #318 is open with the logging changes and CI is green. Do you want me to request reviews from the platform team?",
+   "prompt": "maybe later, not now",
+   "search": false
+  },
+  {
+   "last": "There are 9 small fixup commits on this branch. Should I squash them before merging?",
+   "prompt": "yes, thanks",
+   "search": true
+  },
+  {
+   "last": "So the fix was just adding `--frozen-lockfile` to the install step in CI.",
+   "prompt": "yes, that's right",
+   "search": false
+  },
+  {
+   "last": "The Swift `ImageCache` isn't thread-safe; two decodes can write the same key at once. I'd turn it into an actor. Should I make that change?",
+   "prompt": "wait",
+   "search": false
+  },
+  {
+   "last": "The state looks stale because React batches updates; the `console.log` runs before the re-render that carries the new value.",
+   "prompt": "how is authentication wired between the gateway and the internal services?",
+   "search": true
+  },
+  {
+   "last": "The release branch is two commits behind main, both bug fixes. I can cherry-pick them before tagging v4.2.0. Okay?",
+   "prompt": "makes sense, go ahead",
+   "search": true
+  },
+  {
+   "last": "Done. Image resizing now runs in a background job, so uploads return immediately.",
+   "prompt": "is it covered by tests?",
+   "search": true
+  },
+  {
+   "last": "The Swift `ImageCache` isn't thread-safe; two decodes can write the same key at once. I'd turn it into an actor. Should I make that change?",
+   "prompt": "ok",
+   "search": true
+  },
+  {
+   "last": "Should I regenerate the protobuf bindings for the Python client too?",
+   "prompt": "yep",
+   "search": true
+  },
+  {
+   "last": "The borrow checker rejects that closure because it captures `self` mutably while `self.items` is still borrowed by the iterator. Collecting the keys first breaks the overlap.",
+   "prompt": "is there a test for that?",
+   "search": true
+  },
+  {
+   "last": "Python evaluates the default `items=[]` once, at function definition, so every call shares the same list. That's why entries leak between requests.",
+   "prompt": "i see",
+   "search": false
+  },
+  {
+   "last": "The C# project targets .NET 8 now, and the nullable warnings in `Models/` are fixed.",
+   "prompt": "open a pr for this",
+   "search": true
+  },
+  {
+   "last": "Python evaluates the default `items=[]` once, at function definition, so every call shares the same list. That's why entries leak between requests.",
+   "prompt": "add opentelemetry tracing to the order service and export to the collector",
+   "search": true
+  },
+  {
+   "last": "I'll leave the retry count at 3 since that matches the upstream default; we can tune it later if it becomes a problem.",
+   "prompt": "sure",
+   "search": false
+  },
+  {
+   "last": "I wrote a `docker-compose.yml` for local dev with Postgres, Redis and Mailhog.",
+   "prompt": "now deploy it to staging",
+   "search": true
+  },
+  {
+   "last": "I wrote the unit tests for `RateLimiter`: 9 cases including burst and refill timing, all passing.",
+   "prompt": "not quite, keep the old name as an alias",
+   "search": true
+  },
+  {
+   "last": "Just to confirm before I start: timestamps should be stored in UTC and converted to local time only in the UI?",
+   "prompt": "correct",
+   "search": true
+  },
+  {
+   "last": "I shortened the README intro and moved the architecture details into `docs/architecture.md`.",
+   "prompt": "revert and try a different approach",
+   "search": true
+  },
+  {
+   "last": "I've added retries with exponential backoff to the S3 uploader. Do you want a config option for the max attempts?",
+   "prompt": "no, that's enough for today",
+   "search": false
+  },
+  {
+   "last": "Anything else before I wrap up this branch?",
+   "prompt": "that's it",
+   "search": false
+  },
+  {
+   "last": "That compiler error is `strictNullChecks` at work: `find` can return `undefined`, and the code dereferences the result without checking.",
+   "prompt": "fair enough",
+   "search": false
+  },
+  {
+   "last": "The C# project targets .NET 8 now, and the nullable warnings in `Models/` are fixed.",
+   "prompt": "awesome, ty",
+   "search": false
+  },
+  {
+   "last": "I think we should drop Node 16 and set `engines` to `>=18`; none of our dependencies support 16 anymore. Agree? If so I'll update package.json and the CI matrix.",
+   "prompt": "agreed",
+   "search": true
+  },
+  {
+   "last": "This rename touches about 30 files, mostly import paths. Fine to proceed?",
+   "prompt": "fine",
+   "search": true
+  },
+  {
+   "last": "The Java tests now run on JUnit 5. I migrated all 40 test classes and removed the vintage engine.",
+   "prompt": "same for the admin page",
+   "search": true
+  },
+  {
+   "last": "Here's the diff for the token bucket rate limiter. If it looks okay I'll open the PR.",
+   "prompt": "lgtm",
+   "search": true
+  },
+  {
+   "last": "I can add a CI job that runs the linter on every PR so style issues get caught before review. Should I set that up?",
+   "prompt": "great",
+   "search": true
+  },
+  {
+   "last": "SSH asks for the passphrase every time because no agent is running in that shell; `ssh-add` only lasts as long as the agent does.",
+   "prompt": "ok, thanks for explaining",
+   "search": false
+  },
+  {
+   "last": "So the root cause was the expired intermediate certificate on the CDN, which only some clients had cached.",
+   "prompt": "yup",
+   "search": false
+  },
+  {
+   "last": "On mobile the logo can go in the header or in the slide-out sidebar. Which one?",
+   "prompt": "header",
+   "search": true
+  },
+  {
+   "last": "The CSS grid layout for the dashboard is done. It collapses to a single column under 640px.",
+   "prompt": "works now, thanks!",
+   "search": false
+  },
+  {
+   "last": "Do you want the fix on main only, or also backported to the release-1.4 branch?",
+   "prompt": "both",
+   "search": true
+  },
+  {
+   "last": "I've rewritten the install section of the README for the new Homebrew tap. Want me to update the website copy to match?",
+   "prompt": "sounds good, do it",
+   "search": true
+  },
+  {
+   "last": "The bundle is large mainly because `moment` ships every locale by default. That's about 230KB of the 410KB vendor chunk.",
+   "prompt": "show me",
+   "search": true
+  },
+  {
+   "last": "The pod is OOMKilled because that older JVM sizes its heap from the node's memory instead of the container limit.",
+   "prompt": "fix it then",
+   "search": true
+  },
+  {
+   "last": "The C++ build takes 9 minutes, mostly because every file includes `everything.h`. I could split it into smaller headers, starting with the networking ones. Want me to start?",
+   "prompt": "yes go",
+   "search": true
+  },
+  {
+   "last": "I'd like to replace the hand-rolled CSV parsing in `import.py` with the stdlib `csv` module; the current code already mishandles quoted commas. Okay to do that?",
+   "prompt": "sure, but on a branch",
+   "search": true
+  },
+  {
+   "last": "I shortened the README intro and moved the architecture details into `docs/architecture.md`.",
+   "prompt": "thanks — now can you look at why the websocket disconnects every 30 seconds",
+   "search": true
+  },
+  {
+   "last": "The lint job passes again after removing the unused imports. Should I make `no-unused-vars` an error so it doesn't regress?",
+   "prompt": "nope, we're good",
+   "search": false
+  },
+  {
+   "last": "Do you want me to run the full integration suite as well? It takes about 15 minutes against the docker stack.",
+   "prompt": "yes",
+   "search": true
+  },
+  {
+   "last": "I added a `--dry-run` flag to the deploy script that prints the commands without executing them.",
+   "prompt": "set up eslint with the airbnb config and fix whatever it complains about",
+   "search": true
+  },
+  {
+   "last": "I added a `/healthz` endpoint that checks the database and Redis connections.",
+   "prompt": "also update the changelog",
+   "search": true
+  },
+  {
+   "last": "That's how the token refresh flow works end to end. Is that what you were looking for?",
+   "prompt": "yes, thanks",
+   "search": false
+  },
+  {
+   "last": "The feature branch is pushed. Should I open a PR for it?",
+   "prompt": "not now",
+   "search": false
+  },
+  {
+   "last": "I added type hints to `payments/` and mypy passes in strict mode for that package. Should I continue with `accounts/`?",
+   "prompt": "yeah go ahead",
+   "search": true
+  },
+  {
+   "last": "I added a `/healthz` endpoint that checks the database and Redis connections.",
+   "prompt": "nice 👍",
+   "search": false
+  },
+  {
+   "last": "The Grafana dashboard for the queue workers is created. Do you want alerts on the backlog size too?",
+   "prompt": "approved",
+   "search": true
+  },
+  {
+   "last": "Should I add the new field to the GraphQL schema as nullable so older clients don't break?",
+   "prompt": "yeah",
+   "search": true
+  },
+  {
+   "last": "Done. I renamed `getCwd` to `currentDir` across the 23 files that used it, and the build passes.",
+   "prompt": "investigate why the nightly build failed on the arm64 runner",
+   "search": true
+  },
+  {
+   "last": "The deprecated `request` package is gone and everything uses `fetch` now. Should I also drop the polyfill from the bundle?",
+   "prompt": "yup, do it",
+   "search": true
+  },
+  {
+   "last": "Done: the API now returns 404 instead of 500 for missing projects. Should I add the same handling to the `/teams` endpoints?",
+   "prompt": "lets do it",
+   "search": true
+  },
+  {
+   "last": "I removed the `lodash` dependency and replaced its six call sites with native methods. The bundle is 24KB smaller.",
+   "prompt": "why?",
+   "search": true
+  },
+  {
+   "last": "The Terraform plan wants to recreate the RDS instance because the parameter group name changed. I'd rather add a `lifecycle` block to prevent that. Should I?",
+   "prompt": "no dont",
+   "search": false
+  },
+  {
+   "last": "The docs are updated and the link checker passes.",
+   "prompt": "👍",
+   "search": false
+  },
+  {
+   "last": "The borrow checker rejects that closure because it captures `self` mutably while `self.items` is still borrowed by the iterator. Collecting the keys first breaks the overlap.",
+   "prompt": "makes sense now",
+   "search": false
+  },
+  {
+   "last": "I split `server.js` into `routes/`, `middleware/` and `db/` modules. Behavior is unchanged and the integration tests pass.",
+   "prompt": "push",
+   "search": true
+  },
+  {
+   "last": "I couldn't reproduce the timeout locally, and CI has been green for the last 10 runs, so it was probably a transient runner issue.",
+   "prompt": "that's fine",
+   "search": false
+  },
+  {
+   "last": "I fixed the timezone bug in `formatDate` and added three tests covering DST transitions. Want me to also update the docs page that shows the old output?",
+   "prompt": "yess",
+   "search": true
+  },
+  {
+   "last": "The PHP 8.3 upgrade is done in the Dockerfile and the composer constraints, and I fixed two deprecated `${}` interpolations.",
+   "prompt": "nice one",
+   "search": false
+  },
+  {
+   "last": "The Helm chart hardcodes `replicas: 1`. I can make it a value with a default of 2 and add a PodDisruptionBudget. Shall I?",
+   "prompt": "go",
+   "search": true
+  },
+  {
+   "last": "Have you already created the S3 bucket for the build artifacts? If not, I can add it to the Terraform module.",
+   "prompt": "not yet",
+   "search": true
+  },
+  {
+   "last": "Fixed the off-by-one in pagination: page 1 now starts at item 0, and the last page no longer repeats the previous one.",
+   "prompt": "what about windows?",
+   "search": true
+  },
+  {
+   "last": "Okay to force-push the rebased branch? Nobody else has commits on it.",
+   "prompt": "👍",
+   "search": true
+  },
+  {
+   "last": "The Ansible playbook now installs the monitoring agent on all web hosts. Should I add the database hosts too?",
+   "prompt": "yea",
+   "search": true
+  },
+  {
+   "last": "I'll keep this PR small and leave the module restructuring for a follow-up, like you suggested.",
+   "prompt": "sure",
+   "search": false
+  },
+  {
+   "last": "Your regex is catastrophically backtracking: the nested `(a+)+` lets the engine try exponentially many splits on a long non-matching input.",
+   "prompt": "ok that makes sense",
+   "search": false
+  },
+  {
+   "last": "Is there any reason we still pin `urllib3<2`? If not, I'll lift the pin and run the test suite.",
+   "prompt": "nope",
+   "search": true
+  },
+  {
+   "last": "The cache key ignores the locale, so French users sometimes get English pages. I want to add locale to the key and flush the old entries. Okay to proceed?",
+   "prompt": "makes sense",
+   "search": true
+  },
+  {
+   "last": "The migration `0042_add_status_to_invoices` is written and applied locally; `make test` is green.",
+   "prompt": "lovely, thanks",
+   "search": false
+  },
+  {
+   "last": "Should I delete the old v1 handlers now, or mark them deprecated for one release first?",
+   "prompt": "deprecate first",
+   "search": true
+  },
+  {
+   "last": "Which branch should I base this on, `develop` or `release/2.4`?",
+   "prompt": "develop",
+   "search": true
+  },
+  {
+   "last": "I added a `--dry-run` flag to the deploy script that prints the commands without executing them.",
+   "prompt": "show me the diff",
+   "search": true
+  },
+  {
+   "last": "That compiler error is `strictNullChecks` at work: `find` can return `undefined`, and the code dereferences the result without checking.",
+   "prompt": "why?",
+   "search": true
+  },
+  {
+   "last": "The Ansible playbook now installs the monitoring agent on all web hosts. Should I add the database hosts too?",
+   "prompt": "i'll handle that one, thanks",
+   "search": false
+  },
+  {
+   "last": "The bundle is large mainly because `moment` ships every locale by default. That's about 230KB of the 410KB vendor chunk.",
+   "prompt": "check whether any of our dependencies still pull in log4j 1.x",
+   "search": true
+  },
+  {
+   "last": "Should this be logged as a warning or as an error? The module uses both for similar cases.",
+   "prompt": "warning",
+   "search": true
+  },
+  {
+   "last": "The pod is OOMKilled because that older JVM sizes its heap from the node's memory instead of the container limit.",
+   "prompt": "right right",
+   "search": false
+  },
+  {
+   "last": "I added a `/healthz` endpoint that checks the database and Redis connections.",
+   "prompt": "make the cli print a helpful error when the config file is missing instead of panicking",
+   "search": true
+  },
+  {
+   "last": "The test passes locally but fails in CI because CI runs with `TZ=UTC` while your machine is on CET. The assertion compares a formatted local time string.",
+   "prompt": "is that the case in our code too?",
+   "search": true
+  },
+  {
+   "last": "Floats can't represent 0.1 exactly, so summing prices as floats drifts by fractions of a cent. Storing integer cents avoids that.",
+   "prompt": "cool, makes sense",
+   "search": false
+  },
+  {
+   "last": "The 413 error comes from nginx's default `client_max_body_size` of 1MB, which is smaller than the files you're uploading.",
+   "prompt": "makes sense",
+   "search": false
+  },
+  {
+   "last": "For the new column I can add it nullable and backfill in batches, or add it with a default in one step, which locks the table for about a minute. Which approach?",
+   "prompt": "nullable + backfill",
+   "search": true
+  },
+  {
+   "last": "The migration is slow because adding a column with a default rewrites the whole table on MySQL 5.7. On 8.0 it would be instant.",
+   "prompt": "gotcha, thanks",
+   "search": false
+  },
+  {
+   "last": "Committed and pushed. The PR is #77 and the preview deploy is building.",
+   "prompt": "add it to the readme",
+   "search": true
+  },
+  {
+   "last": "I'd name the new crate `core-types` and move the shared structs into it. Does that work for you?",
+   "prompt": "works for me",
+   "search": true
+  },
+  {
+   "last": "Done. I renamed `getCwd` to `currentDir` across the 23 files that used it, and the build passes.",
+   "prompt": "wait, that should be async. fix it",
+   "search": true
+  },
+  {
+   "last": "Before I merge: any objections to the approach in the PR?",
+   "prompt": "all good",
+   "search": true
+  },
+  {
+   "last": "The state looks stale because React batches updates; the `console.log` runs before the re-render that carries the new value.",
+   "prompt": "prove it",
+   "search": true
+  },
+  {
+   "last": "The nginx config is missing gzip for `application/json`, so API responses go out uncompressed. I can add it to the `gzip_types` line. Want that?",
+   "prompt": "yep 👍",
+   "search": true
+  },
+  {
+   "last": "The segfault comes from `make_name` returning a pointer to a stack buffer, which is invalid as soon as the function returns.",
+   "prompt": "that clears it up",
+   "search": false
+  },
+  {
+   "last": "The worker now logs structured JSON, with the job id on every line.",
+   "prompt": "Can you make the API return RFC 7807 problem details for validation errors?",
+   "search": true
+  },
+  {
+   "last": "The report query now runs in 2 seconds instead of 40 thanks to the covering index. Should I apply the index to production too?",
+   "prompt": "please",
+   "search": true
+  },
+  {
+   "last": "Committed and pushed. The PR is #77 and the preview deploy is building.",
+   "prompt": "great work",
+   "search": false
+  },
+  {
+   "last": "The test passes locally but fails in CI because CI runs with `TZ=UTC` while your machine is on CET. The assertion compares a formatted local time string.",
+   "prompt": "and how do we prevent it next time?",
+   "search": true
+  },
+  {
+   "last": "The Gradle build is slow on CI because the configuration cache is disabled and every job resolves dependencies from scratch.",
+   "prompt": "can you set up renovate to group all the eslint plugin updates into one PR",
+   "search": true
+  },
+  {
+   "last": "Before Go 1.22 the loop variable was shared across iterations, so every goroutine saw the last value. Your go.mod still says `go 1.21`.",
+   "prompt": "the login page crashes on safari 16, can you look into it",
+   "search": true
+  },
+  {
+   "last": "The slow page is fixed by adding `select_related('author')`; it now issues 3 queries instead of 120.",
+   "prompt": "perfect, thanks",
+   "search": false
+  },
+  {
+   "last": "The proto definitions have the new `priority` field, and the Go and Python stubs are regenerated.",
+   "prompt": "looks good",
+   "search": false
+  },
+  {
+   "last": "The `users` table has no index on `email`, which is why login lookups scan 2M rows. I can add a concurrent index in a new migration. Should I?",
+   "prompt": "yes, do that",
+   "search": true
+  },
+  {
+   "last": "The API looks stale because the CDN caches GET responses for 5 minutes and the endpoint sends no `Cache-Control` header.",
+   "prompt": "thx! now lets add caching to the product listing query",
+   "search": true
+  },
+  {
+   "last": "The PHP 8.3 upgrade is done in the Dockerfile and the composer constraints, and I fixed two deprecated `${}` interpolations.",
+   "prompt": "ok cool, can you also bump the minimum supported node version to 20",
+   "search": true
+  },
+  {
+   "last": "I committed the fix as `fix(auth): handle expired refresh tokens` on your branch. Nothing is pushed yet.",
+   "prompt": "🙏",
+   "search": false
+  },
+  {
+   "last": "Before Go 1.22 the loop variable was shared across iterations, so every goroutine saw the last value. Your go.mod still says `go 1.21`.",
+   "prompt": "where",
+   "search": true
+  },
+  {
+   "last": "Want me to add a regression test for the empty-string case so this doesn't come back?",
+   "prompt": "sure",
+   "search": true
+  },
+  {
+   "last": "The C++ build takes 9 minutes, mostly because every file includes `everything.h`. I could split it into smaller headers, starting with the networking ones. Want me to start?",
+   "prompt": "hold on",
+   "search": false
+  },
+  {
+   "last": "Your regex is catastrophically backtracking: the nested `(a+)+` lets the engine try exponentially many splits on a long non-matching input.",
+   "prompt": "what version are we on?",
+   "search": true
+  },
+  {
+   "last": "I committed the fix as `fix(auth): handle expired refresh tokens` on your branch. Nothing is pushed yet.",
+   "prompt": "add a makefile target that spins up the local postgres with seed data",
+   "search": true
+  },
+  {
+   "last": "So the plan is: freeze writes, run the backfill, then flip reads to the new column. I'll start with the write-freeze flag, right?",
+   "prompt": "right",
+   "search": true
+  },
+  {
+   "last": "The docs fix is merged. Want me to also add a redirect from the old URL?",
+   "prompt": "no",
+   "search": false
+  },
+  {
+   "last": "The flaky `test_upload_resume` fails when the temp dir is shared between workers. I can give each test its own `tmp_path`. Want me to fix it that way?",
+   "prompt": "yeah thats fine, go",
+   "search": true
+  },
+  {
+   "last": "The `vendor/` directory is checked in and adds 80MB to every clone. I could remove it and rely on `go mod download` in CI. Should I?",
+   "prompt": "yep, go",
+   "search": true
+  },
+  {
+   "last": "I tagged v1.8.0 and drafted the GitHub release with the changelog. Want me to publish it?",
+   "prompt": "sure go ahead 🙂",
+   "search": true
+  },
+  {
+   "last": "PR #482 is merged and the branch is deleted.",
+   "prompt": "lgtm",
+   "search": false
+  },
+  {
+   "last": "The `new_checkout` feature flag is added and defaults to off in production.",
+   "prompt": "thank you",
+   "search": false
+  },
+  {
+   "last": "Should I rebase onto main before pushing? Two new commits landed there this morning.",
+   "prompt": "👍",
+   "search": true
+  },
+  {
+   "last": "The migration `0042_add_status_to_invoices` is written and applied locally; `make test` is green.",
+   "prompt": "write a github action that runs cargo fmt and clippy on every pull request",
+   "search": true
+  },
+  {
+   "last": "The Java tests now run on JUnit 5. I migrated all 40 test classes and removed the vintage engine.",
+   "prompt": "cool cool",
+   "search": false
+  },
+  {
+   "last": "The CORS error only appears in production because the API lives on a different subdomain there, and the allowed origins list only contains localhost.",
+   "prompt": "port the bash deploy script to python so it works on windows",
+   "search": true
+  },
+  {
+   "last": "I wrote a `docker-compose.yml` for local dev with Postgres, Redis and Mailhog.",
+   "prompt": "add a healthcheck to the docker compose service for redis",
+   "search": true
+  },
+  {
+   "last": "Tree shaking can't drop that code because the package is published as CommonJS, so its imports aren't statically analyzable.",
+   "prompt": "yeah i suspected that",
+   "search": false
+  },
+  {
+   "last": "The Celery task retries forever because `max_retries=None` disables the limit, and that exception is always treated as retryable.",
+   "prompt": "understood",
+   "search": false
+  },
+  {
+   "last": "The cart store is refactored to use derived stores, and the total updates correctly now.",
+   "prompt": "can you add a flag to skip the slow tests when running locally",
+   "search": true
+  },
+  {
+   "last": "The index is created and the dashboard query now runs in 12ms instead of 2.4s.",
+   "prompt": "sgtm",
+   "search": false
+  },
+  {
+   "last": "I can add a pre-commit config with ruff and black so formatting stops showing up in code review. Do you want that?",
+   "prompt": "stop",
+   "search": false
+  },
+  {
+   "last": "I'd rather fix the root cause in the tokenizer than patch every caller. I'll go that way unless you object.",
+   "prompt": "makes sense, thanks",
+   "search": true
+  },
+  {
+   "last": "One more thing: the Android build still references the old package name. Want me to fix that too?",
+   "prompt": "ok sure",
+   "search": true
+  },
+  {
+   "last": "Running `prisma migrate reset` will wipe your local database and reseed it. Okay to run it?",
+   "prompt": "okay",
+   "search": true
+  },
+  {
+   "last": "The Windows build fails because the paths are built with string concatenation and `/`. I can switch them to `Path::join`. Want me to do that?",
+   "prompt": "yes",
+   "search": true
+  },
+  {
+   "last": "The Kubernetes manifests now use the new image registry. Should I update the docs for local `kind` setups as well?",
+   "prompt": "sure, do it",
+   "search": true
+  },
+  {
+   "last": "The CORS error only appears in production because the API lives on a different subdomain there, and the allowed origins list only contains localhost.",
+   "prompt": "so how do i fix it",
+   "search": true
+  },
+  {
+   "last": "Done. The release notes for v2.3.0 are published and the tag is pushed to origin.",
+   "prompt": "ok",
+   "search": false
+  },
+  {
+   "last": "The Java tests now run on JUnit 5. I migrated all 40 test classes and removed the vintage engine.",
+   "prompt": "Write a script that deletes S3 objects older than 90 days in the logs bucket.",
+   "search": true
+  },
+  {
+   "last": "The Celery task retries forever because `max_retries=None` disables the limit, and that exception is always treated as retryable.",
+   "prompt": "perfect. next up, wire the new metrics into the grafana dashboard json",
+   "search": true
+  },
+  {
+   "last": "The connection pool is set to 100 per pod, and with 12 pods that exceeds Postgres `max_connections`. I'd drop it to 20 for now. Should I change it?",
+   "prompt": "stop, don't run that",
+   "search": false
+  },
+  {
+   "last": "The config loader now reads `APP_ENV` and falls back to `development` when it's unset.",
+   "prompt": "add unit tests for the date parsing helpers, especially leap years",
+   "search": true
+  },
+  {
+   "last": "Should I fix both the off-by-one in the pager and the wrong total count, or just the pager for now?",
+   "prompt": "yes, both",
+   "search": true
+  },
+  {
+   "last": "I've rewritten the install section of the README for the new Homebrew tap. Want me to update the website copy to match?",
+   "prompt": "skip it",
+   "search": false
+  },
+  {
+   "last": "That compiler error is `strictNullChecks` at work: `find` can return `undefined`, and the code dereferences the result without checking.",
+   "prompt": "why does it only happen in prod though?",
+   "search": true
+  },
+  {
+   "last": "The pod is OOMKilled because that older JVM sizes its heap from the node's memory instead of the container limit.",
+   "prompt": "what's our convention for naming feature branches here?",
+   "search": true
+  },
+  {
+   "last": "I set up Sentry in the Flask app, and errors from the worker processes are reported too.",
+   "prompt": "sweet",
+   "search": false
+  },
+  {
+   "last": "The API looks stale because the CDN caches GET responses for 5 minutes and the endpoint sends no `Cache-Control` header.",
+   "prompt": "ok fix it",
+   "search": true
+  },
+  {
+   "last": "The config loader now reads `APP_ENV` and falls back to `development` when it's unset.",
+   "prompt": "try again",
+   "search": true
+  },
+  {
+   "last": "The memory leak came from a resize listener that was never removed on unmount. It's gone now that the cleanup function runs.",
+   "prompt": "ok cool",
+   "search": false
+  },
+  {
+   "last": "The deprecated `request` package is gone and everything uses `fetch` now. Should I also drop the polyfill from the bundle?",
+   "prompt": "nah im good",
+   "search": false
+  },
+  {
+   "last": "I've added a GitHub Actions workflow that builds the docs on every push to main and deploys them to Pages.",
+   "prompt": "now tag a release",
+   "search": true
+  },
+  {
+   "last": "Fixed the off-by-one in pagination: page 1 now starts at item 0, and the last page no longer repeats the previous one.",
+   "prompt": "Please document the environment variables the worker reads in the README.",
+   "search": true
+  },
+  {
+   "last": "I've added retries with exponential backoff to the S3 uploader. Do you want a config option for the max attempts?",
+   "prompt": "yes, all of it",
+   "search": true
+  },
+  {
+   "last": "Do you want the export as CSV, JSON, or both?",
+   "prompt": "csv is enough",
+   "search": true
+  },
+  {
+   "last": "I've added a GitHub Actions workflow that builds the docs on every push to main and deploys them to Pages.",
+   "prompt": "confirmed, works on my machine too",
+   "search": false
+  },
+  {
+   "last": "I can generate the TypeScript types from the Prisma schema instead of maintaining them by hand. Want me to wire that into the build?",
+   "prompt": "ok sounds good",
+   "search": true
+  },
+  {
+   "last": "The proto definitions have the new `priority` field, and the Go and Python stubs are regenerated.",
+   "prompt": "Where do we configure the log level for the background workers?",
+   "search": true
+  },
+  {
+   "last": "The CI matrix still tests Python 3.8, which is end of life. I'd drop it and add 3.13 instead. Want me to make that change?",
+   "prompt": "gogogo",
+   "search": true
+  },
+  {
+   "last": "The report query now runs in 2 seconds instead of 40 thanks to the covering index. Should I apply the index to production too?",
+   "prompt": "not needed",
+   "search": false
+  },
+  {
+   "last": "There's a TODO in `billing.rb` saying the proration math rounds down instead of to the nearest cent, and I've confirmed it does. Should I fix the rounding and add specs?",
+   "prompt": "do it pls",
+   "search": true
+  },
+  {
+   "last": "My plan is to split `UserService` into a read path and a write path, then move the caching into the read side. Want me to start with that?",
+   "prompt": "sounds good",
+   "search": true
+  },
+  {
+   "last": "The e2e tests are green on Chrome and Firefox. Should I add WebKit to the Playwright config?",
+   "prompt": "ok do it",
+   "search": true
+  },
+  {
+   "last": "Dependabot has 7 open PRs, all minor bumps with green CI. I could merge them in one batch. Should I?",
+   "prompt": "ok go ahead",
+   "search": true
+  },
+  {
+   "last": "Python evaluates the default `items=[]` once, at function definition, so every call shares the same list. That's why entries leak between requests.",
+   "prompt": "how would we fix that",
+   "search": true
+  },
+  {
+   "last": "Sorry about the noisy test output earlier. I silenced the debug logs and it's clean now.",
+   "prompt": "all good",
+   "search": false
+  },
+  {
+   "last": "Semver treats 0.x releases specially: going from 0.4 to 0.5 is allowed to break the API, which is why cargo didn't pick up the new version automatically.",
+   "prompt": "we need a changelog entry for every merged pr, can you automate that",
+   "search": true
+  },
+  {
+   "last": "To test the queue consumer properly I'd need a local RabbitMQ in docker-compose. Alright if I add that service?",
+   "prompt": "alright",
+   "search": true
+  },
+  {
+   "last": "The bundle is large mainly because `moment` ships every locale by default. That's about 230KB of the 410KB vendor chunk.",
+   "prompt": "oh wow ok",
+   "search": false
+  },
+  {
+   "last": "That's the whole story: the job only triggers on tags, which is why it never ran on your branch. Did that answer your question?",
+   "prompt": "yes",
+   "search": false
+  },
+  {
+   "last": "This change needs `serde_with` as a new dependency for the custom duration format. Is that OK?",
+   "prompt": "ok",
+   "search": true
+  },
+  {
+   "last": "Did both the staging and production deploys show up in your dashboard? They finished a minute ago.",
+   "prompt": "yes, both",
+   "search": false
+  },
+  {
+   "last": "I added type hints to `payments/` and mypy passes in strict mode for that package. Should I continue with `accounts/`?",
+   "prompt": "no, don't bother",
+   "search": false
+  },
+  {
+   "last": "Committed and pushed. The PR is #77 and the preview deploy is building.",
+   "prompt": "refactor the giant switch in reducer.ts into a lookup table of handlers",
+   "search": true
+  },
+  {
+   "last": "My guess is the stale prices come from the 24-hour TTL on the product cache.",
+   "prompt": "sounds right",
+   "search": false
+  },
+  {
+   "last": "I've added a GitHub Actions workflow that builds the docs on every push to main and deploys them to Pages.",
+   "prompt": "can you make it shorter",
+   "search": true
+  },
+  {
+   "last": "The migration ran cleanly on staging and the new column is populated. Should I also backfill the archived rows?",
+   "prompt": "no thanks",
+   "search": false
+  },
+  {
+   "last": "SSH asks for the passphrase every time because no agent is running in that shell; `ssh-add` only lasts as long as the agent does.",
+   "prompt": "can you write a test that reproduces it",
+   "search": true
+  },
+  {
+   "last": "I wrote the unit tests for `RateLimiter`: 9 cases including burst and refill timing, all passing.",
+   "prompt": "great, that's all for today",
+   "search": false
+  },
+  {
+   "last": "Done. Image resizing now runs in a background job, so uploads return immediately.",
+   "prompt": "great, see you tomorrow",
+   "search": false
+  },
+  {
+   "last": "Want the same change applied to the staging Terraform workspace?",
+   "prompt": "yup",
+   "search": true
+  },
+  {
+   "last": "The Redis cache is in place and p95 latency on `/search` dropped from 800ms to 120ms. Should I add metrics for the hit rate as well?",
+   "prompt": "no, that's all for now",
+   "search": false
+  },
+  {
+   "last": "Semver treats 0.x releases specially: going from 0.4 to 0.5 is allowed to break the API, which is why cargo didn't pick up the new version automatically.",
+   "prompt": "how long would the fix take?",
+   "search": true
+  },
+  {
+   "last": "The deploy script now quotes all its variables and passes shellcheck with no warnings.",
+   "prompt": "excellent",
+   "search": false
+  },
+  {
+   "last": "That's the breakdown of the bundle size: about 60% of it is moment.js locales.",
+   "prompt": "okay",
+   "search": false
+  }
+ ]
+}

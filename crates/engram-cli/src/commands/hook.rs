@@ -4,13 +4,17 @@
 //! and outputs additionalContext JSON to stdout.
 //!
 //! Hooks fire on every Read/Write/Edit the agent performs, so latency is
-//! critical. Both handlers build their engine via
-//! [`engramdb::ops::build_engine_without_providers`]: hook queries carry no
+//! critical. Every handler builds its engine via
+//! [`engramdb::ops::build_engine_without_providers`]: the file hooks carry no
 //! query text (`query: None` → the engine's semantic step is skipped and
-//! scoring is `scope_only`) and hooks never create memories, so embedding,
-//! NLI, reranker, and T5 title models are provably never used. Skipping
-//! provider resolution avoids a ~240ms ONNX session init (plus the T5
-//! encoder+decoder init) on every hook invocation.
+//! scoring is `scope_only`), UserPromptSubmit's queries are keyword-only, and
+//! hooks never create memories, so no engine-side model is ever used.
+//! Skipping provider resolution avoids a ~240ms ONNX session init (plus the
+//! T5 encoder+decoder init) on every hook invocation. The one exception is
+//! UserPromptSubmit's situation classifier, which needs the embedding model:
+//! it uses a shared daemon that is already running, else loads the embedding
+//! model alone in this process (~300 ms), once per prompt. It never spawns a
+//! daemon (see [`SituationModel`]).
 
 use anyhow::Result;
 use engramdb::retrieval::engine::{DetailLevel, RetrievalMode, RetrievalQuery, ScoredMemory};
@@ -873,32 +877,6 @@ fn sanitize_min_criticality(v: f64) -> f64 {
 // New hook events (§8.5)
 // ---------------------------------------------------------------------------
 
-/// Situation-inference keyword tables for UserPromptSubmit (§8.5.1). Cheap
-/// substring heuristics — the only place Debugging/DesignChoice can be
-/// inferred automatically.
-const DEBUGGING_KEYWORDS: &[&str] = &["error", "failing", "why does", "debug", "panic", "crash"];
-const DESIGN_KEYWORDS: &[&str] = &[
-    "should we",
-    "choose",
-    " vs ",
-    "design",
-    "approach",
-    "architecture",
-];
-
-/// Infer a situation from the submitted prompt text (`None` when no keyword
-/// table matches — neutral scoring).
-fn infer_situation(prompt: &str) -> Option<Situation> {
-    let lower = prompt.to_lowercase();
-    if DEBUGGING_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return Some(Situation::Debugging);
-    }
-    if DESIGN_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return Some(Situation::DesignChoice);
-    }
-    None
-}
-
 /// Extract the `session_id` field every hook event carries.
 fn extract_session_id(input: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(input).ok()?;
@@ -980,11 +958,146 @@ fn extract_prompt(input: &str) -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+/// Where the UserPromptSubmit hook gets an embedding model for the situation
+/// classifier.
+pub(crate) enum SituationModel {
+    /// A shared daemon that is already running, else the embedding model
+    /// loaded in this process (production). Never spawns a daemon.
+    DaemonOrInProcess,
+    /// The embedding model loaded in this process, never the daemon
+    /// (`--in-process` / `ENGRAMDB_IN_PROCESS`).
+    InProcess,
+    /// Keyword tables only: tests that must not reach a daemon or load a
+    /// model on the developer's machine.
+    #[cfg(test)]
+    KeywordOnly,
+    /// A given provider (tests).
+    #[cfg(test)]
+    Provider(std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>),
+}
+
+/// The embedding model alone, loaded in this process — only when its ONNX
+/// files are already cached ([`engramdb::ops::cached_onnx_embedding_provider`]).
+/// Never downloads a model and never falls back to Ollama, either of which
+/// could stall the prompt for seconds; `None` sends the hook to the keyword
+/// tables instead.
+async fn in_process_embedder(
+    config: &engramdb::types::EngramConfig,
+) -> Option<std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>> {
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || engramdb::ops::cached_onnx_embedding_provider(&config))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// The prompt's situation: the embedding classifier when a model is at hand
+/// and `[hooks].situation_classifier` is on, else the keyword tables. Every
+/// failure falls back to the keyword tables; none reaches the caller.
+async fn prompt_situation(
+    prompt: &str,
+    config: &engramdb::types::EngramConfig,
+    model: &SituationModel,
+) -> Option<Situation> {
+    use engramdb::prompt_intent::{keyword_situation, PrototypeClassifier, PrototypeParams};
+    if !config.hooks.situation_classifier {
+        return keyword_situation(prompt);
+    }
+    let provider = match model {
+        SituationModel::DaemonOrInProcess => {
+            let cell = engramdb::daemon::DaemonCell::new();
+            match engramdb::daemon::resolve_daemon_providers(&cell, config, None)
+                .await
+                .and_then(|p| p.embedding)
+            {
+                Some(p) => Some(p),
+                None => in_process_embedder(config).await,
+            }
+        }
+        SituationModel::InProcess => in_process_embedder(config).await,
+        #[cfg(test)]
+        SituationModel::KeywordOnly => None,
+        #[cfg(test)]
+        SituationModel::Provider(p) => Some(std::sync::Arc::clone(p)),
+    };
+    let Some(provider) = provider else {
+        return keyword_situation(prompt);
+    };
+    // Seeds and prompt in one batch, nothing cached between calls.
+    match PrototypeClassifier::classify_once(provider.as_ref(), PrototypeParams::default(), prompt)
+        .await
+    {
+        // The hook searches every prompt whatever the gate says (see
+        // `prompt_intent`'s module docs). A prompt the gate would skip
+        // embeds near the acknowledgement seeds, where the classifier has no
+        // situation evidence, so the keyword tables decide it: "ok, it still
+        // panics" stays Debugging, "ok thanks" stays neutral.
+        Ok(d) if d.needs_context => d.situation,
+        Ok(_) => keyword_situation(prompt),
+        Err(e) => {
+            tracing::debug!("prompt situation classifier failed (non-fatal): {e}");
+            keyword_situation(prompt)
+        }
+    }
+}
+
+/// The last `max_chars` characters of the agent's previous message, read from
+/// the transcript the event names, starting at a word boundary. `None` when
+/// disabled (`0`), when the event has no transcript, or when the transcript
+/// holds no assistant text near its end.
+fn previous_message_tail(input: &str, max_chars: usize) -> Option<String> {
+    use engramdb::storage::transcripts::{last_assistant_text, LAST_ASSISTANT_TAIL_BYTES};
+    if max_chars == 0 {
+        return None;
+    }
+    let path = extract_transcript_path(input)?;
+    let text = last_assistant_text(Path::new(&path), LAST_ASSISTANT_TAIL_BYTES)?;
+    Some(text_tail(&text, max_chars).to_string())
+}
+
+/// The last `max_chars` characters of `text`; when that cuts a word, the
+/// partial word is dropped.
+fn text_tail(text: &str, max_chars: usize) -> &str {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.trim();
+    }
+    let start = text
+        .char_indices()
+        .nth(count - max_chars)
+        .map_or(0, |(i, _)| i);
+    let cut = &text[start..];
+    let cut_mid_word = !text[..start].ends_with(char::is_whitespace);
+    match cut.find(char::is_whitespace) {
+        Some(i) if cut_mid_word => cut[i..].trim(),
+        _ => cut.trim(),
+    }
+}
+
 /// Core UserPromptSubmit logic (§8.5.1): Filter-mode query with the prompt as
 /// query text plus inferred situation; injects top-k under
-/// `[hooks].prompt_context_budget` with per-class rendering. Keyword-only
-/// retrieval — hooks never load model providers.
+/// `[hooks].prompt_context_budget` with per-class rendering.
+///
+/// Every prompt is searched; there is no skip decision. When the prompt's own
+/// matches leave room, a second Filter query on the tail of the agent's
+/// previous message (`[hooks].previous_message_chars`) fills it, so a short
+/// reply such as "push it" finds memories about what it refers to. The
+/// prompt's matches always rank first.
+///
+/// Retrieval is keyword-only: the engine has no providers. The one model use
+/// is the optional situation classifier, which uses a daemon that is already
+/// running or else loads the embedding model in this process (see
+/// [`SituationModel`]).
+#[cfg(test)]
 async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<String>> {
+    process_user_prompt_submit_with(input, dir, &SituationModel::KeywordOnly).await
+}
+
+async fn process_user_prompt_submit_with(
+    input: &str,
+    dir: &Path,
+    model: &SituationModel,
+) -> Result<Option<String>> {
     let prompt = match extract_prompt(input) {
         Some(p) => p,
         None => return Ok(None),
@@ -1000,7 +1113,8 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
     let config_path = dir.join(".engramdb").join("config.toml");
     let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
 
-    let situation = infer_situation(&prompt);
+    let situation = prompt_situation(&prompt, engine.config(), model).await;
+    let previous = previous_message_tail(input, engine.config().hooks.previous_message_chars);
     let query = RetrievalQuery {
         mode: RetrievalMode::Filter,
         query: Some(prompt),
@@ -1014,17 +1128,43 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
         ..Default::default()
     };
 
-    let result = match engramdb::ops::query_memories(&engine, &query).await {
-        Ok(r) => r,
+    let current_task = session_task_for(input, dir);
+    // Task-scoped and already-shown memories are dropped from each result set
+    // before the slots are counted, so a prompt whose matches were all shown
+    // earlier in the session still gets the previous message's matches.
+    let visible = |memories: Vec<ScoredMemory>| {
+        drop_already_shown(
+            suppress_task_scoped(memories, current_task.as_deref()),
+            input,
+            dir,
+        )
+    };
+    let mut memories = match engramdb::ops::query_memories(&engine, &query).await {
+        Ok(r) => visible(r.memories),
         Err(e) => {
             tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
             return Ok(None);
         }
     };
-
-    let current_task = session_task_for(input, dir);
-    let memories = suppress_task_scoped(result.memories, current_task.as_deref());
-    let mut memories = drop_already_shown(memories, input, dir);
+    if let Some(previous) = previous.filter(|_| memories.len() < PROMPT_MAX_RESULTS) {
+        let context_query = RetrievalQuery {
+            query: Some(previous),
+            ..query.clone()
+        };
+        match engramdb::ops::query_memories(&engine, &context_query).await {
+            Ok(r) => {
+                for m in visible(r.memories) {
+                    if memories.len() >= PROMPT_MAX_RESULTS {
+                        break;
+                    }
+                    if !memories.iter().any(|f| f.memory.id == m.memory.id) {
+                        memories.push(m);
+                    }
+                }
+            }
+            Err(e) => tracing::debug!("Hook previous-message retrieval failed (non-fatal): {e}"),
+        }
+    }
     memories.truncate(PROMPT_MAX_RESULTS);
     if memories.is_empty() {
         return Ok(None);
@@ -1047,10 +1187,15 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
 
 /// Run the UserPromptSubmit hook handler. Malformed/empty stdin ⇒ exit 0
 /// with empty stdout, never an error.
-pub async fn run_hook_user_prompt_submit(dir: &Path) -> Result<()> {
+pub async fn run_hook_user_prompt_submit(dir: &Path, in_process: bool) -> Result<()> {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
-    if let Ok(Some(json)) = process_user_prompt_submit(&input, dir).await {
+    let model = if in_process {
+        SituationModel::InProcess
+    } else {
+        SituationModel::DaemonOrInProcess
+    };
+    if let Ok(Some(json)) = process_user_prompt_submit_with(&input, dir, &model).await {
         println!("{}", json);
     }
     Ok(())
@@ -2610,24 +2755,6 @@ mod tests {
     }
 
     #[test]
-    fn test_infer_situation_keyword_tables() {
-        assert_eq!(
-            infer_situation("why does the test panic here?"),
-            Some(Situation::Debugging)
-        );
-        assert_eq!(
-            infer_situation("Should we choose sqlite vs postgres?"),
-            Some(Situation::DesignChoice)
-        );
-        // Debugging wins when both match (checked first).
-        assert_eq!(
-            infer_situation("error in the design"),
-            Some(Situation::Debugging)
-        );
-        assert_eq!(infer_situation("add a new field to the struct"), None);
-    }
-
-    #[test]
     fn test_extract_prompt() {
         assert_eq!(
             extract_prompt(r#"{"prompt":"why does this fail?"}"#),
@@ -3139,6 +3266,219 @@ mod tests {
 
         // Malformed stdin is silent, never an error.
         assert!(process_post_tool_use("not json", temp_dir.path())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    /// Embeds by keyword families, so a test decides which classifier seeds
+    /// a prompt lands nearest to without loading a model.
+    struct FamilyEmbedder {
+        fail: bool,
+    }
+
+    const SITUATION_FAMILIES: &[&[&str]] = &[
+        &[
+            "fail",
+            "broke",
+            "segfault",
+            "hang",
+            "exception",
+            "bug",
+            "wrong",
+            "slow",
+            "trace",
+        ],
+        &[
+            "better",
+            "tradeoff",
+            "compare",
+            "versus",
+            "decide",
+            "recommend",
+            "pattern",
+            "plan",
+        ],
+        &[
+            "add",
+            "rename",
+            "write",
+            "explain",
+            "update",
+            "run",
+            "implement",
+            "move",
+            "show",
+        ],
+        &[
+            "ok",
+            "thank",
+            "yes",
+            "go ahead",
+            "keep going",
+            "sure",
+            "nice",
+            "do it",
+            "cool",
+        ],
+    ];
+
+    #[async_trait::async_trait]
+    impl engramdb::embeddings::EmbeddingProvider for FamilyEmbedder {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            anyhow::ensure!(!self.fail, "stub provider failure");
+            let lower = text.to_lowercase();
+            let mut v: Vec<f32> = SITUATION_FAMILIES
+                .iter()
+                .map(|words| words.iter().filter(|w| lower.contains(*w)).count() as f32)
+                .collect();
+            v.push(0.01);
+            Ok(v)
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::with_capacity(texts.len());
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimensions(&self) -> usize {
+            SITUATION_FAMILIES.len() + 1
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+        fn model_id(&self) -> String {
+            "family-stub".into()
+        }
+    }
+
+    fn stub_model(fail: bool) -> SituationModel {
+        SituationModel::Provider(std::sync::Arc::new(FamilyEmbedder { fail }))
+    }
+
+    #[tokio::test]
+    async fn prompt_situation_uses_the_classifier_and_falls_back_to_keywords() {
+        let mut config = engramdb::types::EngramConfig::default();
+        // No keyword-table word: the tables see nothing.
+        let prompt = "the tests hang forever on my machine";
+        assert_eq!(engramdb::prompt_intent::keyword_situation(prompt), None);
+
+        let model = stub_model(false);
+        assert_eq!(
+            prompt_situation(prompt, &config, &model).await,
+            Some(Situation::Debugging)
+        );
+        // Turn control has no situation; a gate-skipped prompt falls to the
+        // keyword tables, which still see a failure word.
+        assert_eq!(prompt_situation("ok thanks", &config, &model).await, None);
+        assert_eq!(
+            prompt_situation("ok thanks sure, it panics", &config, &model).await,
+            Some(Situation::Debugging)
+        );
+
+        // A failing model, a keyword-only model and the config switch all
+        // fall back to the keyword tables.
+        let keyword_prompt = "why does this panic";
+        for model in [stub_model(true), SituationModel::KeywordOnly] {
+            assert_eq!(prompt_situation(prompt, &config, &model).await, None);
+            assert_eq!(
+                prompt_situation(keyword_prompt, &config, &model).await,
+                Some(Situation::Debugging)
+            );
+        }
+        config.hooks.situation_classifier = false;
+        assert_eq!(prompt_situation(prompt, &config, &model).await, None);
+    }
+
+    #[test]
+    fn text_tail_keeps_whole_words() {
+        assert_eq!(text_tail("  short  ", 300), "short");
+        assert_eq!(text_tail("alpha beta gamma", 10), "beta gamma");
+        // A cut inside "beta" drops the partial word.
+        assert_eq!(text_tail("alpha beta gamma", 8), "gamma");
+        // The cut falls exactly on a word start: nothing is dropped.
+        assert_eq!(text_tail("alpha beta gamma", 5), "gamma");
+        // Multibyte text is cut on a char boundary.
+        assert_eq!(text_tail("über straße länge", 6), "länge");
+        // One long word longer than the limit is kept as its tail.
+        assert_eq!(text_tail("abcdefghij", 4), "ghij");
+    }
+
+    /// A transcript whose last assistant message is `last`.
+    fn transcript_with(dir: &Path, last: &str) -> std::path::PathBuf {
+        let path = dir.join("transcript.jsonl");
+        let record = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": last}]}
+        });
+        std::fs::write(&path, format!("{record}\n")).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_searches_the_previous_message_for_short_replies() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut push = Memory::new(
+            MemoryType::Convention,
+            "Never push to main directly; open a pull request",
+            "Branch protection rejects direct pushes.",
+            Provenance::human(),
+        );
+        push.criticality = 0.9;
+        store.create(&push).await.unwrap();
+        let mut migration = Memory::new(
+            MemoryType::Convention,
+            "Schema migrations need a version bump",
+            "Bump CURRENT_SCHEMA_VERSION with every new column.",
+            Provenance::human(),
+        );
+        migration.criticality = 0.9;
+        store.create(&migration).await.unwrap();
+
+        let transcript = transcript_with(
+            temp_dir.path(),
+            "I committed the fix on the feature branch. Should I push it?",
+        );
+        let input = |prompt: &str| {
+            serde_json::json!({
+                "prompt": prompt,
+                "transcript_path": transcript.to_str().unwrap(),
+            })
+            .to_string()
+        };
+
+        // "yes" matches nothing; the previous message finds the push memory.
+        let out = process_user_prompt_submit(&input("yes"), temp_dir.path())
+            .await
+            .unwrap()
+            .expect("the previous message should surface a memory");
+        assert!(out.contains("Never push to main"), "{out}");
+
+        // The prompt's own match ranks before the previous message's.
+        forget_shown(&input("x"), temp_dir.path());
+        let out = process_user_prompt_submit(
+            &input("does this need a schema migration?"),
+            temp_dir.path(),
+        )
+        .await
+        .unwrap()
+        .expect("both memories should surface");
+        let (own, previous) = (out.find("Schema migrations"), out.find("Never push"));
+        assert!(own.is_some() && previous.is_some(), "{out}");
+        assert!(own < previous, "prompt match must rank first: {out}");
+
+        // `previous_message_chars = 0` turns the second search off.
+        forget_shown(&input("x"), temp_dir.path());
+        std::fs::write(
+            temp_dir.path().join(".engramdb/config.toml"),
+            "[hooks]\nprevious_message_chars = 0\n",
+        )
+        .unwrap();
+        assert!(process_user_prompt_submit(&input("yes"), temp_dir.path())
             .await
             .unwrap()
             .is_none());

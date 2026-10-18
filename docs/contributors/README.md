@@ -14,6 +14,7 @@ For developers hacking on EngramDB itself. To use EngramDB, go to [../users/](..
 8. [turbovec-evaluation.md](./turbovec-evaluation.md) — why the TurboQuant quantized index was measured and rejected for memory vectors, with the harness in [turbovec-probe/](./turbovec-probe/).
 9. [query-latency-profile.md](./query-latency-profile.md) — where a query's milliseconds actually go, and why LanceDB fragment count (not row count) sets it.
 10. [embedding-dimension-eval.md](./embedding-dimension-eval.md) — 384 vs 1024 dims scored on this project's own memories: why width is the wrong axis, with the corpus and labels in [tools/eval-corpus/](../../tools/eval-corpus/).
+11. [prompt-intent-eval.md](./prompt-intent-eval.md) — the embedding situation classifier the UserPromptSubmit hook now uses, and the parked context gate (zero-shot NLI and Laya, and trained classifiers), measured against the keyword tables.
 
 The CI gate (`cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`) is enforced — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the canonical version.
 
