@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use tokio::io::BufReader;
 
-use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
+use super::protocol::{
+    read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, ModelSelection,
+};
 use super::PROTOCOL_VERSION;
 
 /// One-shot request over a fresh connection to a socket, without spawning.
@@ -158,6 +160,28 @@ impl DaemonHandle {
         } else {
             None
         }
+    }
+
+    /// Renew this session's lease on the daemon's bundle for `models`.
+    ///
+    /// A `Ping` that carries a model selection: the daemon marks the matching
+    /// bundle as in use (it never loads one for a `Ping`), so a session that
+    /// is open but quiet keeps its models resident, and the bundle is
+    /// unloaded once every session using it has ended. An older daemon
+    /// ignores the selection and treats this as a plain `Ping`. Returns
+    /// whether the daemon answered.
+    pub async fn renew_lease(&self, models: ModelSelection) -> bool {
+        matches!(
+            self.request_with_timeout(
+                DaemonRequest {
+                    models: Some(models),
+                    op: DaemonOp::Ping,
+                },
+                Self::PING_TIMEOUT,
+            )
+            .await,
+            Ok(DaemonResponse::Pong { .. })
+        )
     }
 
     /// True if a daemon answers `Ping` with a matching protocol version.

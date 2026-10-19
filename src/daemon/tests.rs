@@ -1796,3 +1796,89 @@ fn v4_daemon_can_parse_a_v5_ping() {
     let back: DaemonRequest = serde_json::from_str(&json).unwrap();
     assert!(back.models.is_none());
 }
+
+/// The daemon unloads a bundle nobody used or leased for its window, keeps
+/// one whose session renews its lease with heartbeat `Ping`s, and never
+/// loads a bundle for a `Ping`.
+///
+/// The model is forced unavailable (empty cache + offline, as in
+/// `failed_request_does_not_increment_counter`): an incomplete bundle is
+/// still cached, which is all `bundles_loaded` counts, so this needs no
+/// staged model.
+#[tokio::test]
+async fn idle_bundles_are_unloaded_and_leases_keep_them() {
+    use super::server::{run_daemon_with, DaemonOptions};
+
+    let empty_cache = super::private_tempdir();
+    std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+    std::env::set_var("ENGRAMDB_OFFLINE", "1");
+
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let window = Duration::from_secs(1);
+    tokio::spawn(run_daemon_with(
+        socket.clone(),
+        DaemonOptions {
+            idle_timeout: Duration::from_secs(3600),
+            bundle_idle_timeout: window,
+        },
+    ));
+    let models = default_models(Some(EmbeddingBackend::Onnx));
+    async fn bundles(socket: &std::path::Path) -> usize {
+        let req = DaemonRequest {
+            models: None,
+            op: DaemonOp::Status,
+        };
+        match wait_request(socket, req).await {
+            DaemonResponse::Status(s) => s.bundles_loaded,
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+    async fn lease(socket: &std::path::Path, models: &ModelSelection) {
+        let req = DaemonRequest {
+            models: Some(models.clone()),
+            op: DaemonOp::Ping,
+        };
+        let resp = wait_request(socket, req).await;
+        assert!(matches!(resp, DaemonResponse::Pong { .. }), "{resp:?}");
+    }
+
+    // A lease on a selection that is not loaded must not load it.
+    lease(&socket, &models).await;
+    assert_eq!(bundles(&socket).await, 0, "a Ping must never load a bundle");
+
+    // Open the "project": a model request resolves (and caches) its bundle.
+    wait_request(
+        &socket,
+        DaemonRequest {
+            models: Some(models.clone()),
+            op: DaemonOp::Meta,
+        },
+    )
+    .await;
+    assert_eq!(bundles(&socket).await, 1);
+
+    // A live session renews its lease well inside the window: kept for
+    // several windows.
+    let until = std::time::Instant::now() + window * 3;
+    while std::time::Instant::now() < until {
+        lease(&socket, &models).await;
+        tokio::time::sleep(window / 4).await;
+    }
+    assert_eq!(
+        bundles(&socket).await,
+        1,
+        "a leased bundle must stay loaded"
+    );
+
+    // The session ends: no more leases. The bundle goes within a window plus
+    // one sweep tick.
+    let deadline = std::time::Instant::now() + window * 4;
+    while bundles(&socket).await != 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "an unleased bundle must be unloaded after its idle window"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

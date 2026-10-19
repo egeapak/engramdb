@@ -24,6 +24,52 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 /// and its 60s request timeout; see the guard in `handle_conn`.
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long the daemon runs without activity, and how long a model bundle
+/// stays loaded without use.
+#[derive(Debug, Clone, Copy)]
+pub struct DaemonOptions {
+    /// Exit after this long with no request and no open connection.
+    pub idle_timeout: Duration,
+    /// Unload a model bundle after this long with no request for it and no
+    /// lease renewal (a heartbeat `Ping` carrying its model selection).
+    ///
+    /// This is the "close" of a project: the daemon knows model selections,
+    /// not projects, so when the last session using a selection ends, its
+    /// heartbeats stop and the bundle is unloaded one window later. Before
+    /// this, every selection ever served stayed loaded until the daemon
+    /// exited — and the heartbeats of any other session kept it from exiting.
+    pub bundle_idle_timeout: Duration,
+}
+
+impl DaemonOptions {
+    /// The production shape: a bundle is unloaded after the same idle window
+    /// that would stop the whole daemon. The heartbeat renews leases every
+    /// `heartbeat_interval(idle)`, at least twice per window, so a live but
+    /// quiet session never loses its bundle.
+    pub fn from_idle_timeout(idle_timeout: Duration) -> Self {
+        Self {
+            idle_timeout,
+            bundle_idle_timeout: idle_timeout,
+        }
+    }
+}
+
+/// Return freed heap pages to the OS.
+///
+/// glibc keeps freed memory in its arenas and returns only the top of the
+/// main heap on its own. The daemon frees large blocks in bursts (a whole
+/// model bundle on eviction), and serves requests from many blocking threads,
+/// each with its own arena — so without a trim the RSS after an unload stays
+/// near its peak. Other allocators (macOS, musl) return memory themselves.
+fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `malloc_trim` takes no pointers and is safe to call from any
+    // thread at any time; it only walks the allocator's own free lists.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 /// Shared per-process daemon state.
 struct Ctx {
     cache: ProviderCache,
@@ -72,6 +118,16 @@ impl Ctx {
 /// calling `process::exit` here keeps `run_daemon` drivable in-process by
 /// tests.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
+    run_daemon_with(socket, DaemonOptions::from_idle_timeout(idle_timeout)).await
+}
+
+/// [`run_daemon`] with explicit [`DaemonOptions`]. Tests and the
+/// memory-footprint bench use it to shorten the bundle window.
+pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow::Result<()> {
+    let DaemonOptions {
+        idle_timeout,
+        bundle_idle_timeout,
+    } = options;
     let listener: super::transport::Listener = match super::transport::bind_or_yield(&socket).await
     {
         Ok(Some(l)) => l,
@@ -129,6 +185,34 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
                 tokio::select! {
                     _ = tokio::time::sleep(PERSIST_INTERVAL) => ctx.persist().await,
                     _ = shutdown.changed() => return,
+                }
+            }
+        });
+    }
+
+    // Bundle sweeper: unload model bundles nobody used or leased for
+    // `bundle_idle_timeout`, then give the freed memory back to the OS.
+    {
+        let ctx = Arc::clone(&ctx);
+        let mut shutdown = shutdown_rx.clone();
+        let tick = (bundle_idle_timeout / 4)
+            .min(Duration::from_secs(30))
+            .max(Duration::from_millis(250));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(tick) => {}
+                    _ = shutdown.changed() => return,
+                }
+                let evicted = ctx.cache.evict_idle(bundle_idle_timeout).await;
+                if evicted > 0 {
+                    tracing::info!(
+                        "engramdb daemon unloaded {evicted} model bundle(s) unused for {bundle_idle_timeout:?}"
+                    );
+                    // The ONNX sessions are freed when the last `Arc` drops;
+                    // an in-flight request may still hold one, so this trim
+                    // can miss that bundle. The next eviction trims again.
+                    tokio::task::spawn_blocking(release_free_memory);
                 }
             }
         });
@@ -362,6 +446,14 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
             ctx.ping_count.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut t) = ctx.last_ping.lock() {
                 *t = Some(Instant::now());
+            }
+            // A heartbeat carries its session's model selection: renew the
+            // lease on that bundle. Never loads one — a session that has not
+            // used a model yet must not make the daemon load it.
+            if let Some(models) = &req.models {
+                ctx.cache
+                    .touch(&models.to_config(), Some(models.backend))
+                    .await;
             }
             return DaemonResponse::Pong {
                 version: PROTOCOL_VERSION.to_string(),

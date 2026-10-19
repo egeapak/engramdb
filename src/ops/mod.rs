@@ -921,6 +921,10 @@ struct CachedProviders {
     /// Whether every provider the config requested actually resolved.
     complete: bool,
     built_at: std::time::Instant,
+    /// Last time a caller used this bundle ([`ProviderCache::get`]) or held
+    /// a lease on it ([`ProviderCache::touch`]). [`ProviderCache::evict_idle`]
+    /// measures idleness from here.
+    last_used: std::time::Instant,
 }
 
 /// True when every provider requested by `config` resolved: embeddings are
@@ -999,8 +1003,9 @@ impl ProviderCache {
             .resolved_pool_size(crate::types::config::available_cores());
         let key = provider_cache_key(config, backend_override, pool_size);
         let mut guard = self.inner.lock().await;
-        if let Some(entry) = guard.get(&key) {
+        if let Some(entry) = guard.get_mut(&key) {
             if entry.complete || entry.built_at.elapsed() < FAILED_BUNDLE_RETRY_AFTER {
+                entry.last_used = std::time::Instant::now();
                 return entry.providers.clone();
             }
             // Incomplete bundle past its retry window: fall through and
@@ -1033,9 +1038,50 @@ impl ProviderCache {
                 providers: providers.clone(),
                 complete,
                 built_at: std::time::Instant::now(),
+                last_used: std::time::Instant::now(),
             },
         );
         providers
+    }
+
+    /// Mark the bundle for `config` as in use, without loading it.
+    ///
+    /// This is the lease a live session renews: the daemon calls it for the
+    /// model selection a heartbeat `Ping` carries, so a session that is open
+    /// but quiet keeps its bundle resident. Returns `false` when no bundle
+    /// for `config` is loaded — a lease never triggers a model load.
+    pub async fn touch(
+        &self,
+        config: &EngramConfig,
+        backend_override: Option<EmbeddingBackend>,
+    ) -> bool {
+        let pool_size = config
+            .embeddings
+            .resolved_pool_size(crate::types::config::available_cores());
+        let key = provider_cache_key(config, backend_override, pool_size);
+        match self.inner.lock().await.get_mut(&key) {
+            Some(entry) => {
+                entry.last_used = std::time::Instant::now();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop every bundle that nobody used or leased for `max_idle`.
+    ///
+    /// This is how a project is "closed": when the last session using a
+    /// model selection ends, its leases stop, and the bundle — every ONNX
+    /// session in it, with each session's memory arena — is released here.
+    /// Without it, every distinct selection the process ever served stayed
+    /// resident until the process exited. A caller still holding the
+    /// bundle's providers keeps them alive (they are `Arc`s); a later
+    /// [`Self::get`] reloads the bundle. Returns how many were evicted.
+    pub async fn evict_idle(&self, max_idle: std::time::Duration) -> usize {
+        let mut guard = self.inner.lock().await;
+        let before = guard.len();
+        guard.retain(|_, entry| entry.last_used.elapsed() < max_idle);
+        before - guard.len()
     }
 
     /// Test seam: insert a pre-built bundle with an explicit completeness and
@@ -1054,6 +1100,7 @@ impl ProviderCache {
                 providers,
                 complete,
                 built_at,
+                last_used: built_at,
             },
         );
     }
@@ -1256,6 +1303,48 @@ mod provider_cache_tests {
             Some("test/marker".to_string()),
             "complete bundles must be cached for the process lifetime"
         );
+    }
+
+    /// A bundle nobody uses is evicted; `get` and `touch` both renew it;
+    /// `touch` never loads a bundle that is not resident.
+    #[tokio::test]
+    async fn evict_idle_releases_unused_bundles_and_leases_renew_them() {
+        let config = failing_config();
+        let mut other = failing_config();
+        other.embeddings.pool_size = Some(1);
+        let Some(old) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(600))
+        else {
+            return;
+        };
+        let cache = ProviderCache::new();
+        assert!(!cache.touch(&config, None).await, "touch must not load");
+        assert_eq!(cache.loaded_count().await, 0);
+
+        cache
+            .insert_for_test(key_for(&config), marker_bundle(), true, old)
+            .await;
+        cache
+            .insert_for_test(key_for(&other), marker_bundle(), true, old)
+            .await;
+        // Renew one of the two old bundles: a lease (no load) counts as use.
+        assert!(cache.touch(&config, None).await);
+
+        let idle = std::time::Duration::from_secs(300);
+        assert_eq!(
+            cache.evict_idle(idle).await,
+            1,
+            "only the unleased bundle goes"
+        );
+        assert_eq!(cache.loaded_count().await, 1);
+        let kept = cache.get(&config, None).await;
+        assert_eq!(
+            kept.embedding.map(|e| e.model_id()),
+            Some("test/marker".to_string()),
+            "the leased bundle must still be served from cache"
+        );
+        assert_eq!(cache.evict_idle(idle).await, 0, "get renewed it again");
+        assert_eq!(cache.evict_idle(std::time::Duration::ZERO).await, 1);
+        assert_eq!(cache.loaded_count().await, 0);
     }
 }
 

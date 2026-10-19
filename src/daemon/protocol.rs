@@ -37,8 +37,10 @@ pub const PROTOCOL_VERSION: &str = "5";
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonRequest {
     /// The client's model selection. Required for the model ops (`Meta`,
-    /// `Embed`, `Classify`, `Rerank`, `Title`); `None` for `Ping`, `Status`
-    /// and `Shutdown`, which load no models.
+    /// `Embed`, `Classify`, `Rerank`, `Title`); `None` for `Status` and
+    /// `Shutdown`, which load no models. Optional on `Ping`: a heartbeat sends
+    /// its session's selection there to renew its lease on that bundle (the
+    /// daemon never loads a model for a `Ping`).
     pub models: Option<ModelSelection>,
     /// The operation to perform.
     pub op: DaemonOp,

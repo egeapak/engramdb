@@ -1994,6 +1994,8 @@ impl EngramDbServer {
     /// mirroring [`Self::resolve_providers`]).
     pub fn spawn_daemon_heartbeat(&self) {
         let daemon = Arc::clone(&self.daemon);
+        let backend = self.embedding_backend;
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
         tokio::spawn(async move {
             loop {
                 // Re-read every tick so an edit to the global config applies
@@ -2007,13 +2009,26 @@ impl EngramDbServer {
                 }
                 let idle = global.idle_timeout_secs;
                 let socket = engramdb::daemon::resolve_socket(None, &global);
-                let _ = daemon
+                let handle = daemon
                     .get(
                         &socket,
                         idle,
                         engramdb::daemon::DaemonPolicy::ConnectOrSpawn,
                     )
                     .await;
+                // Renew this session's lease on its project's model bundle,
+                // so the daemon keeps it loaded while the session is open and
+                // unloads it once the session (and every other one using the
+                // same models) has ended. Re-read the project config each
+                // tick, like the global one, so an edit moves the lease.
+                if let Some(handle) = handle {
+                    let config = load_config_or_default(&config_path).await;
+                    handle
+                        .renew_lease(engramdb::daemon::ModelSelection::from_config(
+                            &config, backend,
+                        ))
+                        .await;
+                }
                 tokio::time::sleep(engramdb::daemon::heartbeat_interval(idle)).await;
             }
         });

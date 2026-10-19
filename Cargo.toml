@@ -131,6 +131,9 @@ tempfile = "3"
 # SO_PEERCRED peer checks (already in the dependency tree via tempfile et al.).
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
+# glibc `malloc_trim`: after the daemon unloads a model bundle, hand the freed
+# heap back to the OS (already in the dependency tree via tempfile et al.).
+libc = "0.2"
 
 [dev-dependencies]
 # Enable storage's `test-support` module (global-store serialization lock) for
@@ -198,6 +201,13 @@ harness = false
 # input is a home directory, so its cost is directory reads rather than compute.
 [[bench]]
 name = "discover_walk"
+harness = false
+
+# Resident memory, not time: samples the daemon's RSS while projects are
+# opened, used and closed, and the MCP store path's RSS over open/close
+# cycles. Not Criterion; prints a table. `-- --check` exits 1 on a failed bound.
+[[bench]]
+name = "memory_footprint"
 harness = false
 
 # Dev/test disk diet: full debug info across the ~400-crate dependency tree
