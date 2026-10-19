@@ -3242,6 +3242,7 @@ mod tests {
                 p50: 11.0,
                 p95: 30.5,
                 p99: 61.3,
+                by_path: Default::default(),
             },
         );
         by_hook.insert(
@@ -3253,6 +3254,7 @@ mod tests {
                 p50: 290.0,
                 p95: 410.2,
                 p99: 410.2,
+                by_path: Default::default(),
             },
         );
         HookStatsView {

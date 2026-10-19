@@ -1906,7 +1906,7 @@ pub fn stats_name(command: &crate::app::HookCommand) -> Option<&'static str> {
 /// load, Tokio runtime start), which no in-process clock can see.
 pub fn record_hook_stats(dir: &Path, name: &str, elapsed: std::time::Duration, ok: bool) {
     let ms = elapsed.as_secs_f64() * 1000.0;
-    if let Err(e) = engramdb::telemetry::hooks::record_hook_call(dir, name, ms, ok) {
+    if let Err(e) = engramdb::telemetry::hooks::record_hook_call(dir, name, ms, ok, None) {
         tracing::debug!("hook stats: could not record `{name}` (non-fatal): {e}");
     }
 }

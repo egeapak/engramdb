@@ -25,6 +25,7 @@
 pub(crate) mod collector;
 // Hook processes are short-lived and record through a JSONL log, not the
 // collector; see the module docs.
+pub mod hook_events;
 pub mod hooks;
 // `persistence` is `pub` (not `pub(crate)`) because the top-level `engramdb`
 // crate's `ops` / `mcp` / `cli` layers drive flush/hydrate directly across the
