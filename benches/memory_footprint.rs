@@ -56,9 +56,10 @@ const ROLE_SOCKET_ENV: &str = "ENGRAMDB_MEMBENCH_SOCKET";
 /// default); the bench shortens it so a "close" is observable in seconds.
 const BUNDLE_WINDOW: Duration = Duration::from_secs(3);
 
-/// How long a closed project is left alone before the "closed" sample: one
-/// bundle window plus the sweeper's tick and some slack.
-const CLOSE_WAIT: Duration = Duration::from_secs(5);
+/// Longest wait for the daemon to unload every bundle after a close. Far
+/// above the window: on a loaded machine the last request ends late, and the
+/// window starts only then.
+const CLOSE_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Open/close cycles in `daemon_open_close`. Enough that a per-cycle leak
 /// adds up to more than the bound.
@@ -279,6 +280,30 @@ impl DaemonChild {
         self.child.id()
     }
 
+    /// Wait until the daemon reports no loaded bundle — every project is
+    /// closed and unloaded — and return how long that took. Sampling on a
+    /// fixed delay instead measured a bundle that was still due to go
+    /// whenever the machine was busy. Panics past [`CLOSE_DEADLINE`]: a
+    /// bundle that is never unloaded is the defect this bench exists for.
+    async fn wait_until_unloaded(&self) -> Duration {
+        let start = Instant::now();
+        loop {
+            let status = engramdb::daemon::query_status(&self.socket)
+                .await
+                .expect("daemon status")
+                .expect("daemon running");
+            if status.bundles_loaded == 0 {
+                return start.elapsed();
+            }
+            assert!(
+                start.elapsed() < CLOSE_DEADLINE,
+                "{} bundle(s) still loaded {CLOSE_DEADLINE:?} after the projects closed",
+                status.bundles_loaded
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     /// Open a "project" against this daemon: what an MCP session does on its
     /// first model-backed tool call (a `Meta` that loads the bundle).
     async fn open_project(&self, config: &EngramConfig) -> Arc<dyn EmbeddingProvider> {
@@ -396,10 +421,13 @@ async fn daemon_batch_shapes() -> Report {
     let open = r
         .sample(d.pid(), "after 300 small requests (still open)")
         .await;
-    tokio::time::sleep(CLOSE_WAIT).await;
+    let waited = d.wait_until_unloaded().await;
     r.sample(
         d.pid(),
-        format!("after {CLOSE_WAIT:?} idle (project closed)"),
+        format!(
+            "project closed, unloaded after {:.1} s",
+            waited.as_secs_f64()
+        ),
     )
     .await;
     // Once a request fills whole runs of full-window texts, a bigger request
@@ -468,10 +496,13 @@ async fn daemon_open_close() -> Report {
             // A session that ends sends nothing: it stops renewing its
             // lease, and the daemon unloads the bundle one window later.
         }
-        tokio::time::sleep(CLOSE_WAIT).await;
+        let waited = d.wait_until_unloaded().await;
         r.sample(
             d.pid(),
-            format!("cycle {cycle}: projects closed, {CLOSE_WAIT:?} idle"),
+            format!(
+                "cycle {cycle}: projects closed, unloaded after {:.1} s",
+                waited.as_secs_f64()
+            ),
         )
         .await;
         closed.push(r.samples.len() - 1);
