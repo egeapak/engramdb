@@ -32,7 +32,14 @@
 //!   memory with many 256-token chunks. Shows how much memory ONNX Runtime
 //!   keeps after the largest request it has served.
 //! - `daemon_same_config_projects` — several projects that share the default
-//!   model selection. They must share one bundle: no growth per project.
+//!   model selection. They must share every model: no growth per project.
+//! - `daemon_shared_models` — two projects that differ only in their title
+//!   strategy (T5 vs keyword). The second must reuse the first's embedding
+//!   pool instead of loading its own.
+//! - `daemon_pool_grouping` — projects asking for embedding pools of 1, 2 and
+//!   3 sessions. They must share one pool of 4 (the largest request, rounded
+//!   up to a power of two), and the pool must shrink back to 2 when the
+//!   size-3 project closes.
 //! - `daemon_open_close` — several projects with *different* model
 //!   selections are opened, used, and closed, in cycles. After a close, RSS
 //!   must return near the level before the first open.
@@ -129,6 +136,8 @@ struct Report {
     samples: Vec<Sample>,
     /// `Some((passed, explanation))` when the scenario has a bound.
     verdict: Option<(bool, String)>,
+    /// Extra lines printed under the table (the daemon's loaded models).
+    notes: Vec<String>,
 }
 
 impl Report {
@@ -137,6 +146,7 @@ impl Report {
             name,
             samples: Vec::new(),
             verdict: None,
+            notes: Vec::new(),
         }
     }
 
@@ -158,6 +168,9 @@ impl Report {
         for s in &self.samples {
             let heap = s.heap.map_or("n/a".to_string(), |h| format!("{h:.1}"));
             println!("| {} | {:.1} | {heap} |", s.label, s.mib);
+        }
+        for note in &self.notes {
+            println!("\n{note}");
         }
         if let Some((ok, why)) = &self.verdict {
             println!("\n{}: {why}", if *ok { "PASS" } else { "FAIL" });
@@ -212,6 +225,14 @@ fn texts(seed: usize, count: usize, words: usize) -> Vec<String> {
 /// A project config: the default model selection with the heavy optional
 /// models off (NLI and the reranker are not staged by default) and keyword
 /// titles, so the only model is the embedding model.
+/// [`project_config`] with T5 titles: the T5 model on top of the embedding
+/// model.
+fn t5_project_config(pool_size: Option<usize>) -> EngramConfig {
+    let mut c = project_config(pool_size);
+    c.title.strategy = engramdb::title::TitleStrategy::T5;
+    c
+}
+
 fn project_config(pool_size: Option<usize>) -> EngramConfig {
     let mut c = EngramConfig::default();
     c.nli.enabled = false;
@@ -278,6 +299,48 @@ impl DaemonChild {
 
     fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// The daemon's loaded models, as `Status` reports them.
+    async fn model_ids(&self) -> Vec<String> {
+        engramdb::daemon::query_status(&self.socket)
+            .await
+            .expect("daemon status")
+            .expect("daemon running")
+            .model_ids
+    }
+
+    /// Wait until the daemon's embedding pool has `sessions` sessions,
+    /// running `keep_alive` between polls (to hold other projects' leases).
+    /// Returns whether it got there before `deadline`: a daemon that has no
+    /// shared pools never does, and the scenario reports that as a failure
+    /// instead of hanging.
+    async fn wait_for_embedding_pool<F, Fut>(
+        &self,
+        sessions: usize,
+        deadline: Duration,
+        mut keep_alive: F,
+    ) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let suffix = format!(" x{sessions}");
+        let start = Instant::now();
+        loop {
+            let ids = self.model_ids().await;
+            if ids
+                .iter()
+                .any(|id| id.starts_with("embed=") && id.ends_with(&suffix))
+            {
+                return true;
+            }
+            if start.elapsed() >= deadline {
+                return false;
+            }
+            keep_alive().await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     /// Wait until the daemon reports no loaded bundle — every project is
@@ -451,6 +514,97 @@ async fn daemon_batch_shapes() -> Report {
             "{growth:+.1} MiB from the 64-text to the 256-text request (bound {TOLERANCE_MIB} MiB); \
              an open project holds {:+.1} MiB over its first load",
             open - opened
+        ),
+    ));
+    r
+}
+
+async fn daemon_shared_models() -> Report {
+    let mut r = Report::new("daemon_shared_models");
+    let d = DaemonChild::start().await;
+    r.sample(d.pid(), "daemon started, nothing loaded").await;
+    let t5 = d.open_project(&t5_project_config(None)).await;
+    embed(&t5, &texts(1, 8, 60)).await;
+    let first = r
+        .sample(d.pid(), "project A opened (embedding + T5 titles)")
+        .await;
+    let keyword = d.open_project(&project_config(None)).await;
+    embed(&keyword, &texts(2, 8, 60)).await;
+    let second = r
+        .sample(d.pid(), "project B opened (embedding, keyword titles)")
+        .await;
+    r.notes
+        .push(format!("Loaded models: {}", d.model_ids().await.join(", ")));
+    // B selects nothing A did not: with per-model sharing it costs nothing.
+    // With one bundle per selection it loaded a second embedding pool.
+    let added = second - first;
+    r.verdict = Some((
+        added <= TOLERANCE_MIB,
+        format!(
+            "{added:+.1} MiB for project B, whose only model A already loaded (bound {TOLERANCE_MIB} MiB)"
+        ),
+    ));
+    r
+}
+
+async fn daemon_pool_grouping() -> Report {
+    const DEADLINE: Duration = Duration::from_secs(20);
+    let mut r = Report::new("daemon_pool_grouping");
+    let d = DaemonChild::start().await;
+    r.sample(d.pid(), "daemon started, nothing loaded").await;
+
+    let p1 = d.open_project(&project_config(Some(1))).await;
+    embed(&p1, &texts(1, 8, 60)).await;
+    r.sample(d.pid(), "project asking for 1 session").await;
+
+    let p2 = d.open_project(&project_config(Some(2))).await;
+    embed(&p2, &texts(2, 8, 60)).await;
+    let grew_to_2 = d
+        .wait_for_embedding_pool(2, DEADLINE, || async { embed(&p2, &texts(3, 1, 12)).await })
+        .await;
+    for i in 0..4 {
+        embed(&p2, &texts(10 + i, 8, 60)).await;
+    }
+    let with_two = r
+        .sample(d.pid(), "+ project asking for 2 (pool of 2)")
+        .await;
+
+    let p3 = d.open_project(&project_config(Some(3))).await;
+    embed(&p3, &texts(4, 8, 60)).await;
+    let grew_to_4 = d
+        .wait_for_embedding_pool(4, DEADLINE, || async { embed(&p3, &texts(5, 1, 12)).await })
+        .await;
+    for i in 0..8 {
+        embed(&p3, &texts(20 + i, 8, 60)).await;
+    }
+    r.sample(d.pid(), "+ project asking for 3 (pool of 4)")
+        .await;
+    r.notes.push(format!(
+        "Loaded models with 3 projects open: {}",
+        d.model_ids().await.join(", ")
+    ));
+
+    // Close the size-3 project; keep the other two leased with requests.
+    drop(p3);
+    let shrank_to_2 = d
+        .wait_for_embedding_pool(2, DEADLINE, || async {
+            embed(&p1, &texts(6, 1, 12)).await;
+            embed(&p2, &texts(7, 1, 12)).await;
+        })
+        .await;
+    let after_close = r.sample(d.pid(), "size-3 project closed (pool of 2)").await;
+    r.notes.push(format!(
+        "Loaded models after the close: {}",
+        d.model_ids().await.join(", ")
+    ));
+
+    let back = after_close - with_two;
+    r.verdict = Some((
+        grew_to_2 && grew_to_4 && shrank_to_2 && back <= TOLERANCE_MIB,
+        format!(
+            "one shared pool grew to 2: {grew_to_2}, to 4: {grew_to_4}, shrank back to 2: \
+             {shrank_to_2}; after the close {back:+.1} MiB against the pool of 2 \
+             (bound {TOLERANCE_MIB} MiB)"
         ),
     ));
     r
@@ -644,12 +798,14 @@ fn main() {
     let mut reports = Vec::new();
     rt.block_on(async {
         type Scenario = fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Report>>>;
-        let daemon: [(&str, Scenario); 4] = [
+        let daemon: [(&str, Scenario); 6] = [
             ("daemon_request_churn", || Box::pin(daemon_request_churn())),
             ("daemon_batch_shapes", || Box::pin(daemon_batch_shapes())),
             ("daemon_same_config_projects", || {
                 Box::pin(daemon_same_config_projects())
             }),
+            ("daemon_shared_models", || Box::pin(daemon_shared_models())),
+            ("daemon_pool_grouping", || Box::pin(daemon_pool_grouping())),
             ("daemon_open_close", || Box::pin(daemon_open_close())),
         ];
         for (name, run) in daemon {

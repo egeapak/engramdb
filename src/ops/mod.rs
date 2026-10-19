@@ -20,6 +20,7 @@ pub mod list;
 pub mod maintenance;
 pub mod parsing;
 pub mod projects;
+pub(crate) mod provider_cache;
 pub mod query;
 pub mod reindex;
 pub mod repair;
@@ -80,6 +81,7 @@ pub use parsing::{
     parse_epistemic_filter, parse_generality, parse_memory_type, parse_situation, parse_status,
     parse_type_filter, parse_visibility, validate_score,
 };
+pub use provider_cache::{provider_cache_key, ProviderCache};
 pub use query::{
     audience_allows, merge_scored_memories, query_memories, query_memories_with_extra_stores,
     query_memories_with_global, ExtraStoresResult,
@@ -610,143 +612,176 @@ pub struct EngineProviders {
 /// Load the model-backed providers selected by `config`.
 ///
 /// This is the heavyweight step: it initializes ONNX Runtime sessions for the
-/// embedding model (always attempted) and, when enabled, the NLI and reranker
-/// models. It performs blocking model loading and is intended to be called at
-/// most once per process per distinct config (the MCP server caches the
-/// result; the CLI calls it once and exits).
+/// embedding model (always attempted) and, when enabled, the NLI, reranker and
+/// T5 title models. It performs blocking model loading. One-shot callers (the
+/// CLI) call it once and exit; long-lived ones go through [`ProviderCache`],
+/// which loads each model through the same per-model builders below and
+/// shares it between every project whose settings select it.
 pub fn resolve_engine_providers(
     config: &crate::types::EngramConfig,
     backend_override: Option<EmbeddingBackend>,
     embedding_pool_size: usize,
 ) -> EngineProviders {
-    let mut providers = EngineProviders::default();
-
     let backend = resolve_backend(config.embeddings.backend, backend_override);
-    // Build up to `embedding_pool_size` independent sessions of the *same*
-    // model and round-robin across them, so concurrent callers (the daemon
-    // serving N agent sessions) don't all serialize behind one session's
-    // mutex. A first-load failure leaves the pool empty → embeddings
-    // disabled, exactly as a single-load failure behaved before; a later
-    // session failing just yields a smaller pool (graceful degradation).
-    let intra_threads = embedding_session_intra_threads(
-        embedding_pool_size,
-        crate::types::config::available_cores(),
-    );
-    let mut sessions = Vec::with_capacity(embedding_pool_size.max(1));
-    for _ in 0..embedding_pool_size.max(1) {
-        match resolve_provider(config.embeddings.provider.as_str(), backend, intra_threads) {
+    let mut providers = EngineProviders {
+        embedding: build_embedding_pool(
+            config.embeddings.provider.as_str(),
+            backend,
+            config.embeddings.dimensions,
+            embedding_pool_size,
+        ),
+        ..EngineProviders::default()
+    };
+    if config.nli.enabled {
+        providers.nli = build_nli(&config.nli.model);
+    }
+    if config.rerank.enabled {
+        providers.reranker = build_reranker(&config.rerank.model);
+    }
+    if config.title.strategy == crate::title::TitleStrategy::T5 {
+        providers.title = build_t5_pool(t5_pool_request(config, embedding_pool_size));
+    }
+    providers
+}
+
+/// The T5 title pool size a caller asks for. The CLI passes
+/// `embedding_pool_size == 1` (one-shot, no concurrency) — don't pay N× the
+/// heavy T5 load there; long-lived daemon / MCP callers (pool > 1) pool T5 too.
+pub(crate) fn t5_pool_request(config: &EngramConfig, embedding_pool_size: usize) -> usize {
+    if embedding_pool_size <= 1 {
+        1
+    } else {
+        config
+            .title
+            .resolved_pool_size(crate::types::config::available_cores())
+    }
+}
+
+/// Build an embedding pool of `pool_size` independent sessions of one model.
+///
+/// Round-robining across several sessions keeps concurrent callers (the
+/// daemon serving N agent sessions) from all serializing behind one session's
+/// mutex. A first-load failure leaves the pool empty → embeddings disabled,
+/// exactly as a single-load failure behaved before; a later session failing
+/// just yields a smaller pool (graceful degradation). Blocking.
+pub(crate) fn build_embedding_pool(
+    provider_name: &str,
+    backend: EmbeddingBackend,
+    configured_dimensions: usize,
+    pool_size: usize,
+) -> Option<Arc<dyn EmbeddingProvider>> {
+    let intra_threads =
+        embedding_session_intra_threads(pool_size, crate::types::config::available_cores());
+    let mut sessions = Vec::with_capacity(pool_size.max(1));
+    for _ in 0..pool_size.max(1) {
+        match resolve_provider(provider_name, backend, intra_threads) {
             Some(p) => sessions.push(p),
             None => break,
         }
     }
-    if let Some(provider) = crate::embeddings::PooledEmbeddingProvider::build(sessions) {
-        if provider.dimensions() != config.embeddings.dimensions {
-            // Deliberately a warning, not a hard error: the Auto backend can
-            // legitimately fall back to a provider with different dimensions
-            // (e.g. ONNX unavailable → Ollama mxbai-embed-large) and graceful
-            // degradation is the contract — operations must keep working.
-            // Corruption is impossible regardless: the LanceDB index is sized
-            // from the config value, `LanceIndex::upsert_chunks` rejects
-            // wrong-width vectors at write time, `vector_search` rejects them
-            // at read time, and the embedding-fingerprint check reports the
-            // drift via `doctor`/open-time warnings.
-            tracing::warn!(
-                "Embedding provider '{}' produces {}-dimensional vectors but \
-                 [embeddings].dimensions = {}. Embeddings will be rejected at write \
-                 time until this is fixed — set [embeddings].dimensions = {} in \
-                 config.toml, then run `engramdb reindex --embeddings-only`.",
-                config.embeddings.provider,
-                provider.dimensions(),
-                config.embeddings.dimensions,
-                provider.dimensions(),
-            );
-        }
-        providers.embedding = Some(provider);
+    let provider = crate::embeddings::PooledEmbeddingProvider::build(sessions)?;
+    if provider.dimensions() != configured_dimensions {
+        // Deliberately a warning, not a hard error: the Auto backend can
+        // legitimately fall back to a provider with different dimensions
+        // (e.g. ONNX unavailable → Ollama mxbai-embed-large) and graceful
+        // degradation is the contract — operations must keep working.
+        // Corruption is impossible regardless: the LanceDB index is sized
+        // from the config value, `LanceIndex::upsert_chunks` rejects
+        // wrong-width vectors at write time, `vector_search` rejects them
+        // at read time, and the embedding-fingerprint check reports the
+        // drift via `doctor`/open-time warnings.
+        tracing::warn!(
+            "Embedding provider '{}' produces {}-dimensional vectors but \
+             [embeddings].dimensions = {}. Embeddings will be rejected at write \
+             time until this is fixed — set [embeddings].dimensions = {} in \
+             config.toml, then run `engramdb reindex --embeddings-only`.",
+            provider_name,
+            provider.dimensions(),
+            configured_dimensions,
+            provider.dimensions(),
+        );
     }
+    Some(provider)
+}
 
-    // NLI, cross-encoder reranker, and T5 titling are all ONNX-Runtime-only, so
-    // the whole block compiles out of a build without it and those features stay
-    // off.
+/// Load the NLI contradiction model. ONNX-Runtime-only. Blocking.
+pub(crate) fn build_nli(model: &str) -> Option<Arc<dyn NliProvider>> {
     #[cfg(feature = "onnxruntime")]
     {
-        if config.nli.enabled {
-            match OnnxNliProvider::try_new(&config.nli.model) {
-                Some(provider) => providers.nli = Some(Arc::new(provider)),
-                None => {
-                    eprintln!("Warning: NLI contradiction detection enabled but model unavailable")
-                }
+        match OnnxNliProvider::try_new(model) {
+            Some(provider) => Some(Arc::new(provider)),
+            None => {
+                eprintln!("Warning: NLI contradiction detection enabled but model unavailable");
+                None
             }
         }
-
-        if config.rerank.enabled {
-            match LocalReranker::load(&config.rerank.model) {
-                Ok(reranker) => providers.reranker = Some(reranker),
-                Err(e) => eprintln!("Warning: reranker init failed, continuing without: {}", e),
-            }
-        }
-
-        resolve_t5_title_provider(config, embedding_pool_size, &mut providers);
     }
     #[cfg(not(feature = "onnxruntime"))]
     {
-        // NLI, reranking, and T5 titling all need ONNX Runtime compiled in.
-        if config.nli.enabled {
-            eprintln!(
-                "Warning: NLI contradiction detection is enabled but unavailable on a build \
-                 without ONNX Runtime; continuing without it"
-            );
-        }
-        if config.rerank.enabled {
-            eprintln!("Warning: reranker is enabled but unavailable on this build");
-        }
+        let _ = model;
+        eprintln!(
+            "Warning: NLI contradiction detection is enabled but unavailable on a build \
+             without ONNX Runtime; continuing without it"
+        );
+        None
     }
-
-    providers
 }
 
-/// Build the cached T5 title generator pool. Split out so the whole ORT-only
-/// path (T5 is a quantized ONNX model) compiles out of a build without ONNX
-/// Runtime.
-#[cfg(feature = "onnxruntime")]
-fn resolve_t5_title_provider(
-    config: &crate::types::EngramConfig,
-    embedding_pool_size: usize,
-    providers: &mut EngineProviders,
-) {
-    // Only T5 is worth caching: keyword titling is in-process and cheap, and
-    // `none` builds nothing. Loading T5 here (an encoder+decoder ONNX init)
-    // means the long-lived daemon / MCP server loads it once into the bundle
-    // instead of rebuilding it on every single `create` — and, under
-    // concurrency, pooling it cuts the dominant create-path tail latency.
-    if config.title.strategy == crate::title::TitleStrategy::T5 {
+/// Load the cross-encoder reranker. ONNX-Runtime-only. Blocking.
+pub(crate) fn build_reranker(model: &str) -> Option<Arc<dyn Reranker>> {
+    #[cfg(feature = "onnxruntime")]
+    {
+        match LocalReranker::load(model) {
+            Ok(reranker) => Some(reranker),
+            Err(e) => {
+                eprintln!("Warning: reranker init failed, continuing without: {}", e);
+                None
+            }
+        }
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        let _ = model;
+        eprintln!("Warning: reranker is enabled but unavailable on this build");
+        None
+    }
+}
+
+/// Build the T5 title generator pool. T5 is a quantized ONNX
+/// encoder+decoder, so this is ONNX-Runtime-only and blocking.
+///
+/// Caching it (rather than building it per `create`) means the long-lived
+/// daemon / MCP server loads it once instead of on every `create`, and under
+/// concurrency, pooling it cuts the dominant create-path tail latency. Each
+/// session's intra_threads is reduced so `pool × intra ≤ cores` (T5 sessions
+/// are direct ORT sessions, unlike fastembed), capped at the Lever A sweet
+/// spot.
+pub(crate) fn build_t5_pool(pool_size: usize) -> Option<Arc<dyn crate::title::TitleGenerator>> {
+    #[cfg(feature = "onnxruntime")]
+    {
         let cores = crate::types::config::available_cores();
-        // The CLI passes `embedding_pool_size == 1` (one-shot, no
-        // concurrency) — don't pay N× the heavy T5 load there. Long-lived
-        // daemon / MCP (pool > 1) pool T5 too. Each session's intra_threads
-        // is reduced so `pool × intra ≤ cores` (T5 sessions are direct ORT
-        // sessions, unlike fastembed), capped at the Lever A sweet spot.
-        let title_pool = if embedding_pool_size <= 1 {
-            1
-        } else {
-            config.title.resolved_pool_size(cores)
-        };
-        let intra = (cores / title_pool.max(1))
+        let pool_size = pool_size.max(1);
+        let intra = (cores / pool_size)
             .min(crate::onnx_ep::intra_threads())
             .max(1);
         let mut generators: Vec<Arc<dyn crate::title::TitleGenerator>> =
-            Vec::with_capacity(title_pool);
-        for _ in 0..title_pool {
+            Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
             match crate::title::t5::T5TitleGenerator::try_new_with_intra(intra) {
                 Some(gen) => generators.push(Arc::new(gen)),
                 None => break,
             }
         }
-        match crate::title::PooledTitleGenerator::build(generators) {
-            Some(t) => providers.title = Some(t),
-            None => {
-                eprintln!("Warning: title strategy 't5' configured but the T5 model is unavailable")
-            }
+        let pool = crate::title::PooledTitleGenerator::build(generators);
+        if pool.is_none() {
+            eprintln!("Warning: title strategy 't5' configured but the T5 model is unavailable");
         }
+        pool
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        let _ = pool_size;
+        None
     }
 }
 
@@ -815,561 +850,6 @@ pub async fn build_engine_without_providers(
 ) -> RetrievalEngine {
     let config = crate::storage::config::load_config_or_default(config_path).await;
     assemble_engine(store, config, EngineProviders::default())
-}
-
-/// Signature of the provider-relevant config fields.
-///
-/// Two configs with the same key resolve to interchangeable model sessions, so
-/// the bundle can be shared. The resolved embedding backend is folded in so a
-/// CLI/env backend override doesn't collide with the config-default backend.
-///
-/// The four model-selecting config sections are destructured **exhaustively**
-/// (no `..`): adding a field to any of them fails compilation here, forcing
-/// an explicit decision about whether the new field affects which models get
-/// loaded. This key drifted behind the config twice before (title.strategy,
-/// title.pool_size — each a stale-bundle bug); the destructuring makes the
-/// third drift impossible to miss.
-pub fn provider_cache_key(
-    config: &EngramConfig,
-    backend_override: Option<EmbeddingBackend>,
-    embedding_pool_size: usize,
-) -> String {
-    // Every field must be bound (or explicitly discarded with a reason).
-    let crate::types::config::EmbeddingsConfig {
-        backend: config_backend,
-        provider,
-        dimensions,
-        // Chunking width, not a model identity: the same loaded session
-        // serves any max_tokens (effective_chunk_tokens clamps per call).
-        max_tokens: _,
-        // Reindex *policy* — what to do on a model change, not which model.
-        reindex_on_model_change: _,
-        // Embed-text *composition*, applied per embed call — the same loaded
-        // session serves both compositions; not model identity.
-        metadata_vector: _,
-        // The caller passes the RESOLVED pool size (auto `cores/2` applied),
-        // which is what actually sizes the bundle.
-        pool_size: _,
-    } = &config.embeddings;
-    let crate::types::config::NliConfig {
-        enabled: nli_enabled,
-        model: nli_model,
-        // Inference-time thresholds, applied per call — not model identity.
-        contradiction_threshold: _,
-        max_comparisons: _,
-        similarity_threshold: _,
-    } = &config.nli;
-    let crate::types::config::RerankConfig {
-        enabled: rerank_enabled,
-        model: rerank_model,
-        // Query-time knobs on an already-loaded reranker.
-        top_n: _,
-        weight: _,
-    } = &config.rerank;
-    let crate::types::config::TitleConfig {
-        strategy: title_strategy,
-        // The T5 title pool is sized from this inside
-        // `resolve_engine_providers`, so two configs with different title
-        // pool sizes are NOT interchangeable bundles — omitting it would
-        // serve a stale wrong-sized title pool after a config change.
-        pool_size: title_pool_size,
-    } = &config.title;
-
-    let backend = resolve_backend(*config_backend, backend_override);
-    format!(
-        "{backend}|{provider}|{dimensions}|{embedding_pool_size}|{nli_enabled}|{nli_model}|{rerank_enabled}|{rerank_model}|{title_strategy:?}|{title_pool_size:?}",
-    )
-}
-
-/// Process-wide cache of model-backed [`EngineProviders`], keyed by
-/// [`provider_cache_key`].
-///
-/// Loading the ONNX embedding model is a ~240ms session init (NLI / reranker
-/// add more). This cache makes the models load at most once per distinct
-/// config for the life of the process. It backs both the in-process MCP
-/// fallback path and the shared embedding daemon, so both share identical
-/// load-once semantics. `providers` carry no per-store state, so one bundle is
-/// reused across every project and call.
-///
-/// A bundle that failed to resolve everything the config requested (e.g. the
-/// embedding model lost a concurrent download race, or the model cache was
-/// not yet staged) is cached only for [`FAILED_BUNDLE_RETRY_AFTER`]: the
-/// heartbeat-kept-alive daemon and long-lived MCP fallback must recover once
-/// the cause is fixed, not serve the dead bundle for the process lifetime —
-/// the same "cached a `None` failure forever" class `DaemonCell` fixed for
-/// daemon handles.
-#[derive(Clone, Default)]
-pub struct ProviderCache {
-    inner: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CachedProviders>>>,
-}
-
-/// How long a bundle with failed providers is served from cache before the
-/// next caller re-attempts the model load. Long enough that a broken machine
-/// isn't paying a failed load per request, short enough that fixing the model
-/// cache heals live daemons/sessions promptly.
-///
-/// Known tradeoff: the cache's single mutex is held across the load (the
-/// pre-existing single-flight design), so on a machine where a provider is
-/// *permanently* unavailable every retry briefly stalls concurrent lookups —
-/// for every key — behind the failed attempt. Offline-mode loads fail fast,
-/// bounding the stall; a per-key in-flight guard would remove it entirely if
-/// this ever shows up in practice.
-const FAILED_BUNDLE_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
-
-struct CachedProviders {
-    providers: EngineProviders,
-    /// Whether every provider the config requested actually resolved.
-    complete: bool,
-    built_at: std::time::Instant,
-    /// Last time a caller used this bundle ([`ProviderCache::get`]) or held
-    /// a lease on it ([`ProviderCache::touch`]). [`ProviderCache::evict_idle`]
-    /// measures idleness from here.
-    last_used: std::time::Instant,
-}
-
-/// True when every provider requested by `config` resolved: embeddings are
-/// always attempted; NLI/reranker only count when enabled; a title generator
-/// only counts under the T5 strategy.
-/// True when a caller other than the cache still holds a provider of this
-/// bundle — an in-flight request, or an engine assembled from it.
-fn providers_in_use(providers: &EngineProviders) -> bool {
-    fn shared<T: ?Sized>(p: &Option<Arc<T>>) -> bool {
-        p.as_ref().is_some_and(|p| Arc::strong_count(p) > 1)
-    }
-    shared(&providers.embedding)
-        || shared(&providers.nli)
-        || shared(&providers.reranker)
-        || shared(&providers.title)
-}
-
-fn providers_complete(config: &EngramConfig, providers: &EngineProviders) -> bool {
-    providers.embedding.is_some()
-        && (!config.nli.enabled || providers.nli.is_some())
-        && (!config.rerank.enabled || providers.reranker.is_some())
-        && (config.title.strategy != crate::title::TitleStrategy::T5 || providers.title.is_some())
-}
-
-impl ProviderCache {
-    /// Create an empty cache.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Number of distinct provider bundles (config signatures) resident.
-    pub async fn loaded_count(&self) -> usize {
-        self.inner.lock().await.len()
-    }
-
-    /// Model ids of every resident provider, as `"<role>=<model_id>"`.
-    ///
-    /// Only embeddings carry a `model_id()` — it is the one whose identity is
-    /// persisted in the manifest and can silently corrupt a store when a stale
-    /// daemon serves vectors from a superseded model. The other roles are
-    /// reported by presence only.
-    ///
-    /// Sorted and deduped so `Status` output is stable across calls.
-    pub async fn model_ids(&self) -> Vec<String> {
-        let guard = self.inner.lock().await;
-        let mut ids: Vec<String> = guard
-            .values()
-            .flat_map(|cached| {
-                let p = &cached.providers;
-                [
-                    p.embedding
-                        .as_ref()
-                        .map(|e| format!("embed={}", e.model_id())),
-                    p.nli.as_ref().map(|_| "nli=loaded".to_string()),
-                    p.reranker.as_ref().map(|_| "rerank=loaded".to_string()),
-                    p.title.as_ref().map(|_| "title=loaded".to_string()),
-                ]
-            })
-            .flatten()
-            .collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
-
-    /// Resolve providers for `config`, building them at most once per signature.
-    ///
-    /// The blocking model load runs on a blocking thread; the async mutex is
-    /// held across it so concurrent first callers collapse into a single load
-    /// instead of each loading the model. Note this serializes the *first*
-    /// build of every distinct signature process-wide (a cold load for one
-    /// config briefly blocks a cache lookup for another). That's acceptable
-    /// here: a process almost always uses a single signature, and with the
-    /// daemon enabled (the default) this in-process path is only the fallback.
-    /// Cached lookups are not serialized beyond the brief map lock.
-    pub async fn get(
-        &self,
-        config: &EngramConfig,
-        backend_override: Option<EmbeddingBackend>,
-    ) -> EngineProviders {
-        // The cache backs the long-lived daemon / in-process MCP fallback —
-        // both serve many concurrent callers — so honor the configured (or
-        // auto `cores/2`) embedding pool size. The size is folded into the
-        // cache key so a config change re-resolves instead of handing back a
-        // wrong-sized pool.
-        let pool_size = config
-            .embeddings
-            .resolved_pool_size(crate::types::config::available_cores());
-        let key = provider_cache_key(config, backend_override, pool_size);
-        let mut guard = self.inner.lock().await;
-        if let Some(entry) = guard.get_mut(&key) {
-            if entry.complete || entry.built_at.elapsed() < FAILED_BUNDLE_RETRY_AFTER {
-                entry.last_used = std::time::Instant::now();
-                return entry.providers.clone();
-            }
-            // Incomplete bundle past its retry window: fall through and
-            // re-attempt the load (overwriting the cached failure).
-        }
-        let cfg = config.clone();
-        let providers = tokio::task::spawn_blocking(move || {
-            resolve_engine_providers(&cfg, backend_override, pool_size)
-        })
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!("engine provider init task panicked: {e}");
-            EngineProviders::default()
-        });
-        let complete = providers_complete(config, &providers);
-        if !complete {
-            tracing::warn!(
-                "provider bundle resolved incompletely (embedding: {}, nli: {}, rerank: {}, title: {}); \
-                 will re-attempt after {}s",
-                providers.embedding.is_some(),
-                providers.nli.is_some(),
-                providers.reranker.is_some(),
-                providers.title.is_some(),
-                FAILED_BUNDLE_RETRY_AFTER.as_secs(),
-            );
-        }
-        guard.insert(
-            key,
-            CachedProviders {
-                providers: providers.clone(),
-                complete,
-                built_at: std::time::Instant::now(),
-                last_used: std::time::Instant::now(),
-            },
-        );
-        providers
-    }
-
-    /// Mark the bundle for `config` as in use, without loading it.
-    ///
-    /// This is the lease a live session renews: the daemon calls it for the
-    /// model selection a heartbeat `Ping` carries, so a session that is open
-    /// but quiet keeps its bundle resident. Returns `false` when no bundle
-    /// for `config` is loaded — a lease never triggers a model load.
-    pub async fn touch(
-        &self,
-        config: &EngramConfig,
-        backend_override: Option<EmbeddingBackend>,
-    ) -> bool {
-        let pool_size = config
-            .embeddings
-            .resolved_pool_size(crate::types::config::available_cores());
-        let key = provider_cache_key(config, backend_override, pool_size);
-        match self.inner.lock().await.get_mut(&key) {
-            Some(entry) => {
-                entry.last_used = std::time::Instant::now();
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Drop every bundle that nobody used or leased for `max_idle`.
-    ///
-    /// A bundle some caller still holds is kept, however old its last use:
-    /// a request that runs longer than `max_idle` must not have its bundle
-    /// dropped under it — the request would finish, but the next one would
-    /// reload the models while the old copy was still resident.
-    ///
-    /// This is how a project is "closed": when the last session using a
-    /// model selection ends, its leases stop, and the bundle — every ONNX
-    /// session in it, with each session's memory arena — is released here.
-    /// Without it, every distinct selection the process ever served stayed
-    /// resident until the process exited. A caller still holding the
-    /// bundle's providers keeps them alive (they are `Arc`s); a later
-    /// [`Self::get`] reloads the bundle. Returns how many were evicted.
-    pub async fn evict_idle(&self, max_idle: std::time::Duration) -> usize {
-        let mut guard = self.inner.lock().await;
-        let before = guard.len();
-        guard.retain(|_, entry| {
-            entry.last_used.elapsed() < max_idle || providers_in_use(&entry.providers)
-        });
-        before - guard.len()
-    }
-
-    /// Test seam: insert a pre-built bundle with an explicit completeness and
-    /// age, so retry semantics are testable without loading models.
-    #[cfg(test)]
-    async fn insert_for_test(
-        &self,
-        key: String,
-        providers: EngineProviders,
-        complete: bool,
-        built_at: std::time::Instant,
-    ) {
-        self.inner.lock().await.insert(
-            key,
-            CachedProviders {
-                providers,
-                complete,
-                built_at,
-                last_used: built_at,
-            },
-        );
-    }
-}
-
-#[cfg(test)]
-mod provider_cache_tests {
-    use super::*;
-
-    #[test]
-    fn cache_key_is_deterministic_and_signature_sensitive() {
-        let base = EngramConfig::default();
-        let k = provider_cache_key(&base, None, 2);
-        // Deterministic.
-        assert_eq!(k, provider_cache_key(&base, None, 2));
-
-        // Backend override is folded in.
-        assert_ne!(
-            k,
-            provider_cache_key(&base, Some(EmbeddingBackend::Onnx), 2)
-        );
-
-        // Pool size is folded in: two pools of different sizes are NOT
-        // interchangeable model bundles (handing back a wrong-sized pool
-        // would silently under- or over-provision the daemon).
-        assert_ne!(k, provider_cache_key(&base, None, 4));
-        assert_eq!(k, provider_cache_key(&base, None, 2));
-
-        // Each provider-relevant field changes the key.
-        let mut c = base.clone();
-        c.embeddings.provider = "mxbai-embed-large".to_string();
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        let mut c = base.clone();
-        c.embeddings.dimensions += 1;
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        let mut c = base.clone();
-        c.nli.enabled = !c.nli.enabled;
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        let mut c = base.clone();
-        c.nli.model = "other-nli".to_string();
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        let mut c = base.clone();
-        c.rerank.enabled = !c.rerank.enabled;
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        let mut c = base.clone();
-        c.rerank.model = "other-reranker".to_string();
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        // Title strategy is folded in: T5 pulls a cached generator into the
-        // bundle, so it is a distinct signature from keyword/none. (The
-        // default is now T5, so flip to keyword to prove sensitivity.)
-        assert_eq!(base.title.strategy, crate::title::TitleStrategy::T5);
-        let mut c = base.clone();
-        c.title.strategy = crate::title::TitleStrategy::Keyword;
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        // Title pool size is folded in: it sizes the pooled T5 generator
-        // inside `resolve_engine_providers`, so changing `[title].pool_size`
-        // must re-resolve instead of serving a stale wrong-sized pool.
-        assert_eq!(base.title.pool_size, None);
-        let mut c = base.clone();
-        c.title.pool_size = Some(3);
-        assert_ne!(k, provider_cache_key(&c, None, 2));
-
-        // A leftover project `[daemon]` table does NOT change the model
-        // signature (daemon settings are global and never model identity).
-        let mut c = base.clone();
-        c.legacy_daemon = Some(toml::from_str("idle_timeout_secs = 61").unwrap());
-        assert_eq!(k, provider_cache_key(&c, None, 2));
-    }
-
-    #[tokio::test]
-    async fn provider_cache_starts_empty() {
-        let cache = ProviderCache::new();
-        assert_eq!(cache.loaded_count().await, 0);
-    }
-
-    /// Deterministically fast-failing config: unknown embedding provider
-    /// (resolve_provider returns None without touching any model), NLI and
-    /// rerank disabled, keyword titles (nothing to load).
-    fn failing_config() -> EngramConfig {
-        let mut config = EngramConfig::default();
-        config.embeddings.provider = "definitely-not-a-model".to_string();
-        config.nli.enabled = false;
-        config.rerank.enabled = false;
-        config.title.strategy = crate::title::TitleStrategy::Keyword;
-        config
-    }
-
-    struct MarkerEmbedding;
-
-    #[async_trait::async_trait]
-    impl crate::embeddings::EmbeddingProvider for MarkerEmbedding {
-        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
-            Ok(vec![0.0; 4])
-        }
-        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
-            Ok(texts.iter().map(|_| vec![0.0; 4]).collect())
-        }
-        fn dimensions(&self) -> usize {
-            4
-        }
-        fn max_tokens(&self) -> usize {
-            16
-        }
-        fn model_id(&self) -> String {
-            "test/marker".to_string()
-        }
-    }
-
-    fn marker_bundle() -> EngineProviders {
-        EngineProviders {
-            embedding: Some(Arc::new(MarkerEmbedding)),
-            ..EngineProviders::default()
-        }
-    }
-
-    fn key_for(config: &EngramConfig) -> String {
-        let pool = config
-            .embeddings
-            .resolved_pool_size(crate::types::config::available_cores());
-        provider_cache_key(config, None, pool)
-    }
-
-    #[test]
-    fn providers_complete_tracks_requested_providers() {
-        let config = failing_config();
-        // Only embeddings are requested: empty bundle is incomplete, a bundle
-        // with an embedding provider is complete.
-        assert!(!providers_complete(&config, &EngineProviders::default()));
-        assert!(providers_complete(&config, &marker_bundle()));
-
-        // Enabling NLI makes a missing NLI provider incomplete again.
-        let mut config = failing_config();
-        config.nli.enabled = true;
-        assert!(!providers_complete(&config, &marker_bundle()));
-
-        // T5 titles require a title generator.
-        let mut config = failing_config();
-        config.title.strategy = crate::title::TitleStrategy::T5;
-        assert!(!providers_complete(&config, &marker_bundle()));
-    }
-
-    /// A failed (incomplete) bundle must not be cached forever: within the
-    /// retry window it is served from cache, past the window the next get()
-    /// re-attempts the load. A complete bundle never expires.
-    #[tokio::test]
-    async fn provider_cache_retries_failed_bundles_after_window() {
-        let config = failing_config();
-        let key = key_for(&config);
-        // Instant is monotonic-since-boot; on a very fresh machine there may
-        // be no representable instant this far in the past — skip then.
-        let Some(stale) = std::time::Instant::now().checked_sub(FAILED_BUNDLE_RETRY_AFTER * 2)
-        else {
-            return;
-        };
-
-        // Fresh incomplete entry: served from cache (marker survives).
-        let cache = ProviderCache::new();
-        cache
-            .insert_for_test(
-                key.clone(),
-                marker_bundle(),
-                false,
-                std::time::Instant::now(),
-            )
-            .await;
-        let got = cache.get(&config, None).await;
-        assert_eq!(
-            got.embedding.map(|e| e.model_id()),
-            Some("test/marker".to_string()),
-            "incomplete bundle inside the retry window must be served from cache"
-        );
-
-        // Stale incomplete entry: get() re-resolves (the failing config
-        // resolves to an empty bundle, so the marker disappears).
-        let cache = ProviderCache::new();
-        cache
-            .insert_for_test(key.clone(), marker_bundle(), false, stale)
-            .await;
-        let got = cache.get(&config, None).await;
-        assert!(
-            got.embedding.is_none(),
-            "incomplete bundle past the retry window must be re-resolved"
-        );
-
-        // Stale but complete entry: never re-resolved.
-        let cache = ProviderCache::new();
-        cache
-            .insert_for_test(key.clone(), marker_bundle(), true, stale)
-            .await;
-        let got = cache.get(&config, None).await;
-        assert_eq!(
-            got.embedding.map(|e| e.model_id()),
-            Some("test/marker".to_string()),
-            "complete bundles must be cached for the process lifetime"
-        );
-    }
-
-    /// A bundle nobody uses is evicted; `get` and `touch` both renew it;
-    /// `touch` never loads a bundle that is not resident.
-    #[tokio::test]
-    async fn evict_idle_releases_unused_bundles_and_leases_renew_them() {
-        let config = failing_config();
-        let mut other = failing_config();
-        other.embeddings.pool_size = Some(1);
-        let Some(old) = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(600))
-        else {
-            return;
-        };
-        let cache = ProviderCache::new();
-        assert!(!cache.touch(&config, None).await, "touch must not load");
-        assert_eq!(cache.loaded_count().await, 0);
-
-        cache
-            .insert_for_test(key_for(&config), marker_bundle(), true, old)
-            .await;
-        cache
-            .insert_for_test(key_for(&other), marker_bundle(), true, old)
-            .await;
-        // Renew one of the two old bundles: a lease (no load) counts as use.
-        assert!(cache.touch(&config, None).await);
-
-        let idle = std::time::Duration::from_secs(300);
-        assert_eq!(
-            cache.evict_idle(idle).await,
-            1,
-            "only the unleased bundle goes"
-        );
-        assert_eq!(cache.loaded_count().await, 1);
-        let kept = cache.get(&config, None).await;
-        assert_eq!(
-            kept.embedding.map(|e| e.model_id()),
-            Some("test/marker".to_string()),
-            "the leased bundle must still be served from cache"
-        );
-        assert_eq!(cache.evict_idle(idle).await, 0, "get renewed it again");
-        // `kept` was consumed above; hold a fresh handle, as an in-flight
-        // request does: the bundle survives even a zero window.
-        let held = cache.get(&config, None).await;
-        assert_eq!(cache.evict_idle(std::time::Duration::ZERO).await, 0);
-        drop(held);
-        assert_eq!(cache.evict_idle(std::time::Duration::ZERO).await, 1);
-        assert_eq!(cache.loaded_count().await, 0);
-    }
 }
 
 #[cfg(test)]

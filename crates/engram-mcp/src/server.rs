@@ -2016,7 +2016,7 @@ impl EngramDbServer {
                         engramdb::daemon::DaemonPolicy::ConnectOrSpawn,
                     )
                     .await;
-                // Renew this session's lease on its project's model bundle,
+                // Renew this session's lease on its project's models,
                 // so the daemon keeps it loaded while the session is open and
                 // unloads it once the session (and every other one using the
                 // same models) has ended. Re-read the project config each

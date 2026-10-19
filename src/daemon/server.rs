@@ -24,28 +24,29 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 /// and its 60s request timeout; see the guard in `handle_conn`.
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// How long the daemon runs without activity, and how long a model bundle
-/// stays loaded without use.
+/// How long the daemon runs without activity, and how long a model stays
+/// loaded without use.
 #[derive(Debug, Clone, Copy)]
 pub struct DaemonOptions {
     /// Exit after this long with no request and no open connection.
     pub idle_timeout: Duration,
-    /// Unload a model bundle after this long with no request for it and no
-    /// lease renewal (a heartbeat `Ping` carrying its model selection).
+    /// Unload a model after this long with no request for it and no lease
+    /// renewal (a heartbeat `Ping` carrying a model selection that uses it),
+    /// and shrink a shared pool once its largest request is this old.
     ///
     /// This is the "close" of a project: the daemon knows model selections,
-    /// not projects, so when the last session using a selection ends, its
-    /// heartbeats stop and the bundle is unloaded one window later. Before
+    /// not projects, so when the last session using a model ends, its
+    /// heartbeats stop and the model is unloaded one window later. Before
     /// this, every selection ever served stayed loaded until the daemon
     /// exited — and the heartbeats of any other session kept it from exiting.
     pub bundle_idle_timeout: Duration,
 }
 
 impl DaemonOptions {
-    /// The production shape: a bundle is unloaded after the same idle window
+    /// The production shape: a model is unloaded after the same idle window
     /// that would stop the whole daemon. The heartbeat renews leases every
     /// `heartbeat_interval(idle)`, at least twice per window, so a live but
-    /// quiet session never loses its bundle.
+    /// quiet session never loses its models.
     pub fn from_idle_timeout(idle_timeout: Duration) -> Self {
         Self {
             idle_timeout,
@@ -58,7 +59,7 @@ impl DaemonOptions {
 ///
 /// glibc keeps freed memory in its arenas and returns only the top of the
 /// main heap on its own. The daemon frees large blocks in bursts (a whole
-/// model bundle on eviction), and serves requests from many blocking threads,
+/// model on eviction), and serves requests from many blocking threads,
 /// each with its own arena — so without a trim the RSS after an unload stays
 /// near its peak. Other allocators (macOS, musl) return memory themselves.
 fn release_free_memory() {
@@ -74,9 +75,9 @@ fn release_free_memory() {
 ///
 /// glibc serves a large allocation with `mmap` (returned to the OS on free)
 /// only above a threshold, and raises that threshold — up to 32 MiB — each
-/// time such a block is freed. Unloading a model bundle frees exactly those
+/// time such a block is freed. Unloading a model frees exactly those
 /// blocks (weights, ONNX Runtime arenas), so after the first unload the
-/// next bundle's large blocks came from the heap instead, where they
+/// next model's large blocks came from the heap instead, where they
 /// fragmented and `malloc_trim` could not return them: the open/close bench
 /// measured the heap after a close climbing from 19 to ~52 MiB over eight
 /// cycles (to ~105 MiB under heavier load). Setting the threshold
@@ -145,6 +146,16 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
 /// [`run_daemon`] with explicit [`DaemonOptions`]. Tests and the
 /// memory-footprint bench use it to shorten the bundle window.
 pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow::Result<()> {
+    run_daemon_with_cache(socket, options, ProviderCache::new()).await
+}
+
+/// [`run_daemon_with`] serving models from `cache`. Tests pass a cache with a
+/// fake loader, so the daemon's model handling is testable without a model.
+pub(crate) async fn run_daemon_with_cache(
+    socket: PathBuf,
+    options: DaemonOptions,
+    cache: ProviderCache,
+) -> anyhow::Result<()> {
     let DaemonOptions {
         idle_timeout,
         bundle_idle_timeout,
@@ -186,7 +197,7 @@ pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow:
         .unwrap_or_default();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let ctx = Arc::new(Ctx {
-        cache: ProviderCache::new(),
+        cache,
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
         pid: std::process::id(),
@@ -212,8 +223,9 @@ pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow:
         });
     }
 
-    // Bundle sweeper: unload model bundles nobody used or leased for
-    // `bundle_idle_timeout`, then give the freed memory back to the OS.
+    // Model sweeper: unload models nobody used or leased for
+    // `bundle_idle_timeout`, shrink shared pools whose largest request went
+    // away, then give the freed memory back to the OS.
     {
         let ctx = Arc::clone(&ctx);
         let mut shutdown = shutdown_rx.clone();
@@ -229,11 +241,15 @@ pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow:
                 let evicted = ctx.cache.evict_idle(bundle_idle_timeout).await;
                 if evicted > 0 {
                     tracing::info!(
-                        "engramdb daemon unloaded {evicted} model bundle(s) unused for {bundle_idle_timeout:?}"
+                        "engramdb daemon unloaded {evicted} model(s) unused for {bundle_idle_timeout:?}"
                     );
-                    // The ONNX sessions are freed when the last `Arc` drops;
-                    // an in-flight request may still hold one, so this trim
-                    // can miss that bundle. The next eviction trims again.
+                }
+                // Unloads, and pools replaced by a grow or shrink (those run
+                // in the background, so they show up on a later tick). The
+                // ONNX sessions are freed when the last `Arc` drops; an
+                // in-flight request may still hold one, so a trim can miss
+                // it — the next release trims again.
+                if ctx.cache.take_released() > 0 {
                     tokio::task::spawn_blocking(release_free_memory);
                 }
             }
@@ -470,8 +486,9 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 *t = Some(Instant::now());
             }
             // A heartbeat carries its session's model selection: renew the
-            // lease on that bundle. Never loads one — a session that has not
-            // used a model yet must not make the daemon load it.
+            // lease on each model it uses, at its pool size. Never loads one
+            // — a session that has not used a model yet must not make the
+            // daemon load it.
             if let Some(models) = &req.models {
                 ctx.cache
                     .touch(&models.to_config(), Some(models.backend))
@@ -527,10 +544,10 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
     let config = models.to_config();
     let providers = ctx.cache.get(&config, Some(models.backend)).await;
     let resp = serve_model_op(req.op, providers, ctx).await;
-    // `get` stamped the bundle when this request started. Stamp it again now
-    // that it is done: a request longer than the bundle window would
-    // otherwise leave a bundle that looks idle the moment it is released,
-    // and the sweeper would unload it in the gap before the next request.
+    // `get` stamped the models when this request started. Stamp them again
+    // now that it is done: a request longer than the window would otherwise
+    // leave a model that looks idle the moment it is released, and the
+    // sweeper would unload it in the gap before the next request.
     ctx.cache.touch(&config, Some(models.backend)).await;
     resp
 }

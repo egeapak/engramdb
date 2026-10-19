@@ -1797,66 +1797,89 @@ fn v4_daemon_can_parse_a_v5_ping() {
     assert!(back.models.is_none());
 }
 
-/// The daemon unloads a bundle nobody used or leased for its window, keeps
-/// one whose session renews its lease with heartbeat `Ping`s, and never
-/// loads a bundle for a `Ping`.
-///
-/// The model is forced unavailable (empty cache + offline, as in
-/// `failed_request_does_not_increment_counter`): an incomplete bundle is
-/// still cached, which is all `bundles_loaded` counts, so this needs no
-/// staged model.
-#[tokio::test]
-async fn idle_bundles_are_unloaded_and_leases_keep_them() {
-    use super::server::{run_daemon_with, DaemonOptions};
-
-    let empty_cache = super::private_tempdir();
-    std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
-    std::env::set_var("ENGRAMDB_OFFLINE", "1");
-
-    let tmp = super::private_tempdir();
-    let socket = tmp.path().join("d.sock");
-    let window = Duration::from_secs(1);
-    tokio::spawn(run_daemon_with(
-        socket.clone(),
+/// A daemon serving models from a fake loader, with a short model window.
+fn spawn_fake_daemon(
+    socket: &std::path::Path,
+    window: Duration,
+) -> std::sync::Arc<crate::ops::provider_cache::test_support::FakeLoader> {
+    use super::server::{run_daemon_with_cache, DaemonOptions};
+    let loader =
+        std::sync::Arc::new(crate::ops::provider_cache::test_support::FakeLoader::default());
+    let cache = crate::ops::ProviderCache::with_loader(loader.clone(), 8);
+    tokio::spawn(run_daemon_with_cache(
+        socket.to_path_buf(),
         DaemonOptions {
             idle_timeout: Duration::from_secs(3600),
             bundle_idle_timeout: window,
         },
+        cache,
     ));
-    let models = default_models(Some(EmbeddingBackend::Onnx));
-    async fn bundles(socket: &std::path::Path) -> usize {
-        let req = DaemonRequest {
-            models: None,
-            op: DaemonOp::Status,
-        };
-        match wait_request(socket, req).await {
-            DaemonResponse::Status(s) => s.bundles_loaded,
-            other => panic!("expected Status, got {other:?}"),
-        }
-    }
-    async fn lease(socket: &std::path::Path, models: &ModelSelection) {
-        let req = DaemonRequest {
-            models: Some(models.clone()),
-            op: DaemonOp::Ping,
-        };
-        let resp = wait_request(socket, req).await;
-        assert!(matches!(resp, DaemonResponse::Pong { .. }), "{resp:?}");
-    }
+    loader
+}
 
-    // A lease on a selection that is not loaded must not load it.
+async fn daemon_status(socket: &std::path::Path) -> super::protocol::DaemonStatus {
+    let req = DaemonRequest {
+        models: None,
+        op: DaemonOp::Status,
+    };
+    match wait_request(socket, req).await {
+        DaemonResponse::Status(s) => s,
+        other => panic!("expected Status, got {other:?}"),
+    }
+}
+
+async fn lease(socket: &std::path::Path, models: &ModelSelection) {
+    let req = DaemonRequest {
+        models: Some(models.clone()),
+        op: DaemonOp::Ping,
+    };
+    let resp = wait_request(socket, req).await;
+    assert!(matches!(resp, DaemonResponse::Pong { .. }), "{resp:?}");
+}
+
+async fn meta(socket: &std::path::Path, models: &ModelSelection) -> DaemonResponse {
+    let req = DaemonRequest {
+        models: Some(models.clone()),
+        op: DaemonOp::Meta,
+    };
+    wait_request(socket, req).await
+}
+
+/// A selection with only the embedding model, at `pool` sessions.
+fn embed_selection(pool: usize) -> ModelSelection {
+    let mut c = EngramConfig::default();
+    c.nli.enabled = false;
+    c.rerank.enabled = false;
+    c.title.strategy = crate::title::TitleStrategy::Keyword;
+    c.embeddings.pool_size = Some(pool);
+    ModelSelection::from_config(&c, Some(EmbeddingBackend::Onnx))
+}
+
+/// The daemon unloads a model nobody used or leased for its window, keeps
+/// one whose session renews its lease with heartbeat `Ping`s, and never
+/// loads a model for a `Ping`.
+#[tokio::test]
+async fn idle_models_are_unloaded_and_leases_keep_them() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let window = Duration::from_secs(1);
+    let loader = spawn_fake_daemon(&socket, window);
+    let models = embed_selection(2);
+
+    // A lease on a model that is not loaded must not load it.
     lease(&socket, &models).await;
-    assert_eq!(bundles(&socket).await, 0, "a Ping must never load a bundle");
+    assert_eq!(daemon_status(&socket).await.bundles_loaded, 0);
+    assert!(
+        loader.loads_of(|_| true).is_empty(),
+        "a Ping must never load"
+    );
 
-    // Open the "project": a model request resolves (and caches) its bundle.
-    wait_request(
-        &socket,
-        DaemonRequest {
-            models: Some(models.clone()),
-            op: DaemonOp::Meta,
-        },
-    )
-    .await;
-    assert_eq!(bundles(&socket).await, 1);
+    // Open the "project": a model request loads its model.
+    assert!(matches!(
+        meta(&socket, &models).await,
+        DaemonResponse::Meta { .. }
+    ));
+    assert_eq!(daemon_status(&socket).await.bundles_loaded, 1);
 
     // A live session renews its lease well inside the window: kept for
     // several windows.
@@ -1865,20 +1888,61 @@ async fn idle_bundles_are_unloaded_and_leases_keep_them() {
         lease(&socket, &models).await;
         tokio::time::sleep(window / 4).await;
     }
-    assert_eq!(
-        bundles(&socket).await,
-        1,
-        "a leased bundle must stay loaded"
-    );
+    assert_eq!(daemon_status(&socket).await.bundles_loaded, 1, "leased");
 
-    // The session ends: no more leases. The bundle goes within a window plus
+    // The session ends: no more leases. The model goes within a window plus
     // one sweep tick.
     let deadline = std::time::Instant::now() + window * 4;
-    while bundles(&socket).await != 0 {
+    while daemon_status(&socket).await.bundles_loaded != 0 {
         assert!(
             std::time::Instant::now() < deadline,
-            "an unleased bundle must be unloaded after its idle window"
+            "an unleased model must be unloaded after its idle window"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Projects asking for embedding pools of 1 and 3 share one pool of 4 (the
+/// largest request rounded up to a power of two); once only the size-1
+/// project keeps its lease, the pool shrinks back to 1.
+#[tokio::test]
+async fn projects_share_one_pool_sized_to_the_largest_request() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let window = Duration::from_secs(1);
+    let loader = spawn_fake_daemon(&socket, window);
+    let small = embed_selection(1);
+    let large = embed_selection(3);
+
+    meta(&socket, &small).await;
+    meta(&socket, &large).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let s = daemon_status(&socket).await;
+        if s.model_ids == vec!["embed=test/fake-x4 x4".to_string()] {
+            assert_eq!(s.bundles_loaded, 1, "one shared embedding model");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{:?}", s.model_ids);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Only the small project stays open.
+    let deadline = std::time::Instant::now() + window * 6;
+    loop {
+        lease(&socket, &small).await;
+        let s = daemon_status(&socket).await;
+        if s.model_ids == vec!["embed=test/fake-x1 x1".to_string()] {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{:?}", s.model_ids);
+        tokio::time::sleep(window / 4).await;
+    }
+    let embed_loads: Vec<usize> =
+        loader.loads_of(|k| matches!(k, crate::ops::provider_cache::ModelKey::Embedding { .. }));
+    assert_eq!(
+        embed_loads,
+        vec![1, 4, 1],
+        "load, grow, shrink — nothing else"
+    );
 }

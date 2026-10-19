@@ -128,7 +128,7 @@ Every store records a fingerprint of the embedding model it was built with: `mod
 
 ## Provider caching
 
-`ProviderCache` in `src/ops/mod.rs` keys loaded model bundles by `provider_cache_key = backend|provider|dimensions|nli.enabled|nli.model|rerank.enabled|rerank.model`. Daemon settings are not in the project config at all (they live in the global config file), so they cannot affect the key. The daemon builds its key from the model sections each request carries (`daemon::ModelSelection`). **If you add a model-affecting config field, extend this key** — the `cache_key_is_deterministic_and_signature_sensitive` test will fail if you forget.
+`ProviderCache` (`src/ops/provider_cache.rs`) caches each **model** separately, keyed by what identifies that model alone (`ModelKey`): the embedding model by resolved backend, provider and dimensions; NLI and the reranker by model name; T5 by itself. A project's providers are assembled from the shared entries, so projects that differ in one model setting (say `[nli].enabled`) still share every other model. Pooled models (embeddings, T5) are shared at one size: the largest `pool_size` any live project asks for, rounded up to a power of two and capped at the core count (`pool_class`). A pool grows in the background and shrinks when its largest request expires; a resize rebuilds the pool, because every session is built with `cores / pool_size` threads. Daemon settings are not in the project config at all (they live in the global config file), so they cannot affect any key. The daemon builds keys from the model sections each request carries (`daemon::ModelSelection`). **If you add a model-affecting config field**, decide in `model_demands` (which destructures every model section exhaustively, so the build fails until you do) whether it is part of a model's identity, a pool-size demand, or neither.
 
 ## Shared embedding daemon
 
@@ -174,7 +174,7 @@ Downstream effects, each in its own layer:
 | Invariant | Where it lives | Why |
 |-----------|---------------|-----|
 | One map for `provider_str → (onnx_spec, ollama_spec)` | `src/ops/mod.rs::provider_specs` | Fingerprint and resolver can't disagree about which model a config selects. |
-| `provider_cache_key` includes every model-affecting config field; daemon settings are global and never part of it | `src/ops/mod.rs::provider_cache_key` | Avoid stale model bundles after a config change. |
+| `model_demands` maps every model-affecting config field to a model key or a pool-size demand; daemon settings are global and never part of it | `src/ops/provider_cache.rs::model_demands` | Avoid serving a stale model after a config change. |
 | Daemon failures never break operations | `src/daemon/remote.rs` falls back to local providers | Daemon is a perf optimization, not a dependency. |
 | All model downloads cache to `dirs::cache_dir() / "engramdb" / "models"` | `crates/engram-storage/src/paths.rs::model_cache_dir` | Restricted-egress environments pre-stage models into one known location. |
 | `provider_specs` keys are stable on disk via `model_id()` | `EmbeddingProvider::model_id` | Manifests written today must keep meaning the same model tomorrow. |

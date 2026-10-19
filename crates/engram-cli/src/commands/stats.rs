@@ -173,7 +173,7 @@ async fn run_daemon_stats(formatter: &OutputFormatter) -> Result<()> {
         outln!(formatter, "  protocol:      v{}", s.version);
         outln!(formatter, "  uptime:        {}s", s.uptime_secs);
         outln!(formatter, "  idle:          {}s", s.idle_secs);
-        outln!(formatter, "  model bundles: {}", s.bundles_loaded);
+        outln!(formatter, "  models loaded: {}", s.bundles_loaded);
         outln!(formatter, "  requests (cumulative across restarts):");
         outln!(formatter, "    embed:       {}", s.requests.embed);
         outln!(formatter, "    classify:    {}", s.requests.classify);

@@ -79,10 +79,11 @@ impl Serialize for DaemonRequest {
 /// project and checked against that project's manifest fingerprint — but the
 /// daemon is shared, so it must not decide it by reading a project directory
 /// named over the socket. The client has already loaded its project config;
-/// it sends these sections, and the daemon builds its provider-cache key
-/// (`ops::provider_cache_key`) from them. They are exactly the sections that
-/// key reads; fields the key ignores travel along and stay ignored, so two
-/// projects that differ only there still share one bundle.
+/// it sends these sections, and the daemon builds its per-model cache keys
+/// and pool-size demands (`ops::provider_cache::model_demands`) from them.
+/// They are exactly the sections those keys read; fields the keys ignore
+/// travel along and stay ignored, so two projects that differ only there
+/// still share every model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSelection {
     /// The embedding backend the client resolved (config + its own
@@ -246,7 +247,10 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     /// Seconds since the daemon last served a request.
     pub idle_secs: u64,
-    /// Distinct model bundles (config signatures) currently resident.
+    /// Models currently loaded (each embedding, NLI, reranker or T5 model
+    /// counts once, however many projects share it). The name predates the
+    /// per-model cache, when this counted whole per-config bundles; it stays
+    /// so older clients still parse `Status`.
     pub bundles_loaded: usize,
     /// Model ids currently resident, e.g. `["embed=onnx/all-MiniLM-L12-v2-u8"]`.
     /// Answers "which models is this daemon actually serving?".
