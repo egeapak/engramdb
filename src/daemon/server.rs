@@ -12,7 +12,7 @@ use super::protocol::{
     read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, NliWire,
     PROTOCOL_VERSION,
 };
-use crate::ops::ProviderCache;
+use crate::ops::{EngineProviders, ProviderCache};
 
 /// Snapshot is persisted to the global store at least this often while the
 /// daemon runs (plus on idle-exit and on graceful shutdown), so `stats
@@ -502,12 +502,21 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
     // `models.backend` is the backend the client already resolved; trust it
     // over this daemon process's own environment so the provider-cache key
     // (and thus the loaded model) matches what the client expects.
-    let providers = ctx
-        .cache
-        .get(&models.to_config(), Some(models.backend))
-        .await;
+    let config = models.to_config();
+    let providers = ctx.cache.get(&config, Some(models.backend)).await;
+    let resp = serve_model_op(req.op, providers, ctx).await;
+    // `get` stamped the bundle when this request started. Stamp it again now
+    // that it is done: a request longer than the bundle window would
+    // otherwise leave a bundle that looks idle the moment it is released,
+    // and the sweeper would unload it in the gap before the next request.
+    ctx.cache.touch(&config, Some(models.backend)).await;
+    resp
+}
 
-    match req.op {
+/// Serve one model op (`Meta`, `Embed`, `Classify`, `Rerank`, `Title`) from
+/// a resolved bundle.
+async fn serve_model_op(op: DaemonOp, providers: EngineProviders, ctx: &Ctx) -> DaemonResponse {
+    match op {
         DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
             unreachable!("handled above")
         }

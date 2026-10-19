@@ -930,6 +930,18 @@ struct CachedProviders {
 /// True when every provider requested by `config` resolved: embeddings are
 /// always attempted; NLI/reranker only count when enabled; a title generator
 /// only counts under the T5 strategy.
+/// True when a caller other than the cache still holds a provider of this
+/// bundle — an in-flight request, or an engine assembled from it.
+fn providers_in_use(providers: &EngineProviders) -> bool {
+    fn shared<T: ?Sized>(p: &Option<Arc<T>>) -> bool {
+        p.as_ref().is_some_and(|p| Arc::strong_count(p) > 1)
+    }
+    shared(&providers.embedding)
+        || shared(&providers.nli)
+        || shared(&providers.reranker)
+        || shared(&providers.title)
+}
+
 fn providers_complete(config: &EngramConfig, providers: &EngineProviders) -> bool {
     providers.embedding.is_some()
         && (!config.nli.enabled || providers.nli.is_some())
@@ -1070,6 +1082,11 @@ impl ProviderCache {
 
     /// Drop every bundle that nobody used or leased for `max_idle`.
     ///
+    /// A bundle some caller still holds is kept, however old its last use:
+    /// a request that runs longer than `max_idle` must not have its bundle
+    /// dropped under it — the request would finish, but the next one would
+    /// reload the models while the old copy was still resident.
+    ///
     /// This is how a project is "closed": when the last session using a
     /// model selection ends, its leases stop, and the bundle — every ONNX
     /// session in it, with each session's memory arena — is released here.
@@ -1080,7 +1097,9 @@ impl ProviderCache {
     pub async fn evict_idle(&self, max_idle: std::time::Duration) -> usize {
         let mut guard = self.inner.lock().await;
         let before = guard.len();
-        guard.retain(|_, entry| entry.last_used.elapsed() < max_idle);
+        guard.retain(|_, entry| {
+            entry.last_used.elapsed() < max_idle || providers_in_use(&entry.providers)
+        });
         before - guard.len()
     }
 
@@ -1343,6 +1362,11 @@ mod provider_cache_tests {
             "the leased bundle must still be served from cache"
         );
         assert_eq!(cache.evict_idle(idle).await, 0, "get renewed it again");
+        // `kept` was consumed above; hold a fresh handle, as an in-flight
+        // request does: the bundle survives even a zero window.
+        let held = cache.get(&config, None).await;
+        assert_eq!(cache.evict_idle(std::time::Duration::ZERO).await, 0);
+        drop(held);
         assert_eq!(cache.evict_idle(std::time::Duration::ZERO).await, 1);
         assert_eq!(cache.loaded_count().await, 0);
     }
