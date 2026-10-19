@@ -25,6 +25,18 @@ Model-needing CLI commands (`query`, `add` / `create`, `update`, `reindex --embe
 
 Precedence (highest first): `--in-process` flag → `ENGRAMDB_IN_PROCESS` env → the global `[daemon].use_for_cli` → `--spawn-daemon` → default connect-only.
 
+## Hooks
+
+When a daemon is running, the Claude Code hooks (`engramdb hook <event>`) run **inside the daemon**. The hook process reads the event, sends it over the socket, and prints the reply. The daemon keeps each project's store open between calls and, for `user-prompt-submit`, uses its already-loaded embedding model. Measured on a release build, `pre-tool-use` is about 30% faster this way (19.2 → 13.6 ms on a compacted store, 27.9 → 18.4 ms at about 36 uncompacted fragments).
+
+- **A hook never starts a daemon.** With no daemon running, the hook runs in its own process, exactly as before.
+- **Fallback is safe by construction.** The hook runs in-process only when the daemon certainly did not run it: nothing is listening, the daemon is older (it is checked with a `Ping` first, on the same connection), it has no hook runner, or the request could not be sent. If the request was sent and the reply is lost, the hook prints nothing and is not repeated, because running it twice could repeat its side effects. That one call is then missing from hook stats.
+- **The daemon reads your project for hooks.** It reads the project's store, config and state files, exactly as the hook's own process would. This crosses no permission boundary: the socket folder is private (0700) and the daemon only accepts connections from its own user.
+- **Environment.** The daemon runs with the environment of the process that started it (normally the MCP server), not the hook's. Hooks read their inputs from the event JSON, so this does not change results in normal use.
+- **Turning it off.** `--in-process`, `ENGRAMDB_IN_PROCESS=1`, `use_for_cli = false` or `enabled = false` in the global `[daemon]` all keep hooks in their own process.
+
+The daemon also records every hook it serves for `engramdb stats` (see [cli-reference](./cli-reference.md#stats--store-statistics)), and in the background keeps the project's tables compact.
+
 ## Commands
 
 ```bash

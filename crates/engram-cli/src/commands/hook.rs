@@ -2206,7 +2206,9 @@ pub enum Delegated {
 /// daemon recorded it — a declared loss.
 pub async fn delegate_to_daemon(call: &HookCall, dir: &Path, input: &str) -> Delegated {
     let global = engramdb::storage::config::load_global_config_or_default().await;
-    if !global.daemon.enabled {
+    // A hook is a CLI invocation: `use_for_cli = false` ("the CLI never
+    // contacts a daemon") keeps it in-process, like every other command.
+    if !global.daemon.enabled || !global.daemon.use_for_cli {
         return Delegated::RunHere;
     }
     let socket = engramdb::daemon::resolve_socket(None, &global.daemon);
