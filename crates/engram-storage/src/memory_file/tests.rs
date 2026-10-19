@@ -824,8 +824,9 @@ fn test_parse_memory_file_empty_input() {
 fn test_parse_memory_file_malformed_yaml_does_not_panic() {
     // Regression (found by `cargo fuzz run memory_file`): this input panicked
     // inside the old serde_yml/libyml scanner ("String join would overflow
-    // memory bounds"), which aborts the process under panic=abort. After
-    // moving to serde_yaml_ng it must surface as an error, never a panic.
+    // memory bounds"), which aborts the process under panic=abort. Whatever
+    // the YAML backend (serde_yaml_ng, now serde-saphyr), it must surface as
+    // an error, never a panic.
     let content = std::str::from_utf8(b"---d\t\t\t\t\t\t\t\t\t\t\t\t\t\t  @---").unwrap();
     assert!(parse_memory_file(content).is_err());
 }
@@ -2095,4 +2096,125 @@ fn premise_with_comment_terminator_roundtrips() {
     // have silently reset these to defaults).
     assert_eq!(parsed.visibility, memory.visibility);
     assert_eq!(parsed.decay.is_some(), memory.decay.is_some());
+}
+
+/// A V2 file as `serde_yaml_ng` wrote it before the move to serde-saphyr:
+/// single-quoted scalars, a `|-` literal block, and unquoted timestamps.
+/// Stores written by older binaries are full of these, so they must keep
+/// parsing to the same values.
+const LEGACY_SERDE_YAML_NG_V2: &str = r#"---
+version: 2
+id: legacy-quoting
+type: decision
+status: Active
+title: |-
+  first line
+  second line
+---
+
+# first line second line
+
+**Summary:** Legacy quoting
+
+## Content
+
+Body.
+
+## Scope
+
+- **Criticality:** 0.5
+- **Confidence:** 0.8
+
+## Provenance
+
+- **Source:** human
+- **Created:** 2026-01-15T10:00:00+00:00
+- **Updated:** 2026-01-15T10:00:00+00:00
+
+<!-- engramdb
+visibility: Shared
+accessed_at: 2026-01-15T10:00:00Z
+superseded_by: 'true'
+supersedes:
+- 'a: b'
+- ''''
+audience:
+- '0123'
+-->
+"#;
+
+#[test]
+fn test_v2_parses_legacy_serde_yaml_ng_quoting() {
+    let memory = parse_memory_file(LEGACY_SERDE_YAML_NG_V2).unwrap();
+    assert_eq!(memory.title.as_deref(), Some("first line\nsecond line"));
+    assert_eq!(memory.summary, "Legacy quoting");
+    assert_eq!(memory.superseded_by.as_deref(), Some("true"));
+    assert_eq!(memory.supersedes, vec!["a: b".to_string(), "'".to_string()]);
+    assert_eq!(memory.audience, Some(vec!["0123".to_string()]));
+    assert_eq!(
+        memory.accessed_at.to_rfc3339(),
+        "2026-01-15T10:00:00+00:00",
+        "an unquoted timestamp must still parse"
+    );
+}
+
+/// Strings that YAML would otherwise read as another type, or that carry
+/// YAML syntax, must survive write → parse unchanged, and the second write
+/// must be byte-identical to the first.
+#[test]
+fn test_v2_yaml_scalar_edge_cases_round_trip() {
+    let edge_cases = [
+        "",
+        "true",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "null",
+        "~",
+        "0",
+        "-1",
+        "1e3",
+        "0x1f",
+        ".nan",
+        "2026-01-15",
+        "12:30",
+        "a: b",
+        "a #b",
+        "- x",
+        "[x]",
+        "{x}",
+        "*a",
+        "&a",
+        "!t",
+        "|",
+        ">",
+        "'q'",
+        "\"dq\"",
+        "back\\slash",
+        " lead",
+        "trail ",
+        "multi\nline",
+        "-->",
+        "<!-- engramdb",
+    ];
+    for value in edge_cases {
+        let mut memory = sample_memory();
+        memory.title = Some(value.to_string());
+        memory.superseded_by = Some(value.to_string());
+        let written = write_memory_file(&memory).unwrap();
+        let parsed = parse_memory_file(&written)
+            .unwrap_or_else(|e| panic!("{value:?} did not parse back: {e}\n{written}"));
+        assert_eq!(parsed.title.as_deref(), Some(value), "title {value:?}");
+        assert_eq!(
+            parsed.superseded_by.as_deref(),
+            Some(value),
+            "superseded_by {value:?}"
+        );
+        assert_eq!(
+            write_memory_file(&parsed).unwrap(),
+            written,
+            "{value:?}: the write is not a fixed point"
+        );
+    }
 }

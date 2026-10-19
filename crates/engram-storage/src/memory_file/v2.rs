@@ -52,7 +52,7 @@ use super::helpers::{
     parse_list_field, parse_provenance_section, parse_score_field, sanitize_list_item,
     sanitize_single_line, split_frontmatter, HIDDEN_META_END, HIDDEN_META_START,
 };
-use super::{MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
+use super::{yaml, MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
 use crate::error::Result;
 use engram_types::{Challenge, Decay, Epistemic, Memory, MemoryType, Status, Validity, Visibility};
 
@@ -155,7 +155,7 @@ impl MemoryWriter for V2Writer {
 // ---------------------------------------------------------------------------
 
 fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
-    let fm: MinimalFrontmatter = serde_yaml_ng::from_str(frontmatter)?;
+    let fm: MinimalFrontmatter = yaml::from_str(frontmatter)?;
     super::validate_id_shape(&fm.id)?;
 
     let sections = parse_body_sections(body);
@@ -249,7 +249,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
             .then_some(memory.epistemic),
         title: memory.title.clone(),
     };
-    let yaml = serde_yaml_ng::to_string(&fm)?;
+    let yaml = yaml::to_string(&fm)?;
     out.push_str(&yaml);
     out.push_str("---\n\n");
 
@@ -373,7 +373,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         source_sessions: memory.source_sessions.clone(),
         challenges: memory.challenges.clone(),
     };
-    let hidden_yaml = serde_yaml_ng::to_string(&hidden)?;
+    let hidden_yaml = yaml::to_string(&hidden)?;
     out.push_str(&format!("\n<!-- engramdb\n{hidden_yaml}-->\n"));
 
     Ok(out)
@@ -444,7 +444,7 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
             .position(|line| line.trim_end() == HIDDEN_META_END)
         {
             let yaml_content = lines[start + 1..start + 1 + len].join("\n");
-            match serde_yaml_ng::from_str(yaml_content.trim()) {
+            match yaml::from_str(yaml_content.trim()) {
                 Ok(meta) => return meta,
                 Err(e) => {
                     // Falling through to defaults silently ERASES the block's
@@ -466,7 +466,7 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
         let after_marker = &body[start_idx + HIDDEN_META_START.len()..];
         if let Some(end_idx) = after_marker.find(HIDDEN_META_END) {
             let yaml_content = after_marker[..end_idx].trim();
-            if let Ok(meta) = serde_yaml_ng::from_str(yaml_content) {
+            if let Ok(meta) = yaml::from_str(yaml_content) {
                 return meta;
             }
         }
