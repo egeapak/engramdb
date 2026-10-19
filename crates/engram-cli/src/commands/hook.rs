@@ -1848,8 +1848,11 @@ pub fn hook_call(command: &crate::app::HookCommand) -> Option<HookCall> {
     use crate::app::HookCommand;
     Some(match command {
         HookCommand::PreToolUse => HookCall::PreToolUse,
+        // Sanitized here, before the call can cross the daemon socket: JSON
+        // has no NaN or infinity, so serde writes `null` and the daemon could
+        // not parse the frame.
         HookCommand::SessionStart { min_criticality } => HookCall::SessionStart {
-            min_criticality: *min_criticality,
+            min_criticality: sanitize_min_criticality(*min_criticality),
         },
         HookCommand::UserPromptSubmit => HookCall::UserPromptSubmit,
         HookCommand::PostToolUse => HookCall::PostToolUse,
@@ -1857,12 +1860,6 @@ pub fn hook_call(command: &crate::app::HookCommand) -> Option<HookCall> {
         HookCommand::PreCompact => HookCall::PreCompact,
         HookCommand::Unknown(_) => return None,
     })
-}
-
-/// The name a hook call is recorded under in hook stats — the clap
-/// subcommand name, so `stats` output matches the command Claude Code runs.
-pub fn stats_name(command: &crate::app::HookCommand) -> Option<&'static str> {
-    hook_call(command).map(|c| c.name())
 }
 
 /// Where a hook handler gets its store.
@@ -1923,21 +1920,28 @@ fn store_stamp(dir: &Path) -> StoreStamp {
 impl StoreCache {
     async fn get_or_open(&self, dir: &Path) -> engramdb::storage::Result<MemoryStore> {
         let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-        let mut inner = self.inner.lock().await;
-        if !engramdb::storage::paths::project_dir(&key).is_dir() {
-            inner.remove(&key);
-            return Err(engramdb::storage::StorageError::NotInitialized);
-        }
-        let now = std::time::Instant::now();
-        inner.retain(|_, c| now.duration_since(c.last_used) < STORE_CACHE_IDLE);
         let stamp = store_stamp(&key);
-        if let Some(cached) = inner.get_mut(&key) {
-            if cached.stamp == stamp {
-                cached.last_used = now;
-                return Ok(cached.store.clone());
+        {
+            let mut inner = self.inner.lock().await;
+            if !engramdb::storage::paths::project_dir(&key).is_dir() {
+                inner.remove(&key);
+                return Err(engramdb::storage::StorageError::NotInitialized);
+            }
+            let now = std::time::Instant::now();
+            inner.retain(|_, c| now.duration_since(c.last_used) < STORE_CACHE_IDLE);
+            if let Some(cached) = inner.get_mut(&key) {
+                if cached.stamp == stamp {
+                    cached.last_used = now;
+                    return Ok(cached.store.clone());
+                }
             }
         }
+        // Opened without the lock: an open can run a schema migration, and
+        // that must not stall every other project's hooks. Two hooks that
+        // miss at once both open; the second insert wins, which is harmless.
         let store = MemoryStore::open(dir).await?;
+        let now = std::time::Instant::now();
+        let mut inner = self.inner.lock().await;
         inner.insert(
             key,
             CachedStore {
@@ -2130,8 +2134,15 @@ impl DaemonHookExecutor {
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         let situation =
             if matches!(call, HookCall::UserPromptSubmit) && config.hooks.situation_classifier {
+                // The embedding model only, like the in-process path: `get`
+                // loads (and leases) every model a config enables, and T5,
+                // NLI or the reranker would hold up a cold prompt for seconds.
+                let mut embedding_only = config.clone();
+                embedding_only.nli.enabled = false;
+                embedding_only.rerank.enabled = false;
+                embedding_only.title.strategy = engramdb::title::TitleStrategy::Keyword;
                 let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
-                match models.get(&config, Some(backend)).await.embedding {
+                match models.get(&embedding_only, Some(backend)).await.embedding {
                     Some(p) => SituationModel::Provider(p),
                     None => SituationModel::KeywordOnly,
                 }
@@ -2267,10 +2278,10 @@ mod tests {
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
 
     /// Every hook is recorded under its clap subcommand name, and no name is
-    /// missed: a new `HookCommand` variant must get a `stats_name` arm (the
+    /// missed: a new `HookCommand` variant must get a `hook_call` arm (the
     /// match is exhaustive) whose name is the one Claude Code runs.
     #[test]
-    fn stats_name_matches_every_subcommand_name() {
+    fn hook_call_name_matches_every_subcommand_name() {
         use crate::app::HookCommand;
         let named: Vec<&str> = [
             HookCommand::PreToolUse,
@@ -2283,7 +2294,7 @@ mod tests {
             HookCommand::PreCompact,
         ]
         .iter()
-        .map(|c| stats_name(c).expect("known hook has a stats name"))
+        .map(|c| hook_call(c).expect("known hook has a call").name())
         .collect();
         let mut supported = crate::supported_hook_subcommands();
         supported.sort();
@@ -2291,7 +2302,7 @@ mod tests {
         named_sorted.sort();
         assert_eq!(named_sorted, supported);
         assert_eq!(
-            stats_name(&HookCommand::Unknown(vec!["x".into()])),
+            hook_call(&HookCommand::Unknown(vec!["x".into()])),
             None,
             "unknown hook names must never become stats keys"
         );
@@ -2313,6 +2324,29 @@ mod tests {
         assert_eq!(loaded.records[0].hook, "pre-tool-use");
         assert!((loaded.records[0].ms - 7.0).abs() < 1e-9);
         assert_eq!(loaded.records[0].session_id.as_deref(), Some("sess-7"));
+    }
+
+    /// A NaN or infinite threshold is sanitized before the call is built, so
+    /// it survives the JSON round-trip to the daemon (JSON has no NaN; serde
+    /// writes `null`, which the daemon cannot parse).
+    #[test]
+    fn hook_call_sanitizes_min_criticality_for_the_wire() {
+        use crate::app::HookCommand;
+        for (raw, want) in [(f64::NAN, 0.6), (f64::INFINITY, 1.0), (-f64::INFINITY, 0.0)] {
+            let call = hook_call(&HookCommand::SessionStart {
+                min_criticality: raw,
+            })
+            .unwrap();
+            let json = serde_json::to_string(&call).unwrap();
+            let back: HookCall = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                back,
+                HookCall::SessionStart {
+                    min_criticality: want
+                },
+                "{raw} -> {json}"
+            );
+        }
     }
 
     // Finding #21: the SessionStart criticality threshold must be sanitized.

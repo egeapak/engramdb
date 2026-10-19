@@ -550,18 +550,30 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 last_ping_secs_ago,
             });
         }
-        DaemonOp::Hook { call, dir, stdin } => {
+        DaemonOp::Hook {
+            call,
+            dir,
+            stdin,
+            env,
+        } => {
             let Some(hooks) = ctx.hooks.as_ref() else {
                 return DaemonResponse::Error {
                     message: "this daemon does not run hooks".to_string(),
                 };
             };
+            // Refused before running anything, so the client runs it
+            // in-process (an `Error` reply is `NotSent`).
+            if let Some(key) = super::hooks::env_mismatch(&env, &super::hooks::hook_env()) {
+                return DaemonResponse::Error {
+                    message: format!("the daemon's {key} differs from this session's"),
+                };
+            }
             let started = Instant::now();
             let run = hooks.run(&call, &dir, &stdin, &ctx.cache).await;
             let ms = started.elapsed().as_secs_f64() * 1000.0;
             if let Some(project) = &run.project {
                 if let Some((pid, batch)) = ctx.hook_telemetry.record(&call, project, ms, run.ok) {
-                    tokio::spawn(async move { super::hooks::write_batch(&pid, &batch).await });
+                    ctx.hook_telemetry.spawn_write(pid, batch);
                 }
                 // After the reply would otherwise be delayed: spawned, and
                 // throttled per project.

@@ -188,11 +188,15 @@ pub enum DaemonOp {
     /// Run a Claude Code hook against the daemon's warm store for the
     /// project. `dir` is the absolute directory the client was invoked in;
     /// `stdin` is the hook event JSON. Loads the embedding model only for
-    /// `user-prompt-submit`'s situation classifier.
+    /// `user-prompt-submit`'s situation classifier. `env` is the client's
+    /// value of each [`HOOK_ENV_KEYS`](super::hooks::HOOK_ENV_KEYS) variable
+    /// that is set; the daemon refuses the hook when its own differ.
     Hook {
         call: HookCall,
         dir: std::path::PathBuf,
         stdin: String,
+        #[serde(default)]
+        env: std::collections::BTreeMap<String, String>,
     },
     /// Ask the daemon to exit. It acks, finishes flushing the response, then
     /// terminates (a fresh one is auto-spawned by the next MCP run).

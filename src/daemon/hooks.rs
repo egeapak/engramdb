@@ -27,7 +27,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,12 +44,53 @@ pub const HOOK_FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 /// A project's buffer is written as soon as it holds this many events.
 pub const HOOK_FLUSH_BATCH: usize = 1_024;
 
-/// Retention prune and table compaction run on every this-many-th flush, for
-/// the projects that flush wrote.
-const PRUNE_EVERY_FLUSHES: u64 = 10;
+/// Retention prune and table compaction run for a project at most this
+/// often, on a flush that writes that project's events.
+const HOOK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 
 /// Background maintenance runs at most this often per project.
 pub const HOOK_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Environment variables that change where a hook reads and writes, or
+/// which model it may load. A hook runs with the daemon's values, so the
+/// daemon runs a hook only when the client's values are the same; otherwise
+/// the client runs it in-process. Without this, a session started with its
+/// own `ENGRAMDB_DATA_DIR` would have its transcript copies, registry entries
+/// and hook events written to the data dir of the session that spawned the
+/// daemon.
+pub const HOOK_ENV_KEYS: &[&str] = &[
+    "ENGRAMDB_DATA_DIR",
+    "ENGRAMDB_CONFIG_DIR",
+    "ENGRAMDB_REGISTRY_PATH",
+    "ENGRAMDB_MODEL_CACHE_DIR",
+    "ENGRAMDB_OFFLINE",
+    "ENGRAMDB_EMBEDDING_BACKEND",
+    "CLAUDE_CONFIG_DIR",
+    "HOME",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+];
+
+/// This process's value of each [`HOOK_ENV_KEYS`] variable that is set.
+pub fn hook_env() -> std::collections::BTreeMap<String, String> {
+    HOOK_ENV_KEYS
+        .iter()
+        .filter_map(|k| Some((k.to_string(), std::env::var(k).ok()?)))
+        .collect()
+}
+
+/// The first [`HOOK_ENV_KEYS`] variable whose value differs between
+/// `client` and `daemon`, if any.
+pub(crate) fn env_mismatch(
+    client: &std::collections::BTreeMap<String, String>,
+    daemon: &std::collections::BTreeMap<String, String>,
+) -> Option<&'static str> {
+    HOOK_ENV_KEYS
+        .iter()
+        .copied()
+        .find(|k| client.get(*k) != daemon.get(*k))
+}
 
 /// The project a hook ran for, as resolved by the executor (worktree routing
 /// applied), plus the settings telemetry needs.
@@ -100,7 +140,11 @@ pub(crate) struct HookTelemetry {
     buf: Mutex<HashMap<String, Vec<HookEvent>>>,
     retention: Mutex<HashMap<String, Option<u64>>>,
     last_maintenance: Mutex<HashMap<PathBuf, Instant>>,
-    flushes: AtomicU64,
+    /// When each project's `hook_events` was last pruned and compacted.
+    last_prune: Mutex<HashMap<String, Instant>>,
+    /// Full-batch writes started by [`Self::spawn_write`], awaited by
+    /// [`Self::flush`] so a shutdown does not exit before they commit.
+    writes: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl HookTelemetry {
@@ -143,18 +187,30 @@ impl HookTelemetry {
         None
     }
 
-    /// Write every buffered event. Failures are logged and the events
-    /// dropped: telemetry must never wedge the daemon.
+    /// Write a full batch returned by [`Self::record`] in the background,
+    /// without delaying the hook's reply.
+    pub(crate) fn spawn_write(&self, project_id: String, batch: Vec<HookEvent>) {
+        let handle = tokio::spawn(async move { write_batch(&project_id, &batch).await });
+        let mut writes = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        writes.retain(|h| !h.is_finished());
+        writes.push(handle);
+    }
+
+    /// Write every buffered event, after waiting for the background batch
+    /// writes. Failures are logged and the events dropped: telemetry must
+    /// never wedge the daemon.
     pub(crate) async fn flush(&self) {
+        let writes = std::mem::take(&mut *self.writes.lock().unwrap_or_else(|e| e.into_inner()));
+        for handle in writes {
+            let _ = handle.await;
+        }
         let drained: Vec<(String, Vec<HookEvent>)> = {
             let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
             buf.drain().collect()
         };
-        let maintain =
-            (self.flushes.fetch_add(1, Ordering::Relaxed) + 1).is_multiple_of(PRUNE_EVERY_FLUSHES);
         for (pid, events) in drained {
             write_batch(&pid, &events).await;
-            if maintain {
+            if self.prune_due(&pid) {
                 let retention = self
                     .retention
                     .lock()
@@ -169,6 +225,20 @@ impl HookTelemetry {
                 if let Err(e) = optimize_hook_events(&pid).await {
                     tracing::debug!("hook_events optimize for {pid}: {e}");
                 }
+            }
+        }
+    }
+
+    /// Whether `project_id`'s retention prune is due; marks it as run. Due on
+    /// a project's first flush, then every [`HOOK_PRUNE_INTERVAL`].
+    fn prune_due(&self, project_id: &str) -> bool {
+        let mut last = self.last_prune.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        match last.get(project_id) {
+            Some(t) if now.duration_since(*t) < HOOK_PRUNE_INTERVAL => false,
+            _ => {
+                last.insert(project_id.to_string(), now);
+                true
             }
         }
     }
@@ -292,5 +362,31 @@ mod tests {
         assert!(t.maintenance_due(Path::new("/a")));
         assert!(!t.maintenance_due(Path::new("/a")));
         assert!(t.maintenance_due(Path::new("/b")));
+    }
+
+    #[test]
+    fn prune_is_due_on_a_projects_first_flush_then_throttled() {
+        let t = HookTelemetry::default();
+        assert!(t.prune_due("a"));
+        assert!(!t.prune_due("a"));
+        assert!(
+            t.prune_due("b"),
+            "one project's prune must not delay another's"
+        );
+    }
+
+    #[test]
+    fn env_mismatch_names_the_first_differing_key() {
+        let mut client = std::collections::BTreeMap::new();
+        let mut daemon = std::collections::BTreeMap::new();
+        assert_eq!(env_mismatch(&client, &daemon), None);
+        // Set on one side only counts as a difference.
+        client.insert("ENGRAMDB_DATA_DIR".to_string(), "/a".to_string());
+        assert_eq!(env_mismatch(&client, &daemon), Some("ENGRAMDB_DATA_DIR"));
+        daemon.insert("ENGRAMDB_DATA_DIR".to_string(), "/a".to_string());
+        assert_eq!(env_mismatch(&client, &daemon), None);
+        // Variables outside the list are ignored.
+        client.insert("EDITOR".to_string(), "vi".to_string());
+        assert_eq!(env_mismatch(&client, &daemon), None);
     }
 }

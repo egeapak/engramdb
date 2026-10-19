@@ -84,7 +84,18 @@ pub async fn delegate_hook(
         read_msg::<_, DaemonResponse>(&mut reader).await
     };
     match tokio::time::timeout(HOOK_PING_TIMEOUT, ping).await {
-        Ok(Ok(Some(DaemonResponse::Pong { version, .. }))) if version == PROTOCOL_VERSION => {}
+        // An older build of the same protocol would run its own, older hook
+        // handlers. Nothing on the hook path evicts it (it never spawns), so
+        // run in-process until something else replaces that daemon.
+        Ok(Ok(Some(DaemonResponse::Pong { version, build }))) if version == PROTOCOL_VERSION => {
+            if build_is_older(build.as_deref(), env!("CARGO_PKG_VERSION")) {
+                return HookDelegation::NotSent(format!(
+                    "daemon build {} is older than {}",
+                    build.as_deref().unwrap_or("unknown"),
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+        }
         Ok(Ok(Some(DaemonResponse::Pong { version, .. }))) => {
             return HookDelegation::NotSent(format!("daemon speaks protocol {version}"))
         }
@@ -101,6 +112,7 @@ pub async fn delegate_hook(
             call: call.clone(),
             dir: dir.to_path_buf(),
             stdin: stdin.to_string(),
+            env: super::hooks::hook_env(),
         },
     };
     // The daemon only executes a complete frame, so a failed write means the

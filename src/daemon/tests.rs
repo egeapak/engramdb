@@ -1890,6 +1890,30 @@ async fn delegate_hook_never_sends_to_an_older_protocol() {
     );
 }
 
+/// An older build of the current protocol would run its older handlers; the
+/// hook path never evicts it, so the client must run the hook itself.
+#[tokio::test]
+async fn delegate_hook_never_sends_to_an_older_build() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("stale.sock");
+    let log = spawn_recording_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => Some(DaemonResponse::Pong {
+            version: super::PROTOCOL_VERSION.to_string(),
+            build: Some("0.0.1".to_string()),
+        }),
+        _ => Some(DaemonResponse::Error {
+            message: "unexpected".to_string(),
+        }),
+    });
+    wait_connectable(&socket).await;
+    let out = super::delegate_hook(&socket, &super::HookCall::PreCompact, tmp.path(), "{}").await;
+    assert!(matches!(out, super::HookDelegation::NotSent(_)), "{out:?}");
+    assert!(
+        !sent_hook(&log),
+        "the hook op must not reach an older build"
+    );
+}
+
 /// A daemon without a hook runner refuses before running anything.
 #[tokio::test]
 async fn delegate_hook_refused_is_not_sent() {
@@ -2016,6 +2040,92 @@ async fn daemon_runs_hooks_and_flushes_hook_events_on_shutdown() {
     assert_eq!((ss.calls, ss.errors), (1, 0));
     let pc = &groups[&("pre-compact".to_string(), HookPath::Daemon)];
     assert_eq!((pc.calls, pc.errors), (1, 1));
+}
+
+/// A session whose data dir differs from the daemon's must not have its hook
+/// run there: the hook would write into the daemon's data dir. The daemon
+/// refuses before running it, which the client reads as `NotSent`.
+#[tokio::test]
+async fn daemon_refuses_a_hook_from_a_different_environment() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let exec = std::sync::Arc::new(EchoExecutor {
+        project_id: "test-daemon-hook-env".to_string(),
+        root: tmp.path().to_path_buf(),
+    });
+    tokio::spawn(super::run_daemon_with_hooks(
+        socket.clone(),
+        super::server::DaemonOptions::from_idle_timeout(Duration::from_secs(3600)),
+        Some(exec),
+    ));
+    wait_connectable(&socket).await;
+
+    let mut env = super::hooks::hook_env();
+    env.insert(
+        "ENGRAMDB_DATA_DIR".to_string(),
+        "/some/other/data/dir".to_string(),
+    );
+    let req = DaemonRequest {
+        models: None,
+        op: DaemonOp::Hook {
+            call: super::HookCall::PreCompact,
+            dir: tmp.path().to_path_buf(),
+            stdin: "{}".to_string(),
+            env,
+        },
+    };
+    match wait_request(&socket, req).await {
+        DaemonResponse::Error { message } => {
+            assert!(message.contains("ENGRAMDB_DATA_DIR"), "{message}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// A full batch is written in the background; a shutdown right after it
+/// must still wait for that write.
+#[tokio::test]
+async fn shutdown_waits_for_a_full_batch_write() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let project_id = "test-daemon-hook-full-batch".to_string();
+    std::fs::create_dir_all(
+        crate::storage::paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(&project_id),
+    )
+    .unwrap();
+    let exec = std::sync::Arc::new(EchoExecutor {
+        project_id: project_id.clone(),
+        root: tmp.path().to_path_buf(),
+    });
+    let daemon = tokio::spawn(super::run_daemon_with_hooks(
+        socket.clone(),
+        super::server::DaemonOptions::from_idle_timeout(Duration::from_secs(3600)),
+        Some(exec),
+    ));
+    wait_connectable(&socket).await;
+    let n = super::hooks::HOOK_FLUSH_BATCH;
+    for _ in 0..n {
+        let out =
+            super::delegate_hook(&socket, &super::HookCall::PreToolUse, tmp.path(), "{}").await;
+        assert!(
+            matches!(out, super::HookDelegation::Served { .. }),
+            "{out:?}"
+        );
+    }
+    assert!(super::request_shutdown(&socket).await.unwrap());
+    daemon.await.unwrap().unwrap();
+
+    let groups = crate::telemetry::hook_events::load_groups(&project_id, None, 100_000)
+        .await
+        .unwrap();
+    let g = &groups[&(
+        "pre-tool-use".to_string(),
+        crate::telemetry::hook_events::HookPath::Daemon,
+    )];
+    assert_eq!(g.calls, n as u64);
 }
 
 /// A daemon serving models from a fake loader, with a short model window.
