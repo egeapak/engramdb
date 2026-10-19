@@ -30,6 +30,95 @@ async fn oneshot(socket: &Path, op: DaemonOp) -> anyhow::Result<DaemonResponse> 
         .unwrap_or_else(|_| Err(anyhow::anyhow!("daemon request timed out")))
 }
 
+/// Outcome of offering a hook to a running daemon.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HookDelegation {
+    /// The daemon ran the hook. `stdout` is what the hook prints.
+    Served { stdout: Option<String>, ok: bool },
+    /// The daemon never ran it: none listening, an older protocol, no hook
+    /// runner, or the request could not be written. Run it in-process.
+    NotSent(String),
+    /// The request was sent but no reply came back (timeout, connection
+    /// dropped). The daemon may have run the hook, so running it again
+    /// in-process could repeat its side effects; print nothing.
+    Lost(String),
+}
+
+/// Upper bound on a hook round trip. Claude Code's own hook timeout is 60 s
+/// by default, so a reply later than this has no one left to read it.
+const HOOK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Bound on the version check that precedes a hook request.
+const HOOK_PING_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Offer a hook to an already-running daemon. Never spawns one.
+///
+/// One connection carries both requests: a `Ping` first, so the hook is
+/// only sent to a daemon that speaks this protocol (a v5 daemon cannot parse
+/// the `Hook` op, and would drop the connection after reading it — which
+/// would look like [`HookDelegation::Lost`]), then the `Hook` itself.
+pub async fn delegate_hook(
+    socket: &Path,
+    call: &super::protocol::HookCall,
+    dir: &Path,
+    stdin: &str,
+) -> HookDelegation {
+    let stream = match super::transport::connect(socket).await {
+        Ok(s) => s,
+        Err(e) => return HookDelegation::NotSent(format!("connect: {e}")),
+    };
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read_half);
+
+    let ping = async {
+        write_msg(
+            &mut write_half,
+            &DaemonRequest {
+                models: None,
+                op: DaemonOp::Ping,
+            },
+        )
+        .await?;
+        read_msg::<_, DaemonResponse>(&mut reader).await
+    };
+    match tokio::time::timeout(HOOK_PING_TIMEOUT, ping).await {
+        Ok(Ok(Some(DaemonResponse::Pong { version, .. }))) if version == PROTOCOL_VERSION => {}
+        Ok(Ok(Some(DaemonResponse::Pong { version, .. }))) => {
+            return HookDelegation::NotSent(format!("daemon speaks protocol {version}"))
+        }
+        Ok(Ok(other)) => {
+            return HookDelegation::NotSent(format!("unexpected ping reply: {other:?}"))
+        }
+        Ok(Err(e)) => return HookDelegation::NotSent(format!("ping: {e}")),
+        Err(_) => return HookDelegation::NotSent("ping timed out".to_string()),
+    }
+
+    let request = DaemonRequest {
+        models: None,
+        op: DaemonOp::Hook {
+            call: call.clone(),
+            dir: dir.to_path_buf(),
+            stdin: stdin.to_string(),
+        },
+    };
+    // The daemon only executes a complete frame, so a failed write means the
+    // hook did not run.
+    if let Err(e) = write_msg(&mut write_half, &request).await {
+        return HookDelegation::NotSent(format!("write: {e}"));
+    }
+    match tokio::time::timeout(HOOK_TIMEOUT, read_msg::<_, DaemonResponse>(&mut reader)).await {
+        Ok(Ok(Some(DaemonResponse::HookOutput { stdout, ok }))) => {
+            HookDelegation::Served { stdout, ok }
+        }
+        // Refused before running anything (a daemon without a hook runner).
+        Ok(Ok(Some(DaemonResponse::Error { message }))) => HookDelegation::NotSent(message),
+        Ok(Ok(Some(other))) => HookDelegation::Lost(format!("unexpected reply: {other:?}")),
+        Ok(Ok(None)) => HookDelegation::Lost("daemon closed the connection".to_string()),
+        Ok(Err(e)) => HookDelegation::Lost(format!("read: {e}")),
+        Err(_) => HookDelegation::Lost("timed out".to_string()),
+    }
+}
+
 /// Query a running daemon's status. `Ok(None)` means no daemon is listening
 /// on `socket` (not an error — the daemon is auto-spawned on demand).
 pub async fn query_status(socket: &Path) -> anyhow::Result<Option<DaemonStatus>> {

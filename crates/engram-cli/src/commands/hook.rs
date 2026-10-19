@@ -2185,6 +2185,55 @@ impl engramdb::daemon::HookExecutor for DaemonHookExecutor {
     }
 }
 
+/// What happened to a hook offered to the daemon.
+pub enum Delegated {
+    /// The daemon ran it and its output is printed. Nothing else to do: the
+    /// daemon records the call in hook stats.
+    Done,
+    /// The daemon did not run it. Run it in this process.
+    RunHere,
+}
+
+/// Offer a hook to an already-running daemon, before this process does any
+/// project work of its own (registry, worktree routing, config). Never spawns
+/// a daemon.
+///
+/// Falls back ([`Delegated::RunHere`]) only when the daemon provably did not
+/// run the hook. When the request was sent and the reply was lost, the hook
+/// prints nothing and is not retried here: the daemon may have run it, and a
+/// second run could repeat its side effects (the "already shown" record, the
+/// SessionEnd archive). That call is also missing from hook stats unless the
+/// daemon recorded it — a declared loss.
+pub async fn delegate_to_daemon(call: &HookCall, dir: &Path, input: &str) -> Delegated {
+    let global = engramdb::storage::config::load_global_config_or_default().await;
+    if !global.daemon.enabled {
+        return Delegated::RunHere;
+    }
+    let socket = engramdb::daemon::resolve_socket(None, &global.daemon);
+    // The daemon's working directory is unrelated to ours.
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    match engramdb::daemon::delegate_hook(&socket, call, &dir, input).await {
+        engramdb::daemon::HookDelegation::Served { stdout, .. } => {
+            print_hook_output(stdout.as_deref());
+            Delegated::Done
+        }
+        engramdb::daemon::HookDelegation::NotSent(why) => {
+            tracing::debug!(
+                "engramdb hook: daemon did not take `{}` ({why})",
+                call.name()
+            );
+            Delegated::RunHere
+        }
+        engramdb::daemon::HookDelegation::Lost(why) => {
+            tracing::warn!(
+                "engramdb hook: lost the daemon's reply for `{}` ({why}); continuing without context",
+                call.name()
+            );
+            Delegated::Done
+        }
+    }
+}
+
 /// The session id of a hook event, for hook stats.
 pub fn event_session_id(input: &str) -> Option<String> {
     extract_session_id(input)

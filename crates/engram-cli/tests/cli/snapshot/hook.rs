@@ -191,6 +191,8 @@ fn hook_calls_are_recorded_and_reported_by_stats() {
         assert!(r["ms"].as_f64().unwrap() >= 0.0, "{r}");
         assert!(r["ts"].is_string(), "{r}");
         assert!(r["ok"].is_boolean(), "{r}");
+        assert!(r["id"].is_string(), "{r}");
+        assert_eq!(r["path"], "in_process", "{r}");
     }
 
     let out = f.run(&["stats", "--json"]);
@@ -204,11 +206,18 @@ fn hook_calls_are_recorded_and_reported_by_stats() {
         assert!(hooks["pre-tool-use"].get(key).is_some(), "missing {key}");
     }
     assert!(hooks.get("some-future-event").is_none());
+    assert_eq!(hooks["pre-tool-use"]["by_path"]["in_process"]["calls"], 2);
+    assert!(hooks["pre-tool-use"]["by_path"].get("daemon").is_none());
     assert!(json["hooks"]["since"].is_string());
 
     let pretty = f.run(&["--format", "pretty", "stats"]);
     assert!(pretty.contains("Hook calls (since "), "{pretty}");
-    assert!(pretty.contains("  pre-tool-use: 2 calls, p50 "), "{pretty}");
+    // The fixture forces in-process hooks (`ENGRAMDB_IN_PROCESS`), so the
+    // single path is named on the hook's own line.
+    assert!(
+        pretty.contains("  pre-tool-use (in-process): 2 calls, p50 "),
+        "{pretty}"
+    );
 }
 
 /// A store with no hook history shows no hook section at all.

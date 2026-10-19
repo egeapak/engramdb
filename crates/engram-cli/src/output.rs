@@ -1263,6 +1263,18 @@ impl OutputFormatter {
                     t.p50,
                     t.p99
                 );
+                for (path, p) in &t.by_path {
+                    outln!(
+                        self,
+                        "Hook {} {}: calls={} errors={} p50={:.1} p99={:.1}",
+                        hook,
+                        path,
+                        p.calls,
+                        p.errors,
+                        p.p50,
+                        p.p99
+                    );
+                }
             }
         }
     }
@@ -1604,6 +1616,22 @@ fn print_runtime_pretty(f: &OutputFormatter, rt: &engramdb::telemetry::RuntimeSn
     }
 }
 
+fn calls_word(n: u64) -> &'static str {
+    if n == 1 {
+        "call"
+    } else {
+        "calls"
+    }
+}
+
+/// Human label for a hook path key.
+fn path_label(path: &str) -> &str {
+    match path {
+        "in_process" => "in-process",
+        other => other,
+    }
+}
+
 /// Pretty-print per-hook call counts and latency percentiles.
 fn print_hooks_pretty(f: &OutputFormatter, hooks: &engramdb::telemetry::hooks::HookStatsView) {
     match hooks.since {
@@ -1616,21 +1644,55 @@ fn print_hooks_pretty(f: &OutputFormatter, hooks: &engramdb::telemetry::hooks::H
     }
     for (hook, t) in &hooks.by_hook {
         let errors = if t.errors > 0 {
-            format!(", {} errors", t.errors)
+            format!(
+                ", {} {}",
+                t.errors,
+                if t.errors == 1 { "error" } else { "errors" }
+            )
         } else {
             String::new()
         };
+        // One path: name it on the hook's line. Several: break them down.
+        let only_path = match t.by_path.keys().collect::<Vec<_>>().as_slice() {
+            [one] => format!(" ({})", path_label(one)),
+            _ => String::new(),
+        };
         outln!(
             f,
-            "  {}: {} calls{}, p50 {:.1} ms, p99 {:.1} ms (avg {:.1}, p95 {:.1})",
+            "  {}{}: {} {}{}, p50 {:.1} ms, p99 {:.1} ms (avg {:.1}, p95 {:.1})",
             hook,
+            only_path,
             t.calls,
+            calls_word(t.calls),
             errors,
             t.p50,
             t.p99,
             t.avg,
             t.p95
         );
+        if t.by_path.len() > 1 {
+            for (path, p) in &t.by_path {
+                let errors = if p.errors > 0 {
+                    format!(
+                        ", {} {}",
+                        p.errors,
+                        if p.errors == 1 { "error" } else { "errors" }
+                    )
+                } else {
+                    String::new()
+                };
+                outln!(
+                    f,
+                    "    {}: {} {}{}, p50 {:.1} ms, p99 {:.1} ms",
+                    path_label(path),
+                    p.calls,
+                    calls_word(p.calls),
+                    errors,
+                    p.p50,
+                    p.p99
+                );
+            }
+        }
     }
     if hooks.skipped_lines > 0 {
         outln!(
@@ -3242,7 +3304,32 @@ mod tests {
                 p50: 11.0,
                 p95: 30.5,
                 p99: 61.3,
-                by_path: Default::default(),
+                by_path: [
+                    (
+                        "daemon".to_string(),
+                        engramdb::telemetry::hooks::PathTimingStats {
+                            calls: 100,
+                            errors: 0,
+                            avg: 12.1,
+                            p50: 10.2,
+                            p95: 22.0,
+                            p99: 30.4,
+                        },
+                    ),
+                    (
+                        "in_process".to_string(),
+                        engramdb::telemetry::hooks::PathTimingStats {
+                            calls: 20,
+                            errors: 0,
+                            avg: 24.7,
+                            p50: 21.5,
+                            p95: 55.0,
+                            p99: 61.3,
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
             },
         );
         by_hook.insert(
@@ -3254,7 +3341,19 @@ mod tests {
                 p50: 290.0,
                 p95: 410.2,
                 p99: 410.2,
-                by_path: Default::default(),
+                by_path: [(
+                    "daemon".to_string(),
+                    engramdb::telemetry::hooks::PathTimingStats {
+                        calls: 8,
+                        errors: 2,
+                        avg: 301.4,
+                        p50: 290.0,
+                        p95: 410.2,
+                        p99: 410.2,
+                    },
+                )]
+                .into_iter()
+                .collect(),
             },
         );
         HookStatsView {

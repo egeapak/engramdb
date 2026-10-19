@@ -3027,14 +3027,16 @@ impl EngramDbServer {
                 }
             }
         }
-        // Hook calls are logged by the short-lived hook processes into the
-        // project's own state dir, not through this server's collector (see
-        // `engramdb::telemetry::hooks`). Additive key, omitted when empty.
+        // Hook calls are recorded by the daemon (into `hook_events`) or by the
+        // hook's own process (JSONL), never through this server's collector
+        // (see `engramdb::telemetry::hooks`). Additive key, omitted when empty.
         if self.stats.enabled() {
-            let hooks = engramdb::telemetry::hooks::load_summary(
+            let hooks = engramdb::telemetry::hooks::load_combined_summary(
                 &store.project_dir,
+                &store.project_id,
                 self.stats.config().retention_days,
-            );
+            )
+            .await;
             if !hooks.is_empty() {
                 payload["hooks"] = serde_json::to_value(&hooks).unwrap_or_default();
             }

@@ -75,12 +75,17 @@ pub async fn run_stats(
         || !runtime.view.timings_ms.tool.is_empty()
         || runtime.by_project.as_ref().is_some_and(|m| !m.is_empty());
 
-    // Hook processes log to the project's own state dir (see
-    // `engramdb::telemetry::hooks`); the global store has no hooks of its own.
+    // Hook calls: the project's `hook_events` table plus its not-yet-drained
+    // JSONL (see `engramdb::telemetry::hooks`). The global store has no hooks.
     let hooks = if global {
         Default::default()
     } else {
-        engramdb::telemetry::hooks::load_summary(&store.project_dir, cfg.stats.retention_days)
+        engramdb::telemetry::hooks::load_combined_summary(
+            &store.project_dir,
+            &store.project_id,
+            cfg.stats.retention_days,
+        )
+        .await
     };
 
     let stats = Stats {

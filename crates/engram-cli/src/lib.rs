@@ -184,6 +184,25 @@ pub async fn run(cli: Cli) -> Result<()> {
     let in_process_flag = cli.in_process || engramdb::types::in_process_override();
     let spawn_daemon_flag = cli.spawn_daemon;
 
+    // Hooks go to a running daemon first, before any project work here
+    // (registry, worktree routing, config): the daemon does that itself
+    // against warm state. Only a hook the daemon provably did not run falls
+    // through to the in-process path below, with the stdin already read.
+    let mut hook_input: Option<String> = None;
+    if let Command::Hook { command: Some(cmd) } = &cli.command {
+        if let Some(call) = commands::hook::hook_call(cmd) {
+            let input = commands::hook::read_stdin();
+            if !in_process_flag {
+                if let commands::hook::Delegated::Done =
+                    commands::hook::delegate_to_daemon(&call, &dir, &input).await
+                {
+                    return Ok(());
+                }
+            }
+            hook_input = Some(input);
+        }
+    }
+
     // One process-wide DaemonCell — model-needing ops share it so the daemon
     // handle is cached and health-checked once per process, not per command.
     let daemon_cell = Arc::new(DaemonCell::new());
@@ -734,7 +753,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                 commands::hook::warn_unknown_hook(name);
                 return Ok(());
             };
-            let input = commands::hook::read_stdin();
+            let input = hook_input.take().unwrap_or_else(commands::hook::read_stdin);
             let result = commands::hook::run_in_process(&call, &dir, &input, in_process_flag).await;
             if config.stats.enabled {
                 let session_id = commands::hook::event_session_id(&input);

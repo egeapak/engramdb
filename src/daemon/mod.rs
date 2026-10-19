@@ -38,7 +38,7 @@ pub mod server;
 // capability on every platform.
 mod transport;
 
-pub use client::{query_status, request_shutdown, DaemonHandle};
+pub use client::{delegate_hook, query_status, request_shutdown, DaemonHandle, HookDelegation};
 pub use doctor::check_daemon;
 pub use hooks::{HookExecutor, HookProject, HookRun};
 pub use protocol::{DaemonStatus, HookCall, ModelSelection, RequestCounts, PROTOCOL_VERSION};

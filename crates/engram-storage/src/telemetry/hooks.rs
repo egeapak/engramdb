@@ -266,6 +266,39 @@ pub fn load_summary(project_root: &Path, retention_days: Option<u64>) -> HookSta
     }
 }
 
+/// The full hook summary for a project: the `hook_events` table plus the
+/// JSONL lines no drain has moved yet. Nothing is counted twice — a drain
+/// claims a file (renames it) before it inserts, and claimed files are not
+/// read here. A failure on either side is logged and that side reads empty.
+pub async fn load_combined_summary(
+    project_root: &Path,
+    project_id: &str,
+    retention_days: Option<u64>,
+) -> HookStatsView {
+    let mut groups = match crate::telemetry::hook_events::load_groups(
+        project_id,
+        retention_days,
+        PERCENTILE_SAMPLES,
+    )
+    .await
+    {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!("hook stats: could not read hook_events: {e}");
+            Groups::new()
+        }
+    };
+    let loaded = match load_hook_calls(project_root) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("hook stats: could not read the hook log: {e}");
+            LoadedHookCalls::default()
+        }
+    };
+    add_records_to_groups(&loaded.records, retention_days, Utc::now(), &mut groups);
+    build_view(groups, PERCENTILE_SAMPLES, loaded.skipped_lines)
+}
+
 /// What one [`drain_to_table`] call moved.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DrainReport {
@@ -716,5 +749,34 @@ mod tests {
             .unwrap()
             .join("projects/test-drain-ghost")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn combined_summary_reads_table_and_undrained_lines() {
+        let (tmp, pid) = project_with_id();
+        record_hook_call(tmp.path(), "pre-tool-use", 10.0, true, None).unwrap();
+        drain_to_table_with_grace(tmp.path(), &pid, Duration::ZERO)
+            .await
+            .unwrap();
+        record_hook_call(tmp.path(), "pre-tool-use", 30.0, false, None).unwrap();
+        let daemon_row = HookEvent {
+            id: "d1".to_string(),
+            ts: Utc::now(),
+            hook: "pre-tool-use".to_string(),
+            duration_ms: 5.0,
+            ok: true,
+            path: HookPath::Daemon,
+            session_id: None,
+        };
+        append_hook_events(&pid, &[daemon_row], false)
+            .await
+            .unwrap();
+
+        let view = load_combined_summary(tmp.path(), &pid, Some(90)).await;
+        let h = &view.by_hook["pre-tool-use"];
+        assert_eq!((h.calls, h.errors), (3, 1));
+        assert_eq!(h.by_path["in_process"].calls, 2, "one drained, one pending");
+        assert_eq!(h.by_path["daemon"].calls, 1);
+        assert_eq!(h.p99, 30.0);
     }
 }
