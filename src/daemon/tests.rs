@@ -1796,3 +1796,224 @@ fn v4_daemon_can_parse_a_v5_ping() {
     let back: DaemonRequest = serde_json::from_str(&json).unwrap();
     assert!(back.models.is_none());
 }
+
+// ---- hooks (protocol 6) ------------------------------------------------------
+
+/// Like [`spawn_stub`], but the reply may be `None`: drop the connection
+/// without answering (a daemon that died mid-request). Every op received is
+/// logged.
+fn spawn_recording_stub<F>(
+    socket: std::path::PathBuf,
+    reply: F,
+) -> std::sync::Arc<std::sync::Mutex<Vec<String>>>
+where
+    F: Fn(&DaemonOp) -> Option<DaemonResponse> + Send + Sync + 'static,
+{
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&log);
+    tokio::spawn(async move {
+        let listener = super::transport::bind_or_yield(&socket)
+            .await
+            .unwrap()
+            .expect("stub owns the address");
+        while let Ok(stream) = listener.accept().await {
+            let (rh, mut wh) = tokio::io::split(stream);
+            let mut r = BufReader::new(rh);
+            while let Some(req) = read_msg::<_, DaemonRequest>(&mut r).await.unwrap_or(None) {
+                seen.lock().unwrap().push(format!("{:?}", req.op));
+                let Some(resp) = reply(&req.op) else {
+                    break;
+                };
+                if write_msg(&mut wh, &resp).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    log
+}
+
+fn current_pong() -> DaemonResponse {
+    DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
+async fn wait_connectable(socket: &std::path::Path) {
+    for _ in 0..200 {
+        if super::transport::connect(socket).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("nothing listening on {}", socket.display());
+}
+
+fn sent_hook(log: &std::sync::Mutex<Vec<String>>) -> bool {
+    log.lock().unwrap().iter().any(|op| op.starts_with("Hook"))
+}
+
+#[tokio::test]
+async fn delegate_hook_without_a_daemon_is_not_sent() {
+    let tmp = super::private_tempdir();
+    let out = super::delegate_hook(
+        &tmp.path().join("none.sock"),
+        &super::HookCall::PreToolUse,
+        tmp.path(),
+        "{}",
+    )
+    .await;
+    assert!(matches!(out, super::HookDelegation::NotSent(_)), "{out:?}");
+}
+
+/// A v5 daemon cannot parse the Hook op; the client must not send it one.
+#[tokio::test]
+async fn delegate_hook_never_sends_to_an_older_protocol() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("old.sock");
+    let log = spawn_recording_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => Some(DaemonResponse::Pong {
+            version: "5".to_string(),
+            build: Some("0.10.0".to_string()),
+        }),
+        _ => Some(DaemonResponse::Error {
+            message: "unexpected".to_string(),
+        }),
+    });
+    wait_connectable(&socket).await;
+    let out = super::delegate_hook(&socket, &super::HookCall::PreCompact, tmp.path(), "{}").await;
+    assert!(matches!(out, super::HookDelegation::NotSent(_)), "{out:?}");
+    assert!(
+        !sent_hook(&log),
+        "the hook op must not reach an older daemon"
+    );
+}
+
+/// A daemon without a hook runner refuses before running anything.
+#[tokio::test]
+async fn delegate_hook_refused_is_not_sent() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    wait_connectable(&socket).await;
+    let out = super::delegate_hook(&socket, &super::HookCall::PreCompact, tmp.path(), "{}").await;
+    match out {
+        super::HookDelegation::NotSent(why) => assert!(why.contains("does not run hooks"), "{why}"),
+        other => panic!("expected NotSent, got {other:?}"),
+    }
+}
+
+/// The request reached the daemon and the reply never came: the hook may
+/// have run, so this must not be reported as safe to retry.
+#[tokio::test]
+async fn delegate_hook_with_a_lost_reply_is_lost() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("dying.sock");
+    let log = spawn_recording_stub(socket.clone(), |op| match op {
+        DaemonOp::Ping => Some(current_pong()),
+        _ => None,
+    });
+    wait_connectable(&socket).await;
+    let out = super::delegate_hook(&socket, &super::HookCall::PreToolUse, tmp.path(), "{}").await;
+    assert!(matches!(out, super::HookDelegation::Lost(_)), "{out:?}");
+    assert!(sent_hook(&log));
+}
+
+/// A stub executor: echoes the call, reports a project whose global dir
+/// exists, so the daemon records the call.
+struct EchoExecutor {
+    project_id: String,
+    root: std::path::PathBuf,
+}
+
+impl super::HookExecutor for EchoExecutor {
+    fn run<'a>(
+        &'a self,
+        call: &'a super::HookCall,
+        dir: &'a std::path::Path,
+        stdin: &'a str,
+        _models: &'a crate::ops::ProviderCache,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = super::HookRun> + Send + 'a>> {
+        Box::pin(async move {
+            super::HookRun {
+                stdout: Some(format!("{}|{}|{stdin}", call.name(), dir.display())),
+                ok: !stdin.contains("fail"),
+                project: Some(super::HookProject {
+                    root: self.root.clone(),
+                    project_id: self.project_id.clone(),
+                    stats_enabled: true,
+                    retention_days: Some(90),
+                    session_id: Some("sess-x".to_string()),
+                }),
+            }
+        })
+    }
+}
+
+/// End to end through a real daemon: the hook runs in the daemon, its output
+/// comes back, and the call lands in `hook_events` when the daemon shuts
+/// down (every shutdown path flushes).
+#[tokio::test]
+async fn daemon_runs_hooks_and_flushes_hook_events_on_shutdown() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let project_id = "test-daemon-hook-flush".to_string();
+    let data = crate::storage::paths::global_data_dir()
+        .unwrap()
+        .join("projects")
+        .join(&project_id);
+    std::fs::create_dir_all(&data).unwrap();
+    let exec = std::sync::Arc::new(EchoExecutor {
+        project_id: project_id.clone(),
+        root: tmp.path().to_path_buf(),
+    });
+    let daemon = tokio::spawn(super::run_daemon_with_hooks(
+        socket.clone(),
+        Duration::from_secs(3600),
+        Some(exec),
+    ));
+    wait_connectable(&socket).await;
+
+    let out = super::delegate_hook(
+        &socket,
+        &super::HookCall::SessionStart {
+            min_criticality: 0.5,
+        },
+        std::path::Path::new("/abs/project"),
+        "{\"x\":1}",
+    )
+    .await;
+    assert_eq!(
+        out,
+        super::HookDelegation::Served {
+            stdout: Some("session-start|/abs/project|{\"x\":1}".to_string()),
+            ok: true,
+        }
+    );
+    let failed =
+        super::delegate_hook(&socket, &super::HookCall::PreCompact, tmp.path(), "fail").await;
+    assert!(matches!(
+        failed,
+        super::HookDelegation::Served { ok: false, .. }
+    ));
+
+    // Not flushed yet: the timer is 60 s.
+    assert!(
+        crate::telemetry::hook_events::load_groups(&project_id, None, 100)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(super::request_shutdown(&socket).await.unwrap());
+    daemon.await.unwrap().unwrap();
+
+    let groups = crate::telemetry::hook_events::load_groups(&project_id, None, 100)
+        .await
+        .unwrap();
+    use crate::telemetry::hook_events::HookPath;
+    let ss = &groups[&("session-start".to_string(), HookPath::Daemon)];
+    assert_eq!((ss.calls, ss.errors), (1, 0));
+    let pc = &groups[&("pre-compact".to_string(), HookPath::Daemon)];
+    assert_eq!((pc.calls, pc.errors), (1, 1));
+}

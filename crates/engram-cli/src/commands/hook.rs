@@ -4631,3 +4631,181 @@ mod hint_line_tests {
         assert!(!out.contains("task-scoped memories hidden"), "{out}");
     }
 }
+
+#[cfg(test)]
+mod daemon_executor_tests {
+    use super::*;
+    use engramdb::storage::InMemoryRegistry;
+    use engramdb::types::{Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    /// A store with two memories scoped to `src/main.rs`, which exists.
+    async fn setup_store_with_memories() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "").unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for (type_, summary, crit) in [
+            (MemoryType::Decision, "Use async everywhere", 0.9),
+            (MemoryType::Hazard, "Avoid blocking calls in async", 0.8),
+        ] {
+            let mut mem = Memory::new(type_, summary, "Details.", Provenance::human());
+            mem.physical = vec!["src/main.rs".to_string()];
+            mem.criticality = crit;
+            store.create(&mem).await.unwrap();
+        }
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        (tmp, store)
+    }
+
+    // ---- the daemon executor ---------------------------------------------------
+
+    fn read_event(path: &Path, session: &str) -> String {
+        serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": path },
+            "session_id": session,
+        })
+        .to_string()
+    }
+
+    async fn daemon_run(
+        exec: &DaemonHookExecutor,
+        call: &HookCall,
+        dir: &Path,
+        input: &str,
+    ) -> engramdb::daemon::HookRun {
+        use engramdb::daemon::HookExecutor;
+        let models = engramdb::ops::ProviderCache::new();
+        exec.run(call, dir, input, &models).await
+    }
+
+    async fn in_process_run(call: &HookCall, dir: &Path, input: &str) -> Option<String> {
+        let env = HookEnv {
+            stores: StoreSource::Fresh,
+            situation: SituationModel::KeywordOnly,
+        };
+        execute_hook(call, dir, input, &env).await.unwrap()
+    }
+
+    /// The daemon prints exactly what the hook's own process prints. Distinct
+    /// session ids, so the "already shown" record cannot hide anything.
+    #[tokio::test]
+    async fn daemon_executor_output_matches_in_process() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let file = tmp.path().join("src/main.rs");
+        let exec = DaemonHookExecutor::new().unwrap();
+        for (call, input_a, input_b) in [
+            (
+                HookCall::PreToolUse,
+                read_event(&file, "a1"),
+                read_event(&file, "b1"),
+            ),
+            (
+                HookCall::SessionStart {
+                    min_criticality: 0.5,
+                },
+                "{\"session_id\":\"a2\"}".to_string(),
+                "{\"session_id\":\"b2\"}".to_string(),
+            ),
+            (
+                HookCall::PreCompact,
+                "{\"session_id\":\"a3\"}".to_string(),
+                "{\"session_id\":\"b3\"}".to_string(),
+            ),
+        ] {
+            let here = in_process_run(&call, tmp.path(), &input_a).await;
+            let run = daemon_run(&exec, &call, tmp.path(), &input_b).await;
+            assert!(here.is_some(), "{} printed nothing", call.name());
+            assert_eq!(run.stdout, here, "{} differs", call.name());
+            assert!(run.ok);
+        }
+    }
+
+    /// A store the daemon has cached still sees a memory written afterwards by
+    /// another process (every LanceDB call reopens its table).
+    #[tokio::test]
+    async fn daemon_executor_sees_writes_made_after_caching() {
+        let (tmp, store) = setup_store_with_memories().await;
+        let file = tmp.path().join("src/main.rs");
+        let exec = DaemonHookExecutor::new().unwrap();
+        let first = daemon_run(
+            &exec,
+            &HookCall::PreToolUse,
+            tmp.path(),
+            &read_event(&file, "f1"),
+        )
+        .await;
+        assert!(!first.stdout.unwrap().contains("Freshly written rule"));
+        assert_eq!(exec.stores.len().await, 1);
+
+        let mut mem = Memory::new(
+            MemoryType::Hazard,
+            "Freshly written rule",
+            "Written while the daemon held a warm store",
+            Provenance::human(),
+        );
+        mem.physical = vec!["src/main.rs".to_string()];
+        mem.criticality = 0.99;
+        store.create(&mem).await.unwrap();
+
+        let second = daemon_run(
+            &exec,
+            &HookCall::PreToolUse,
+            tmp.path(),
+            &read_event(&file, "f2"),
+        )
+        .await;
+        assert!(
+            second.stdout.unwrap().contains("Freshly written rule"),
+            "the warm store must not serve a stale table version"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_cache_reopens_on_config_change_and_refuses_a_removed_store() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let cache = StoreCache::default();
+        cache.get_or_open(tmp.path()).await.unwrap();
+        let stamp = store_stamp(tmp.path());
+        // A config edit changes the stamp, so the next call reopens.
+        let config = tmp.path().join(".engramdb/config.toml");
+        let text = std::fs::read_to_string(&config).unwrap_or_default();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&config, format!("{text}\n")).unwrap();
+        assert_ne!(store_stamp(tmp.path()), stamp);
+        cache.get_or_open(tmp.path()).await.unwrap();
+        assert_eq!(cache.len().await, 1, "reopened in place, not duplicated");
+
+        std::fs::remove_dir_all(tmp.path().join(".engramdb")).unwrap();
+        assert!(cache.get_or_open(tmp.path()).await.is_err());
+        assert!(
+            cache.is_empty().await,
+            "a removed store is dropped from the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_executor_reports_a_project_only_when_initialized() {
+        let exec = DaemonHookExecutor::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let run = daemon_run(&exec, &HookCall::PreCompact, bare.path(), "{}").await;
+        assert!(run.project.is_none(), "an un-init'ed dir collects no stats");
+        assert!(run.stdout.is_some(), "the reminder still prints");
+
+        let (tmp, store) = setup_store_with_memories().await;
+        let run = daemon_run(
+            &exec,
+            &HookCall::PreCompact,
+            tmp.path(),
+            "{\"session_id\":\"sess-9\"}",
+        )
+        .await;
+        let project = run.project.expect("initialized store");
+        assert_eq!(project.project_id, store.project_id);
+        assert_eq!(project.session_id.as_deref(), Some("sess-9"));
+        assert!(project.stats_enabled);
+    }
+}
