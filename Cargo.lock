@@ -2376,6 +2376,7 @@ dependencies = [
  "globset",
  "hf-hub",
  "lancedb",
+ "libc",
  "ort",
  "rand 0.10.2",
  "rayon",
