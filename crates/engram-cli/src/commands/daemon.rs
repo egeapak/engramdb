@@ -109,7 +109,12 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
                     None
                 }
             };
-            daemon::run_daemon_with_hooks(socket, idle, hooks).await
+            daemon::run_daemon_with_hooks(
+                socket,
+                daemon::server::DaemonOptions::from_idle_timeout(idle),
+                hooks,
+            )
+            .await
         }
 
         DaemonCommand::Status { socket } => {
@@ -152,7 +157,7 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
                     outln!(formatter, "  protocol:        v{}", s.version);
                     outln!(formatter, "  uptime:          {}", fmt_dur(s.uptime_secs));
                     outln!(formatter, "  idle:            {}", fmt_dur(s.idle_secs));
-                    outln!(formatter, "  model bundles:   {}", s.bundles_loaded);
+                    outln!(formatter, "  models loaded:   {}", s.bundles_loaded);
                     outln!(
                         formatter,
                         "  {}",

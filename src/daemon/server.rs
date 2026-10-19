@@ -13,7 +13,7 @@ use super::protocol::{
     read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, NliWire,
     PROTOCOL_VERSION,
 };
-use crate::ops::ProviderCache;
+use crate::ops::{EngineProviders, ProviderCache};
 
 /// Snapshot is persisted to the global store at least this often while the
 /// daemon runs (plus on idle-exit and on graceful shutdown), so `stats
@@ -24,6 +24,74 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 /// server closes it. Comfortably above the client's one-round-trip usage
 /// and its 60s request timeout; see the guard in `handle_conn`.
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the daemon runs without activity, and how long a model stays
+/// loaded without use.
+#[derive(Debug, Clone, Copy)]
+pub struct DaemonOptions {
+    /// Exit after this long with no request and no open connection.
+    pub idle_timeout: Duration,
+    /// Unload a model after this long with no request for it and no lease
+    /// renewal (a heartbeat `Ping` carrying a model selection that uses it),
+    /// and shrink a shared pool once its largest request is this old.
+    ///
+    /// This is the "close" of a project: the daemon knows model selections,
+    /// not projects, so when the last session using a model ends, its
+    /// heartbeats stop and the model is unloaded one window later. Before
+    /// this, every selection ever served stayed loaded until the daemon
+    /// exited — and the heartbeats of any other session kept it from exiting.
+    pub bundle_idle_timeout: Duration,
+}
+
+impl DaemonOptions {
+    /// The production shape: a model is unloaded after the same idle window
+    /// that would stop the whole daemon. The heartbeat renews leases every
+    /// `heartbeat_interval(idle)`, at least twice per window, so a live but
+    /// quiet session never loses its models.
+    pub fn from_idle_timeout(idle_timeout: Duration) -> Self {
+        Self {
+            idle_timeout,
+            bundle_idle_timeout: idle_timeout,
+        }
+    }
+}
+
+/// Return freed heap pages to the OS.
+///
+/// glibc keeps freed memory in its arenas and returns only the top of the
+/// main heap on its own. The daemon frees large blocks in bursts (a whole
+/// model on eviction), and serves requests from many blocking threads,
+/// each with its own arena — so without a trim the RSS after an unload stays
+/// near its peak. Other allocators (macOS, musl) return memory themselves.
+fn release_free_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `malloc_trim` takes no pointers and is safe to call from any
+    // thread at any time; it only walks the allocator's own free lists.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// Fix glibc's mmap threshold for the daemon process.
+///
+/// glibc serves a large allocation with `mmap` (returned to the OS on free)
+/// only above a threshold, and raises that threshold — up to 32 MiB — each
+/// time such a block is freed. Unloading a model frees exactly those
+/// blocks (weights, ONNX Runtime arenas), so after the first unload the
+/// next model's large blocks came from the heap instead, where they
+/// fragmented and `malloc_trim` could not return them: the open/close bench
+/// measured the heap after a close climbing from 19 to ~52 MiB over eight
+/// cycles (to ~105 MiB under heavier load). Setting the threshold
+/// explicitly turns the adjustment off; with it the heap after a close
+/// stayed at 19–22 MiB.
+fn fix_mmap_threshold() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `mallopt` only sets an allocator parameter; it is safe to
+    // call at any time from any thread.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+    }
+}
 
 /// Shared per-process daemon state.
 struct Ctx {
@@ -80,15 +148,38 @@ impl Ctx {
 /// calling `process::exit` here keeps `run_daemon` drivable in-process by
 /// tests.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
-    run_daemon_with_hooks(socket, idle_timeout, None).await
+    run_daemon_with(socket, DaemonOptions::from_idle_timeout(idle_timeout)).await
 }
 
-/// [`run_daemon`], also serving [`DaemonOp::Hook`] through `hooks`.
+/// [`run_daemon`] with explicit [`DaemonOptions`]. Tests and the
+/// memory-footprint bench use it to shorten the model window.
+pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow::Result<()> {
+    run_daemon_with_cache(socket, options, ProviderCache::new(), None).await
+}
+
+/// [`run_daemon_with`], also serving [`DaemonOp::Hook`] through `hooks`.
 pub async fn run_daemon_with_hooks(
     socket: PathBuf,
-    idle_timeout: Duration,
+    options: DaemonOptions,
     hooks: Option<Arc<dyn HookExecutor>>,
 ) -> anyhow::Result<()> {
+    run_daemon_with_cache(socket, options, ProviderCache::new(), hooks).await
+}
+
+/// [`run_daemon_with_hooks`] serving models from `cache`. Tests pass a cache
+/// with a fake loader, so the daemon's model handling is testable without a
+/// model.
+pub(crate) async fn run_daemon_with_cache(
+    socket: PathBuf,
+    options: DaemonOptions,
+    cache: ProviderCache,
+    hooks: Option<Arc<dyn HookExecutor>>,
+) -> anyhow::Result<()> {
+    let DaemonOptions {
+        idle_timeout,
+        bundle_idle_timeout,
+    } = options;
+    fix_mmap_threshold();
     let listener: super::transport::Listener = match super::transport::bind_or_yield(&socket).await
     {
         Ok(Some(l)) => l,
@@ -129,7 +220,7 @@ pub async fn run_daemon_with_hooks(
     let ctx = Arc::new(Ctx {
         hooks,
         hook_telemetry,
-        cache: ProviderCache::new(),
+        cache,
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
         pid: std::process::id(),
@@ -150,6 +241,39 @@ pub async fn run_daemon_with_hooks(
                 tokio::select! {
                     _ = tokio::time::sleep(PERSIST_INTERVAL) => ctx.persist().await,
                     _ = shutdown.changed() => return,
+                }
+            }
+        });
+    }
+
+    // Model sweeper: unload models nobody used or leased for
+    // `bundle_idle_timeout`, shrink shared pools whose largest request went
+    // away, then give the freed memory back to the OS.
+    {
+        let ctx = Arc::clone(&ctx);
+        let mut shutdown = shutdown_rx.clone();
+        let tick = (bundle_idle_timeout / 4)
+            .min(Duration::from_secs(30))
+            .max(Duration::from_millis(250));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(tick) => {}
+                    _ = shutdown.changed() => return,
+                }
+                let evicted = ctx.cache.evict_idle(bundle_idle_timeout).await;
+                if evicted > 0 {
+                    tracing::info!(
+                        "engramdb daemon unloaded {evicted} model(s) unused for {bundle_idle_timeout:?}"
+                    );
+                }
+                // Unloads, and pools replaced by a grow or shrink (those run
+                // in the background, so they show up on a later tick). The
+                // ONNX sessions are freed when the last `Arc` drops; an
+                // in-flight request may still hold one, so a trim can miss
+                // it — the next release trims again.
+                if ctx.cache.take_released() > 0 {
+                    tokio::task::spawn_blocking(release_free_memory);
                 }
             }
         });
@@ -384,6 +508,15 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
             if let Ok(mut t) = ctx.last_ping.lock() {
                 *t = Some(Instant::now());
             }
+            // A heartbeat carries its session's model selection: renew the
+            // lease on each model it uses, at its pool size. Never loads one
+            // — a session that has not used a model yet must not make the
+            // daemon load it.
+            if let Some(models) = &req.models {
+                ctx.cache
+                    .touch(&models.to_config(), Some(models.backend))
+                    .await;
+            }
             return DaemonResponse::Pong {
                 version: PROTOCOL_VERSION.to_string(),
                 build: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -455,12 +588,23 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
     // `models.backend` is the backend the client already resolved; trust it
     // over this daemon process's own environment so the provider-cache key
     // (and thus the loaded model) matches what the client expects.
-    let providers = ctx
-        .cache
-        .get(&models.to_config(), Some(models.backend))
-        .await;
+    let config = models.to_config();
+    let providers = ctx.cache.get(&config, Some(models.backend)).await;
+    let resp = serve_model_op(req.op, providers.clone(), ctx).await;
+    // `get` stamped the models when this request started. Stamp them again
+    // now that it is done, while `providers` still holds them: a request
+    // longer than the window would otherwise leave a model that looks idle
+    // the moment it is released, and the sweeper could unload it in the gap
+    // before the next request.
+    ctx.cache.touch(&config, Some(models.backend)).await;
+    drop(providers);
+    resp
+}
 
-    match req.op {
+/// Serve one model op (`Meta`, `Embed`, `Classify`, `Rerank`, `Title`) from
+/// the project's resolved providers.
+async fn serve_model_op(op: DaemonOp, providers: EngineProviders, ctx: &Ctx) -> DaemonResponse {
+    match op {
         DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown | DaemonOp::Hook { .. } => {
             unreachable!("handled above")
         }

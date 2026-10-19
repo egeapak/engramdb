@@ -166,19 +166,19 @@ impl Default for DaemonCell {
 /// What to load when the daemon path is unavailable (disabled, unreachable,
 /// or forbidden by policy).
 pub enum InProcessFallback<'a> {
-    /// Load a single-session bundle. Right for one-shot callers (the CLI):
+    /// Load single-session models. Right for one-shot callers (the CLI):
     /// no concurrency, process exits after the call.
     Single,
-    /// Serve pooled bundles from the given process-wide cache. Right for
+    /// Serve pooled models from the given process-wide cache. Right for
     /// long-lived multi-session callers (the MCP server).
     Pool(&'a ProviderCache),
-    /// Serve single-session bundles from the given cache. Right for a
+    /// Serve models from the given cache at a demand of one session. Right for a
     /// sequential batch over several projects (`projects discover` /
     /// `repair`): the model loads once for the batch, and no extra sessions
     /// are built that a sequential caller could never use. The one-session
     /// size applies to the in-process load only — the daemon still gets the
     /// project's own `pool_size`, so it serves these calls from the same
-    /// bundle as every other session instead of building a second one.
+    /// shared models as every other session instead of building more.
     SequentialPool(&'a ProviderCache),
 }
 

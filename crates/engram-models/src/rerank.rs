@@ -213,6 +213,17 @@ impl LocalReranker {
     }
 }
 
+/// Most documents scored in one ONNX Runtime run.
+///
+/// The same arena rule as `MAX_TEXTS_PER_RUN` in the embedding provider:
+/// ORT keeps a session's arena at the largest run it served. fastembed's
+/// default reranker batch is 256, so every query-document pair of a request
+/// went into one run — `top_n` (10 by default, unbounded) pairs of up to 512
+/// tokens each, and the whole merged candidate set of a cross-store query.
+/// Four 512-token pairs cost about what eight 256-token embedding texts do.
+#[cfg(feature = "onnxruntime")]
+const MAX_DOCS_PER_RUN: usize = 4;
+
 #[cfg(feature = "onnxruntime")]
 #[async_trait]
 impl Reranker for LocalReranker {
@@ -226,7 +237,7 @@ impl Reranker for LocalReranker {
                 .map_err(|e| anyhow::anyhow!("Failed to acquire reranker lock: {}", e))?;
             let doc_refs: Vec<&String> = documents.iter().collect();
             let results = guard
-                .rerank(&query, doc_refs, false, None)
+                .rerank(&query, doc_refs, false, Some(MAX_DOCS_PER_RUN))
                 .map_err(|e| anyhow::anyhow!("Reranking failed: {}", e))?;
             Ok(results
                 .into_iter()

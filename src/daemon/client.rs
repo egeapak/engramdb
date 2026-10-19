@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use tokio::io::BufReader;
 
-use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
+use super::protocol::{
+    read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, ModelSelection,
+};
 use super::PROTOCOL_VERSION;
 
 /// One-shot request over a fresh connection to a socket, without spawning.
@@ -249,6 +251,29 @@ impl DaemonHandle {
         }
     }
 
+    /// Renew this session's lease on the daemon's models for `models`.
+    ///
+    /// A `Ping` that carries a model selection: the daemon marks each model
+    /// the selection uses as in use, at its pool size (it never loads one for
+    /// a `Ping`), so a session that is open but quiet keeps its models
+    /// resident, and a model is unloaded once every session using it has
+    /// ended. An older daemon ignores the selection and treats this as a
+    /// plain `Ping`, so its models are never unloaded. Returns whether the
+    /// daemon answered.
+    pub async fn renew_lease(&self, models: ModelSelection) -> bool {
+        matches!(
+            self.request_with_timeout(
+                DaemonRequest {
+                    models: Some(models),
+                    op: DaemonOp::Ping,
+                },
+                Self::PING_TIMEOUT,
+            )
+            .await,
+            Ok(DaemonResponse::Pong { .. })
+        )
+    }
+
     /// True if a daemon answers `Ping` with a matching protocol version.
     pub(crate) async fn check_health(&self) -> bool {
         self.healthy().await
@@ -266,7 +291,7 @@ impl DaemonHandle {
             .await
         {
             Ok(DaemonResponse::Pong { version, build }) if version == PROTOCOL_VERSION => {
-                // Same wire, older binary: its cached provider bundles are from
+                // Same wire, older binary: its cached models are from
                 // the previous release, so it can serve vectors from a model
                 // this build no longer uses — silently, because the manifest
                 // fingerprint is computed client-side. Evict it the same way an
@@ -428,12 +453,92 @@ fn spawn_command(exe: &Path, socket: &Path, idle_override: Option<u64>) -> tokio
     }
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null());
+    // The daemon outlives the session that spawned it and serves every other
+    // session, so it must not carry that session's environment (its
+    // `GIT_DIR`, secrets, tool settings). It starts from an empty environment
+    // plus the allowlist below.
+    cmd.env_clear().envs(daemon_env(std::env::vars_os()));
     cmd
+}
+
+/// Variables a spawned daemon keeps, compared without regard to case
+/// (Windows names are case-insensitive, and proxy variables come in both
+/// cases on Unix).
+const DAEMON_ENV_KEEP: &[&str] = &[
+    // Identity, locale, temp dirs, and `PATH` (hooks run `git`).
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "PATH",
+    "LANG",
+    "TZ",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // Where the ONNX runtime is found.
+    "ORT_DYLIB_PATH",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    // Logging into `daemon.log`.
+    "RUST_LOG",
+    "RUST_BACKTRACE",
+    // Where SessionEnd finds the transcript it copies.
+    "CLAUDE_CONFIG_DIR",
+    // Model backends and downloads.
+    "OLLAMA_HOST",
+    "HF_ENDPOINT",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    // Windows: what the system and the `dirs` crate need.
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERNAME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+];
+
+/// Prefixes a spawned daemon keeps: the user's engramdb settings (data,
+/// config, registry and model-cache paths, offline mode), locale categories,
+/// and the XDG base directories every path in `engram_storage::paths`
+/// resolves through.
+const DAEMON_ENV_KEEP_PREFIXES: &[&str] = &["ENGRAMDB_", "LC_", "XDG_"];
+
+/// The environment a spawned daemon starts with: the entries of `vars` that
+/// [`DAEMON_ENV_KEEP`] or [`DAEMON_ENV_KEEP_PREFIXES`] name.
+///
+/// `ENGRAMDB_IN_PROCESS` is dropped: it is one session's opt-out from the
+/// daemon, not a setting of the daemon.
+fn daemon_env(
+    vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    vars.into_iter()
+        .filter(|(name, _)| {
+            let Some(name) = name.to_str() else {
+                return false;
+            };
+            let upper = name.to_ascii_uppercase();
+            upper != "ENGRAMDB_IN_PROCESS"
+                && (DAEMON_ENV_KEEP.contains(&upper.as_str())
+                    || DAEMON_ENV_KEEP_PREFIXES
+                        .iter()
+                        .any(|p| upper.starts_with(p)))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod spawn_tests {
-    use super::spawn_command;
+    use super::{daemon_env, spawn_command};
     use std::path::Path;
 
     fn args(cmd: &tokio::process::Command) -> Vec<String> {
@@ -471,6 +576,71 @@ mod spawn_tests {
                 "90"
             ]
         );
+    }
+
+    fn names(vars: &[(&str, &str)]) -> Vec<String> {
+        daemon_env(vars.iter().map(|(k, v)| (k.into(), v.into())))
+            .into_iter()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The spawning session's own variables never reach the daemon; the
+    /// user's settings, paths and runtime location do.
+    #[test]
+    fn spawned_daemon_keeps_only_the_allowlist() {
+        let kept = names(&[
+            ("HOME", "/home/u"),
+            ("PATH", "/usr/bin"),
+            ("ENGRAMDB_DATA_DIR", "/d"),
+            ("ENGRAMDB_IN_PROCESS", "1"),
+            ("XDG_RUNTIME_DIR", "/run/user/1"),
+            ("LC_ALL", "C"),
+            ("ORT_DYLIB_PATH", "/lib/ort.so"),
+            ("CLAUDE_CONFIG_DIR", "/c"),
+            ("https_proxy", "http://p"),
+            ("GIT_DIR", "/elsewhere/.git"),
+            ("ANTHROPIC_API_KEY", "secret"),
+            ("CLAUDE_PROJECT_DIR", "/p"),
+            ("EDITOR", "vim"),
+        ]);
+        assert_eq!(
+            kept,
+            [
+                "HOME",
+                "PATH",
+                "ENGRAMDB_DATA_DIR",
+                "XDG_RUNTIME_DIR",
+                "LC_ALL",
+                "ORT_DYLIB_PATH",
+                "CLAUDE_CONFIG_DIR",
+                "https_proxy"
+            ]
+        );
+    }
+
+    /// A process started from the spawn command sees the allowlist and
+    /// nothing else of this process's environment. Runs a stand-in "binary"
+    /// that dumps its environment next to the socket path it is given.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_process_starts_without_the_spawners_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        // nextest runs each test in its own process, so this is not shared.
+        std::env::set_var("ENGRAMDB_SPAWN_TEST_KEEP", "kept");
+        std::env::set_var("SPAWN_TEST_SESSION_SECRET", "leaked");
+        let dir = tempfile::TempDir::new().unwrap();
+        let exe = dir.path().join("fake-engramdb");
+        std::fs::write(&exe, "#!/bin/sh\nenv > \"$4.env\"\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let socket = dir.path().join("d.sock");
+
+        let status = spawn_command(&exe, &socket, None).status().await.unwrap();
+        assert!(status.success());
+        let env = std::fs::read_to_string(dir.path().join("d.sock.env")).unwrap();
+        assert!(env.contains("ENGRAMDB_SPAWN_TEST_KEEP=kept"), "{env}");
+        assert!(!env.contains("SPAWN_TEST_SESSION_SECRET"), "{env}");
+        assert!(!env.contains("CARGO_"), "{env}");
     }
 }
 

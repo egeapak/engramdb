@@ -6,6 +6,29 @@ use async_trait::async_trait;
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use std::sync::{Arc, Mutex};
 
+/// Most texts handed to ONNX Runtime in one run.
+///
+/// ONNX Runtime's CPU memory arena grows to the largest run a session has
+/// served and never shrinks, so the size of a run sets the session's memory
+/// for the rest of the process. That size grows with the batch and with the
+/// *square* of the (padded) text length, because of the attention matrices.
+/// For a dynamically quantized model (the default MiniLM builds) fastembed
+/// ignores its own batch size and runs every text it is given at once, so
+/// without this cap one request decided the arena: a 64-text batch of
+/// 256-token chunks — one `EMBED_BATCH_CHUNK` of a reindex or a harvest index
+/// pass — left the long-lived daemon holding ~3.4 GiB, and each session of
+/// the pool grows separately (`benches/memory_footprint.rs`,
+/// `daemon_batch_shapes`).
+///
+/// 8 keeps most of the batched speed-up — 8 short texts batched were 1.6x
+/// faster than one at a time, against 2.5x for 64 (`benches/parallel_simd.rs`,
+/// `embed_batching/*`, ~30-token texts; not measured for full-window
+/// chunks), so a 64-text pass costs roughly half again as long — while
+/// bounding a run at 8 texts of at most the model's window. Runs over a dynamically quantized model
+/// were already batch-dependent (a query embeds alone, documents in
+/// batches), so this changes vectors only within that same rounding.
+const MAX_TEXTS_PER_RUN: usize = 8;
+
 /// An ONNX export that `fastembed`'s built-in registry doesn't point at, loaded
 /// through its user-defined-model path instead.
 ///
@@ -553,9 +576,15 @@ impl EmbeddingProvider for OnnxProvider {
             let mut model = model
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
-            model
-                .embed(texts_owned, None)
-                .context("Failed to generate batch embeddings")
+            let mut vectors = Vec::with_capacity(texts_owned.len());
+            for run in texts_owned.chunks(MAX_TEXTS_PER_RUN) {
+                vectors.extend(
+                    model
+                        .embed(run, None)
+                        .context("Failed to generate batch embeddings")?,
+                );
+            }
+            Ok(vectors)
         })
         .await
         .context("Task panicked")?

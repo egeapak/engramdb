@@ -734,7 +734,7 @@ impl Default for RetrievalConfig {
 ///
 /// Controls whether the local ONNX runtime (fastembed) or an Ollama server is
 /// used to run the embedding model.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbeddingBackend {
     /// Try ONNX first, fall back to Ollama (default).
@@ -945,8 +945,9 @@ impl Default for EmbeddingsConfig {
 ///
 /// One NLI model serves every epistemic class (§9 conflict routing keys off
 /// the class pair, not per-class models). If class-specific NLI models are
-/// ever added, `provider_cache_key` in `src/ops/mod.rs` must be extended
-/// with the new field(s) or the cache will serve stale bundles.
+/// ever added, `ModelKey` / `model_demands` in `src/ops/provider_cache.rs`
+/// must be extended with the new field(s) or the cache will serve a stale
+/// model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NliConfig {
     /// Whether NLI contradiction detection is enabled
@@ -1238,10 +1239,10 @@ pub struct EngramConfig {
 
 /// Settings for harvesting past Claude Code sessions (`[harvest]` section).
 ///
-/// **Not part of [`provider_cache_key`](crate) inputs.** Harvesting loads no
-/// model, so these fields must never be folded into the provider cache key —
-/// doing so would evict cached embedding/NLI/reranker bundles every time a
-/// budget was tweaked.
+/// **Not part of the provider cache's model keys** (`model_demands` in
+/// `src/ops/provider_cache.rs`). Harvesting loads no model, so these fields
+/// must never be folded into a model key — doing so would reload cached
+/// embedding/NLI/reranker models every time a budget was tweaked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HarvestConfig {
     /// Character budget for a single-session deep read (`harvest show`).
@@ -1480,12 +1481,11 @@ impl StalenessCheck {
 
 /// Index-currency checking (`[index]` section).
 ///
-/// **Not part of [`provider_cache_key`](crate) inputs**, for the same reason
+/// **Not part of the provider cache's model keys**, for the same reason
 /// `[harvest]` is not: index-currency checking loads no model, so folding these
-/// fields into the provider cache key would evict cached embedding/NLI/reranker
-/// bundles every time the tier was tweaked. `provider_cache_key` exhaustively
-/// destructures only the three model configs, so adding a top-level section
-/// here cannot break it.
+/// fields into a model key would reload cached embedding/NLI/reranker models
+/// every time the tier was tweaked. `model_demands` exhaustively destructures
+/// only the model configs, so adding a top-level section here cannot break it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexConfig {
     /// How much work the on-every-read staleness check does. See

@@ -174,7 +174,7 @@ impl crate::title::TitleGenerator for RemoteTitleProvider {
     }
 }
 
-/// Build the [`EngineProviders`] bundle backed by the daemon for `models`
+/// Build the [`EngineProviders`] backed by the daemon for `models`
 /// (taken from the client's project `config`).
 ///
 /// One round-trip fetches the embedding model's dimensionality and token
