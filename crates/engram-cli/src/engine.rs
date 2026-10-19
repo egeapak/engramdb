@@ -39,15 +39,16 @@ pub async fn engine_for(
 /// [`engine_for`] for commands that build engines for **several projects in one
 /// run** (`projects discover`, `projects repair`).
 ///
-/// Differs only in the in-process fallback: bundles are served from a shared
+/// Differs only in the in-process fallback: models are served from a shared
 /// [`ProviderCache`] so the model loads once for the whole batch instead of
 /// once per project. The in-process pool is pinned to a single session
 /// ([`InProcessFallback::SequentialPool`]) — `ProviderCache` is the MCP
 /// server's seam and otherwise auto-sizes to `cores/2` for many concurrent
 /// callers, but these callers are strictly sequential, so the extra sessions
 /// could never be used and would cost a full model load each. The size is
-/// part of `provider_cache_key`, so this stays a coherent cache key. The
-/// daemon is not affected: it gets the project's own `pool_size`.
+/// only a demand: the cache shares one pool per model at the largest demand,
+/// so a pool already loaded larger in this cache still serves it. The daemon
+/// is not affected: it gets the project's own `pool_size`.
 pub async fn engine_for_project(
     store: MemoryStore,
     backend: Option<EmbeddingBackend>,

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use tokio::io::BufReader;
 
-use super::protocol::{read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus};
+use super::protocol::{
+    read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, ModelSelection,
+};
 use super::PROTOCOL_VERSION;
 
 /// One-shot request over a fresh connection to a socket, without spawning.
@@ -160,6 +162,29 @@ impl DaemonHandle {
         }
     }
 
+    /// Renew this session's lease on the daemon's models for `models`.
+    ///
+    /// A `Ping` that carries a model selection: the daemon marks each model
+    /// the selection uses as in use, at its pool size (it never loads one for
+    /// a `Ping`), so a session that is open but quiet keeps its models
+    /// resident, and a model is unloaded once every session using it has
+    /// ended. An older daemon ignores the selection and treats this as a
+    /// plain `Ping`, so its models are never unloaded. Returns whether the
+    /// daemon answered.
+    pub async fn renew_lease(&self, models: ModelSelection) -> bool {
+        matches!(
+            self.request_with_timeout(
+                DaemonRequest {
+                    models: Some(models),
+                    op: DaemonOp::Ping,
+                },
+                Self::PING_TIMEOUT,
+            )
+            .await,
+            Ok(DaemonResponse::Pong { .. })
+        )
+    }
+
     /// True if a daemon answers `Ping` with a matching protocol version.
     pub(crate) async fn check_health(&self) -> bool {
         self.healthy().await
@@ -177,7 +202,7 @@ impl DaemonHandle {
             .await
         {
             Ok(DaemonResponse::Pong { version, build }) if version == PROTOCOL_VERSION => {
-                // Same wire, older binary: its cached provider bundles are from
+                // Same wire, older binary: its cached models are from
                 // the previous release, so it can serve vectors from a model
                 // this build no longer uses — silently, because the manifest
                 // fingerprint is computed client-side. Evict it the same way an

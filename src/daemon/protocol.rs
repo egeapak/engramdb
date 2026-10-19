@@ -17,7 +17,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// `4` added `Pong.build` and `DaemonStatus::{build, model_ids}`.
 ///
 /// **Also bump on a model-default change, not just a wire change.** The daemon
-/// caches provider bundles for its whole lifetime, so one started before an
+/// keeps a model loaded for as long as any session uses or leases it — days,
+/// with heartbeats — so one started before an
 /// upgrade keeps serving the *old* embedding model while the upgraded client
 /// fingerprints the new one. The wire was unchanged across 0.8.0 → 0.9.0, so
 /// nothing evicted the stale daemon: `reindex` re-embedded with the old model
@@ -37,8 +38,10 @@ pub const PROTOCOL_VERSION: &str = "5";
 #[derive(Debug, Clone, Deserialize)]
 pub struct DaemonRequest {
     /// The client's model selection. Required for the model ops (`Meta`,
-    /// `Embed`, `Classify`, `Rerank`, `Title`); `None` for `Ping`, `Status`
-    /// and `Shutdown`, which load no models.
+    /// `Embed`, `Classify`, `Rerank`, `Title`); `None` for `Status` and
+    /// `Shutdown`, which load no models. Optional on `Ping`: a heartbeat sends
+    /// its session's selection there to renew its lease on each model that
+    /// selection uses (the daemon never loads a model for a `Ping`).
     pub models: Option<ModelSelection>,
     /// The operation to perform.
     pub op: DaemonOp,
@@ -77,10 +80,11 @@ impl Serialize for DaemonRequest {
 /// project and checked against that project's manifest fingerprint — but the
 /// daemon is shared, so it must not decide it by reading a project directory
 /// named over the socket. The client has already loaded its project config;
-/// it sends these sections, and the daemon builds its provider-cache key
-/// (`ops::provider_cache_key`) from them. They are exactly the sections that
-/// key reads; fields the key ignores travel along and stay ignored, so two
-/// projects that differ only there still share one bundle.
+/// it sends these sections, and the daemon builds its per-model cache keys
+/// and pool-size demands (`ops::provider_cache::model_demands`) from them.
+/// They are exactly the sections those keys read; fields the keys ignore
+/// travel along and stay ignored, so two projects that differ only there
+/// still share every model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSelection {
     /// The embedding backend the client resolved (config + its own
@@ -244,9 +248,13 @@ pub struct DaemonStatus {
     pub uptime_secs: u64,
     /// Seconds since the daemon last served a request.
     pub idle_secs: u64,
-    /// Distinct model bundles (config signatures) currently resident.
+    /// Models currently loaded (each embedding, NLI, reranker or T5 model
+    /// counts once, however many projects share it). The name predates the
+    /// per-model cache, when this counted whole per-config bundles; it stays
+    /// so older clients still parse `Status`.
     pub bundles_loaded: usize,
-    /// Model ids currently resident, e.g. `["embed=onnx/all-MiniLM-L12-v2-u8"]`.
+    /// Model ids currently resident, with the pool size of a pooled model,
+    /// e.g. `["embed=onnx/all-MiniLM-L12-v2-u8 x4", "title=t5 x2"]`.
     /// Answers "which models is this daemon actually serving?".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_ids: Vec<String>,

@@ -88,7 +88,7 @@ pub async fn check_daemon() -> EnvironmentCheck {
     match super::query_status(&socket).await {
         Ok(Some(s)) => {
             details.push(format!(
-                "pid {}, uptime {}s, {} model bundle(s), {} requests served (cumulative)",
+                "pid {}, uptime {}s, {} model(s) loaded, {} requests served (cumulative)",
                 s.pid, s.uptime_secs, s.bundles_loaded, s.requests.total
             ));
             EnvironmentCheck {

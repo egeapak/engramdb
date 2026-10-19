@@ -89,6 +89,8 @@ metadata_vector = true         # embed "{title}. {summary}. tags: ..." as an ext
                                # (toggling changes vector composition: run `engramdb reindex --embeddings-only`)
 # pool_size = 2                # independent embedding sessions; omit to auto-size (cores/2) in daemon/MCP, 1 in one-shot CLI.
 #                               # Each pooled session gets cores/pool_size ONNX threads, so the pool never oversubscribes the CPU.
+#                               # The daemon shares one pool per embedding model between projects, sized to the largest
+#                               # pool_size an open project asks for, rounded up to a power of two (3 -> 4) and capped at cores.
 
 [scope_proximity]
 exact_file = 1.0
@@ -154,7 +156,8 @@ use_for_cli = true             # route model-needing CLI commands through a runn
 
 [title]
 strategy = "t5"                # "t5" (default) | "keyword" | "none"
-# pool_size = 2                # T5 sessions to pool when strategy = "t5"; omit to auto-size (2, clamped to cores)
+# pool_size = 2                # T5 sessions to pool when strategy = "t5"; omit to auto-size (2, clamped to cores).
+#                               # Shared between projects like the embedding pool: largest request, rounded up to a power of two.
 
 [security]
 allow_cross_project_writes = true   # allow MCP tools to write to a different registered project

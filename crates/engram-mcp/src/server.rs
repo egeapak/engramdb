@@ -1992,8 +1992,18 @@ impl EngramDbServer {
     /// one. Best-effort and non-blocking; a `None` resolve just means the next
     /// tick retries. No-op under `cfg(test)` (the daemon path is disabled there,
     /// mirroring [`Self::resolve_providers`]).
+    ///
+    /// Each tick also renews this session's lease on its **own** project's
+    /// models (`renew_lease`), so the daemon keeps them loaded while the
+    /// session is open. Models this session used for *another* project (a
+    /// tool call with a `project` argument, a group store) are not leased:
+    /// the daemon unloads them one idle window after their last request, and
+    /// the next such call reloads them. That second `Ping` per tick is also
+    /// counted in `daemon status`'s ping total.
     pub fn spawn_daemon_heartbeat(&self) {
         let daemon = Arc::clone(&self.daemon);
+        let backend = self.embedding_backend;
+        let config_path = self.effective_dir.join(".engramdb").join("config.toml");
         tokio::spawn(async move {
             loop {
                 // Re-read every tick so an edit to the global config applies
@@ -2007,13 +2017,26 @@ impl EngramDbServer {
                 }
                 let idle = global.idle_timeout_secs;
                 let socket = engramdb::daemon::resolve_socket(None, &global);
-                let _ = daemon
+                let handle = daemon
                     .get(
                         &socket,
                         idle,
                         engramdb::daemon::DaemonPolicy::ConnectOrSpawn,
                     )
                     .await;
+                // Renew this session's lease on its project's models,
+                // so the daemon keeps it loaded while the session is open and
+                // unloads it once the session (and every other one using the
+                // same models) has ended. Re-read the project config each
+                // tick, like the global one, so an edit moves the lease.
+                if let Some(handle) = handle {
+                    let config = load_config_or_default(&config_path).await;
+                    handle
+                        .renew_lease(engramdb::daemon::ModelSelection::from_config(
+                            &config, backend,
+                        ))
+                        .await;
+                }
                 tokio::time::sleep(engramdb::daemon::heartbeat_interval(idle)).await;
             }
         });
