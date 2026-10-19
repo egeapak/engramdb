@@ -99,7 +99,14 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
         } => {
             let (socket, idle) = run_settings(socket.as_deref(), idle_timeout, &cfg);
             redirect_stderr_to_log_unless_tty(&socket);
-            daemon::run_daemon(socket, idle).await
+            daemon::run_daemon_with_hooks(
+                socket,
+                idle,
+                Some(std::sync::Arc::new(
+                    crate::commands::hook::DaemonHookExecutor::default(),
+                )),
+            )
+            .await
         }
 
         DaemonCommand::Status { socket } => {

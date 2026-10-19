@@ -146,6 +146,14 @@ pub enum DaemonOp {
     Title { text: String },
     /// Report daemon status + cumulative request metrics. Loads no models.
     Status,
+    /// SPIKE: run a Claude Code hook handler in the daemon, against a warm
+    /// per-project store. `stdin` is the hook event JSON; the reply carries
+    /// what the hook would print. Loads no models.
+    Hook {
+        event: String,
+        dir: std::path::PathBuf,
+        stdin: String,
+    },
     /// Ask the daemon to exit. It acks, finishes flushing the response, then
     /// terminates (a fresh one is auto-spawned by the next MCP run).
     Shutdown,
@@ -182,6 +190,8 @@ pub enum DaemonResponse {
     Reranked { scores: Vec<(usize, f32)> },
     /// Reply to [`DaemonOp::Title`]: the generated title.
     Title { title: String },
+    /// Reply to [`DaemonOp::Hook`]: the hook's stdout, if any.
+    HookOutput { stdout: Option<String> },
     /// Reply to [`DaemonOp::Status`].
     Status(DaemonStatus),
     /// Reply to [`DaemonOp::Shutdown`] — sent immediately before the daemon

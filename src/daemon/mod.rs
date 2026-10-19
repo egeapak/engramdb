@@ -45,7 +45,7 @@ pub use resolve::{
     resolve_daemon_providers, resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy,
     InProcessFallback,
 };
-pub use server::run_daemon;
+pub use server::{run_daemon, run_daemon_with_hooks, HookExecutor};
 
 // The daemon tests drive the transport through the cross-platform `transport`
 // seam, so they build and run on both Unix (domain sockets) and Windows (named

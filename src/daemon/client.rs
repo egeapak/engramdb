@@ -83,6 +83,32 @@ fn build_is_older(daemon: Option<&str>, client: &str) -> bool {
     }
 }
 
+/// SPIKE: run a hook in an already-running daemon. One round trip, no Ping,
+/// never spawns. `Err` means the caller should run the hook in-process.
+pub async fn run_hook(
+    socket: &Path,
+    event: &str,
+    dir: &Path,
+    stdin: &str,
+) -> anyhow::Result<Option<String>> {
+    let handle = DaemonHandle {
+        socket: socket.to_path_buf(),
+    };
+    let req = DaemonRequest {
+        models: None,
+        op: super::protocol::DaemonOp::Hook {
+            event: event.to_string(),
+            dir: dir.to_path_buf(),
+            stdin: stdin.to_string(),
+        },
+    };
+    match handle.request(req).await? {
+        DaemonResponse::HookOutput { stdout } => Ok(stdout),
+        DaemonResponse::Error { message } => Err(anyhow::anyhow!(message)),
+        other => Err(anyhow::anyhow!("unexpected daemon reply: {other:?}")),
+    }
+}
+
 /// A connection factory for the shared daemon.
 ///
 /// Each request opens a short-lived connection (connecting to a Unix socket is

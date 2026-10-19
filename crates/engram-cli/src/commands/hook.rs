@@ -744,6 +744,65 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
 pub async fn run_hook_pre_tool_use(dir: &Path) -> Result<()> {
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
+    run_hook_pre_tool_use_with_input(dir, &input).await
+}
+
+/// SPIKE: send `pre-tool-use` to a running daemon; run it in-process when the
+/// daemon cannot take it.
+pub async fn run_hook_pre_tool_use_via_daemon(dir: &Path, socket: &Path) -> Result<()> {
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    match engramdb::daemon::client::run_hook(socket, "pre-tool-use", dir, &input).await {
+        Ok(stdout) => {
+            if let Some(json) = stdout {
+                println!("{}", json);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            tracing::debug!("daemon hook failed, running in-process: {e}");
+            run_hook_pre_tool_use_with_input(dir, &input).await
+        }
+    }
+}
+
+/// SPIKE: the daemon-side hook runner, with a per-project store cache.
+#[derive(Default)]
+pub struct DaemonHookExecutor {
+    stores: tokio::sync::Mutex<std::collections::HashMap<std::path::PathBuf, MemoryStore>>,
+}
+
+impl engramdb::daemon::HookExecutor for DaemonHookExecutor {
+    fn run<'a>(
+        &'a self,
+        event: &'a str,
+        dir: &'a Path,
+        stdin: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<String>>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            if event != "pre-tool-use" {
+                anyhow::bail!("spike: only pre-tool-use runs in the daemon");
+            }
+            let store = {
+                let mut stores = self.stores.lock().await;
+                match stores.get(dir) {
+                    Some(s) => s.clone(),
+                    None => {
+                        let s = MemoryStore::open(dir).await?;
+                        stores.insert(dir.to_path_buf(), s.clone());
+                        s
+                    }
+                }
+            };
+            process_hook_input(stdin, dir, store).await
+        })
+    }
+}
+
+async fn run_hook_pre_tool_use_with_input(dir: &Path, input: &str) -> Result<()> {
+    let input = input.to_string();
 
     // Open store — if it fails, exit silently (store may not be initialized)
     let store = match MemoryStore::open(dir).await {

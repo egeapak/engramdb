@@ -725,6 +725,14 @@ pub async fn run(cli: Cli) -> Result<()> {
             // (`--in-process` skips the daemon).
             let stats_name = command.as_ref().and_then(commands::hook::stats_name);
             let result = match command {
+                // SPIKE: opt-in daemon path, for A/B measurement.
+                Some(HookCommand::PreToolUse)
+                    if std::env::var_os("ENGRAMDB_HOOK_VIA_DAEMON").is_some()
+                        && global.daemon.enabled =>
+                {
+                    let socket = engramdb::daemon::resolve_socket(None, &global.daemon);
+                    commands::hook::run_hook_pre_tool_use_via_daemon(&dir, &socket).await
+                }
                 Some(HookCommand::PreToolUse) => commands::run_hook_pre_tool_use(&dir).await,
                 Some(HookCommand::SessionStart { min_criticality }) => {
                     commands::run_hook_session_start(&dir, min_criticality).await

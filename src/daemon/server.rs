@@ -24,8 +24,24 @@ const PERSIST_INTERVAL: Duration = Duration::from_secs(300);
 /// and its 60s request timeout; see the guard in `handle_conn`.
 const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// SPIKE: runs hook handlers inside the daemon.
+///
+/// The handlers live in the CLI crate, which depends on this one, so the
+/// daemon cannot call them directly; `engramdb daemon run` injects them.
+pub trait HookExecutor: Send + Sync {
+    fn run<'a>(
+        &'a self,
+        event: &'a str,
+        dir: &'a std::path::Path,
+        stdin: &'a str,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<String>>> + Send + 'a>,
+    >;
+}
+
 /// Shared per-process daemon state.
 struct Ctx {
+    hooks: Option<Arc<dyn HookExecutor>>,
     cache: ProviderCache,
     counters: Arc<Counters>,
     start: Instant,
@@ -72,6 +88,15 @@ impl Ctx {
 /// calling `process::exit` here keeps `run_daemon` drivable in-process by
 /// tests.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
+    run_daemon_with_hooks(socket, idle_timeout, None).await
+}
+
+/// [`run_daemon`] with a hook executor (SPIKE).
+pub async fn run_daemon_with_hooks(
+    socket: PathBuf,
+    idle_timeout: Duration,
+    hooks: Option<Arc<dyn HookExecutor>>,
+) -> anyhow::Result<()> {
     let listener: super::transport::Listener = match super::transport::bind_or_yield(&socket).await
     {
         Ok(Some(l)) => l,
@@ -108,6 +133,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         .unwrap_or_default();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let ctx = Arc::new(Ctx {
+        hooks,
         cache: ProviderCache::new(),
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
@@ -396,6 +422,19 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 last_ping_secs_ago,
             });
         }
+        DaemonOp::Hook { event, dir, stdin } => {
+            let Some(hooks) = ctx.hooks.as_ref() else {
+                return DaemonResponse::Error {
+                    message: "this daemon does not run hooks".to_string(),
+                };
+            };
+            return match hooks.run(&event, &dir, &stdin).await {
+                Ok(stdout) => DaemonResponse::HookOutput { stdout },
+                Err(e) => DaemonResponse::Error {
+                    message: e.to_string(),
+                },
+            };
+        }
         _ => {}
     }
 
@@ -416,7 +455,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
         .await;
 
     match req.op {
-        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
+        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown | DaemonOp::Hook { .. } => {
             unreachable!("handled above")
         }
         // Per-op counters are incremented only on a *successful* response, so
