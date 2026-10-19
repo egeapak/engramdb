@@ -28,7 +28,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 /// `5` replaced the request's `dir` + `backend` with [`ModelSelection`]: the
 /// client sends the model-affecting config itself, and the daemon no longer
 /// reads `<dir>/.engramdb/config.toml` for a path named over the socket.
-pub const PROTOCOL_VERSION: &str = "5";
+///
+/// `6` added [`DaemonOp::Hook`]: the daemon now runs Claude Code hooks, and
+/// for that one op it does read the named project (see `daemon::hooks`). A
+/// v5 daemon cannot parse the op, so a client must know it speaks to `6`
+/// before it sends one.
+pub const PROTOCOL_VERSION: &str = "6";
 
 /// A request frame: which models to use (for model ops) and the operation.
 ///
@@ -121,6 +126,36 @@ impl ModelSelection {
     }
 }
 
+/// A Claude Code hook invocation, as the client sends it to the daemon.
+///
+/// One variant per `engramdb hook <event>` subcommand, carrying that
+/// subcommand's arguments. `HookCommand::Unknown` has no counterpart: an
+/// unknown hook never leaves the client.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "hook", rename_all = "kebab-case")]
+pub enum HookCall {
+    PreToolUse,
+    SessionStart { min_criticality: f64 },
+    UserPromptSubmit,
+    PostToolUse,
+    SessionEnd,
+    PreCompact,
+}
+
+impl HookCall {
+    /// The subcommand name, which is also the name hook stats are kept under.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::PreToolUse => "pre-tool-use",
+            Self::SessionStart { .. } => "session-start",
+            Self::UserPromptSubmit => "user-prompt-submit",
+            Self::PostToolUse => "post-tool-use",
+            Self::SessionEnd => "session-end",
+            Self::PreCompact => "pre-compact",
+        }
+    }
+}
+
 /// The model operation a request is asking the daemon to perform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -146,6 +181,15 @@ pub enum DaemonOp {
     Title { text: String },
     /// Report daemon status + cumulative request metrics. Loads no models.
     Status,
+    /// Run a Claude Code hook against the daemon's warm store for the
+    /// project. `dir` is the absolute directory the client was invoked in;
+    /// `stdin` is the hook event JSON. Loads the embedding model only for
+    /// `user-prompt-submit`'s situation classifier.
+    Hook {
+        call: HookCall,
+        dir: std::path::PathBuf,
+        stdin: String,
+    },
     /// Ask the daemon to exit. It acks, finishes flushing the response, then
     /// terminates (a fresh one is auto-spawned by the next MCP run).
     Shutdown,
@@ -182,6 +226,9 @@ pub enum DaemonResponse {
     Reranked { scores: Vec<(usize, f32)> },
     /// Reply to [`DaemonOp::Title`]: the generated title.
     Title { title: String },
+    /// Reply to [`DaemonOp::Hook`]: what the hook prints, and whether its
+    /// handler succeeded.
+    HookOutput { stdout: Option<String>, ok: bool },
     /// Reply to [`DaemonOp::Status`].
     Status(DaemonStatus),
     /// Reply to [`DaemonOp::Shutdown`] — sent immediately before the daemon

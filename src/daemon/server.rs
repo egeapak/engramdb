@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 
+use super::hooks::{HookExecutor, HookTelemetry};
 use super::metrics::{self, Counters};
 use super::protocol::{
     read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, NliWire,
@@ -26,6 +27,10 @@ const CONN_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Shared per-process daemon state.
 struct Ctx {
+    /// Hook handlers injected by `engramdb daemon run`; `None` in a daemon
+    /// that only serves models (tests, embedders).
+    hooks: Option<Arc<dyn HookExecutor>>,
+    hook_telemetry: Arc<HookTelemetry>,
     cache: ProviderCache,
     counters: Arc<Counters>,
     start: Instant,
@@ -44,7 +49,10 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// Persist the request counters and write buffered hook events. Every
+    /// shutdown path calls this.
     async fn persist(&self) {
+        self.hook_telemetry.flush().await;
         metrics::persist(
             self.pid,
             self.start.elapsed().as_secs(),
@@ -72,6 +80,15 @@ impl Ctx {
 /// calling `process::exit` here keeps `run_daemon` drivable in-process by
 /// tests.
 pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Result<()> {
+    run_daemon_with_hooks(socket, idle_timeout, None).await
+}
+
+/// [`run_daemon`], also serving [`DaemonOp::Hook`] through `hooks`.
+pub async fn run_daemon_with_hooks(
+    socket: PathBuf,
+    idle_timeout: Duration,
+    hooks: Option<Arc<dyn HookExecutor>>,
+) -> anyhow::Result<()> {
     let listener: super::transport::Listener = match super::transport::bind_or_yield(&socket).await
     {
         Ok(Some(l)) => l,
@@ -107,7 +124,11 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
         .map(|p| p.snapshot)
         .unwrap_or_default();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let hook_telemetry = Arc::new(HookTelemetry::default());
+    super::hooks::spawn_flush_task(Arc::clone(&hook_telemetry), shutdown_rx.clone());
     let ctx = Arc::new(Ctx {
+        hooks,
+        hook_telemetry,
         cache: ProviderCache::new(),
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
@@ -396,6 +417,30 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 last_ping_secs_ago,
             });
         }
+        DaemonOp::Hook { call, dir, stdin } => {
+            let Some(hooks) = ctx.hooks.as_ref() else {
+                return DaemonResponse::Error {
+                    message: "this daemon does not run hooks".to_string(),
+                };
+            };
+            let started = Instant::now();
+            let run = hooks.run(&call, &dir, &stdin, &ctx.cache).await;
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            if let Some(project) = &run.project {
+                if let Some((pid, batch)) = ctx.hook_telemetry.record(&call, project, ms, run.ok) {
+                    tokio::spawn(async move { super::hooks::write_batch(&pid, &batch).await });
+                }
+                // After the reply would otherwise be delayed: spawned, and
+                // throttled per project.
+                if ctx.hook_telemetry.maintenance_due(&project.root) {
+                    tokio::spawn(super::hooks::maintain(project.clone()));
+                }
+            }
+            return DaemonResponse::HookOutput {
+                stdout: run.stdout,
+                ok: run.ok,
+            };
+        }
         _ => {}
     }
 
@@ -416,7 +461,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
         .await;
 
     match req.op {
-        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
+        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown | DaemonOp::Hook { .. } => {
             unreachable!("handled above")
         }
         // Per-op counters are incremented only on a *successful* response, so

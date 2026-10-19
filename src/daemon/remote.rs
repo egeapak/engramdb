@@ -29,6 +29,7 @@ fn response_kind(resp: &DaemonResponse) -> &'static str {
         DaemonResponse::Reranked { .. } => "reranked",
         DaemonResponse::Title { .. } => "title",
         DaemonResponse::Status(_) => "status",
+        DaemonResponse::HookOutput { .. } => "hook_output",
         DaemonResponse::ShuttingDown => "shutting_down",
         DaemonResponse::Error { .. } => "error",
     }

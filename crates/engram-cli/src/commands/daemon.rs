@@ -99,7 +99,17 @@ pub async fn run_daemon_cmd(command: DaemonCommand, formatter: &OutputFormatter)
         } => {
             let (socket, idle) = run_settings(socket.as_deref(), idle_timeout, &cfg);
             redirect_stderr_to_log_unless_tty(&socket);
-            daemon::run_daemon(socket, idle).await
+            // Hooks are served when the executor builds (it needs the
+            // registry path); a daemon that cannot serve them still serves
+            // models, and clients run their hooks in-process.
+            let hooks = match crate::commands::hook::DaemonHookExecutor::new() {
+                Ok(h) => Some(std::sync::Arc::new(h) as std::sync::Arc<dyn daemon::HookExecutor>),
+                Err(e) => {
+                    tracing::warn!("daemon: hooks disabled, registry unavailable: {e}");
+                    None
+                }
+            };
+            daemon::run_daemon_with_hooks(socket, idle, hooks).await
         }
 
         DaemonCommand::Status { socket } => {

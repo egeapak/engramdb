@@ -47,10 +47,6 @@ pub use gc::run_gc;
 pub use get::run_get;
 pub use groups::run_groups;
 pub use harvest::run_harvest;
-pub use hook::{
-    run_hook_post_tool_use, run_hook_pre_compact, run_hook_pre_tool_use, run_hook_session_end,
-    run_hook_session_start, run_hook_user_prompt_submit,
-};
 pub use init::run_init;
 pub use list::run_list;
 pub use migrate::run_migrate;
