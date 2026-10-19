@@ -1992,6 +1992,14 @@ impl EngramDbServer {
     /// one. Best-effort and non-blocking; a `None` resolve just means the next
     /// tick retries. No-op under `cfg(test)` (the daemon path is disabled there,
     /// mirroring [`Self::resolve_providers`]).
+    ///
+    /// Each tick also renews this session's lease on its **own** project's
+    /// models (`renew_lease`), so the daemon keeps them loaded while the
+    /// session is open. Models this session used for *another* project (a
+    /// tool call with a `project` argument, a group store) are not leased:
+    /// the daemon unloads them one idle window after their last request, and
+    /// the next such call reloads them. That second `Ping` per tick is also
+    /// counted in `daemon status`'s ping total.
     pub fn spawn_daemon_heartbeat(&self) {
         let daemon = Arc::clone(&self.daemon);
         let backend = self.embedding_backend;

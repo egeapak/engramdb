@@ -144,7 +144,7 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
 }
 
 /// [`run_daemon`] with explicit [`DaemonOptions`]. Tests and the
-/// memory-footprint bench use it to shorten the bundle window.
+/// memory-footprint bench use it to shorten the model window.
 pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow::Result<()> {
     run_daemon_with_cache(socket, options, ProviderCache::new()).await
 }
@@ -543,17 +543,19 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
     // (and thus the loaded model) matches what the client expects.
     let config = models.to_config();
     let providers = ctx.cache.get(&config, Some(models.backend)).await;
-    let resp = serve_model_op(req.op, providers, ctx).await;
+    let resp = serve_model_op(req.op, providers.clone(), ctx).await;
     // `get` stamped the models when this request started. Stamp them again
-    // now that it is done: a request longer than the window would otherwise
-    // leave a model that looks idle the moment it is released, and the
-    // sweeper would unload it in the gap before the next request.
+    // now that it is done, while `providers` still holds them: a request
+    // longer than the window would otherwise leave a model that looks idle
+    // the moment it is released, and the sweeper could unload it in the gap
+    // before the next request.
     ctx.cache.touch(&config, Some(models.backend)).await;
+    drop(providers);
     resp
 }
 
 /// Serve one model op (`Meta`, `Embed`, `Classify`, `Rerank`, `Title`) from
-/// a resolved bundle.
+/// the project's resolved providers.
 async fn serve_model_op(op: DaemonOp, providers: EngineProviders, ctx: &Ctx) -> DaemonResponse {
     match op {
         DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {

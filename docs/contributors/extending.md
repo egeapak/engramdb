@@ -46,7 +46,7 @@ Existing tools (`create_memory`, `query`) are the template — implement once in
 
 2. **Validate at deserialization.** If the field has a valid range (e.g. `0..=1.0`), add a custom deserializer or a `validate_*` call in a post-deser hook. Bad configs should fail loading, not at first use.
 
-3. **If the field affects model loading**, add it to `provider_cache_key` in `src/ops/mod.rs`. There's a test (`cache_key_is_deterministic_and_signature_sensitive`) that fails if you forget.
+3. **If the field affects model loading**, decide in `model_demands` (`src/ops/provider_cache.rs`) whether it is part of a model's identity (add it to `ModelKey`), a pool-size demand, or neither. `model_demands` destructures every model section exhaustively, so the build fails until you decide. If the field lives outside `[embeddings]`/`[nli]`/`[rerank]`/`[title]`, also add it to `daemon::ModelSelection`. The test `signature_tracks_model_selection_and_demands` pins the current fields.
 
 4. **Document in `docs/users/configuration.md`** — every section there should match `EngramConfig`.
 

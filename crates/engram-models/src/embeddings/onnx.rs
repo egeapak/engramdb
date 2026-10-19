@@ -20,9 +20,11 @@ use std::sync::{Arc, Mutex};
 /// the pool grows separately (`benches/memory_footprint.rs`,
 /// `daemon_batch_shapes`).
 ///
-/// 8 keeps the batched speed-up (8 texts batched were 1.6x faster than one
-/// at a time; `benches/parallel_simd.rs`, `embed_batching/*`) while bounding
-/// a run at 8 full-window chunks. Runs over a dynamically quantized model
+/// 8 keeps most of the batched speed-up — 8 short texts batched were 1.6x
+/// faster than one at a time, against 2.5x for 64 (`benches/parallel_simd.rs`,
+/// `embed_batching/*`, ~30-token texts; not measured for full-window
+/// chunks), so a 64-text pass costs roughly half again as long — while
+/// bounding a run at 8 texts of at most the model's window. Runs over a dynamically quantized model
 /// were already batch-dependent (a query embeds alone, documents in
 /// batches), so this changes vectors only within that same rounding.
 const MAX_TEXTS_PER_RUN: usize = 8;

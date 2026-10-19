@@ -131,7 +131,7 @@ tempfile = "3"
 # SO_PEERCRED peer checks (already in the dependency tree via tempfile et al.).
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
-# glibc `malloc_trim`: after the daemon unloads a model bundle, hand the freed
+# glibc `malloc_trim`: after the daemon unloads a model, hand the freed
 # heap back to the OS (already in the dependency tree via tempfile et al.).
 libc = "0.2"
 

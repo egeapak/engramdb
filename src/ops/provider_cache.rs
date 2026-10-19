@@ -31,7 +31,6 @@
 //! still holds the model.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -95,6 +94,7 @@ pub(crate) fn model_demands(
     config: &EngramConfig,
     backend_override: Option<EmbeddingBackend>,
     embedding_pool_size: usize,
+    cores: usize,
 ) -> Vec<(ModelKey, usize)> {
     let crate::types::config::EmbeddingsConfig {
         backend: config_backend,
@@ -161,7 +161,7 @@ pub(crate) fn model_demands(
     if *title_strategy == crate::title::TitleStrategy::T5 {
         demands.push((
             ModelKey::Title,
-            t5_pool_request(config, embedding_pool_size),
+            t5_pool_request(config, embedding_pool_size, cores),
         ));
     }
     demands
@@ -179,11 +179,16 @@ pub fn provider_cache_key(
     backend_override: Option<EmbeddingBackend>,
     embedding_pool_size: usize,
 ) -> String {
-    model_demands(config, backend_override, embedding_pool_size)
-        .iter()
-        .map(|(key, pool)| format!("{key:?}x{pool}"))
-        .collect::<Vec<_>>()
-        .join("|")
+    model_demands(
+        config,
+        backend_override,
+        embedding_pool_size,
+        crate::types::config::available_cores(),
+    )
+    .iter()
+    .map(|(key, pool)| format!("{key:?}x{pool}"))
+    .collect::<Vec<_>>()
+    .join("|")
 }
 
 /// The pool size a pooled model is loaded at for a requested size: the next
@@ -201,7 +206,24 @@ pub(crate) enum ModelHandle {
     Title(Arc<dyn TitleGenerator>),
 }
 
+/// Reports whether a model the cache let go of is still alive somewhere (an
+/// in-flight request may hold a replaced pool for a while).
+type Liveness = Box<dyn Fn() -> bool + Send>;
+
 impl ModelHandle {
+    fn liveness(&self) -> Liveness {
+        fn alive<T: ?Sized + Send + Sync + 'static>(p: &Arc<T>) -> Liveness {
+            let weak = Arc::downgrade(p);
+            Box::new(move || weak.strong_count() > 0)
+        }
+        match self {
+            ModelHandle::Embedding(p) => alive(p),
+            ModelHandle::Nli(p) => alive(p),
+            ModelHandle::Rerank(p) => alive(p),
+            ModelHandle::Title(p) => alive(p),
+        }
+    }
+
     /// True when a caller other than the cache still holds this model — an
     /// in-flight request, or an engine assembled from it.
     fn in_use(&self) -> bool {
@@ -219,8 +241,10 @@ impl ModelHandle {
 /// model on disk.
 pub(crate) trait ModelLoader: Send + Sync + 'static {
     /// Load `key` as a pool of `pool_size` sessions (ignored for unpooled
-    /// models). Blocking; `None` when the model is unavailable.
-    fn load(&self, key: &ModelKey, pool_size: usize) -> Option<ModelHandle>;
+    /// models), returning the model and how many sessions it really has — a
+    /// pool can come up smaller when a later session fails to load. Blocking;
+    /// `None` when the model is unavailable.
+    fn load(&self, key: &ModelKey, pool_size: usize) -> Option<(ModelHandle, usize)>;
 }
 
 /// Loads models with the same builders [`super::resolve_engine_providers`]
@@ -228,17 +252,19 @@ pub(crate) trait ModelLoader: Send + Sync + 'static {
 struct OnnxLoader;
 
 impl ModelLoader for OnnxLoader {
-    fn load(&self, key: &ModelKey, pool_size: usize) -> Option<ModelHandle> {
+    fn load(&self, key: &ModelKey, pool_size: usize) -> Option<(ModelHandle, usize)> {
         match key {
             ModelKey::Embedding {
                 backend,
                 provider,
                 dimensions,
             } => build_embedding_pool(provider, *backend, *dimensions, pool_size)
-                .map(ModelHandle::Embedding),
-            ModelKey::Nli { model } => build_nli(model).map(ModelHandle::Nli),
-            ModelKey::Rerank { model } => build_reranker(model).map(ModelHandle::Rerank),
-            ModelKey::Title => build_t5_pool(pool_size).map(ModelHandle::Title),
+                .map(|(p, n)| (ModelHandle::Embedding(p), n)),
+            ModelKey::Nli { model } => build_nli(model).map(|p| (ModelHandle::Nli(p), 1)),
+            ModelKey::Rerank { model } => {
+                build_reranker(model).map(|p| (ModelHandle::Rerank(p), 1))
+            }
+            ModelKey::Title => build_t5_pool(pool_size).map(|(p, n)| (ModelHandle::Title(p), n)),
         }
     }
 }
@@ -265,6 +291,9 @@ struct SlotState {
     demands: HashMap<usize, Instant>,
     /// A background resize is queued or running.
     resizing: bool,
+    /// When the last resize failed or came up short, so a broken model is
+    /// not rebuilt on every request.
+    resize_failed_at: Option<Instant>,
 }
 
 impl SlotState {
@@ -276,15 +305,20 @@ impl SlotState {
         let largest = self.demands.keys().copied().max().unwrap_or(1);
         pool_class(largest, cores)
     }
+
+    fn resize_backing_off(&self) -> bool {
+        self.resize_failed_at
+            .is_some_and(|t| t.elapsed() < FAILED_LOAD_RETRY_AFTER)
+    }
 }
 
 struct Inner {
     loader: Arc<dyn ModelLoader>,
     cores: usize,
     slots: Mutex<HashMap<ModelKey, Arc<Slot>>>,
-    /// Models (or replaced pools) let go of since the last
-    /// [`ProviderCache::take_released`] — the daemon trims the heap then.
-    released: AtomicUsize,
+    /// Models and replaced pools the cache let go of that may not be freed
+    /// yet. [`ProviderCache::take_released`] reports the ones that are.
+    retired: Mutex<Vec<Liveness>>,
 }
 
 /// Process-wide cache of loaded models, shared by every project whose config
@@ -322,7 +356,7 @@ impl ProviderCache {
                 loader,
                 cores,
                 slots: Mutex::new(HashMap::new()),
-                released: AtomicUsize::new(0),
+                retired: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -389,7 +423,7 @@ impl ProviderCache {
     ) -> EngineProviders {
         let pool_size = config.embeddings.resolved_pool_size(self.inner.cores);
         let mut providers = EngineProviders::default();
-        for (key, want) in model_demands(config, backend_override, pool_size) {
+        for (key, want) in model_demands(config, backend_override, pool_size, self.inner.cores) {
             let slot = self.slot(&key);
             match self.ensure(&slot, want).await {
                 Some(ModelHandle::Embedding(p)) => providers.embedding = Some(p),
@@ -408,13 +442,9 @@ impl ProviderCache {
         {
             let mut st = lock(&slot.state);
             st.demands.insert(want, Instant::now());
-            if let Some((handle, size)) = &st.loaded {
+            if let Some((handle, _)) = &st.loaded {
                 let handle = handle.clone();
-                // Grow in the background; shrinking is the sweeper's call.
-                if st.target(&slot.key, self.inner.cores) > *size && !st.resizing {
-                    st.resizing = true;
-                    self.spawn_resize(Arc::clone(slot));
-                }
+                self.maybe_resize(slot, &mut st);
                 return Some(handle);
             }
             if st
@@ -427,10 +457,13 @@ impl ProviderCache {
 
         let _single_flight = slot.load.lock().await;
         let target = {
-            let st = lock(&slot.state);
-            // Someone else loaded (or failed) while we waited.
+            let mut st = lock(&slot.state);
+            // Someone else loaded (or failed) while we waited. Our demand may
+            // be larger than what they loaded.
             if let Some((handle, _)) = &st.loaded {
-                return Some(handle.clone());
+                let handle = handle.clone();
+                self.maybe_resize(slot, &mut st);
+                return Some(handle);
             }
             if st
                 .failed_at
@@ -443,9 +476,15 @@ impl ProviderCache {
         let loaded = self.load_blocking(&slot.key, target).await;
         let mut st = lock(&slot.state);
         match loaded {
-            Some(handle) => {
-                st.loaded = Some((handle.clone(), target));
+            Some((handle, built)) => {
+                st.loaded = Some((handle.clone(), built));
                 st.failed_at = None;
+                if built < target {
+                    self.note_short_pool(slot, &mut st, target, built);
+                } else {
+                    // A larger demand may have arrived during the load.
+                    self.maybe_resize(slot, &mut st);
+                }
                 Some(handle)
             }
             None => {
@@ -460,7 +499,37 @@ impl ProviderCache {
         }
     }
 
-    async fn load_blocking(&self, key: &ModelKey, pool_size: usize) -> Option<ModelHandle> {
+    /// Start a background resize when the loaded pool is not at its target
+    /// size. Growing is started from requests; shrinking from the sweeper
+    /// (only it expires demands), but either direction is handled here.
+    fn maybe_resize(&self, slot: &Arc<Slot>, st: &mut SlotState) {
+        let Some((_, size)) = &st.loaded else {
+            return;
+        };
+        if st.resizing || st.resize_backing_off() || st.target(&slot.key, self.inner.cores) == *size
+        {
+            return;
+        }
+        st.resizing = true;
+        self.spawn_resize(Arc::clone(slot));
+    }
+
+    /// A pool came up with fewer sessions than asked for: keep it (it works),
+    /// report its real size, and back off before trying to grow it again.
+    fn note_short_pool(&self, slot: &Slot, st: &mut SlotState, target: usize, built: usize) {
+        tracing::warn!(
+            "{:?} loaded {built} of {target} sessions; will re-attempt after {}s",
+            slot.key,
+            FAILED_LOAD_RETRY_AFTER.as_secs()
+        );
+        st.resize_failed_at = Some(Instant::now());
+    }
+
+    async fn load_blocking(
+        &self,
+        key: &ModelKey,
+        pool_size: usize,
+    ) -> Option<(ModelHandle, usize)> {
         let loader = Arc::clone(&self.inner.loader);
         let key = key.clone();
         tokio::task::spawn_blocking(move || loader.load(&key, pool_size))
@@ -482,10 +551,9 @@ impl ProviderCache {
         let _single_flight = slot.load.lock().await;
         let target = {
             let mut st = lock(&slot.state);
+            let target = st.target(&slot.key, self.inner.cores);
             match &st.loaded {
-                Some((_, size)) if st.target(&slot.key, self.inner.cores) != *size => {
-                    st.target(&slot.key, self.inner.cores)
-                }
+                Some((_, size)) if *size != target => target,
                 // Unloaded meanwhile, or demand already back at this size.
                 _ => {
                     st.resizing = false;
@@ -493,33 +561,59 @@ impl ProviderCache {
                 }
             }
         };
+        // Built while the current pool keeps serving, so the two briefly
+        // coexist: a resize costs the old pool plus the new one at its peak.
         let rebuilt = self.load_blocking(&slot.key, target).await;
-        let mut st = lock(&slot.state);
-        st.resizing = false;
-        match rebuilt {
-            // Swap only if the model is still loaded: one evicted while this
-            // rebuild ran must stay unloaded. The replaced pool is freed when
-            // the last in-flight request holding it finishes.
-            Some(handle) if st.loaded.is_some() => {
-                st.loaded = Some((handle, target));
-                self.inner.released.fetch_add(1, Ordering::Relaxed);
+        let mut let_go = Vec::new();
+        {
+            let mut st = lock(&slot.state);
+            st.resizing = false;
+            match rebuilt {
+                Some((handle, built)) => {
+                    let current = st.loaded.as_ref().map(|(_, size)| *size);
+                    let now_target = st.target(&slot.key, self.inner.cores);
+                    match current {
+                        // Evicted while this rebuild ran: stay unloaded.
+                        None => let_go.push(handle),
+                        // Demand moved back to the current size meanwhile:
+                        // keep the pool that already fits.
+                        Some(size) if size == now_target => let_go.push(handle),
+                        Some(_) => {
+                            if let Some((old, _)) = st.loaded.replace((handle, built)) {
+                                let_go.push(old);
+                            }
+                            if built < target {
+                                self.note_short_pool(&slot, &mut st, target, built);
+                            } else {
+                                // Demand moved elsewhere meanwhile: go again.
+                                self.maybe_resize(&slot, &mut st);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        "resizing {:?} to {target} sessions failed; keeping the current pool \
+                         and re-attempting after {}s",
+                        slot.key,
+                        FAILED_LOAD_RETRY_AFTER.as_secs()
+                    );
+                    st.resize_failed_at = Some(Instant::now());
+                }
             }
-            Some(_) => {}
-            None => tracing::warn!(
-                "resizing {:?} to {target} sessions failed; keeping the current pool",
-                slot.key
-            ),
         }
+        self.retire(let_go).await;
     }
 
     /// Renew the demands `config` makes on the models it selects, without
-    /// loading anything.
+    /// loading anything — not even to grow a pool to a larger lease.
     ///
     /// This is the lease a live session renews: the daemon calls it for the
     /// model selection a heartbeat `Ping` carries (and after serving each
     /// request), so a session that is open but quiet keeps its models — at
-    /// its pool size — resident. Returns `false` when none of the models is
-    /// known to the cache.
+    /// its pool size — resident. A larger lease is recorded, and the next
+    /// request grows the pool to it. Returns whether any of the models is
+    /// loaded.
     pub async fn touch(
         &self,
         config: &EngramConfig,
@@ -528,13 +622,15 @@ impl ProviderCache {
         let pool_size = config.embeddings.resolved_pool_size(self.inner.cores);
         let slots = lock(&self.inner.slots);
         let mut known = false;
-        for (key, want) in model_demands(config, backend_override, pool_size) {
+        for (key, want) in model_demands(config, backend_override, pool_size, self.inner.cores) {
             if let Some(slot) = slots.get(&key) {
                 let mut st = lock(&slot.state);
+                // A model being loaded has demands but no handle yet; renew
+                // those too, so its first request's demand does not lapse.
                 if st.loaded.is_some() || !st.demands.is_empty() {
                     st.demands.insert(want, Instant::now());
-                    known = true;
                 }
+                known |= st.loaded.is_some();
             }
         }
         known
@@ -548,33 +644,51 @@ impl ProviderCache {
     /// it, with each session's memory arena — is released here. A model some
     /// caller still holds is kept, however old its last use: a request that
     /// runs longer than `max_idle` must not have its model dropped under it.
-    /// Shrinks run in the background. Returns how many models were unloaded.
+    /// Shrinks run in the background. Returns how many models were unloaded;
+    /// they are dropped (on a blocking thread) before this returns, so a
+    /// [`Self::take_released`] right after reports them.
     pub async fn evict_idle(&self, max_idle: Duration) -> usize {
-        let mut unloaded = 0;
+        let mut let_go = Vec::new();
         for slot in self.all_slots() {
             let mut st = lock(&slot.state);
             st.demands.retain(|_, at| at.elapsed() < max_idle);
-            let Some((handle, size)) = &st.loaded else {
+            let Some((handle, _)) = &st.loaded else {
                 continue;
             };
             if st.demands.is_empty() {
                 if !handle.in_use() {
-                    st.loaded = None;
-                    unloaded += 1;
-                    self.inner.released.fetch_add(1, Ordering::Relaxed);
+                    if let Some((handle, _)) = st.loaded.take() {
+                        let_go.push(handle);
+                    }
                 }
-            } else if st.target(&slot.key, self.inner.cores) < *size && !st.resizing {
-                st.resizing = true;
-                self.spawn_resize(Arc::clone(&slot));
+            } else {
+                self.maybe_resize(&slot, &mut st);
             }
         }
+        let unloaded = let_go.len();
+        self.retire(let_go).await;
         unloaded
     }
 
-    /// How many models or replaced pools were let go of since the last call.
-    /// The daemon returns freed memory to the OS when this is non-zero.
+    /// Drop models the cache let go of, off the async threads (tearing down
+    /// ONNX sessions frees hundreds of MiB), and remember them until they are
+    /// really freed — a replaced pool lives on while an in-flight request
+    /// holds it.
+    async fn retire(&self, handles: Vec<ModelHandle>) {
+        if handles.is_empty() {
+            return;
+        }
+        lock(&self.inner.retired).extend(handles.iter().map(ModelHandle::liveness));
+        let _ = tokio::task::spawn_blocking(move || drop(handles)).await;
+    }
+
+    /// How many models or replaced pools have been freed since the last
+    /// call. The daemon returns memory to the OS when this is non-zero.
     pub fn take_released(&self) -> usize {
-        self.inner.released.swap(0, Ordering::Relaxed)
+        let mut retired = lock(&self.inner.retired);
+        let before = retired.len();
+        retired.retain(|alive| alive());
+        before - retired.len()
     }
 }
 
@@ -630,12 +744,16 @@ pub(crate) mod test_support {
         }
     }
 
-    /// Records every load; loads fail while `fail` is set. NLI is never
-    /// loadable (tests don't need it).
+    /// Records every load; loads fail while `fail` is set, and pools come
+    /// up with at most `max_sessions` sessions when it is non-zero. Each load
+    /// sleeps `delay_ms`, so a test can overlap requests with a load. NLI is
+    /// never loadable (tests don't need it).
     #[derive(Default)]
     pub(crate) struct FakeLoader {
         pub loads: Mutex<Vec<(ModelKey, usize)>>,
         pub fail: std::sync::atomic::AtomicBool,
+        pub max_sessions: std::sync::atomic::AtomicUsize,
+        pub delay_ms: std::sync::atomic::AtomicU64,
     }
 
     impl FakeLoader {
@@ -649,19 +767,29 @@ pub(crate) mod test_support {
     }
 
     impl ModelLoader for FakeLoader {
-        fn load(&self, key: &ModelKey, pool_size: usize) -> Option<ModelHandle> {
+        fn load(&self, key: &ModelKey, pool_size: usize) -> Option<(ModelHandle, usize)> {
+            use std::sync::atomic::Ordering::SeqCst;
             lock(&self.loads).push((key.clone(), pool_size));
-            if self.fail.load(Ordering::SeqCst) {
+            let delay = self.delay_ms.load(SeqCst);
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+            if self.fail.load(SeqCst) {
                 return None;
             }
-            match key {
+            let built = match self.max_sessions.load(SeqCst) {
+                0 => pool_size,
+                cap => pool_size.min(cap),
+            };
+            let handle = match key {
                 ModelKey::Embedding { .. } => {
-                    Some(ModelHandle::Embedding(Arc::new(FakeEmbedding(pool_size))))
+                    ModelHandle::Embedding(Arc::new(FakeEmbedding(built)))
                 }
-                ModelKey::Title => Some(ModelHandle::Title(Arc::new(FakeTitle))),
-                ModelKey::Rerank { .. } => Some(ModelHandle::Rerank(Arc::new(FakeReranker))),
-                ModelKey::Nli { .. } => None,
-            }
+                ModelKey::Title => ModelHandle::Title(Arc::new(FakeTitle)),
+                ModelKey::Rerank { .. } => ModelHandle::Rerank(Arc::new(FakeReranker)),
+                ModelKey::Nli { .. } => return None,
+            };
+            Some((handle, built))
         }
     }
 }
@@ -670,6 +798,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::FakeLoader;
     use super::*;
+    use std::sync::atomic::Ordering;
 
     /// A config with only the embedding model, at an explicit pool size.
     fn embed_only(pool: usize) -> EngramConfig {
@@ -858,14 +987,17 @@ mod tests {
     async fn expired_demands_shrink_then_unload() {
         let (loader, cache) = fake_cache(8);
         let _ = embed_id(&cache, 4).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Wide margins: only the older demand may cross the window, however
+        // slowly the runner schedules the next two calls.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
         // A newer, smaller demand: the 4 is now the older one.
         let _ = embed_id(&cache, 2).await;
-        assert_eq!(cache.evict_idle(Duration::from_millis(150)).await, 0);
+        assert_eq!(cache.evict_idle(Duration::from_millis(600)).await, 0);
         eventually(|| loader.loads_of(is_embedding) == vec![4, 2]).await;
-        eventually(|| cache.inner.released.load(Ordering::Relaxed) == 1).await;
+        eventually(|| embedding_pool(&cache) == Some(2)).await;
+        // The replaced pool of 4 is freed once nothing holds it.
+        eventually(|| cache.take_released() == 1).await;
         assert_eq!(embed_id(&cache, 2).await, "test/fake-x2");
-        assert_eq!(cache.take_released(), 1);
 
         assert_eq!(cache.evict_idle(Duration::ZERO).await, 1);
         assert_eq!(cache.loaded_count().await, 0);
@@ -911,12 +1043,84 @@ mod tests {
         assert!(cache.get(&titled, None).await.title.is_some());
 
         // Age the failure past the window.
-        let slot = cache.slot(&model_demands(&embed_only(1), None, 1)[0].0);
-        let Some(old) = Instant::now().checked_sub(FAILED_LOAD_RETRY_AFTER * 2) else {
-            return;
-        };
+        let slot = cache.slot(&model_demands(&embed_only(1), None, 1, 8)[0].0);
+        let old = Instant::now()
+            .checked_sub(FAILED_LOAD_RETRY_AFTER + Duration::from_secs(1))
+            .expect("an instant 31 s in the past");
         lock(&slot.state).failed_at = Some(old);
         assert!(cache.get(&embed_only(1), None).await.embedding.is_some());
         assert_eq!(loader.loads_of(is_embedding).len(), 2);
+    }
+
+    /// Concurrent first requests for one model load it once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_requests_load_once() {
+        let (loader, cache) = fake_cache(8);
+        loader.delay_ms.store(100, Ordering::SeqCst);
+        let gets = (0..4).map(|_| {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get(&embed_only(2), None).await })
+        });
+        for got in futures_util::future::join_all(gets).await {
+            assert!(got.unwrap().embedding.is_some());
+        }
+        assert_eq!(loader.loads_of(is_embedding), vec![2]);
+    }
+
+    /// A request that waited on another's first load still gets its larger
+    /// pool: it starts the grow itself.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_larger_demand_arriving_during_the_first_load_grows_the_pool() {
+        let (loader, cache) = fake_cache(8);
+        loader.delay_ms.store(200, Ordering::SeqCst);
+        let first = {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get(&embed_only(2), None).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = cache.get(&embed_only(8), None).await;
+        let _ = first.await.unwrap();
+        eventually(|| embedding_pool(&cache) == Some(8)).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![2, 8]);
+    }
+
+    /// A grow that fails is not re-attempted on every request: it backs off
+    /// like a failed first load, and the current pool keeps serving.
+    #[tokio::test]
+    async fn a_failing_grow_backs_off() {
+        let (loader, cache) = fake_cache(8);
+        let _ = embed_id(&cache, 1).await;
+        loader.fail.store(true, Ordering::SeqCst);
+        let _ = embed_id(&cache, 4).await;
+        eventually(|| loader.loads_of(is_embedding).len() == 2).await;
+        eventually(|| {
+            !lock(
+                &cache
+                    .slot(&model_demands(&embed_only(1), None, 1, 8)[0].0)
+                    .state,
+            )
+            .resizing
+        })
+        .await;
+        for _ in 0..5 {
+            assert_eq!(embed_id(&cache, 4).await, "test/fake-x1");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![1, 4], "no retry storm");
+    }
+
+    /// A pool that comes up short reports its real size and is not rebuilt
+    /// on every request.
+    #[tokio::test]
+    async fn a_short_pool_reports_its_real_size_and_backs_off() {
+        let (loader, cache) = fake_cache(8);
+        loader.max_sessions.store(3, Ordering::SeqCst);
+        assert_eq!(embed_id(&cache, 8).await, "test/fake-x3");
+        assert_eq!(cache.model_ids().await, vec!["embed=test/fake-x3 x3"]);
+        for _ in 0..5 {
+            let _ = embed_id(&cache, 8).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![8], "no retry storm");
     }
 }

@@ -1798,6 +1798,10 @@ fn v4_daemon_can_parse_a_v5_ping() {
 }
 
 /// A daemon serving models from a fake loader, with a short model window.
+///
+/// `run_daemon_with_cache` fixes glibc's mmap threshold for the whole
+/// process; that is harmless here only because nextest runs every test in
+/// its own process.
 fn spawn_fake_daemon(
     socket: &std::path::Path,
     window: Duration,
@@ -1862,7 +1866,9 @@ fn embed_selection(pool: usize) -> ModelSelection {
 async fn idle_models_are_unloaded_and_leases_keep_them() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
-    let window = Duration::from_secs(1);
+    // Wide enough that a busy runner descheduling this test for a while
+    // cannot make a renewed lease look expired.
+    let window = Duration::from_secs(2);
     let loader = spawn_fake_daemon(&socket, window);
     let models = embed_selection(2);
 
@@ -1886,7 +1892,7 @@ async fn idle_models_are_unloaded_and_leases_keep_them() {
     let until = std::time::Instant::now() + window * 3;
     while std::time::Instant::now() < until {
         lease(&socket, &models).await;
-        tokio::time::sleep(window / 4).await;
+        tokio::time::sleep(window / 8).await;
     }
     assert_eq!(daemon_status(&socket).await.bundles_loaded, 1, "leased");
 
@@ -1909,7 +1915,7 @@ async fn idle_models_are_unloaded_and_leases_keep_them() {
 async fn projects_share_one_pool_sized_to_the_largest_request() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
-    let window = Duration::from_secs(1);
+    let window = Duration::from_secs(2);
     let loader = spawn_fake_daemon(&socket, window);
     let small = embed_selection(1);
     let large = embed_selection(3);
@@ -1918,6 +1924,9 @@ async fn projects_share_one_pool_sized_to_the_largest_request() {
     meta(&socket, &large).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
+        // Both projects stay open while the pool grows.
+        lease(&socket, &small).await;
+        lease(&socket, &large).await;
         let s = daemon_status(&socket).await;
         if s.model_ids == vec!["embed=test/fake-x4 x4".to_string()] {
             assert_eq!(s.bundles_loaded, 1, "one shared embedding model");
@@ -1936,7 +1945,7 @@ async fn projects_share_one_pool_sized_to_the_largest_request() {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "{:?}", s.model_ids);
-        tokio::time::sleep(window / 4).await;
+        tokio::time::sleep(window / 8).await;
     }
     let embed_loads: Vec<usize> =
         loader.loads_of(|k| matches!(k, crate::ops::provider_cache::ModelKey::Embedding { .. }));

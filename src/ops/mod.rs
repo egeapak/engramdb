@@ -594,9 +594,9 @@ fn embedding_session_intra_threads(pool_size: usize, cores: usize) -> Option<usi
 /// model, NLI classifier, cross-encoder reranker). Building these is the
 /// expensive part of engine construction — loading the embedding model alone
 /// is a ~240ms ONNX session init. The providers carry no per-store state, so
-/// a single bundle is safely shared across every project and every tool call
-/// for the lifetime of a process. The MCP server caches one bundle per
-/// distinct config signature so models load once instead of once per call.
+/// each model is safely shared across every project and every tool call:
+/// [`ProviderCache`] keeps one copy of each model per process and assembles a
+/// project's providers from those shared copies.
 #[derive(Clone, Default)]
 pub struct EngineProviders {
     pub embedding: Option<Arc<dyn EmbeddingProvider>>,
@@ -629,7 +629,8 @@ pub fn resolve_engine_providers(
             backend,
             config.embeddings.dimensions,
             embedding_pool_size,
-        ),
+        )
+        .map(|(pool, _)| pool),
         ..EngineProviders::default()
     };
     if config.nli.enabled {
@@ -639,7 +640,12 @@ pub fn resolve_engine_providers(
         providers.reranker = build_reranker(&config.rerank.model);
     }
     if config.title.strategy == crate::title::TitleStrategy::T5 {
-        providers.title = build_t5_pool(t5_pool_request(config, embedding_pool_size));
+        providers.title = build_t5_pool(t5_pool_request(
+            config,
+            embedding_pool_size,
+            crate::types::config::available_cores(),
+        ))
+        .map(|(pool, _)| pool);
     }
     providers
 }
@@ -647,13 +653,15 @@ pub fn resolve_engine_providers(
 /// The T5 title pool size a caller asks for. The CLI passes
 /// `embedding_pool_size == 1` (one-shot, no concurrency) — don't pay N× the
 /// heavy T5 load there; long-lived daemon / MCP callers (pool > 1) pool T5 too.
-pub(crate) fn t5_pool_request(config: &EngramConfig, embedding_pool_size: usize) -> usize {
+pub(crate) fn t5_pool_request(
+    config: &EngramConfig,
+    embedding_pool_size: usize,
+    cores: usize,
+) -> usize {
     if embedding_pool_size <= 1 {
         1
     } else {
-        config
-            .title
-            .resolved_pool_size(crate::types::config::available_cores())
+        config.title.resolved_pool_size(cores)
     }
 }
 
@@ -663,13 +671,14 @@ pub(crate) fn t5_pool_request(config: &EngramConfig, embedding_pool_size: usize)
 /// daemon serving N agent sessions) from all serializing behind one session's
 /// mutex. A first-load failure leaves the pool empty → embeddings disabled,
 /// exactly as a single-load failure behaved before; a later session failing
-/// just yields a smaller pool (graceful degradation). Blocking.
+/// just yields a smaller pool (graceful degradation). Returns the pool and
+/// how many sessions it really has. Blocking.
 pub(crate) fn build_embedding_pool(
     provider_name: &str,
     backend: EmbeddingBackend,
     configured_dimensions: usize,
     pool_size: usize,
-) -> Option<Arc<dyn EmbeddingProvider>> {
+) -> Option<(Arc<dyn EmbeddingProvider>, usize)> {
     let intra_threads =
         embedding_session_intra_threads(pool_size, crate::types::config::available_cores());
     let mut sessions = Vec::with_capacity(pool_size.max(1));
@@ -679,6 +688,7 @@ pub(crate) fn build_embedding_pool(
             None => break,
         }
     }
+    let built = sessions.len();
     let provider = crate::embeddings::PooledEmbeddingProvider::build(sessions)?;
     if provider.dimensions() != configured_dimensions {
         // Deliberately a warning, not a hard error: the Auto backend can
@@ -701,7 +711,7 @@ pub(crate) fn build_embedding_pool(
             provider.dimensions(),
         );
     }
-    Some(provider)
+    Some((provider, built))
 }
 
 /// Load the NLI contradiction model. ONNX-Runtime-only. Blocking.
@@ -755,8 +765,10 @@ pub(crate) fn build_reranker(model: &str) -> Option<Arc<dyn Reranker>> {
 /// concurrency, pooling it cuts the dominant create-path tail latency. Each
 /// session's intra_threads is reduced so `pool × intra ≤ cores` (T5 sessions
 /// are direct ORT sessions, unlike fastembed), capped at the Lever A sweet
-/// spot.
-pub(crate) fn build_t5_pool(pool_size: usize) -> Option<Arc<dyn crate::title::TitleGenerator>> {
+/// spot. Returns the pool and how many sessions it really has.
+pub(crate) fn build_t5_pool(
+    pool_size: usize,
+) -> Option<(Arc<dyn crate::title::TitleGenerator>, usize)> {
     #[cfg(feature = "onnxruntime")]
     {
         let cores = crate::types::config::available_cores();
@@ -772,11 +784,12 @@ pub(crate) fn build_t5_pool(pool_size: usize) -> Option<Arc<dyn crate::title::Ti
                 None => break,
             }
         }
+        let built = generators.len();
         let pool = crate::title::PooledTitleGenerator::build(generators);
         if pool.is_none() {
             eprintln!("Warning: title strategy 't5' configured but the T5 model is unavailable");
         }
-        pool
+        pool.map(|pool| (pool, built))
     }
     #[cfg(not(feature = "onnxruntime"))]
     {

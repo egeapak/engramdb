@@ -39,7 +39,7 @@ pub async fn engine_for(
 /// [`engine_for`] for commands that build engines for **several projects in one
 /// run** (`projects discover`, `projects repair`).
 ///
-/// Differs only in the in-process fallback: bundles are served from a shared
+/// Differs only in the in-process fallback: models are served from a shared
 /// [`ProviderCache`] so the model loads once for the whole batch instead of
 /// once per project. The in-process pool is pinned to a single session
 /// ([`InProcessFallback::SequentialPool`]) — `ProviderCache` is the MCP

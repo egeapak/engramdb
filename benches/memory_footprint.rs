@@ -43,7 +43,8 @@
 //! - `daemon_open_close` — several projects with *different* model
 //!   selections are opened, used, and closed, in cycles. After a close, RSS
 //!   must return near the level before the first open.
-//! - `mcp_store_open_close` — the MCP server's per-call path: open a project
+//! - `mcp_store_open_close` — the MCP server's per-call *store* path (no
+//!   model is involved; models are the daemon's): open a project
 //!   store, write, query, drop. Cycles over several projects must plateau.
 
 use std::path::{Path, PathBuf};
@@ -231,6 +232,15 @@ fn t5_project_config(pool_size: Option<usize>) -> EngramConfig {
     let mut c = project_config(pool_size);
     c.title.strategy = engramdb::title::TitleStrategy::T5;
     c
+}
+
+/// The shared pool size the daemon loads for a largest request of
+/// `requested` sessions: the next power of two, capped at this machine's
+/// cores (mirrors `ops::provider_cache::pool_class`).
+fn shared_pool(requested: usize) -> usize {
+    requested
+        .next_power_of_two()
+        .min(engramdb::types::config::available_cores().max(1))
 }
 
 fn project_config(pool_size: Option<usize>) -> EngramConfig {
@@ -560,25 +570,35 @@ async fn daemon_pool_grouping() -> Report {
     let p2 = d.open_project(&project_config(Some(2))).await;
     embed(&p2, &texts(2, 8, 60)).await;
     let grew_to_2 = d
-        .wait_for_embedding_pool(2, DEADLINE, || async { embed(&p2, &texts(3, 1, 12)).await })
+        .wait_for_embedding_pool(shared_pool(2), DEADLINE, || async {
+            embed(&p2, &texts(3, 1, 12)).await
+        })
         .await;
     for i in 0..4 {
         embed(&p2, &texts(10 + i, 8, 60)).await;
     }
     let with_two = r
-        .sample(d.pid(), "+ project asking for 2 (pool of 2)")
+        .sample(
+            d.pid(),
+            format!("+ project asking for 2 (pool of {})", shared_pool(2)),
+        )
         .await;
 
     let p3 = d.open_project(&project_config(Some(3))).await;
     embed(&p3, &texts(4, 8, 60)).await;
     let grew_to_4 = d
-        .wait_for_embedding_pool(4, DEADLINE, || async { embed(&p3, &texts(5, 1, 12)).await })
+        .wait_for_embedding_pool(shared_pool(3), DEADLINE, || async {
+            embed(&p3, &texts(5, 1, 12)).await
+        })
         .await;
     for i in 0..8 {
         embed(&p3, &texts(20 + i, 8, 60)).await;
     }
-    r.sample(d.pid(), "+ project asking for 3 (pool of 4)")
-        .await;
+    r.sample(
+        d.pid(),
+        format!("+ project asking for 3 (pool of {})", shared_pool(3)),
+    )
+    .await;
     r.notes.push(format!(
         "Loaded models with 3 projects open: {}",
         d.model_ids().await.join(", ")
@@ -587,12 +607,17 @@ async fn daemon_pool_grouping() -> Report {
     // Close the size-3 project; keep the other two leased with requests.
     drop(p3);
     let shrank_to_2 = d
-        .wait_for_embedding_pool(2, DEADLINE, || async {
+        .wait_for_embedding_pool(shared_pool(2), DEADLINE, || async {
             embed(&p1, &texts(6, 1, 12)).await;
             embed(&p2, &texts(7, 1, 12)).await;
         })
         .await;
-    let after_close = r.sample(d.pid(), "size-3 project closed (pool of 2)").await;
+    let after_close = r
+        .sample(
+            d.pid(),
+            format!("size-3 project closed (pool of {})", shared_pool(2)),
+        )
+        .await;
     r.notes.push(format!(
         "Loaded models after the close: {}",
         d.model_ids().await.join(", ")
@@ -602,9 +627,12 @@ async fn daemon_pool_grouping() -> Report {
     r.verdict = Some((
         grew_to_2 && grew_to_4 && shrank_to_2 && back <= TOLERANCE_MIB,
         format!(
-            "one shared pool grew to 2: {grew_to_2}, to 4: {grew_to_4}, shrank back to 2: \
-             {shrank_to_2}; after the close {back:+.1} MiB against the pool of 2 \
-             (bound {TOLERANCE_MIB} MiB)"
+            "one shared pool grew to {}: {grew_to_2}, to {}: {grew_to_4}, shrank back to {}: \
+             {shrank_to_2}; after the close {back:+.1} MiB against that smaller pool \
+             (bound {TOLERANCE_MIB} MiB)",
+            shared_pool(2),
+            shared_pool(3),
+            shared_pool(2),
         ),
     ));
     r
@@ -639,7 +667,8 @@ async fn daemon_open_close() -> Report {
     let d = DaemonChild::start().await;
     r.sample(d.pid(), "daemon started, nothing loaded").await;
     // Three projects whose configs differ in a model-affecting field
-    // (`[embeddings].pool_size`), so each needs its own bundle.
+    // (`[embeddings].pool_size`). They share one embedding pool, at the
+    // largest request rounded up to a power of two.
     let configs = [
         project_config(Some(1)),
         project_config(Some(2)),
@@ -659,7 +688,7 @@ async fn daemon_open_close() -> Report {
             // (A daemon without shared pools never reports one; give up
             // after a few seconds rather than stall every cycle.)
             let last = open.last().expect("three projects");
-            d.wait_for_embedding_pool(4, Duration::from_secs(10), || async {
+            d.wait_for_embedding_pool(shared_pool(3), Duration::from_secs(10), || async {
                 embed(last, &texts(cycle, 1, 12)).await
             })
             .await;
@@ -799,6 +828,10 @@ fn main() {
     let isolated = tempfile::TempDir::new().expect("isolation dir");
     std::env::set_var("ENGRAMDB_DATA_DIR", isolated.path().join("data"));
     std::env::set_var("ENGRAMDB_CONFIG_DIR", isolated.path().join("config"));
+    // Never download a model into the real cache: a model that is not
+    // staged is skipped (the embedding model) or reported missing in the
+    // scenario's "Loaded models" note (T5).
+    std::env::set_var("ENGRAMDB_OFFLINE", "1");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

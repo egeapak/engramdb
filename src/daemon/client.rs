@@ -162,14 +162,15 @@ impl DaemonHandle {
         }
     }
 
-    /// Renew this session's lease on the daemon's bundle for `models`.
+    /// Renew this session's lease on the daemon's models for `models`.
     ///
-    /// A `Ping` that carries a model selection: the daemon marks the matching
-    /// bundle as in use (it never loads one for a `Ping`), so a session that
-    /// is open but quiet keeps its models resident, and the bundle is
-    /// unloaded once every session using it has ended. An older daemon
-    /// ignores the selection and treats this as a plain `Ping`. Returns
-    /// whether the daemon answered.
+    /// A `Ping` that carries a model selection: the daemon marks each model
+    /// the selection uses as in use, at its pool size (it never loads one for
+    /// a `Ping`), so a session that is open but quiet keeps its models
+    /// resident, and a model is unloaded once every session using it has
+    /// ended. An older daemon ignores the selection and treats this as a
+    /// plain `Ping`, so its models are never unloaded. Returns whether the
+    /// daemon answered.
     pub async fn renew_lease(&self, models: ModelSelection) -> bool {
         matches!(
             self.request_with_timeout(
@@ -201,7 +202,7 @@ impl DaemonHandle {
             .await
         {
             Ok(DaemonResponse::Pong { version, build }) if version == PROTOCOL_VERSION => {
-                // Same wire, older binary: its cached provider bundles are from
+                // Same wire, older binary: its cached models are from
                 // the previous release, so it can serve vectors from a model
                 // this build no longer uses — silently, because the manifest
                 // fingerprint is computed client-side. Evict it the same way an
