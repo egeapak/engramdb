@@ -70,6 +70,27 @@ fn release_free_memory() {
     }
 }
 
+/// Fix glibc's mmap threshold for the daemon process.
+///
+/// glibc serves a large allocation with `mmap` (returned to the OS on free)
+/// only above a threshold, and raises that threshold — up to 32 MiB — each
+/// time such a block is freed. Unloading a model bundle frees exactly those
+/// blocks (weights, ONNX Runtime arenas), so after the first unload the
+/// next bundle's large blocks came from the heap instead, where they
+/// fragmented and `malloc_trim` could not return them: the open/close bench
+/// measured the heap after a close climbing from 19 to ~52 MiB over eight
+/// cycles (to ~105 MiB under heavier load). Setting the threshold
+/// explicitly turns the adjustment off; with it the heap after a close
+/// stayed at 19–22 MiB.
+fn fix_mmap_threshold() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: `mallopt` only sets an allocator parameter; it is safe to
+    // call at any time from any thread.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 256 * 1024);
+    }
+}
+
 /// Shared per-process daemon state.
 struct Ctx {
     cache: ProviderCache,
@@ -128,6 +149,7 @@ pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow:
         idle_timeout,
         bundle_idle_timeout,
     } = options;
+    fix_mmap_threshold();
     let listener: super::transport::Listener = match super::transport::bind_or_yield(&socket).await
     {
         Ok(Some(l)) => l,

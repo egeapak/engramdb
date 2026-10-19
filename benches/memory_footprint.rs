@@ -372,10 +372,15 @@ async fn daemon_request_churn() -> Report {
     }
     let warm = r.sample(d.pid(), "after 200 warm-up requests").await;
     let mut last = warm;
+    // Time the requests alone (not the samples' settle sleeps), so a change
+    // that trades speed for memory shows here too.
+    let mut busy = Duration::ZERO;
     for round in 1..=5 {
+        let started = Instant::now();
         for i in 0..400 {
             embed(&p, &texts(round * 1000 + i, 1 + i % 4, 8 + i % 24)).await;
         }
+        busy += started.elapsed();
         last = r
             .sample(d.pid(), format!("after {} more requests", round * 400))
             .await;
@@ -383,7 +388,11 @@ async fn daemon_request_churn() -> Report {
     let growth = last - warm;
     r.verdict = Some((
         growth <= TOLERANCE_MIB,
-        format!("{growth:+.1} MiB over 2000 requests after warm-up (bound {TOLERANCE_MIB} MiB)"),
+        format!(
+            "{growth:+.1} MiB over 2000 requests after warm-up (bound {TOLERANCE_MIB} MiB); \
+             {:.2} ms per request",
+            busy.as_secs_f64() * 1000.0 / 2000.0
+        ),
     ));
     r
 }
