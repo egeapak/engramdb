@@ -654,10 +654,22 @@ async fn daemon_open_close() -> Report {
                 embed(&p, &texts(cycle, 16, 60)).await;
                 open.push(p);
             }
+            // The shared pool grows to 4 in the background; sample it at
+            // its full size, with every session having served a request.
+            // (A daemon without shared pools never reports one; give up
+            // after a few seconds rather than stall every cycle.)
+            let last = open.last().expect("three projects");
+            d.wait_for_embedding_pool(4, Duration::from_secs(10), || async {
+                embed(last, &texts(cycle, 1, 12)).await
+            })
+            .await;
+            for i in 0..8 {
+                embed(last, &texts(cycle * 100 + i, 16, 60)).await;
+            }
             r.sample(d.pid(), format!("cycle {cycle}: 3 projects opened"))
                 .await;
             // A session that ends sends nothing: it stops renewing its
-            // lease, and the daemon unloads the bundle one window later.
+            // leases, and the daemon unloads its models one window later.
         }
         let waited = d.wait_until_unloaded().await;
         r.sample(
