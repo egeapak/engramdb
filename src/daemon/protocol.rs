@@ -185,6 +185,13 @@ pub enum DaemonOp {
     Title { text: String },
     /// Report daemon status + cumulative request metrics. Loads no models.
     Status,
+    /// Report the protocol and build, answered with a `Pong`. Unlike `Ping`
+    /// it is not a heartbeat: it is not counted in `ping_count` and renews
+    /// no lease. The hook client sends it before every `Hook`, which would
+    /// otherwise make `stats --daemon` count one heartbeat per hook. A daemon
+    /// older than protocol 6 cannot parse it and closes the connection, which
+    /// the client reads as `NotSent`.
+    Version,
     /// Run a Claude Code hook against the daemon's warm store for the
     /// project. `dir` is the absolute directory the client was invoked in;
     /// `stdin` is the hook event JSON. Loads the embedding model only for
@@ -207,7 +214,7 @@ pub enum DaemonOp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum DaemonResponse {
-    /// Reply to [`DaemonOp::Ping`].
+    /// Reply to [`DaemonOp::Ping`] and [`DaemonOp::Version`].
     Pong {
         /// Wire-protocol version ([`PROTOCOL_VERSION`]).
         version: String,

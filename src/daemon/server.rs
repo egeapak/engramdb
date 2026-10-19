@@ -522,6 +522,12 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 build: Some(env!("CARGO_PKG_VERSION").to_string()),
             };
         }
+        DaemonOp::Version => {
+            return DaemonResponse::Pong {
+                version: PROTOCOL_VERSION.to_string(),
+                build: Some(env!("CARGO_PKG_VERSION").to_string()),
+            };
+        }
         DaemonOp::Status => {
             ctx.counters.incr_status();
             let s = ctx.counters.snapshot();
@@ -617,7 +623,11 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
 /// the project's resolved providers.
 async fn serve_model_op(op: DaemonOp, providers: EngineProviders, ctx: &Ctx) -> DaemonResponse {
     match op {
-        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown | DaemonOp::Hook { .. } => {
+        DaemonOp::Ping
+        | DaemonOp::Version
+        | DaemonOp::Status
+        | DaemonOp::Shutdown
+        | DaemonOp::Hook { .. } => {
             unreachable!("handled above")
         }
         // Per-op counters are incremented only on a *successful* response, so

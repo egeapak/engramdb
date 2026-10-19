@@ -1873,7 +1873,7 @@ async fn delegate_hook_never_sends_to_an_older_protocol() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("old.sock");
     let log = spawn_recording_stub(socket.clone(), |op| match op {
-        DaemonOp::Ping => Some(DaemonResponse::Pong {
+        DaemonOp::Version => Some(DaemonResponse::Pong {
             version: "5".to_string(),
             build: Some("0.10.0".to_string()),
         }),
@@ -1897,7 +1897,7 @@ async fn delegate_hook_never_sends_to_an_older_build() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("stale.sock");
     let log = spawn_recording_stub(socket.clone(), |op| match op {
-        DaemonOp::Ping => Some(DaemonResponse::Pong {
+        DaemonOp::Version => Some(DaemonResponse::Pong {
             version: super::PROTOCOL_VERSION.to_string(),
             build: Some("0.0.1".to_string()),
         }),
@@ -1935,7 +1935,7 @@ async fn delegate_hook_with_a_lost_reply_is_lost() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("dying.sock");
     let log = spawn_recording_stub(socket.clone(), |op| match op {
-        DaemonOp::Ping => Some(current_pong()),
+        DaemonOp::Version => Some(current_pong()),
         _ => None,
     });
     wait_connectable(&socket).await;
@@ -2021,6 +2021,13 @@ async fn daemon_runs_hooks_and_flushes_hook_events_on_shutdown() {
         failed,
         super::HookDelegation::Served { ok: false, .. }
     ));
+
+    // The version check before each hook is not a heartbeat.
+    assert_eq!(
+        daemon_status(&socket).await.ping_count,
+        0,
+        "hook version checks must not count as heartbeat pings"
+    );
 
     // Not flushed yet: the timer is 60 s.
     assert!(

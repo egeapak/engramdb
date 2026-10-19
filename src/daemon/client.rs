@@ -55,7 +55,7 @@ const HOOK_PING_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Offer a hook to an already-running daemon. Never spawns one.
 ///
-/// One connection carries both requests: a `Ping` first, so the hook is
+/// One connection carries both requests: a `Version` first, so the hook is
 /// only sent to a daemon that speaks this protocol (a v5 daemon cannot parse
 /// the `Hook` op, and would drop the connection after reading it — which
 /// would look like [`HookDelegation::Lost`]), then the `Hook` itself.
@@ -77,7 +77,7 @@ pub async fn delegate_hook(
             &mut write_half,
             &DaemonRequest {
                 models: None,
-                op: DaemonOp::Ping,
+                op: DaemonOp::Version,
             },
         )
         .await?;
