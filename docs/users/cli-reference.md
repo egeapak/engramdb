@@ -195,6 +195,14 @@ Walks through memories one at a time and lets you keep, update, or delete each.
 
 By default it lists flagged memories (challenged / needs-review). `--stale-after-days` adds the **recency trigger**: active memories not updated in more than `N` days are folded in too (a bare `--stale-after-days` uses the 90-day default). Every keep/update resets a memory's clock, so this surfaces knowledge nobody has revisited in a while for you to confirm or retire.
 
+## `config` — effective configuration
+
+```bash
+engramdb config [--top-tags <N>] [--global]
+```
+
+Shows the effective config values and thresholds, and the store's most-used tags (`--top-tags`, default 20). `--global` shows the global store's config.
+
 ## `stats` — store statistics
 
 ```bash
@@ -630,6 +638,20 @@ so run `engramdb reindex`.
 and `doctor --fix` offers this repair.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
+
+## `groups` — shared group stores
+
+A group is a named store that several projects share. A project that subscribes to a group sees the group's memories in its own queries. Agents write to a group through MCP with `project: "group:<name>"`.
+
+```bash
+engramdb groups create <NAME>
+engramdb groups subscribe <NAME> [--yes]     # creates the group if needed
+engramdb groups unsubscribe <NAME> [--yes]
+engramdb groups list                         # all groups + this project's subscriptions
+engramdb groups members <NAME>               # subscribed projects + memory count
+```
+
+`subscribe` and `unsubscribe` print what changes (memory count, other subscribers) and ask first. To skip the prompt, pass `--yes`. JSON mode requires `--yes`.
 
 ## `harvest` — mine past Claude Code sessions
 

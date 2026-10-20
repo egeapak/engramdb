@@ -16,6 +16,7 @@
 - [projects-and-worktrees.md](./projects-and-worktrees.md) — project IDs, global store, worktree routing.
 - [embeddings.md](./embeddings.md) — models, backends, fingerprinting, reindex.
 - [daemon.md](./daemon.md) — shared embedding daemon.
+- Session harvest (mining past Claude Code sessions): [claude-code.md](./claude-code.md) (`SessionEnd`, `/engram:harvest`) and [cli-reference.md](./cli-reference.md) (`harvest`).
 - Epistemic classes, validity windows, and task-scoped memories: [cli-reference.md](./cli-reference.md) (`verify`, `task`, invalidation flags), [configuration.md](./configuration.md) (`[epistemic]`, situation weighting), and [claude-code.md](./claude-code.md) (the six hooks).
 
 ## [troubleshooting.md](./troubleshooting.md)
