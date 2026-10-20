@@ -117,7 +117,10 @@ model.
   plugin's hook wiring no longer blocks every prompt. `doctor` reports the
   mismatch.
 - **Larger, faster binary.** The release profile moved from `opt-level = "z"`
-  to `3` (about 112 MiB, was about 59 MiB; about 11% faster on bulk paths).
+  to `3`, which about doubles the binary (Linux x86-64: 123 MiB, was 60 MiB;
+  gzipped download 47 MiB, was 24 MiB) and makes bulk paths about 11% faster.
+  The growth is inlined and unrolled code, mostly in the LanceDB / DataFusion /
+  Arrow stack and in generic standard-library code.
 - **YAML memory files are read with `serde-saphyr`**, a pure-Rust parser that
   does not panic on malformed input. Existing files keep the same bytes.
 - **Faster bulk paths.** Batched updates and reads in `task complete`,
