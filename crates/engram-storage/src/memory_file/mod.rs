@@ -13,6 +13,7 @@
 mod helpers;
 pub mod v1;
 pub mod v2;
+mod yaml;
 
 #[cfg(test)]
 mod tests;

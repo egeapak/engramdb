@@ -18,9 +18,11 @@
 //! ```
 
 use super::helpers::{escape_body_text, parse_body_sections, split_frontmatter};
-use super::{MemoryParser, MemoryWriter};
+use super::{yaml, MemoryParser, MemoryWriter};
 use crate::error::Result;
 use engram_types::Memory;
+use serde::de::{Deserializer, IgnoredAny};
+use serde::Deserialize;
 
 /// Parser for the V1 (legacy) full-YAML-frontmatter format.
 pub struct V1Parser;
@@ -53,8 +55,20 @@ impl MemoryWriter for V1Writer {
 // Implementation
 // ---------------------------------------------------------------------------
 
+/// Records whether the frontmatter has an `epistemic` key at all, whatever
+/// its value (`null` included). Every other key is ignored.
+#[derive(Deserialize)]
+struct EpistemicKey {
+    #[serde(default, deserialize_with = "key_present")]
+    epistemic: bool,
+}
+
+fn key_present<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<bool, D::Error> {
+    IgnoredAny::deserialize(d).map(|_| true)
+}
+
 fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
-    let mut memory: Memory = serde_yaml_ng::from_str(frontmatter)?;
+    let mut memory: Memory = yaml::from_str(frontmatter)?;
     super::validate_id_shape(&memory.id)?;
 
     // Serde's field default for `epistemic` is `Fact`, but the authoritative
@@ -62,12 +76,8 @@ fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
     // (`Debug` ⇒ Observation, `Decision`/`Intent`/`Preference` ⇒ Decision).
     // Serde can't distinguish "key absent" from "key = fact", so re-check the
     // raw frontmatter for the key.
-    let has_epistemic_key = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(frontmatter)
-        .ok()
-        .and_then(|v| {
-            v.as_mapping()
-                .map(|m| m.contains_key(serde_yaml_ng::Value::from("epistemic")))
-        })
+    let has_epistemic_key = yaml::from_str::<EpistemicKey>(frontmatter)
+        .map(|k| k.epistemic)
         .unwrap_or(false);
     if !has_epistemic_key {
         memory.epistemic = memory.type_.default_epistemic();
@@ -98,7 +108,7 @@ fn write_v1(memory: &Memory) -> Result<String> {
     let mut yaml_memory = memory.clone();
     yaml_memory.content = String::new();
     yaml_memory.details = None;
-    let yaml = serde_yaml_ng::to_string(&yaml_memory)?;
+    let yaml = yaml::to_string(&yaml_memory)?;
     out.push_str(&yaml);
     out.push_str("---\n\n");
 

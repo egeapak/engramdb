@@ -21,7 +21,10 @@ pub enum StorageError {
     Io(#[from] io::Error),
 
     #[error("YAML parse error: {0}")]
-    Yaml(#[from] serde_yaml_ng::Error),
+    Yaml(#[from] serde_saphyr::DeserializeError),
+
+    #[error("YAML write error: {0}")]
+    YamlWrite(#[from] serde_saphyr::SerializeError),
 
     #[error("JSON parse error: {0}")]
     Json(#[from] serde_json::Error),

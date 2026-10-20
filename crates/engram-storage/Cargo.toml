@@ -26,7 +26,10 @@ arrow-schema = "58"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml_ng = "0.10"
+# Pure-Rust YAML for memory-file frontmatter and the hidden metadata block;
+# options are set in `memory_file/yaml.rs`. Only (de)serialization is needed,
+# so the default `comments` feature is off.
+serde-saphyr = { version = "2", default-features = false, features = ["serialize", "deserialize"] }
 toml = "1"
 
 uuid = { version = "1", features = ["v7", "serde"] }
