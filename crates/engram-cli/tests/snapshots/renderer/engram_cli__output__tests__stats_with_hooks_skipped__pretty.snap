@@ -1,0 +1,22 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total Memories: 0
+
+By Type:
+
+By Status:
+
+Expired: 0
+
+Average Criticality: 0.00
+
+Hook calls (since 2026-10-01 09:30:00 UTC):
+  pre-tool-use: 120 calls, p50 11.0 ms, p99 61.3 ms (avg 14.2, p95 30.5)
+    daemon: 100 calls, p50 10.2 ms, p99 30.4 ms
+    in-process: 20 calls, p50 21.5 ms, p99 61.3 ms
+  user-prompt-submit (daemon): 8 calls, 2 errors, p50 290.0 ms, p99 410.2 ms (avg 301.4, p95 410.2)
+  (3 unreadable log line(s) skipped)
+--- stderr ---

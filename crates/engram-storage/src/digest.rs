@@ -89,7 +89,7 @@ fn normalize_line_endings(text: &str) -> std::borrow::Cow<'_, str> {
 /// `sha2` 0.11's `finalize` returns a `hybrid_array::Array` with no `LowerHex`,
 /// so `{:x}` does not compile — the same gotcha `transcript_archive::hex_digest`,
 /// `project_id::hash_to_id` and `ops::harvest::index_text_digest` all document.
-fn hex_sha256(bytes: &[u8]) -> String {
+pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hasher

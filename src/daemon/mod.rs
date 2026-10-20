@@ -17,6 +17,7 @@
 
 pub mod client;
 pub mod doctor;
+pub mod hooks;
 // Where a daemon's diagnostics go. An auto-spawned daemon is detached and
 // outlives its parent, so its streams used to be discarded outright; this owns
 // the log file that replaces `/dev/null` and the rule for when a hand-run
@@ -37,15 +38,16 @@ pub mod server;
 // capability on every platform.
 mod transport;
 
-pub use client::{query_status, request_shutdown, DaemonHandle};
+pub use client::{delegate_hook, query_status, request_shutdown, DaemonHandle, HookDelegation};
 pub use doctor::check_daemon;
-pub use protocol::{DaemonStatus, ModelSelection, RequestCounts, PROTOCOL_VERSION};
+pub use hooks::{HookExecutor, HookProject, HookRun};
+pub use protocol::{DaemonStatus, HookCall, ModelSelection, RequestCounts, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use resolve::{
     resolve_daemon_providers, resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy,
     InProcessFallback,
 };
-pub use server::run_daemon;
+pub use server::{run_daemon, run_daemon_with_hooks};
 
 // The daemon tests drive the transport through the cross-platform `transport`
 // seam, so they build and run on both Unix (domain sockets) and Windows (named

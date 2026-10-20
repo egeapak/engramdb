@@ -387,6 +387,11 @@ pub async fn auto_maintain_with_engine(
                     }
                 }
 
+                // Hook stats: move the JSONL written by in-process hooks into
+                // `hook_events` — the backup for users without a daemon,
+                // which otherwise drains it.
+                maintain_hook_events(&store).await;
+
                 // 3) Compact fragments and prune old dataset versions. Every
                 // mutation commits a new immutable LanceDB version, so a
                 // create/update-heavy workload that never runs `gc`/`reindex`
@@ -548,6 +553,30 @@ async fn index_conversations(
             tracing::warn!("engramdb auto-maintenance: conversation indexing failed: {e}");
             None
         }
+    }
+}
+
+/// Hook stats housekeeping for one project: drain the JSONL that in-process
+/// hooks write into the `hook_events` table, then prune it by
+/// `[stats].retention_days` and compact it. The daemon drains as it serves
+/// hooks; `gc` and the throttled CLI maintenance pass call this as the
+/// backup for users who run without one. Best-effort: failures are logged.
+pub async fn maintain_hook_events(store: &crate::storage::MemoryStore) {
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
+    let config = crate::storage::config::load_config_or_default(&config_path).await;
+    let pid = &store.project_id;
+    if config.stats.enabled {
+        if let Err(e) = crate::telemetry::hooks::drain_to_table(&store.project_dir, pid).await {
+            tracing::warn!("hook stats: drain failed (non-fatal): {e}");
+        }
+    }
+    if let Some(days) = config.stats.retention_days {
+        if let Err(e) = crate::telemetry::hook_events::prune_hook_events(pid, days).await {
+            tracing::warn!("hook stats: prune failed (non-fatal): {e}");
+        }
+    }
+    if let Err(e) = crate::telemetry::hook_events::optimize_hook_events(pid).await {
+        tracing::debug!("hook stats: optimize failed (non-fatal): {e}");
     }
 }
 

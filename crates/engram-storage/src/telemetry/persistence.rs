@@ -73,7 +73,7 @@ const STARTUP_REPLAY_CAP: usize = 50_000;
 const FLUSH_BATCH_MAX: usize = 1_024;
 
 /// Resolve the LanceDB connection root for a project ID.
-fn lancedb_root(project_id: &str) -> Result<PathBuf> {
+pub(crate) fn lancedb_root(project_id: &str) -> Result<PathBuf> {
     if project_id == GLOBAL_PROJECT_ID {
         global_lancedb_dir().context("resolving global lancedb dir")
     } else {
@@ -95,7 +95,7 @@ static CONN_CACHE: LazyLock<Mutex<HashMap<String, Arc<Connection>>>> =
 /// the parent path is created by `MemoryStore::init`, so its absence is a
 /// signal that this project_id came from a typo or unregistered path
 /// override and we shouldn't silently create scaffolding for it.
-async fn connect_for(project_id: &str) -> Result<Arc<Connection>> {
+pub(crate) async fn connect_for(project_id: &str) -> Result<Arc<Connection>> {
     {
         let cache = CONN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(conn) = cache.get(project_id) {
@@ -250,7 +250,7 @@ async fn ensure_table(conn: &Connection) -> Result<Table> {
 /// `SYSTEM_PROJECT_ID` constant in `mcp::server`.
 const IN_MEMORY_ONLY_IDS: &[&str] = &["__system__"];
 
-fn is_in_memory_only(project_id: &str) -> bool {
+pub(crate) fn is_in_memory_only(project_id: &str) -> bool {
     IN_MEMORY_ONLY_IDS.contains(&project_id)
 }
 

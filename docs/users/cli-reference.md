@@ -208,6 +208,13 @@ engramdb stats [--all-projects] [--global] [--daemon]
 | `--global` | Stats for the global store. |
 | `--daemon` | Embedding-daemon request metrics (see [daemon.md](./daemon.md)). |
 
+Without `--global` or `--daemon`, the output also has a **Hook calls** section: for each `engramdb hook <event>`, how many times it ran in this project, how many returned an error, the average, and the p50 / p95 / p99 wall time in milliseconds. When a hook ran both through the daemon and in its own process, a per-path breakdown follows (`daemon` / `in-process`); with one path, the path is named on the hook's line.
+
+- **Where the data comes from.** Hooks the daemon runs are stored in the project's `hook_events` table (written every 60 s and when the daemon stops). Hooks that run in their own process append a line to `.engramdb/state/hook_stats.jsonl` (gitignored, machine-local), which the daemon, `gc` and the automatic maintenance pass move into `hook_events`. `stats` reads both, and counts nothing twice.
+- **Window.** Counts, errors and averages cover the last `[stats].retention_days` (90 by default). Percentiles use the newest 10,000 calls per hook and path.
+- **What the time measures.** For an in-process hook, from command start to handler return. For a daemon hook, the handler inside the daemon. Process start-up (about 6 ms on a release build) is not included in either.
+- Set `[stats].enabled = false` to stop recording. In `--json` output the section is the `hooks` key.
+
 ## `doctor` — health check
 
 ```bash

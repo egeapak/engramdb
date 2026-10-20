@@ -73,8 +73,8 @@ pub use harvest_pin::{
 };
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{
-    auto_compact, auto_maintain, auto_maintain_with_engine, maintenance_status,
-    maintenance_would_run, MaintenanceReport, MaintenanceStatus,
+    auto_compact, auto_maintain, auto_maintain_with_engine, maintain_hook_events,
+    maintenance_status, maintenance_would_run, MaintenanceReport, MaintenanceStatus,
 };
 pub use parsing::{
     parse_decay_strategy, parse_detail_level, parse_detail_level_or_default, parse_epistemic,

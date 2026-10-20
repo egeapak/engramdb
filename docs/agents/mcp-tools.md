@@ -290,6 +290,8 @@ Returns `{ task, demoted, kept_custom_decay, project_wide_review }`.
 | `all_projects?` | `bool` | Include per-project runtime telemetry breakdown. |
 | `project?` | `string` | See conventions. |
 
+When hooks have run in the project, the result also has a `hooks` object: `since` (oldest sample counted) and `by_hook`, which maps each hook name (`pre-tool-use`, `session-start`, `user-prompt-submit`, `post-tool-use`, `session-end`, `pre-compact`) to `calls`, `errors`, `avg`, `p50`, `p95` and `p99` (milliseconds), plus `by_path` with the same fields per execution path (`daemon`, `in_process`).
+
 ### `config` (read-only)
 
 **Effective config values and store vocabulary** — call this once at the start of a session to learn the limits and thresholds that govern the other tools, and to get a feel for what is already in memory. Returns:

@@ -22,6 +22,7 @@ use engramdb::types::{Epistemic, Generality, MemoryType, Situation};
 // Shared with the retrieval engine (which also relativizes `query.path`
 // itself); the hook still pre-relativizes so the injected context shows
 // repo-relative paths.
+use engramdb::daemon::HookCall;
 use engramdb::storage::paths::relativize_path;
 use engramdb::storage::{MemoryStore, RegistryBackend};
 use std::io::Read;
@@ -736,42 +737,27 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
     Ok(Some(json))
 }
 
-/// Run the PreToolUse hook handler.
-///
-/// Reads JSON from stdin, extracts `tool_input.file_path`,
-/// retrieves relevant memories for that path, and prints
-/// JSON with `additionalContext` to stdout.
-pub async fn run_hook_pre_tool_use(dir: &Path) -> Result<()> {
-    let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
-
-    // Open store — if it fails, exit silently (store may not be initialized)
-    let store = match MemoryStore::open(dir).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::debug!("Hook store open failed (non-fatal): {}", e);
-            return Ok(());
-        }
-    };
-
-    if let Some(json) = process_hook_input(&input, dir, store).await? {
-        println!("{}", json);
-    }
-
-    Ok(())
-}
-
 /// Core SessionStart logic: returns the JSON to print, or `None` if nothing
 /// should be surfaced (store not initialized, no memories above threshold,
 /// retrieval failed). Split from [`run_hook_session_start`] so the body is
 /// unit-testable without stdout capture — mirrors how `process_hook_input`
 /// backs `run_hook_pre_tool_use`.
+#[cfg(test)]
 async fn process_session_start(
     dir: &Path,
     min_criticality: f64,
     input: &str,
 ) -> Result<Option<String>> {
-    let store = match MemoryStore::open(dir).await {
+    process_session_start_in(dir, min_criticality, input, &StoreSource::Fresh).await
+}
+
+async fn process_session_start_in(
+    dir: &Path,
+    min_criticality: f64,
+    input: &str,
+    stores: &StoreSource<'_>,
+) -> Result<Option<String>> {
+    let store = match stores.open(dir).await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("Hook store open failed (non-fatal): {}", e);
@@ -843,22 +829,6 @@ async fn process_session_start(
     record_shown(&memories, &context, input, dir);
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
-}
-
-/// Run the SessionStart hook handler.
-///
-/// Retrieves high-criticality active memories and prints them as
-/// additionalContext JSON to stdout so they are surfaced at session start.
-pub async fn run_hook_session_start(dir: &Path, min_criticality: f64) -> Result<()> {
-    let min_criticality = sanitize_min_criticality(min_criticality);
-    // The event JSON carries the session id used for §8.3 task
-    // un-suppression; a missing/closed stdin degrades to no session id.
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    if let Some(json) = process_session_start(dir, min_criticality, &input).await? {
-        println!("{}", json);
-    }
-    Ok(())
 }
 
 /// Bound the SessionStart criticality threshold into `[0, 1]`, mapping NaN to
@@ -960,19 +930,18 @@ fn extract_prompt(input: &str) -> Option<String> {
 
 /// Where the UserPromptSubmit hook gets an embedding model for the situation
 /// classifier.
-pub(crate) enum SituationModel {
+pub enum SituationModel {
     /// A shared daemon that is already running, else the embedding model
     /// loaded in this process (production). Never spawns a daemon.
     DaemonOrInProcess,
     /// The embedding model loaded in this process, never the daemon
     /// (`--in-process` / `ENGRAMDB_IN_PROCESS`).
     InProcess,
-    /// Keyword tables only: tests that must not reach a daemon or load a
-    /// model on the developer's machine.
-    #[cfg(test)]
+    /// Keyword tables only: the daemon when no embedding model resolves, and
+    /// tests that must not reach a daemon or load a model on the developer's
+    /// machine.
     KeywordOnly,
-    /// A given provider (tests).
-    #[cfg(test)]
+    /// A given provider: the daemon's own loaded model, or a test stub.
     Provider(std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>),
 }
 
@@ -1015,9 +984,7 @@ async fn prompt_situation(
             }
         }
         SituationModel::InProcess => in_process_embedder(config).await,
-        #[cfg(test)]
         SituationModel::KeywordOnly => None,
-        #[cfg(test)]
         SituationModel::Provider(p) => Some(std::sync::Arc::clone(p)),
     };
     let Some(provider) = provider else {
@@ -1093,17 +1060,27 @@ async fn process_user_prompt_submit(input: &str, dir: &Path) -> Result<Option<St
     process_user_prompt_submit_with(input, dir, &SituationModel::KeywordOnly).await
 }
 
+#[cfg(test)]
 async fn process_user_prompt_submit_with(
     input: &str,
     dir: &Path,
     model: &SituationModel,
+) -> Result<Option<String>> {
+    process_user_prompt_submit_in(input, dir, model, &StoreSource::Fresh).await
+}
+
+async fn process_user_prompt_submit_in(
+    input: &str,
+    dir: &Path,
+    model: &SituationModel,
+    stores: &StoreSource<'_>,
 ) -> Result<Option<String>> {
     let prompt = match extract_prompt(input) {
         Some(p) => p,
         None => return Ok(None),
     };
 
-    let store = match MemoryStore::open(dir).await {
+    let store = match stores.open(dir).await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("Hook store open failed (non-fatal): {}", e);
@@ -1183,22 +1160,6 @@ async fn process_user_prompt_submit_with(
     record_shown(&memories, &context, input, dir);
     let json = build_hook_response("UserPromptSubmit", &context)?;
     Ok(Some(json))
-}
-
-/// Run the UserPromptSubmit hook handler. Malformed/empty stdin ⇒ exit 0
-/// with empty stdout, never an error.
-pub async fn run_hook_user_prompt_submit(dir: &Path, in_process: bool) -> Result<()> {
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    let model = if in_process {
-        SituationModel::InProcess
-    } else {
-        SituationModel::DaemonOrInProcess
-    };
-    if let Ok(Some(json)) = process_user_prompt_submit_with(&input, dir, &model).await {
-        println!("{}", json);
-    }
-    Ok(())
 }
 
 const RETRY_NOTE_PREFIX: &str = "[EngramDB]";
@@ -1475,7 +1436,16 @@ fn process_bash_retry(value: &serde_json::Value, dir: &Path) -> Option<String> {
 /// memories (this hook bypasses the query path, so it applies the §2.4
 /// default exclusion itself — an invalidated memory must not keep warning).
 /// Index-only: no memory files are loaded.
+#[cfg(test)]
 async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>> {
+    process_post_tool_use_in(input, dir, &StoreSource::Fresh).await
+}
+
+async fn process_post_tool_use_in(
+    input: &str,
+    dir: &Path,
+    stores: &StoreSource<'_>,
+) -> Result<Option<String>> {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
         if value.get("tool_name").and_then(|v| v.as_str()) == Some("Bash") {
             return Ok(process_bash_retry(&value, dir));
@@ -1502,7 +1472,7 @@ async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>
         return Ok(None);
     }
 
-    let store = match MemoryStore::open(dir).await {
+    let store = match stores.open(dir).await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("Hook store open failed (non-fatal): {}", e);
@@ -1554,28 +1524,19 @@ async fn process_post_tool_use(input: &str, dir: &Path) -> Result<Option<String>
     Ok(Some(json))
 }
 
-/// Run the PostToolUse hook handler (matcher `Write|Edit|MultiEdit|Bash`), which
-/// also serves PostToolUseFailure (matcher `Bash`).
-pub async fn run_hook_post_tool_use(dir: &Path) -> Result<()> {
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-    if let Ok(Some(json)) = process_post_tool_use(&input, dir).await {
-        println!("{}", json);
-    }
-    Ok(())
-}
-
-/// Run the SessionEnd hook handler (§8.5.3): housekeeping only, no context
+/// The SessionEnd hook (§8.5.3): housekeeping only, no context
 /// output, must never block session teardown. Clears the session→task
 /// mapping (§11.1) and, when `[epistemic].demote_on_session_end` is set and
 /// a mapping existed, runs the §11.2 demotion for that task. Best-effort:
 /// every failure is logged and swallowed. (Telemetry flushes live in the
 /// long-running MCP/daemon processes; a one-shot hook has none.)
-pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) -> Result<()> {
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
-
-    let Some(session_id) = extract_session_id(&input) else {
+async fn session_end(
+    input: &str,
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+    stores: &StoreSource<'_>,
+) -> Result<()> {
+    let Some(session_id) = extract_session_id(input) else {
         return Ok(());
     };
 
@@ -1595,7 +1556,7 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
         return Ok(());
     }
 
-    forget_shown(&input, dir);
+    forget_shown(input, dir);
     engramdb::storage::hook_seen::prune_stale(dir);
     if let Err(e) = engramdb::storage::bash_retry::clear(dir, &session_id) {
         tracing::debug!("SessionEnd retry record clear failed (non-fatal): {e}");
@@ -1613,7 +1574,7 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
         let config_path = dir.join(".engramdb").join("config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         if config.epistemic.demote_on_session_end {
-            match MemoryStore::open(dir).await {
+            match stores.open(dir).await {
                 Ok(store) => {
                     if let Err(e) =
                         engramdb::ops::task_complete(&store, &task, &config.epistemic).await
@@ -1630,7 +1591,7 @@ pub async fn run_hook_session_end(dir: &Path, registry: &dyn RegistryBackend) ->
     // (compression is proportional to transcript size), and if the hook is
     // killed by a timeout the task-mapping clear above must already have
     // happened. Bounded by `archive_max_transcript_bytes` as well.
-    archive_ending_session(dir, &session_id, &input, registry).await;
+    archive_ending_session(dir, &session_id, input, registry).await;
     Ok(())
 }
 
@@ -1831,18 +1792,17 @@ const PRE_COMPACT_REMINDER: &str = "[EngramDB] Context is about to be compacted.
 discoveries first: decisions (with their premise), hazards, and verified observations via the \
 memory create tool.";
 
-/// Run the PreCompact hook handler (§8.5.4): inject a short static reminder.
+/// The PreCompact hook (§8.5.4): inject a short static reminder.
 /// Same additionalContext contract as the other hooks; if the runtime
 /// ignores it for PreCompact events, the output is harmlessly dropped.
-pub async fn run_hook_pre_compact(dir: &Path) -> Result<()> {
-    let mut input = String::new();
-    let _ = std::io::stdin().read_to_string(&mut input);
+fn pre_compact(input: &str, dir: &Path) -> Result<Option<String>> {
     // Compaction drops the injected memories from the context, so the hooks
     // may show them again.
-    forget_shown(&input, dir);
-    let json = build_hook_response("PreCompact", PRE_COMPACT_REMINDER)?;
-    println!("{}", json);
-    Ok(())
+    forget_shown(input, dir);
+    Ok(Some(build_hook_response(
+        "PreCompact",
+        PRE_COMPACT_REMINDER,
+    )?))
 }
 
 /// Report a `hook` invocation this binary cannot serve, then let the caller
@@ -1877,10 +1837,517 @@ pub fn warn_unknown_hook(name: Option<&str>) {
     }
 }
 
+/// The wire form of a hook subcommand, or `None` for
+/// [`HookCommand::Unknown`] (and a bare `engramdb hook`): that name comes from
+/// a config this binary does not understand, so it is neither executed,
+/// delegated nor recorded — recording it would let any string become a stats
+/// key.
+///
+/// [`HookCommand::Unknown`]: crate::app::HookCommand::Unknown
+pub fn hook_call(command: &crate::app::HookCommand) -> Option<HookCall> {
+    use crate::app::HookCommand;
+    Some(match command {
+        HookCommand::PreToolUse => HookCall::PreToolUse,
+        // Sanitized here, before the call can cross the daemon socket: JSON
+        // has no NaN or infinity, so serde writes `null` and the daemon could
+        // not parse the frame.
+        HookCommand::SessionStart { min_criticality } => HookCall::SessionStart {
+            min_criticality: sanitize_min_criticality(*min_criticality),
+        },
+        HookCommand::UserPromptSubmit => HookCall::UserPromptSubmit,
+        HookCommand::PostToolUse => HookCall::PostToolUse,
+        HookCommand::SessionEnd => HookCall::SessionEnd,
+        HookCommand::PreCompact => HookCall::PreCompact,
+        HookCommand::Unknown(_) => return None,
+    })
+}
+
+/// Where a hook handler gets its store.
+pub enum StoreSource<'a> {
+    /// Open the store for this call (a hook running in its own process).
+    Fresh,
+    /// Reuse a warm store (the daemon).
+    Cached(&'a StoreCache),
+}
+
+impl StoreSource<'_> {
+    async fn open(&self, dir: &Path) -> engramdb::storage::Result<MemoryStore> {
+        match self {
+            Self::Fresh => MemoryStore::open(dir).await,
+            Self::Cached(cache) => cache.get_or_open(dir).await,
+        }
+    }
+}
+
+/// At most this many projects keep a warm store in the daemon.
+const STORE_CACHE_MAX: usize = 16;
+
+/// A project whose store has not been used for this long is dropped.
+const STORE_CACHE_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Warm stores, one per project root, kept by the daemon across hook calls.
+///
+/// Freshness does not depend on this cache: every LanceDB operation reopens
+/// its table and so reads the latest version, and memory files are read from
+/// disk on each query. What the cache keeps is the open connection and
+/// LanceDB's metadata caches. An entry is reopened when `config.toml` or
+/// `manifest.toml` changes (the store reads its dimensions from them at
+/// open), and refused when `.engramdb/` is gone.
+#[derive(Default)]
+pub struct StoreCache {
+    inner: tokio::sync::Mutex<std::collections::HashMap<std::path::PathBuf, CachedStore>>,
+}
+
+struct CachedStore {
+    store: MemoryStore,
+    stamp: StoreStamp,
+    last_used: std::time::Instant,
+}
+
+/// Modification times of the files a store reads at open.
+type StoreStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
+
+fn store_stamp(dir: &Path) -> StoreStamp {
+    let engramdb = engramdb::storage::paths::project_dir(dir);
+    let mtime = |name: &str| {
+        std::fs::metadata(engramdb.join(name))
+            .and_then(|m| m.modified())
+            .ok()
+    };
+    (mtime("config.toml"), mtime("manifest.toml"))
+}
+
+impl StoreCache {
+    async fn get_or_open(&self, dir: &Path) -> engramdb::storage::Result<MemoryStore> {
+        let key = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let stamp = store_stamp(&key);
+        {
+            let mut inner = self.inner.lock().await;
+            if !engramdb::storage::paths::project_dir(&key).is_dir() {
+                inner.remove(&key);
+                return Err(engramdb::storage::StorageError::NotInitialized);
+            }
+            let now = std::time::Instant::now();
+            inner.retain(|_, c| now.duration_since(c.last_used) < STORE_CACHE_IDLE);
+            if let Some(cached) = inner.get_mut(&key) {
+                if cached.stamp == stamp {
+                    cached.last_used = now;
+                    return Ok(cached.store.clone());
+                }
+            }
+        }
+        // Opened without the lock: an open can run a schema migration, and
+        // that must not stall every other project's hooks. Two hooks that
+        // miss at once both open; the second insert wins, which is harmless.
+        let store = MemoryStore::open(dir).await?;
+        let now = std::time::Instant::now();
+        let mut inner = self.inner.lock().await;
+        inner.insert(
+            key,
+            CachedStore {
+                store: store.clone(),
+                stamp,
+                last_used: now,
+            },
+        );
+        while inner.len() > STORE_CACHE_MAX {
+            let Some(oldest) = inner
+                .iter()
+                .min_by_key(|(_, c)| c.last_used)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            inner.remove(&oldest);
+        }
+        Ok(store)
+    }
+
+    /// Number of warm stores.
+    pub async fn len(&self) -> usize {
+        self.inner.lock().await.len()
+    }
+
+    /// Whether no store is warm.
+    pub async fn is_empty(&self) -> bool {
+        self.inner.lock().await.is_empty()
+    }
+}
+
+/// What differs between running a hook in its own process and in the daemon.
+pub struct HookEnv<'a> {
+    pub stores: StoreSource<'a>,
+    pub situation: SituationModel,
+}
+
+/// Run one hook and return what it would print. The single entry point for
+/// both paths: the hook's own process and the daemon.
+///
+/// Error behavior is each hook's own, unchanged: `pre-tool-use` and
+/// `session-start` return an error (recorded as `ok = false`; the caller
+/// still exits 0), the others swallow theirs.
+pub async fn execute_hook(
+    call: &HookCall,
+    dir: &Path,
+    input: &str,
+    env: &HookEnv<'_>,
+) -> Result<Option<String>> {
+    match call {
+        HookCall::PreToolUse => {
+            let store = match env.stores.open(dir).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("Hook store open failed (non-fatal): {}", e);
+                    return Ok(None);
+                }
+            };
+            process_hook_input(input, dir, store).await
+        }
+        HookCall::SessionStart { min_criticality } => {
+            let min_criticality = sanitize_min_criticality(*min_criticality);
+            process_session_start_in(dir, min_criticality, input, &env.stores).await
+        }
+        HookCall::UserPromptSubmit => {
+            Ok(
+                process_user_prompt_submit_in(input, dir, &env.situation, &env.stores)
+                    .await
+                    .unwrap_or(None),
+            )
+        }
+        HookCall::PostToolUse => Ok(process_post_tool_use_in(input, dir, &env.stores)
+            .await
+            .unwrap_or(None)),
+        HookCall::SessionEnd => {
+            run_session_end_isolated(input, dir).await?;
+            Ok(None)
+        }
+        HookCall::PreCompact => pre_compact(input, dir),
+    }
+}
+
+/// Run SessionEnd on its own thread, with its own single-threaded runtime.
+///
+/// Two reasons. Its future is not `Send` — rustc's higher-ranked `Send` check
+/// fails somewhere inside the harvest helpers it calls — and the daemon needs
+/// a `Send` future for every other hook. And it is the slow hook (it
+/// compresses the transcript), which should not occupy a daemon worker thread
+/// while other sessions' hooks wait. The cost is one thread per session end.
+/// It always opens a fresh store and the global registry: the store is only
+/// needed for the optional demotion, so a warm one buys nothing.
+async fn run_session_end_isolated(input: &str, dir: &Path) -> Result<()> {
+    let input = input.to_string();
+    let dir = dir.to_path_buf();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("engramdb-session-end".to_string())
+        .spawn(move || {
+            let result = (|| -> Result<()> {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(async {
+                    let registry = engramdb::storage::FileRegistry::global()?;
+                    session_end(&input, &dir, &registry, &StoreSource::Fresh).await
+                })
+            })();
+            let _ = tx.send(result);
+        })?;
+    rx.await
+        .map_err(|_| anyhow::anyhow!("session-end thread ended without a result"))?
+}
+
+/// Read the hook event from stdin. Hooks must never fail on their input, so
+/// a closed stdin reads as empty and invalid UTF-8 is replaced.
+pub fn read_stdin() -> String {
+    let mut bytes = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Print a hook's output: the hook protocol document Claude Code parses off
+/// stdout.
+pub fn print_hook_output(output: Option<&str>) {
+    if let Some(json) = output {
+        println!("{}", json);
+    }
+}
+
+/// Run a hook in this process and print its output.
+pub async fn run_in_process(
+    call: &HookCall,
+    dir: &Path,
+    input: &str,
+    in_process: bool,
+) -> Result<()> {
+    let env = HookEnv {
+        stores: StoreSource::Fresh,
+        situation: if in_process {
+            SituationModel::InProcess
+        } else {
+            SituationModel::DaemonOrInProcess
+        },
+    };
+    let output = execute_hook(call, dir, input, &env).await?;
+    print_hook_output(output.as_deref());
+    Ok(())
+}
+
+/// The hook runner `engramdb daemon run` injects into the daemon.
+///
+/// Mirrors what the hook's own process does before dispatch — worktree
+/// routing (failing open to the given directory, like `cli::run` does for
+/// hooks) and the project config — then runs [`execute_hook`] against warm
+/// stores, with the daemon's own embedding model for the situation
+/// classifier.
+pub struct DaemonHookExecutor {
+    stores: StoreCache,
+    registry: engramdb::storage::FileRegistry,
+}
+
+impl DaemonHookExecutor {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            stores: StoreCache::default(),
+            registry: engramdb::storage::FileRegistry::global()?,
+        })
+    }
+
+    async fn run_inner(
+        &self,
+        call: &HookCall,
+        dir: &Path,
+        stdin: &str,
+        models: &engramdb::ops::ProviderCache,
+    ) -> engramdb::daemon::HookRun {
+        let root = match engramdb::storage::worktree::resolve_project_root(dir, &self.registry)
+            .await
+        {
+            Ok(root) => root,
+            Err(e) => {
+                tracing::warn!(
+                    "engramdb hook (daemon): worktree resolution failed (continuing unresolved): {e}"
+                );
+                dir.to_path_buf()
+            }
+        };
+        let config_path = root.join(".engramdb").join("config.toml");
+        let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+        let situation =
+            if matches!(call, HookCall::UserPromptSubmit) && config.hooks.situation_classifier {
+                // The embedding model only, like the in-process path: `get`
+                // loads (and leases) every model a config enables, and T5,
+                // NLI or the reranker would hold up a cold prompt for seconds.
+                let mut embedding_only = config.clone();
+                embedding_only.nli.enabled = false;
+                embedding_only.rerank.enabled = false;
+                embedding_only.title.strategy = engramdb::title::TitleStrategy::Keyword;
+                let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
+                match models.get(&embedding_only, Some(backend)).await.embedding {
+                    Some(p) => SituationModel::Provider(p),
+                    None => SituationModel::KeywordOnly,
+                }
+            } else {
+                SituationModel::KeywordOnly
+            };
+        let env = HookEnv {
+            stores: StoreSource::Cached(&self.stores),
+            situation,
+        };
+        let (stdout, ok) = match execute_hook(call, &root, stdin, &env).await {
+            Ok(out) => (out, true),
+            Err(e) => {
+                tracing::warn!("engramdb hook (daemon) failed (continuing without context): {e}");
+                (None, false)
+            }
+        };
+        let engramdb_dir = engramdb::storage::paths::project_dir(&root);
+        let initialized =
+            engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
+        let project = initialized.then(|| engramdb::daemon::HookProject {
+            project_id: engramdb::storage::project_id::compute_project_id(&root),
+            root: root.clone(),
+            stats_enabled: config.stats.enabled,
+            retention_days: config.stats.retention_days,
+            session_id: extract_session_id(stdin),
+        });
+        engramdb::daemon::HookRun {
+            stdout,
+            ok,
+            project,
+        }
+    }
+}
+
+impl engramdb::daemon::HookExecutor for DaemonHookExecutor {
+    fn run<'a>(
+        &'a self,
+        call: &'a HookCall,
+        dir: &'a Path,
+        stdin: &'a str,
+        models: &'a engramdb::ops::ProviderCache,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = engramdb::daemon::HookRun> + Send + 'a>>
+    {
+        // Owned copies: borrowing the arguments straight into `run_inner`
+        // trips rustc's higher-ranked `Send` check on the nested futures.
+        let call = call.clone();
+        let dir = dir.to_path_buf();
+        let stdin = stdin.to_string();
+        Box::pin(async move { self.run_inner(&call, &dir, &stdin, models).await })
+    }
+}
+
+/// What happened to a hook offered to the daemon.
+pub enum Delegated {
+    /// The daemon ran it and its output is printed. Nothing else to do: the
+    /// daemon records the call in hook stats.
+    Done,
+    /// The daemon did not run it. Run it in this process.
+    RunHere,
+}
+
+/// Offer a hook to an already-running daemon, before this process does any
+/// project work of its own (registry, worktree routing, config). Never spawns
+/// a daemon.
+///
+/// Falls back ([`Delegated::RunHere`]) only when the daemon provably did not
+/// run the hook. When the request was sent and the reply was lost, the hook
+/// prints nothing and is not retried here: the daemon may have run it, and a
+/// second run could repeat its side effects (the "already shown" record, the
+/// SessionEnd archive). That call is also missing from hook stats unless the
+/// daemon recorded it — a declared loss.
+pub async fn delegate_to_daemon(call: &HookCall, dir: &Path, input: &str) -> Delegated {
+    let global = engramdb::storage::config::load_global_config_or_default().await;
+    // A hook is a CLI invocation: `use_for_cli = false` ("the CLI never
+    // contacts a daemon") keeps it in-process, like every other command.
+    if !global.daemon.enabled || !global.daemon.use_for_cli {
+        return Delegated::RunHere;
+    }
+    let socket = engramdb::daemon::resolve_socket(None, &global.daemon);
+    // The daemon's working directory is unrelated to ours.
+    let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    match engramdb::daemon::delegate_hook(&socket, call, &dir, input).await {
+        engramdb::daemon::HookDelegation::Served { stdout, .. } => {
+            print_hook_output(stdout.as_deref());
+            Delegated::Done
+        }
+        engramdb::daemon::HookDelegation::NotSent(why) => {
+            tracing::debug!(
+                "engramdb hook: daemon did not take `{}` ({why})",
+                call.name()
+            );
+            Delegated::RunHere
+        }
+        engramdb::daemon::HookDelegation::Lost(why) => {
+            tracing::warn!(
+                "engramdb hook: lost the daemon's reply for `{}` ({why}); continuing without context",
+                call.name()
+            );
+            Delegated::Done
+        }
+    }
+}
+
+/// The session id of a hook event, for hook stats.
+pub fn event_session_id(input: &str) -> Option<String> {
+    extract_session_id(input)
+}
+
+/// Record one hook call (count, wall time, outcome) in the project's hook
+/// log. Best-effort: a failure is logged at debug level and never changes the
+/// hook's exit status or output, which Claude Code parses.
+///
+/// `elapsed` runs from `cli::run` entry to handler return, so it includes
+/// worktree resolution and config loading but not process start-up (binary
+/// load, Tokio runtime start), which no in-process clock can see.
+pub fn record_hook_stats(
+    dir: &Path,
+    name: &str,
+    elapsed: std::time::Duration,
+    ok: bool,
+    session_id: Option<&str>,
+) {
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    if let Err(e) = engramdb::telemetry::hooks::record_hook_call(dir, name, ms, ok, session_id) {
+        tracing::debug!("hook stats: could not record `{name}` (non-fatal): {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
+
+    /// Every hook is recorded under its clap subcommand name, and no name is
+    /// missed: a new `HookCommand` variant must get a `hook_call` arm (the
+    /// match is exhaustive) whose name is the one Claude Code runs.
+    #[test]
+    fn hook_call_name_matches_every_subcommand_name() {
+        use crate::app::HookCommand;
+        let named: Vec<&str> = [
+            HookCommand::PreToolUse,
+            HookCommand::SessionStart {
+                min_criticality: 0.6,
+            },
+            HookCommand::UserPromptSubmit,
+            HookCommand::PostToolUse,
+            HookCommand::SessionEnd,
+            HookCommand::PreCompact,
+        ]
+        .iter()
+        .map(|c| hook_call(c).expect("known hook has a call").name())
+        .collect();
+        let mut supported = crate::supported_hook_subcommands();
+        supported.sort();
+        let mut named_sorted: Vec<String> = named.iter().map(|s| s.to_string()).collect();
+        named_sorted.sort();
+        assert_eq!(named_sorted, supported);
+        assert_eq!(
+            hook_call(&HookCommand::Unknown(vec!["x".into()])),
+            None,
+            "unknown hook names must never become stats keys"
+        );
+    }
+
+    #[test]
+    fn record_hook_stats_writes_one_line_in_an_initialized_project() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".engramdb/memories")).unwrap();
+        record_hook_stats(
+            tmp.path(),
+            "pre-tool-use",
+            std::time::Duration::from_millis(7),
+            true,
+            Some("sess-7"),
+        );
+        let loaded = engramdb::telemetry::hooks::load_hook_calls(tmp.path()).unwrap();
+        assert_eq!(loaded.records.len(), 1);
+        assert_eq!(loaded.records[0].hook, "pre-tool-use");
+        assert!((loaded.records[0].ms - 7.0).abs() < 1e-9);
+        assert_eq!(loaded.records[0].session_id.as_deref(), Some("sess-7"));
+    }
+
+    /// A NaN or infinite threshold is sanitized before the call is built, so
+    /// it survives the JSON round-trip to the daemon (JSON has no NaN; serde
+    /// writes `null`, which the daemon cannot parse).
+    #[test]
+    fn hook_call_sanitizes_min_criticality_for_the_wire() {
+        use crate::app::HookCommand;
+        for (raw, want) in [(f64::NAN, 0.6), (f64::INFINITY, 1.0), (-f64::INFINITY, 0.0)] {
+            let call = hook_call(&HookCommand::SessionStart {
+                min_criticality: raw,
+            })
+            .unwrap();
+            let json = serde_json::to_string(&call).unwrap();
+            let back: HookCall = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                back,
+                HookCall::SessionStart {
+                    min_criticality: want
+                },
+                "{raw} -> {json}"
+            );
+        }
+    }
 
     // Finding #21: the SessionStart criticality threshold must be sanitized.
     #[test]
@@ -4198,5 +4665,183 @@ mod hint_line_tests {
             .unwrap()
             .unwrap();
         assert!(!out.contains("task-scoped memories hidden"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod daemon_executor_tests {
+    use super::*;
+    use engramdb::storage::InMemoryRegistry;
+    use engramdb::types::{Memory, MemoryType, Provenance};
+    use tempfile::TempDir;
+
+    /// A store with two memories scoped to `src/main.rs`, which exists.
+    async fn setup_store_with_memories() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "").unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for (type_, summary, crit) in [
+            (MemoryType::Decision, "Use async everywhere", 0.9),
+            (MemoryType::Hazard, "Avoid blocking calls in async", 0.8),
+        ] {
+            let mut mem = Memory::new(type_, summary, "Details.", Provenance::human());
+            mem.physical = vec!["src/main.rs".to_string()];
+            mem.criticality = crit;
+            store.create(&mem).await.unwrap();
+        }
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        (tmp, store)
+    }
+
+    // ---- the daemon executor ---------------------------------------------------
+
+    fn read_event(path: &Path, session: &str) -> String {
+        serde_json::json!({
+            "tool_name": "Read",
+            "tool_input": { "file_path": path },
+            "session_id": session,
+        })
+        .to_string()
+    }
+
+    async fn daemon_run(
+        exec: &DaemonHookExecutor,
+        call: &HookCall,
+        dir: &Path,
+        input: &str,
+    ) -> engramdb::daemon::HookRun {
+        use engramdb::daemon::HookExecutor;
+        let models = engramdb::ops::ProviderCache::new();
+        exec.run(call, dir, input, &models).await
+    }
+
+    async fn in_process_run(call: &HookCall, dir: &Path, input: &str) -> Option<String> {
+        let env = HookEnv {
+            stores: StoreSource::Fresh,
+            situation: SituationModel::KeywordOnly,
+        };
+        execute_hook(call, dir, input, &env).await.unwrap()
+    }
+
+    /// The daemon prints exactly what the hook's own process prints. Distinct
+    /// session ids, so the "already shown" record cannot hide anything.
+    #[tokio::test]
+    async fn daemon_executor_output_matches_in_process() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let file = tmp.path().join("src/main.rs");
+        let exec = DaemonHookExecutor::new().unwrap();
+        for (call, input_a, input_b) in [
+            (
+                HookCall::PreToolUse,
+                read_event(&file, "a1"),
+                read_event(&file, "b1"),
+            ),
+            (
+                HookCall::SessionStart {
+                    min_criticality: 0.5,
+                },
+                "{\"session_id\":\"a2\"}".to_string(),
+                "{\"session_id\":\"b2\"}".to_string(),
+            ),
+            (
+                HookCall::PreCompact,
+                "{\"session_id\":\"a3\"}".to_string(),
+                "{\"session_id\":\"b3\"}".to_string(),
+            ),
+        ] {
+            let here = in_process_run(&call, tmp.path(), &input_a).await;
+            let run = daemon_run(&exec, &call, tmp.path(), &input_b).await;
+            assert!(here.is_some(), "{} printed nothing", call.name());
+            assert_eq!(run.stdout, here, "{} differs", call.name());
+            assert!(run.ok);
+        }
+    }
+
+    /// A store the daemon has cached still sees a memory written afterwards by
+    /// another process (every LanceDB call reopens its table).
+    #[tokio::test]
+    async fn daemon_executor_sees_writes_made_after_caching() {
+        let (tmp, store) = setup_store_with_memories().await;
+        let file = tmp.path().join("src/main.rs");
+        let exec = DaemonHookExecutor::new().unwrap();
+        let first = daemon_run(
+            &exec,
+            &HookCall::PreToolUse,
+            tmp.path(),
+            &read_event(&file, "f1"),
+        )
+        .await;
+        assert!(!first.stdout.unwrap().contains("Freshly written rule"));
+        assert_eq!(exec.stores.len().await, 1);
+
+        let mut mem = Memory::new(
+            MemoryType::Hazard,
+            "Freshly written rule",
+            "Written while the daemon held a warm store",
+            Provenance::human(),
+        );
+        mem.physical = vec!["src/main.rs".to_string()];
+        mem.criticality = 0.99;
+        store.create(&mem).await.unwrap();
+
+        let second = daemon_run(
+            &exec,
+            &HookCall::PreToolUse,
+            tmp.path(),
+            &read_event(&file, "f2"),
+        )
+        .await;
+        assert!(
+            second.stdout.unwrap().contains("Freshly written rule"),
+            "the warm store must not serve a stale table version"
+        );
+    }
+
+    #[tokio::test]
+    async fn store_cache_reopens_on_config_change_and_refuses_a_removed_store() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let cache = StoreCache::default();
+        cache.get_or_open(tmp.path()).await.unwrap();
+        let stamp = store_stamp(tmp.path());
+        // A config edit changes the stamp, so the next call reopens.
+        let config = tmp.path().join(".engramdb/config.toml");
+        let text = std::fs::read_to_string(&config).unwrap_or_default();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&config, format!("{text}\n")).unwrap();
+        assert_ne!(store_stamp(tmp.path()), stamp);
+        cache.get_or_open(tmp.path()).await.unwrap();
+        assert_eq!(cache.len().await, 1, "reopened in place, not duplicated");
+
+        std::fs::remove_dir_all(tmp.path().join(".engramdb")).unwrap();
+        assert!(cache.get_or_open(tmp.path()).await.is_err());
+        assert!(
+            cache.is_empty().await,
+            "a removed store is dropped from the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_executor_reports_a_project_only_when_initialized() {
+        let exec = DaemonHookExecutor::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let run = daemon_run(&exec, &HookCall::PreCompact, bare.path(), "{}").await;
+        assert!(run.project.is_none(), "an un-init'ed dir collects no stats");
+        assert!(run.stdout.is_some(), "the reminder still prints");
+
+        let (tmp, store) = setup_store_with_memories().await;
+        let run = daemon_run(
+            &exec,
+            &HookCall::PreCompact,
+            tmp.path(),
+            "{\"session_id\":\"sess-9\"}",
+        )
+        .await;
+        let project = run.project.expect("initialized store");
+        assert_eq!(project.project_id, store.project_id);
+        assert_eq!(project.session_id.as_deref(), Some("sess-9"));
+        assert!(project.stats_enabled);
     }
 }

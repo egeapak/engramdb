@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 
+use super::hooks::{HookExecutor, HookTelemetry};
 use super::metrics::{self, Counters};
 use super::protocol::{
     read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, DaemonStatus, NliWire,
@@ -94,6 +95,10 @@ fn fix_mmap_threshold() {
 
 /// Shared per-process daemon state.
 struct Ctx {
+    /// Hook handlers injected by `engramdb daemon run`; `None` in a daemon
+    /// that only serves models (tests, embedders).
+    hooks: Option<Arc<dyn HookExecutor>>,
+    hook_telemetry: Arc<HookTelemetry>,
     cache: ProviderCache,
     counters: Arc<Counters>,
     start: Instant,
@@ -112,7 +117,10 @@ struct Ctx {
 }
 
 impl Ctx {
+    /// Persist the request counters and write buffered hook events. Every
+    /// shutdown path calls this.
     async fn persist(&self) {
+        self.hook_telemetry.flush().await;
         metrics::persist(
             self.pid,
             self.start.elapsed().as_secs(),
@@ -146,15 +154,26 @@ pub async fn run_daemon(socket: PathBuf, idle_timeout: Duration) -> anyhow::Resu
 /// [`run_daemon`] with explicit [`DaemonOptions`]. Tests and the
 /// memory-footprint bench use it to shorten the model window.
 pub async fn run_daemon_with(socket: PathBuf, options: DaemonOptions) -> anyhow::Result<()> {
-    run_daemon_with_cache(socket, options, ProviderCache::new()).await
+    run_daemon_with_cache(socket, options, ProviderCache::new(), None).await
 }
 
-/// [`run_daemon_with`] serving models from `cache`. Tests pass a cache with a
-/// fake loader, so the daemon's model handling is testable without a model.
+/// [`run_daemon_with`], also serving [`DaemonOp::Hook`] through `hooks`.
+pub async fn run_daemon_with_hooks(
+    socket: PathBuf,
+    options: DaemonOptions,
+    hooks: Option<Arc<dyn HookExecutor>>,
+) -> anyhow::Result<()> {
+    run_daemon_with_cache(socket, options, ProviderCache::new(), hooks).await
+}
+
+/// [`run_daemon_with_hooks`] serving models from `cache`. Tests pass a cache
+/// with a fake loader, so the daemon's model handling is testable without a
+/// model.
 pub(crate) async fn run_daemon_with_cache(
     socket: PathBuf,
     options: DaemonOptions,
     cache: ProviderCache,
+    hooks: Option<Arc<dyn HookExecutor>>,
 ) -> anyhow::Result<()> {
     let DaemonOptions {
         idle_timeout,
@@ -196,7 +215,11 @@ pub(crate) async fn run_daemon_with_cache(
         .map(|p| p.snapshot)
         .unwrap_or_default();
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let hook_telemetry = Arc::new(HookTelemetry::default());
+    super::hooks::spawn_flush_task(Arc::clone(&hook_telemetry), shutdown_rx.clone());
     let ctx = Arc::new(Ctx {
+        hooks,
+        hook_telemetry,
         cache,
         counters: Arc::new(Counters::seeded(base)),
         start: Instant::now(),
@@ -499,6 +522,12 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 build: Some(env!("CARGO_PKG_VERSION").to_string()),
             };
         }
+        DaemonOp::Version => {
+            return DaemonResponse::Pong {
+                version: PROTOCOL_VERSION.to_string(),
+                build: Some(env!("CARGO_PKG_VERSION").to_string()),
+            };
+        }
         DaemonOp::Status => {
             ctx.counters.incr_status();
             let s = ctx.counters.snapshot();
@@ -526,6 +555,42 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 ping_count,
                 last_ping_secs_ago,
             });
+        }
+        DaemonOp::Hook {
+            call,
+            dir,
+            stdin,
+            env,
+        } => {
+            let Some(hooks) = ctx.hooks.as_ref() else {
+                return DaemonResponse::Error {
+                    message: "this daemon does not run hooks".to_string(),
+                };
+            };
+            // Refused before running anything, so the client runs it
+            // in-process (an `Error` reply is `NotSent`).
+            if let Some(key) = super::hooks::env_mismatch(&env, &super::hooks::hook_env()) {
+                return DaemonResponse::Error {
+                    message: format!("the daemon's {key} differs from this session's"),
+                };
+            }
+            let started = Instant::now();
+            let run = hooks.run(&call, &dir, &stdin, &ctx.cache).await;
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            if let Some(project) = &run.project {
+                if let Some((pid, batch)) = ctx.hook_telemetry.record(&call, project, ms, run.ok) {
+                    ctx.hook_telemetry.spawn_write(pid, batch);
+                }
+                // After the reply would otherwise be delayed: spawned, and
+                // throttled per project.
+                if ctx.hook_telemetry.maintenance_due(&project.root) {
+                    tokio::spawn(super::hooks::maintain(project.clone()));
+                }
+            }
+            return DaemonResponse::HookOutput {
+                stdout: run.stdout,
+                ok: run.ok,
+            };
         }
         _ => {}
     }
@@ -558,7 +623,11 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
 /// the project's resolved providers.
 async fn serve_model_op(op: DaemonOp, providers: EngineProviders, ctx: &Ctx) -> DaemonResponse {
     match op {
-        DaemonOp::Ping | DaemonOp::Status | DaemonOp::Shutdown => {
+        DaemonOp::Ping
+        | DaemonOp::Version
+        | DaemonOp::Status
+        | DaemonOp::Shutdown
+        | DaemonOp::Hook { .. } => {
             unreachable!("handled above")
         }
         // Per-op counters are incremented only on a *successful* response, so

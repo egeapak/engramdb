@@ -140,6 +140,8 @@ pub fn supported_hook_subcommands() -> Vec<String> {
 /// # Returns
 /// Ok(()) on success, or an error if the command fails
 pub async fn run(cli: Cli) -> Result<()> {
+    // Start of the hook-latency clock (see `commands::hook::record_hook_stats`).
+    let started = std::time::Instant::now();
     // Initialize tracing so warnings (e.g. from reindex) are visible.
     // Defaults to WARN level; override with RUST_LOG env var.
     //
@@ -181,6 +183,25 @@ pub async fn run(cli: Cli) -> Result<()> {
     // env var (any truthy string: "1", "true", "yes", "on").
     let in_process_flag = cli.in_process || engramdb::types::in_process_override();
     let spawn_daemon_flag = cli.spawn_daemon;
+
+    // Hooks go to a running daemon first, before any project work here
+    // (registry, worktree routing, config): the daemon does that itself
+    // against warm state. Only a hook the daemon provably did not run falls
+    // through to the in-process path below, with the stdin already read.
+    let mut hook_input: Option<String> = None;
+    if let Command::Hook { command: Some(cmd) } = &cli.command {
+        if let Some(call) = commands::hook::hook_call(cmd) {
+            let input = commands::hook::read_stdin();
+            if !in_process_flag {
+                if let commands::hook::Delegated::Done =
+                    commands::hook::delegate_to_daemon(&call, &dir, &input).await
+                {
+                    return Ok(());
+                }
+            }
+            hook_input = Some(input);
+        }
+    }
 
     // One process-wide DaemonCell — model-needing ops share it so the daemon
     // handle is cached and health-checked once per process, not per command.
@@ -721,36 +742,29 @@ pub async fn run(cli: Cli) -> Result<()> {
             // UserPromptSubmit's situation classifier: a running daemon's
             // embedding model, else the embedding model alone in-process
             // (`--in-process` skips the daemon).
-            let result = match command {
-                Some(HookCommand::PreToolUse) => commands::run_hook_pre_tool_use(&dir).await,
-                Some(HookCommand::SessionStart { min_criticality }) => {
-                    commands::run_hook_session_start(&dir, min_criticality).await
-                }
-                Some(HookCommand::UserPromptSubmit) => {
-                    commands::run_hook_user_prompt_submit(&dir, in_process_flag).await
-                }
-                Some(HookCommand::PostToolUse) => commands::run_hook_post_tool_use(&dir).await,
-                Some(HookCommand::SessionEnd) => {
-                    commands::run_hook_session_end(&dir, &registry).await
-                }
-                Some(HookCommand::PreCompact) => commands::run_hook_pre_compact(&dir).await,
-                // Version skew: the Claude Code hook config names an event this
-                // binary predates (or is a bare `engramdb hook`). Report on
-                // stderr and exit 0 — see `warn_unknown_hook`.
-                Some(HookCommand::Unknown(args)) => {
-                    commands::hook::warn_unknown_hook(args.first().map(String::as_str));
-                    Ok(())
-                }
-                None => {
-                    commands::hook::warn_unknown_hook(None);
-                    Ok(())
-                }
+            let Some(call) = command.as_ref().and_then(commands::hook::hook_call) else {
+                // Version skew: the Claude Code hook config names an event
+                // this binary predates (or is a bare `engramdb hook`). Report
+                // on stderr and exit 0 — see `warn_unknown_hook`.
+                let name = match &command {
+                    Some(HookCommand::Unknown(args)) => args.first().map(String::as_str),
+                    _ => None,
+                };
+                commands::hook::warn_unknown_hook(name);
+                return Ok(());
             };
-            // Fail-open backstop: a hook that exits non-zero surfaces as an
-            // error on EVERY Read/Write/Edit in Claude Code. The handlers
-            // already swallow store/retrieval errors themselves; this catches
-            // what they can't (non-UTF-8 stdin, JSON emit failures) so the
-            // hook degrades to "no context" instead of breaking the session.
+            let input = hook_input.take().unwrap_or_else(commands::hook::read_stdin);
+            let result = commands::hook::run_in_process(&call, &dir, &input, in_process_flag).await;
+            if config.stats.enabled {
+                let session_id = commands::hook::event_session_id(&input);
+                commands::hook::record_hook_stats(
+                    &dir,
+                    call.name(),
+                    started.elapsed(),
+                    result.is_ok(),
+                    session_id.as_deref(),
+                );
+            }
             if let Err(e) = result {
                 tracing::warn!("engramdb hook failed (continuing without context): {e}");
             }

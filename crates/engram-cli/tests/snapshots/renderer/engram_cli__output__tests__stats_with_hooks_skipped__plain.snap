@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total: 0
+Hook pre-tool-use: calls=120 errors=0 p50=11.0 p99=61.3
+Hook pre-tool-use daemon: calls=100 errors=0 p50=10.2 p99=30.4
+Hook pre-tool-use in_process: calls=20 errors=0 p50=21.5 p99=61.3
+Hook user-prompt-submit: calls=8 errors=2 p50=290.0 p99=410.2
+Hook user-prompt-submit daemon: calls=8 errors=2 p50=290.0 p99=410.2
+--- stderr ---

@@ -247,6 +247,8 @@ async fn run_maintenance(store: &MemoryStore, config: &EngramConfig) -> Option<G
     if let Err(e) = crate::telemetry::persistence::optimize_table(&store.project_id).await {
         tracing::warn!("gc: telemetry optimize failed (non-fatal): {e}");
     }
+    // Hook stats: drain the in-process hooks' JSONL, prune, compact.
+    super::maintenance::maintain_hook_events(store).await;
 
     // Memories + chunks tables: compaction plus version pruning is where
     // monotonic disk growth from create/update/delete is actually reclaimed.
