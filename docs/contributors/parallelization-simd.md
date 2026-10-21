@@ -223,6 +223,11 @@ arithmetic-bound code is a small slice.
 
 ### Per-package `opt-level` does not survive fat LTO
 
+> **Partly superseded.** This holds for small crates (the two-crate repro, and
+> EngramDB's own crates). It does **not** hold for large dependencies: building
+> sqlparser, DataFusion, Arrow and most of LanceDB at `"z"` shrinks the release
+> binary by 36%. See [Shrinking the LanceDB stack](#shrinking-the-lancedb-stack-per-package-z).
+
 The tempting middle ground is to raise `opt-level` for only the hot crates:
 
 ```toml
@@ -505,6 +510,32 @@ between that measurement and this one — so any percentage computed against it
 is measuring partly unrelated growth. Old absolute byte counts in this document
 should be treated as of-their-time; only the ratios carry, and only when both
 halves were measured together.
+
+### Shrinking the LanceDB stack: per-package `"z"`
+
+`cargo bloat` on the `3` build put most of the growth in the LanceDB stack
+(sqlparser 1.6 → 8.9 MiB; lance / datafusion / arrow / sqlparser together
+25.4 → 53.6 MiB of `.text`) and in standard-library generics instantiated by
+those crates. `std` itself cannot be targeted; it shrinks only when its
+callers are built for size. So `[profile.release.package.*]` sets
+`opt-level = "z"` for those crates. Linux x86-64, one commit, stripped:
+
+| build | binary | gzipped | vector query min / median |
+|---|---|---|---|
+| all `3` | 123.2 MiB | 46.8 MiB | 198 / 225 ms |
+| `"z"`: sqlparser, datafusion-\*, arrow-\* | 95.0 MiB | 37.5 MiB | within noise |
+| `"z"`: also every lance-\* and lancedb | 74.6 MiB | 29.5 MiB | 204 / 229 ms (2–3% slower) |
+| **`"z"`: as above, but `lance-linalg` and `lance-index` at `3` (ships)** | **78.6 MiB** | **31.0 MiB** | **194 / 226 ms** |
+| all `"z"` | 60.5 MiB | 23.9 MiB | 219 / 253 ms |
+
+Vector queries: 1,200 memories with vectors, queries embedded by one shared
+daemon so each process times only its own LanceDB work, 120 interleaved runs.
+`reindex --index-only`, `query --mode filter`, `list` and start-up measured
+the same for the shipped build and all `3` (25 interleaved rounds, noise about
+±5%).
+
+`lance-linalg` holds the vector-distance kernels and `lance-index` the index
+search; at `"z"` they are what made vector queries slower.
 
 ## Why not just use `fastembed::similarity`?
 
