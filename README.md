@@ -9,12 +9,13 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 
 ## Features
 
-- **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L6-v2 embeddings
+- **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L12-v2 embeddings
 - **Automatic context injection** — hooks surface relevant memories when your agent touches files
 - **Contradiction detection** — NLI-based challenge system flags conflicting information
 - **Epistemic classes** — every memory is a `fact`, `observation`, or `decision`, orthogonal to its type; retrieval reweights classes by situation (observations surface while debugging, decisions while designing)
 - **Bi-temporal validity** — outdated memories are invalidated instead of deleted; superseded and consolidated memories stay queryable as history
 - **Task-scoped memories** — declare the task a session works on; completing it demotes its task-scoped memories, re-confirmed ones get promoted, and `verify`/`doctor` re-check what's still accurate
+- **Session harvest** — the SessionEnd hook keeps a compressed copy of each Claude Code transcript; `/engram:harvest` mines past sessions for memories, and `harvest search` finds past conversations by meaning
 - **Memory lifecycle** — criticality scoring, garbage collection, compression of stale memories
 - **MCP server** — full Model Context Protocol integration (stdio and SSE transports)
 - **Shared embedding daemon** — auto-spawned and self-healing; loads models once machine-wide instead of once per agent session, stays resident while sessions are connected, and is usable from the CLI too, with graceful in-process fallback
@@ -107,6 +108,7 @@ When integrated with Claude Code:
 | `challenge` | Challenge a memory's validity |
 | `review` | Interactive review of challenged/stale memories |
 | `verify` | Confirm a memory is still accurate (stamps `verified_at`, clears doctor-flagged reviews) |
+| `config` | Show effective config values, thresholds, and top tags |
 | `task` | Declare or complete the task this session works on (`current`/`complete`) |
 | `stats` | Show store statistics |
 | `doctor` | Check environment and store health (`--fix` to repair, `validate` to test models) |
@@ -119,7 +121,9 @@ When integrated with Claude Code:
 | `daemon` | Manage the shared embedding daemon (`run`/`status`/`stop`/`restart`) |
 | `setup` | Set up Claude Code integration |
 | `hook` | Claude Code plugin hook handler |
-| `projects` | Manage registered EngramDB projects |
+| `projects` | Manage registered EngramDB projects (`list`/`info`/`discover`/`link`/`prune`/`repair`/…) |
+| `groups` | Manage shared group stores and project subscriptions |
+| `harvest` | Review, index, and search past Claude Code sessions (`list`/`show`/`mark`/`search`/`ledger`/…) |
 | `completions` | Generate shell completions |
 
 `stats --daemon` shows the embedding daemon's cumulative request metrics
@@ -175,6 +179,11 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `projects_info` | Info about a specific project (id, name, path, memory count, scopes) |
 | `projects_link` | Link a registered project as a sub-project of another |
 | `projects_unlink` | Remove a project's parent link, promoting it back to a root project |
+| `harvest_list` | List past Claude Code sessions not yet reviewed |
+| `harvest_show` | Digest one past session for mining |
+| `harvest_mark` | Record the review decision and link the memories it produced |
+| `harvest_search` | Search past conversations by meaning |
+| `harvest_ledger` | Read which sessions were reviewed and which still have an archived transcript |
 
 ## Configuration
 
@@ -215,7 +224,7 @@ idle_timeout_secs = 900   # Daemon reaps this long after the last session discon
 ### Embedding backends
 
 - **auto** (default) — tries ONNX first, falls back to Ollama
-- **onnx** — local ONNX Runtime with all-MiniLM-L6-v2, no external dependencies
+- **onnx** — local ONNX Runtime with all-MiniLM-L12-v2 (quantized); needs the ONNX Runtime library, nothing else
 - **ollama** — uses a local Ollama instance for embeddings (requires `ollama` running)
 
 Models are cached in the system cache directory (`~/Library/Caches/engramdb/models` on macOS).

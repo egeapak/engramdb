@@ -265,33 +265,165 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 
-# There is deliberately no `[profile.release.package.*]` block. There used to be
-# one: fourteen crates pinned to `opt-level = 3` while the profile itself was
-# `"z"`, which was the only thing standing between the hot paths (TOML
-# frontmatter, YAML for the legacy V1 format, Snowball stemming, glob matching)
-# and a build with no optimizer at all. The profile is now `3`, so every entry
-# named the value it already had.
+# The LanceDB stack is built for size, not speed. These crates (sqlparser,
+# DataFusion, Arrow and LanceDB) were most of what `opt-level = 3` added: on
+# Linux x86-64 the stripped binary is 123.2 MiB with every crate at `3` and
+# 78.6 MiB with this block (gzipped download 46.8 -> 31.0 MiB). EngramDB uses
+# the stack only as an embedded index, and its hot paths (TOML/YAML parsing,
+# stemming, our own crates) stay at `3`.
 #
-# Removing them was expected to be a no-op and is NOT: the binary is 7,264
-# bytes smaller and `.text` alone moves by 6,720 (0.007%), so codegen really
-# does differ even though no crate's `opt-level` changed. Cause not
-# established — most likely fat-LTO module ordering shifting inlining
-# decisions, since cargo's per-package profile feeds the crate metadata hash.
-# Speed is unaffected (138-140 ms either way on the reindex benchmark below),
-# and the direction is favourable, so this is recorded rather than chased.
+# Measured on HEAD of 0.10.0, 1,200 memories with vectors, queries embedded by
+# one shared daemon, interleaved runs:
 #
-# Two things from that block are still worth knowing before adding one back.
-# Per-package `opt-level` is only *mostly* effective under `lto = true`: a
-# minimal two-crate reproduction produced a byte-identical binary, and
-# overriding only EngramDB's core crate left no trace in the hot function,
-# because the fat-LTO link step re-runs the pipeline at the top-level
-# `opt-level` and can discard per-crate decisions. It evidently survives for
-# large dependency crates. And lance / datafusion / arrow / ort were
-# deliberately absent: they dominate binary size and their hot loops are
-# already inside compiled C++ or their own tuned Rust. Do not assume an
-# addition here helps; measure it.
+#                         all `3`             this block
+#   reindex --index-only  168 ms / 189 ms     162 ms / 189 ms   (min / median)
+#   query --mode filter   204 ms / 223 ms     204 ms / 227 ms
+#   query --mode rank     198 ms / 225 ms     194 ms / 226 ms   (n = 120)
+#
+# `lance-linalg` (vector distance) and `lance-index` stay at `3`: with them at
+# `"z"` too the binary is 74.6 MiB, but vector queries were 2-3% slower at
+# every percentile. Excluding them closed that gap for 4 MiB.
+#
+# Per-package `opt-level` DOES survive fat LTO for these crates. The earlier
+# finding that it does not came from a two-crate reproduction and from
+# overriding EngramDB's own small crates; it does not hold for large
+# dependencies. Measure any change to this list: the list is the full set of
+# matching names in `Cargo.lock`, so a new `lance-*` / `datafusion-*` /
+# `arrow-*` crate from an upgrade is built at `3` until it is added here.
+[profile.release.package.arrow]
+opt-level = "z"
+[profile.release.package.arrow-arith]
+opt-level = "z"
+[profile.release.package.arrow-array]
+opt-level = "z"
+[profile.release.package.arrow-buffer]
+opt-level = "z"
+[profile.release.package.arrow-cast]
+opt-level = "z"
+[profile.release.package.arrow-csv]
+opt-level = "z"
+[profile.release.package.arrow-data]
+opt-level = "z"
+[profile.release.package.arrow-ipc]
+opt-level = "z"
+[profile.release.package.arrow-json]
+opt-level = "z"
+[profile.release.package.arrow-ord]
+opt-level = "z"
+[profile.release.package.arrow-row]
+opt-level = "z"
+[profile.release.package.arrow-schema]
+opt-level = "z"
+[profile.release.package.arrow-select]
+opt-level = "z"
+[profile.release.package.arrow-string]
+opt-level = "z"
+[profile.release.package.datafusion]
+opt-level = "z"
+[profile.release.package.datafusion-catalog]
+opt-level = "z"
+[profile.release.package.datafusion-catalog-listing]
+opt-level = "z"
+[profile.release.package.datafusion-common]
+opt-level = "z"
+[profile.release.package.datafusion-common-runtime]
+opt-level = "z"
+[profile.release.package.datafusion-datasource]
+opt-level = "z"
+[profile.release.package.datafusion-datasource-arrow]
+opt-level = "z"
+[profile.release.package.datafusion-datasource-csv]
+opt-level = "z"
+[profile.release.package.datafusion-datasource-json]
+opt-level = "z"
+[profile.release.package.datafusion-doc]
+opt-level = "z"
+[profile.release.package.datafusion-execution]
+opt-level = "z"
+[profile.release.package.datafusion-expr]
+opt-level = "z"
+[profile.release.package.datafusion-expr-common]
+opt-level = "z"
+[profile.release.package.datafusion-functions]
+opt-level = "z"
+[profile.release.package.datafusion-functions-aggregate]
+opt-level = "z"
+[profile.release.package.datafusion-functions-aggregate-common]
+opt-level = "z"
+[profile.release.package.datafusion-functions-nested]
+opt-level = "z"
+[profile.release.package.datafusion-functions-table]
+opt-level = "z"
+[profile.release.package.datafusion-functions-window]
+opt-level = "z"
+[profile.release.package.datafusion-functions-window-common]
+opt-level = "z"
+[profile.release.package.datafusion-macros]
+opt-level = "z"
+[profile.release.package.datafusion-optimizer]
+opt-level = "z"
+[profile.release.package.datafusion-physical-expr]
+opt-level = "z"
+[profile.release.package.datafusion-physical-expr-adapter]
+opt-level = "z"
+[profile.release.package.datafusion-physical-expr-common]
+opt-level = "z"
+[profile.release.package.datafusion-physical-optimizer]
+opt-level = "z"
+[profile.release.package.datafusion-physical-plan]
+opt-level = "z"
+[profile.release.package.datafusion-pruning]
+opt-level = "z"
+[profile.release.package.datafusion-session]
+opt-level = "z"
+[profile.release.package.datafusion-sql]
+opt-level = "z"
+[profile.release.package.lance]
+opt-level = "z"
+[profile.release.package.lance-arrow]
+opt-level = "z"
+[profile.release.package.lance-arrow-scalar]
+opt-level = "z"
+[profile.release.package.lance-arrow-stats]
+opt-level = "z"
+[profile.release.package.lance-bitpacking]
+opt-level = "z"
+[profile.release.package.lance-core]
+opt-level = "z"
+[profile.release.package.lance-datafusion]
+opt-level = "z"
+[profile.release.package.lance-datagen]
+opt-level = "z"
+[profile.release.package.lance-derive]
+opt-level = "z"
+[profile.release.package.lance-encoding]
+opt-level = "z"
+[profile.release.package.lance-file]
+opt-level = "z"
+[profile.release.package.lance-index-core]
+opt-level = "z"
+[profile.release.package.lance-io]
+opt-level = "z"
+[profile.release.package.lance-namespace]
+opt-level = "z"
+[profile.release.package.lance-namespace-impls]
+opt-level = "z"
+[profile.release.package.lance-namespace-reqwest-client]
+opt-level = "z"
+[profile.release.package.lance-select]
+opt-level = "z"
+[profile.release.package.lance-table]
+opt-level = "z"
+[profile.release.package.lance-tokenizer]
+opt-level = "z"
+[profile.release.package.lancedb]
+opt-level = "z"
+[profile.release.package.sqlparser]
+opt-level = "z"
 
-# `opt-level` MUST match `[profile.release]`. It used to be 2 while release
+# `opt-level` MUST match `[profile.release]`. (The per-package `"z"` block above
+# is not mirrored: benchmarks here measure EngramDB's code, not the LanceDB
+# stack. Measure query speed on a real release build.) It used to be 2 while release
 # shipped "z", which does not merely make benchmarks optimistic — for
 # codegen-sensitive code the two levels *rank candidates differently*. A dot
 # product hand-unrolled into independent accumulators measured 4.4x faster than
