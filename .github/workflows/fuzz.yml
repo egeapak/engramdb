@@ -14,8 +14,6 @@ on:
 
 permissions:
   contents: read
-  # Needed by the issue-on-failure step below.
-  issues: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -153,61 +151,99 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
-      - name: File or update fuzz-failure issue
-        # Scheduled runs have no human watching them; route failures to an
-        # issue so a crash found on a Monday run isn't silently forgotten.
-        # One open issue per target: repeat failures append a comment.
-        if: failure() && github.event_name == 'schedule'
+  # A runner that is shut down mid-step (run 41441935829: every leg killed
+  # while compiling, exit 143) skips the rest of that job, `if: failure()`
+  # steps included, so the old in-job issue step never ran and ten weekly
+  # failures went unreported. This job runs on a fresh runner after the legs,
+  # whatever happened to them, and reads their outcome from the API.
+  report:
+    name: Report fuzz failures
+    needs: [build, fuzz]
+    if: >-
+      always() && github.event_name == 'schedule' &&
+      (needs.build.result != 'success' || needs.fuzz.result != 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: File or update fuzz-failure issues
         uses: actions/github-script@v9
         with:
           script: |
-            const target = '${{ matrix.target }}';
+            const { owner, repo } = context.repo;
             const label = 'fuzz-failure';
-            const title = `Fuzz failure: ${target}`;
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              `The scheduled fuzz run failed for target \`${target}\`.`,
-              '',
-              `Run: ${runUrl}`,
-              '',
-              'Crash inputs (if any) are in the run\'s `fuzz-artifacts-' + target + '` artifact.',
-              'Reproduce locally with:',
-              '```',
-              `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<crash-file>`,
-              '```',
-              'Per fuzz/ policy, commit the failing input as a corpus seed once fixed.',
-            ].join('\n');
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id: context.runId, filter: 'latest', per_page: 100,
+            });
+            // A leg that found a crash fails its "Run <target>" step and then
+            // runs "Upload crash artifacts" to success. A leg whose runner was
+            // killed, that timed out, or that never started because the build
+            // failed, did not, and neither did the build job itself.
+            const crashed = [];
+            const broken = [];
+            for (const job of jobs) {
+              const m = /^Fuzz (.+)$/.exec(job.name);
+              if (!m && job.name !== 'Build fuzz targets') continue;
+              if (job.conclusion === 'success') continue;
+              const step = (name) => (job.steps || []).find((s) => s.name === name);
+              const run = m && step(`Run ${m[1]}`);
+              const upload = step('Upload crash artifacts');
+              if (run && run.conclusion === 'failure' && upload && upload.conclusion === 'success') {
+                crashed.push({ target: m[1], url: job.html_url });
+              } else {
+                broken.push({ name: job.name, conclusion: job.conclusion || job.status, url: job.html_url });
+              }
+            }
             try {
               await github.rest.issues.createLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: label,
-                color: 'b60205',
+                owner, repo, name: label, color: 'b60205',
                 description: 'A scheduled fuzz run found a failure',
               });
             } catch (e) {
               if (e.status !== 422) throw e; // 422 = label already exists
             }
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: label,
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: label, per_page: 100,
             });
-            const existing = issues.find((i) => i.title === title);
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: existing.number,
-                body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                labels: [label],
-                body,
-              });
+            // One open issue per title: a repeat failure appends a comment.
+            async function fileOrComment(title, body) {
+              const existing = open.find((i) => i.title === title);
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              } else {
+                await github.rest.issues.create({ owner, repo, title, labels: [label], body });
+              }
             }
+            for (const { target, url } of crashed) {
+              await fileOrComment(`Fuzz failure: ${target}`, [
+                `The scheduled fuzz run found a crash in target \`${target}\`.`,
+                '',
+                `Run: ${runUrl}`,
+                `Job: ${url}`,
+                '',
+                `Crash inputs are in the run's \`fuzz-artifacts-${target}\` artifact.`,
+                'Reproduce locally with:',
+                '```',
+                `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<crash-file>`,
+                '```',
+                'Per fuzz/ policy, commit the failing input as a corpus seed once fixed.',
+              ].join('\n'));
+            }
+            if (broken.length > 0) {
+              await fileOrComment('Fuzz workflow failure (not a crash)', [
+                'The scheduled fuzz run failed without a fuzzer crash: a build',
+                'error, a killed runner, a timeout or a cancellation. The jobs',
+                'below did not finish fuzzing.',
+                '',
+                `Run: ${runUrl}`,
+                '',
+                ...broken.map((b) => `- [${b.name}](${b.url}): ${b.conclusion}`),
+                '',
+                'The build step prints memory, swap and free disk once a minute,',
+                'so its last `[resources]` line before a runner shutdown shows',
+                'which one ran out.',
+              ].join('\n'));
+            }
+            await core.summary.addRaw(`crashes: ${crashed.length}, other failures: ${broken.length}`).write();
