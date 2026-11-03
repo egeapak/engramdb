@@ -1,0 +1,1928 @@
+//! Typed memory edges: link, unlink, review, and the read views over them.
+//!
+//! The file format and the derived `edges` table are storage's business
+//! (`engram_types::Link`, `engram_storage::edge_index`); this module is the
+//! policy both front ends share. Every write here is a read-modify-write
+//! through [`MemoryStore::update_with`] that **adds or removes one edge** —
+//! there is deliberately no `MemoryUpdate` field for `links`, because a
+//! wholesale list replacement built from a snapshot read is exactly how a
+//! concurrent writer's edge gets erased.
+//!
+//! # Rules
+//!
+//! - **One copy per edge.** A symmetric kind (`contradicts`, `related_to`,
+//!   `duplicates`) is stored once, on whichever side wrote it first; linking
+//!   the reverse direction updates that copy. The table answers both ends.
+//! - **`supersedes` stays canonical in its own fields.** `link A supersedes B`
+//!   adds B to A's `supersedes` list and closes B's window
+//!   (`superseded_by = A`), exactly as `create --supersedes` does; a `links`
+//!   entry rides along only to keep the edge's note, origin and confidence.
+//!   `unlink` is the inverse and reopens B when A was what closed it.
+//! - **No personal id in a committed file.** A project's shared memories are
+//!   committed to git; a personal memory's id written into one leaks into the
+//!   repository. A symmetric edge is therefore stored on the personal side
+//!   instead (same meaning, no leak); a directed edge in that direction is
+//!   refused with the remedy. Group and global stores are not in any
+//!   repository, so the rule does not apply there. `doctor` reports a
+//!   committed file that acquired such an edge some other way (a visibility
+//!   change after linking).
+//! - **Dangling is legal.** Deleting a memory leaves edges into it; reads
+//!   filter them out by default and `doctor` reports them. A cross-store
+//!   target whose store cannot be opened here is `Unknown`, never `Dangling`
+//!   — the absence of evidence is not evidence of deletion.
+//! - **Edges are not challenges.** `resolve --keep` clears challenges and
+//!   never touches `links`; a rejected edge is kept (`status: rejected`) so an
+//!   automatic proposer does not raise it again.
+//! - **gc never edits edges.** A memory's own edges go when it is deleted;
+//!   rejected edges are retained on purpose; dangling ones are reported, not
+//!   pruned — pruning would rewrite committed files gc otherwise leaves alone,
+//!   and a target removed on one branch can come back with a checkout.
+//!
+//! Every write records a `linked` usage event on the memory whose file
+//! changed, with the other end as `related_id`.
+
+use std::collections::{HashMap, HashSet};
+
+use anyhow::{anyhow, bail, Result};
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+use crate::storage::{MemoryStore, StorageError};
+use crate::types::{Memory, MemoryType, Status, Visibility};
+
+pub use crate::storage::edge_index::{EdgeField, EdgeRow};
+pub use crate::types::{Link, LinkKind, LinkOrigin, LinkStatus};
+
+/// Most outbound edges one memory may hold. A guard against an automatic
+/// proposer (NLI, similarity) flooding a committed file, not a modelling
+/// limit: a human linking by hand never gets near it.
+pub const MAX_LINKS_PER_MEMORY: usize = 256;
+
+/// Longest note an edge may carry, in characters.
+pub const MAX_NOTE_CHARS: usize = 1000;
+
+// ---------------------------------------------------------------------------
+// Store ids
+// ---------------------------------------------------------------------------
+
+/// Turn a store spec as the front ends accept it into the id an edge records:
+/// `global` → [`crate::storage::paths::GLOBAL_PROJECT_ID`], `group:<name>` →
+/// its group id, and an already-canonical id (16-hex project id, `__g_…`
+/// group id, the global id) unchanged. An id, never a path: a path differs
+/// between checkouts and machines, and the file travels with the repository.
+pub fn canonical_store_id(spec: &str) -> Result<String> {
+    let spec = spec.trim();
+    if spec == "global" || spec == crate::storage::paths::GLOBAL_PROJECT_ID {
+        return Ok(crate::storage::paths::GLOBAL_PROJECT_ID.to_string());
+    }
+    if let Some(name) = spec.strip_prefix("group:") {
+        if name.trim().is_empty() {
+            bail!("empty group name in store spec {spec:?}");
+        }
+        return Ok(crate::storage::paths::compute_group_id(name));
+    }
+    if crate::storage::paths::is_group_id(spec) {
+        return Ok(spec.to_string());
+    }
+    if spec.len() == 16 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(spec.to_ascii_lowercase());
+    }
+    bail!(
+        "unrecognized store {spec:?}: expected \"global\", \"group:<name>\" or a 16-character \
+         project id"
+    )
+}
+
+/// Open the store `id` names ([`canonical_store_id`] form). `read_only`
+/// uses the side-effect-free open — the right choice for an existence check,
+/// which must not migrate or create anything in another project.
+pub async fn open_store_by_id(id: &str, read_only: bool) -> Result<MemoryStore> {
+    use crate::storage::paths;
+    if id == paths::GLOBAL_PROJECT_ID {
+        return Ok(if read_only {
+            MemoryStore::open_global_read_only().await?
+        } else {
+            MemoryStore::open_global().await?
+        });
+    }
+    if paths::is_group_id(id) {
+        return Ok(if read_only {
+            MemoryStore::open_group_read_only(id).await?
+        } else {
+            MemoryStore::open_group(id).await?
+        });
+    }
+    use crate::storage::RegistryBackend;
+    let registry = crate::storage::FileRegistry::global()?.load().await?;
+    let root = crate::storage::resolve_root_project_id(&registry, id);
+    let entry = registry
+        .projects
+        .iter()
+        .find(|e| e.project_id == root)
+        .ok_or_else(|| anyhow!("project {id} is not in the registry"))?;
+    let dir = std::path::PathBuf::from(&entry.project_path);
+    Ok(if read_only {
+        MemoryStore::open_read_only(&dir).await?
+    } else {
+        MemoryStore::open(&dir).await?
+    })
+}
+
+/// A project's shared memories are committed to its repository; nothing
+/// else EngramDB writes is.
+fn is_committed(store: &MemoryStore, memory: &Memory) -> bool {
+    !store.is_global() && !store.is_group() && memory.visibility == Visibility::Shared
+}
+
+/// `None` when `dst_store` names `store` itself — "same store" is always
+/// spelled `None`, so two spellings of one edge cannot coexist.
+fn normalize_store(store: &MemoryStore, dst_store: Option<&str>) -> Result<Option<String>> {
+    match dst_store {
+        None => Ok(None),
+        Some(spec) => {
+            let id = canonical_store_id(spec)?;
+            Ok((id != store.project_id).then_some(id))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
+
+/// What to link.
+#[derive(Debug, Clone)]
+pub struct LinkParams {
+    /// Source memory (id or unique prefix) in the store passed to [`link`].
+    pub src: String,
+    pub kind: LinkKind,
+    /// Target memory: id or unique prefix. A prefix must resolve; a full id in
+    /// a store that cannot be opened here is accepted and recorded as
+    /// `Unknown`.
+    pub dst: String,
+    /// Target store spec ([`canonical_store_id`]); `None` = same store.
+    pub dst_store: Option<String>,
+    /// Defaults to 1.0.
+    pub confidence: Option<f64>,
+    pub origin: LinkOrigin,
+    /// Defaults to `confirmed`: an explicit link is a claim its author makes.
+    /// Automatic proposers pass `proposed`.
+    pub status: Option<LinkStatus>,
+    pub note: Option<String>,
+}
+
+/// Whether the far end of an edge could be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeState {
+    /// The other end exists and its validity window is open.
+    Live,
+    /// The other end exists but is invalidated (hidden by default).
+    Invalidated,
+    /// The other end's store was checked and the memory is not there.
+    Dangling,
+    /// The other end lives in a store that could not be opened here.
+    Unknown,
+}
+
+/// What [`link`] (and the status writes) did.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinkResult {
+    /// The memory whose file now holds the edge — the source, or the target
+    /// for a symmetric edge stored on the other side.
+    pub owner_id: String,
+    pub src_id: String,
+    pub dst_id: String,
+    pub dst_store: Option<String>,
+    pub kind: LinkKind,
+    pub status: LinkStatus,
+    /// `false` when an existing edge was updated rather than added.
+    pub created: bool,
+    pub target_state: EdgeState,
+    /// Set when the edge went somewhere other than the source's file, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_note: Option<String>,
+}
+
+/// A resolved far end: full id, and its memory when it could be read.
+struct Target {
+    id: String,
+    memory: Option<Memory>,
+    state: EdgeState,
+}
+
+async fn resolve_target(store: &MemoryStore, dst: &str, dst_store: Option<&str>) -> Result<Target> {
+    match dst_store {
+        None => {
+            let id = store.resolve_id(dst).await.map_err(|e| match e {
+                StorageError::NotFound(_) => anyhow!("target memory not found: {dst}"),
+                other => other.into(),
+            })?;
+            let memory = store.get(&id).await?;
+            let state = if memory.is_invalidated() {
+                EdgeState::Invalidated
+            } else {
+                EdgeState::Live
+            };
+            Ok(Target {
+                id,
+                memory: Some(memory),
+                state,
+            })
+        }
+        Some(other) => match open_store_by_id(other, true).await {
+            Ok(target_store) => {
+                let id = target_store.resolve_id(dst).await.map_err(|e| match e {
+                    StorageError::NotFound(_) => {
+                        anyhow!("target memory not found in store {other}: {dst}")
+                    }
+                    other => other.into(),
+                })?;
+                let memory = target_store.get(&id).await?;
+                let state = if memory.is_invalidated() {
+                    EdgeState::Invalidated
+                } else {
+                    EdgeState::Live
+                };
+                Ok(Target {
+                    id,
+                    memory: Some(memory),
+                    state,
+                })
+            }
+            Err(e) => {
+                // An unopenable store cannot resolve a prefix, so only a full
+                // id is accepted blind — and it is recorded as unknown.
+                if uuid::Uuid::parse_str(dst).is_err() {
+                    bail!(
+                        "store {other} cannot be opened here ({e:#}), so the target must be \
+                         given as a full id, not a prefix"
+                    );
+                }
+                tracing::info!(store = %other, "link target store not openable; edge recorded as unknown: {e:#}");
+                Ok(Target {
+                    id: dst.to_string(),
+                    memory: None,
+                    state: EdgeState::Unknown,
+                })
+            }
+        },
+    }
+}
+
+fn validate_note(note: Option<String>) -> Result<Option<String>> {
+    let Some(note) = note else { return Ok(None) };
+    let note = note.trim().to_string();
+    if note.is_empty() {
+        return Ok(None);
+    }
+    if note.chars().count() > MAX_NOTE_CHARS {
+        bail!("note is longer than {MAX_NOTE_CHARS} characters");
+    }
+    Ok(Some(note))
+}
+
+/// The edge `challenge --against` records: a proposed `contradicts` from the
+/// challenged memory to the one that contradicts it, carrying the evidence
+/// as its note. Proposed, not confirmed — a challenge disputes one memory,
+/// and the reviewer is who decides whether both stand or one supersedes.
+pub fn challenge_edge(challenged: &str, against: &str, evidence: &str) -> LinkParams {
+    LinkParams {
+        src: challenged.to_string(),
+        kind: LinkKind::Contradicts,
+        dst: against.to_string(),
+        dst_store: None,
+        confidence: None,
+        origin: LinkOrigin::Agent,
+        status: Some(LinkStatus::Proposed),
+        note: Some(evidence.chars().take(MAX_NOTE_CHARS).collect()),
+    }
+}
+
+/// Add an edge, or update the attributes of the same edge (same target, kind
+/// and store) when it already exists. See the module docs for the rules.
+pub async fn link(
+    store: &MemoryStore,
+    params: LinkParams,
+    surface: super::usage::Surface,
+) -> Result<LinkResult> {
+    if !params.kind.is_known() {
+        bail!(
+            "unknown edge kind {:?} (known: {})",
+            params.kind.as_str(),
+            LinkKind::known_list()
+        );
+    }
+    let confidence = super::validate_score(params.confidence.unwrap_or(1.0), "confidence")?;
+    let note = validate_note(params.note)?;
+    let status = params.status.unwrap_or(LinkStatus::Confirmed);
+    let dst_store = normalize_store(store, params.dst_store.as_deref())?;
+
+    let src = store.get(&params.src).await?;
+    let target = resolve_target(store, &params.dst, dst_store.as_deref()).await?;
+    if dst_store.is_none() && target.id == src.id {
+        bail!("a memory cannot link to itself");
+    }
+
+    let template = Link {
+        to: target.id.clone(),
+        kind: params.kind.clone(),
+        store: dst_store.clone(),
+        confidence,
+        origin: params.origin,
+        status: status.clone(),
+        at: Some(Utc::now()),
+        note,
+    };
+
+    if params.kind == LinkKind::Supersedes {
+        return link_supersedes(store, src, target, template, surface).await;
+    }
+
+    // The personal-id rule (module docs).
+    let target_personal = target
+        .memory
+        .as_ref()
+        .is_some_and(|m| m.visibility == Visibility::Personal);
+    let mut owner = src.id.clone();
+    let mut edge = template.clone();
+    let mut stored_note = None;
+    if is_committed(store, &src) && target_personal {
+        if params.kind.is_symmetric() && dst_store.is_none() {
+            owner = target.id.clone();
+            edge.to = src.id.clone();
+            stored_note = Some(format!(
+                "stored on the personal memory {}: a committed memory's file must not name a \
+                 personal memory",
+                target.id
+            ));
+        } else {
+            bail!(
+                "refusing to link shared memory {} to personal memory {}: the shared memory's \
+                 file is committed to git, and the personal id would leak into the repository. \
+                 Link from the personal memory instead{}",
+                src.id,
+                target.id,
+                if params.kind.is_symmetric() {
+                    " (in its own store)"
+                } else {
+                    ", or make one of them shared/personal to match"
+                }
+            );
+        }
+    } else if params.kind.is_symmetric() && dst_store.is_none() {
+        // Already stored on the other side? Update that copy (one per edge).
+        if let Some(other) = &target.memory {
+            let reverse = Link {
+                to: src.id.clone(),
+                ..template.clone()
+            };
+            if other.links.iter().any(|l| l.same_edge(&reverse)) {
+                owner = other.id.clone();
+                edge = reverse;
+            }
+        }
+    }
+
+    let created = upsert_edge(store, &owner, edge).await?;
+    let related = if owner == src.id {
+        target.id.clone()
+    } else {
+        src.id.clone()
+    };
+    super::usage::record_write(
+        store,
+        &owner,
+        super::usage::UsageKind::Linked,
+        surface,
+        Some(&related),
+    )
+    .await;
+    Ok(LinkResult {
+        owner_id: owner,
+        src_id: src.id,
+        dst_id: target.id,
+        dst_store,
+        kind: params.kind,
+        status,
+        created,
+        target_state: target.state,
+        stored_note,
+    })
+}
+
+/// Add `edge` to `owner`'s links, or update the existing same edge in place.
+/// Returns whether it was new.
+async fn upsert_edge(store: &MemoryStore, owner: &str, edge: Link) -> Result<bool> {
+    let mut created = false;
+    store
+        .update_with(owner, |m| {
+            if let Some(existing) = m.links.iter_mut().find(|l| l.same_edge(&edge)) {
+                *existing = edge;
+            } else {
+                if m.links.len() >= MAX_LINKS_PER_MEMORY {
+                    bail!(
+                        "memory {} already has {MAX_LINKS_PER_MEMORY} outbound edges; remove \
+                         some before adding more",
+                        m.id
+                    );
+                }
+                m.links.push(edge);
+                created = true;
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(created)
+}
+
+/// `link A supersedes B`: the canonical fields, plus a `links` entry that
+/// keeps the edge's metadata (module docs). Same store only — `superseded_by`
+/// cannot name another store, so a cross-store supersession has no canonical
+/// form to write.
+async fn link_supersedes(
+    store: &MemoryStore,
+    src: Memory,
+    target: Target,
+    edge: Link,
+    surface: super::usage::Surface,
+) -> Result<LinkResult> {
+    if edge.store.is_some() {
+        bail!("`supersedes` edges must stay within one store (superseded_by cannot name another)");
+    }
+    if let Some(t) = &target.memory {
+        if is_committed(store, &src) && t.visibility == Visibility::Personal {
+            bail!(
+                "refusing to record that shared memory {} supersedes personal memory {}: the \
+                 personal id would leak into the committed file",
+                src.id,
+                t.id
+            );
+        }
+    }
+    let target_id = target.id.clone();
+    let mut created = false;
+    store
+        .update_with(&src.id, |m| {
+            if !m.supersedes.contains(&target_id) {
+                m.supersedes.push(target_id.clone());
+                created = true;
+            }
+            if let Some(existing) = m.links.iter_mut().find(|l| l.same_edge(&edge)) {
+                *existing = edge.clone();
+            } else {
+                m.links.push(edge.clone());
+            }
+            Ok(())
+        })
+        .await?;
+    super::close_superseded_windows(store, std::slice::from_ref(&target_id), &src.id).await;
+    super::usage::record_write(
+        store,
+        &src.id,
+        super::usage::UsageKind::Linked,
+        surface,
+        Some(&target_id),
+    )
+    .await;
+    Ok(LinkResult {
+        owner_id: src.id.clone(),
+        src_id: src.id,
+        dst_id: target_id,
+        dst_store: None,
+        kind: LinkKind::Supersedes,
+        status: edge.status,
+        created,
+        target_state: target.state,
+        stored_note: None,
+    })
+}
+
+/// Which edge to remove or review.
+#[derive(Debug, Clone)]
+pub struct EdgeRef {
+    pub src: String,
+    pub kind: LinkKind,
+    pub dst: String,
+    pub dst_store: Option<String>,
+}
+
+/// Find where an edge is stored: `(owner_id, link as stored)`. Looks on the
+/// source, then — for a symmetric kind in one store — on the target.
+async fn locate(store: &MemoryStore, edge: &EdgeRef) -> Result<(String, Link, String, String)> {
+    let dst_store = normalize_store(store, edge.dst_store.as_deref())?;
+    let src = store.get(&edge.src).await?;
+    let dst_id = match dst_store {
+        None => store
+            .resolve_id(&edge.dst)
+            .await
+            .unwrap_or_else(|_| edge.dst.clone()),
+        Some(_) => edge.dst.clone(),
+    };
+    let probe = Link {
+        to: dst_id.clone(),
+        kind: edge.kind.clone(),
+        store: dst_store.clone(),
+        ..Link::new("", LinkKind::RelatedTo, LinkOrigin::Human)
+    };
+    if let Some(l) = src.links.iter().find(|l| l.same_edge(&probe)) {
+        return Ok((src.id.clone(), l.clone(), src.id, dst_id));
+    }
+    if edge.kind.is_symmetric() && dst_store.is_none() {
+        if let Ok(other) = store.get(&dst_id).await {
+            let reverse = Link {
+                to: src.id.clone(),
+                ..probe
+            };
+            if let Some(l) = other.links.iter().find(|l| l.same_edge(&reverse)) {
+                return Ok((other.id.clone(), l.clone(), src.id, dst_id));
+            }
+        }
+    }
+    bail!(
+        "no {} edge from {} to {}{}",
+        edge.kind,
+        src.id,
+        dst_id,
+        dst_store
+            .map(|s| format!(" in store {s}"))
+            .unwrap_or_default()
+    )
+}
+
+/// What [`unlink`] did.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnlinkResult {
+    pub owner_id: String,
+    pub src_id: String,
+    pub dst_id: String,
+    pub kind: LinkKind,
+    /// For `supersedes`: the target's window was reopened because this edge
+    /// was what closed it.
+    pub reopened: bool,
+}
+
+/// Remove one edge. `supersedes` removes the canonical entry too, and
+/// reopens the target when this source is what closed its window.
+pub async fn unlink(
+    store: &MemoryStore,
+    edge: EdgeRef,
+    surface: super::usage::Surface,
+) -> Result<UnlinkResult> {
+    if edge.kind == LinkKind::Supersedes {
+        return unlink_supersedes(store, edge, surface).await;
+    }
+    let (owner, stored, src_id, dst_id) = locate(store, &edge).await?;
+    store
+        .update_with(&owner, |m| {
+            let before = m.links.len();
+            m.links.retain(|l| !l.same_edge(&stored));
+            if m.links.len() == before {
+                bail!("edge vanished before it could be removed");
+            }
+            Ok(())
+        })
+        .await?;
+    let related = if owner == src_id { &dst_id } else { &src_id };
+    super::usage::record_write(
+        store,
+        &owner,
+        super::usage::UsageKind::Linked,
+        surface,
+        Some(related),
+    )
+    .await;
+    Ok(UnlinkResult {
+        owner_id: owner,
+        src_id,
+        dst_id,
+        kind: edge.kind,
+        reopened: false,
+    })
+}
+
+async fn unlink_supersedes(
+    store: &MemoryStore,
+    edge: EdgeRef,
+    surface: super::usage::Surface,
+) -> Result<UnlinkResult> {
+    let src = store.get(&edge.src).await?;
+    let dst_id = store
+        .resolve_id(&edge.dst)
+        .await
+        .unwrap_or_else(|_| edge.dst.clone());
+    let target = store.get(&dst_id).await.ok();
+    let in_list = src.supersedes.contains(&dst_id);
+    let in_links = src
+        .links
+        .iter()
+        .any(|l| l.kind == LinkKind::Supersedes && l.to == dst_id && l.store.is_none());
+    let mirrored = target
+        .as_ref()
+        .is_some_and(|t| t.superseded_by.as_deref() == Some(src.id.as_str()));
+    if !in_list && !in_links && !mirrored {
+        bail!("{} does not supersede {}", src.id, dst_id);
+    }
+    if in_list || in_links {
+        store
+            .update_with(&src.id, |m| {
+                m.supersedes.retain(|s| s != &dst_id);
+                m.links.retain(|l| {
+                    !(l.kind == LinkKind::Supersedes && l.to == dst_id && l.store.is_none())
+                });
+                Ok(())
+            })
+            .await?;
+    }
+    let reopened = if mirrored {
+        let src_id = src.id.clone();
+        store
+            .update_with(&dst_id, |m| {
+                if m.superseded_by.as_deref() == Some(src_id.as_str()) {
+                    m.superseded_by = None;
+                    m.invalidated_at = None;
+                }
+                Ok(())
+            })
+            .await?;
+        true
+    } else {
+        false
+    };
+    super::usage::record_write(
+        store,
+        &src.id,
+        super::usage::UsageKind::Linked,
+        surface,
+        Some(&dst_id),
+    )
+    .await;
+    Ok(UnlinkResult {
+        owner_id: src.id.clone(),
+        src_id: src.id,
+        dst_id,
+        kind: LinkKind::Supersedes,
+        reopened,
+    })
+}
+
+/// Set an existing edge's review status (confirm / reject / back to
+/// proposed). A rejected edge is kept, not removed (module docs).
+pub async fn set_link_status(
+    store: &MemoryStore,
+    edge: EdgeRef,
+    status: LinkStatus,
+    note: Option<String>,
+    surface: super::usage::Surface,
+) -> Result<LinkResult> {
+    if !status.is_known() {
+        bail!(
+            "unknown edge status {:?} (known: {})",
+            status.as_str(),
+            LinkStatus::known_list()
+        );
+    }
+    let note = validate_note(note)?;
+    let (owner, stored, src_id, dst_id) = locate(store, &edge).await?;
+    let new_status = status.clone();
+    store
+        .update_with(&owner, |m| {
+            let l = m
+                .links
+                .iter_mut()
+                .find(|l| l.same_edge(&stored))
+                .ok_or_else(|| anyhow!("edge vanished before its status could be set"))?;
+            l.status = new_status;
+            l.at = Some(Utc::now());
+            if note.is_some() {
+                l.note = note;
+            }
+            Ok(())
+        })
+        .await?;
+    let related = if owner == src_id { &dst_id } else { &src_id };
+    super::usage::record_write(
+        store,
+        &owner,
+        super::usage::UsageKind::Linked,
+        surface,
+        Some(related),
+    )
+    .await;
+    Ok(LinkResult {
+        owner_id: owner,
+        src_id,
+        dst_id,
+        dst_store: stored.store,
+        kind: stored.kind,
+        status,
+        created: false,
+        target_state: EdgeState::Live,
+        stored_note: None,
+    })
+}
+
+/// A reviewer's answer to a `contradicts` edge (plan: "Contradiction
+/// direction").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContradictionVerdict {
+    /// Both stand, in conflict: the edge becomes `confirmed` and both sides
+    /// carry the penalty (phase 5).
+    BothStand,
+    /// `winner` (one of the two ids, or a prefix of it) supersedes the other:
+    /// the `contradicts` edge is replaced by `winner supersedes loser`, the
+    /// loser's window closes (`superseded_by = winner`) and only it is
+    /// demoted.
+    Supersedes { winner: String },
+    /// Not a contradiction: kept as `rejected` so NLI does not propose it
+    /// again.
+    Reject,
+}
+
+/// What [`confirm_contradiction_direction`] did.
+#[derive(Debug, Clone, Serialize)]
+pub struct ContradictionOutcome {
+    pub a: String,
+    pub b: String,
+    /// `confirmed`, `rejected`, or `superseded`.
+    pub outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loser: Option<String>,
+}
+
+/// Apply a reviewer's verdict to the `contradicts` edge between `a` and `b`
+/// (stored on either side). See [`ContradictionVerdict`].
+///
+/// The supersede path is three writes, ordered so an interruption leaves a
+/// re-runnable state rather than a lost edge: the `supersedes` edge is added
+/// first, the loser's window closed second, and the `contradicts` edge removed
+/// last — a crash in between leaves both edges, and running the same verdict
+/// again finishes the job.
+pub async fn confirm_contradiction_direction(
+    store: &MemoryStore,
+    a: &str,
+    b: &str,
+    verdict: ContradictionVerdict,
+    note: Option<String>,
+    surface: super::usage::Surface,
+) -> Result<ContradictionOutcome> {
+    let edge = EdgeRef {
+        src: a.to_string(),
+        kind: LinkKind::Contradicts,
+        dst: b.to_string(),
+        dst_store: None,
+    };
+    let (owner, stored, a_id, b_id) = locate(store, &edge).await?;
+    match verdict {
+        ContradictionVerdict::BothStand | ContradictionVerdict::Reject => {
+            let (status, outcome) = if verdict == ContradictionVerdict::Reject {
+                (LinkStatus::Rejected, "rejected")
+            } else {
+                (LinkStatus::Confirmed, "confirmed")
+            };
+            set_link_status(store, edge, status, note, surface).await?;
+            Ok(ContradictionOutcome {
+                a: a_id,
+                b: b_id,
+                outcome,
+                winner: None,
+                loser: None,
+            })
+        }
+        ContradictionVerdict::Supersedes { winner } => {
+            let w = winner.trim();
+            let (win, lose) = match (
+                !w.is_empty() && a_id.starts_with(w),
+                !w.is_empty() && b_id.starts_with(w),
+            ) {
+                (true, false) => (a_id.clone(), b_id.clone()),
+                (false, true) => (b_id.clone(), a_id.clone()),
+                (true, true) => bail!("winner {winner:?} is a prefix of both {a_id} and {b_id}"),
+                (false, false) => bail!("winner {winner:?} is neither {a_id} nor {b_id}"),
+            };
+            let mut carried = Link::new(&lose, LinkKind::Supersedes, stored.origin.clone());
+            carried.confidence = stored.confidence;
+            carried.note = validate_note(note)?.or(stored.note.clone());
+            link(
+                store,
+                LinkParams {
+                    src: win.clone(),
+                    kind: LinkKind::Supersedes,
+                    dst: lose.clone(),
+                    dst_store: None,
+                    confidence: Some(carried.confidence),
+                    origin: carried.origin,
+                    status: Some(LinkStatus::Confirmed),
+                    note: carried.note,
+                },
+                surface,
+            )
+            .await?;
+            // `link_supersedes` closed the loser's window unless it was
+            // already closed; a verdict says who replaced it, so make sure
+            // the reverse link names the winner either way.
+            store
+                .invalidate_with(&lose, Some(win.clone()), Utc::now())
+                .await?;
+            store
+                .update_with(&owner, |m| {
+                    m.links.retain(|l| !l.same_edge(&stored));
+                    Ok(())
+                })
+                .await?;
+            Ok(ContradictionOutcome {
+                a: a_id,
+                b: b_id,
+                outcome: "superseded",
+                winner: Some(win),
+                loser: Some(lose),
+            })
+        }
+    }
+}
+
+/// Compress/consolidation: move the sources' outbound edges onto `summary_id`.
+///
+/// Edges between two sources (and edges into the summary itself) are dropped
+/// — they describe a relation the merge has absorbed. Inbound edges are left
+/// where they are: they now point at an invalidated source whose
+/// `superseded_by` names the summary, which is how readers resolve them
+/// ([`EdgeView::successor`]). An edge the summary's file may not hold (the
+/// personal-id rule) stays on its source. Moved edges take `origin:
+/// compress`; their status, confidence and note are kept.
+///
+/// Best-effort like the rest of supersession maintenance: a failure is
+/// logged and never fails the compress that produced a valid summary.
+pub async fn carry_links_onto(store: &MemoryStore, summary_id: &str, sources: &[Memory]) {
+    if let Err(e) = carry_links_inner(store, summary_id, sources).await {
+        tracing::warn!(summary = %summary_id, "could not carry source edges onto the summary: {e:#}");
+    }
+}
+
+async fn carry_links_inner(
+    store: &MemoryStore,
+    summary_id: &str,
+    sources: &[Memory],
+) -> Result<()> {
+    let source_ids: HashSet<&str> = sources.iter().map(|m| m.id.as_str()).collect();
+    if sources.iter().all(|m| m.links.is_empty()) {
+        return Ok(());
+    }
+    let summary = store.get(summary_id).await?;
+    let committed = is_committed(store, &summary);
+    // The personal-id rule needs the same-store targets' visibility.
+    let targets: Vec<&str> = sources
+        .iter()
+        .flat_map(|m| m.links.iter())
+        .filter(|l| l.store.is_none())
+        .map(|l| l.to.as_str())
+        .collect();
+    let personal: HashSet<String> = store
+        .get_batch(&targets)
+        .await?
+        .into_iter()
+        .filter(|(_, m)| m.visibility == Visibility::Personal)
+        .map(|(id, _)| id)
+        .collect();
+
+    let mut carried: Vec<Link> = Vec::new();
+    let mut moved_from: HashMap<String, Vec<Link>> = HashMap::new();
+    for source in sources {
+        for link in &source.links {
+            let internal = link.store.is_none()
+                && (source_ids.contains(link.to.as_str()) || link.to == summary_id);
+            if internal {
+                moved_from
+                    .entry(source.id.clone())
+                    .or_default()
+                    .push(link.clone());
+                continue;
+            }
+            if committed && link.store.is_none() && personal.contains(&link.to) {
+                continue; // stays on the source
+            }
+            let mut moved = link.clone();
+            moved.origin = LinkOrigin::Compress;
+            if !carried.iter().any(|c| c.same_edge(&moved)) {
+                carried.push(moved);
+            }
+            moved_from
+                .entry(source.id.clone())
+                .or_default()
+                .push(link.clone());
+        }
+    }
+    if !carried.is_empty() {
+        store
+            .update_with(summary_id, |m| {
+                for link in carried {
+                    if !m.links.iter().any(|l| l.same_edge(&link)) {
+                        m.links.push(link);
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+    }
+    let ids: Vec<String> = moved_from.keys().cloned().collect();
+    let (_, errors) = store
+        .update_batch_with(&ids, |m| {
+            if let Some(gone) = moved_from.get(&m.id) {
+                m.links.retain(|l| !gone.iter().any(|g| g.same_edge(l)));
+            }
+            Ok(())
+        })
+        .await?;
+    for (id, e) in errors {
+        tracing::warn!(source = %id, "edges were copied to the summary but not removed from the source: {e}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
+
+/// Which side of the viewed memory an edge sits on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Out,
+    In,
+}
+
+/// One edge as seen from one memory.
+#[derive(Debug, Clone, Serialize)]
+pub struct EdgeView {
+    pub direction: Direction,
+    /// The memory at the other end.
+    pub other_id: String,
+    /// `None` = same store.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_store: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other_summary: Option<String>,
+    pub kind: LinkKind,
+    pub symmetric: bool,
+    pub confidence: f64,
+    pub origin: LinkOrigin,
+    pub status: LinkStatus,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub state: EdgeState,
+    /// When the other end is invalidated by supersession: the memory that
+    /// replaced it, which is where an edge into a compressed source resolves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub successor: Option<String>,
+}
+
+/// What a read hides by default. Everything `false` is the default view:
+/// live and unknown edges of every status except `rejected`.
+#[derive(Debug, Clone, Default)]
+pub struct LinkFilter {
+    pub include_dangling: bool,
+    pub include_invalidated: bool,
+    pub include_rejected: bool,
+    /// `None` = every kind.
+    pub kinds: Option<Vec<LinkKind>>,
+}
+
+impl LinkFilter {
+    /// Show everything.
+    pub fn all() -> Self {
+        Self {
+            include_dangling: true,
+            include_invalidated: true,
+            include_rejected: true,
+            kinds: None,
+        }
+    }
+
+    fn admits(&self, kind: &LinkKind, status: &LinkStatus, state: EdgeState) -> bool {
+        if let Some(kinds) = &self.kinds {
+            if !kinds.contains(kind) {
+                return false;
+            }
+        }
+        if !self.include_rejected && *status == LinkStatus::Rejected {
+            return false;
+        }
+        match state {
+            EdgeState::Dangling => self.include_dangling,
+            EdgeState::Invalidated => self.include_invalidated,
+            EdgeState::Live | EdgeState::Unknown => true,
+        }
+    }
+}
+
+/// A memory's edges, both directions.
+#[derive(Debug, Clone, Serialize)]
+pub struct LinksView {
+    pub id: String,
+    pub outbound: Vec<EdgeView>,
+    pub inbound: Vec<EdgeView>,
+    /// Edges the filter hid (dangling, invalidated, rejected, other kinds),
+    /// so a view never claims a completeness it does not have.
+    pub hidden: usize,
+}
+
+/// Existence and validity of the other ends, checked once per store.
+struct EndStates {
+    local: HashMap<String, (EdgeState, Option<String>, Option<String>)>,
+    foreign: HashMap<String, Option<HashSet<String>>>,
+}
+
+impl EndStates {
+    async fn gather(store: &MemoryStore, ends: &[(String, Option<String>)]) -> Result<Self> {
+        let local_ids: Vec<&str> = ends
+            .iter()
+            .filter(|(_, s)| s.is_none())
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let local = store
+            .get_batch(&local_ids)
+            .await?
+            .into_iter()
+            .map(|(id, m)| {
+                let state = if m.is_invalidated() {
+                    EdgeState::Invalidated
+                } else {
+                    EdgeState::Live
+                };
+                (
+                    id,
+                    (state, Some(m.summary.clone()), m.superseded_by.clone()),
+                )
+            })
+            .collect();
+        let mut foreign: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+        let mut by_store: HashMap<&str, Vec<&str>> = HashMap::new();
+        for (id, s) in ends {
+            if let Some(s) = s {
+                by_store.entry(s.as_str()).or_default().push(id.as_str());
+            }
+        }
+        for (sid, ids) in by_store {
+            let found = match open_store_by_id(sid, true).await {
+                Ok(other) => other.batch_exists(&ids).await.ok(),
+                Err(_) => None,
+            };
+            foreign.insert(sid.to_string(), found);
+        }
+        Ok(Self { local, foreign })
+    }
+
+    fn state(&self, id: &str, store: Option<&str>) -> (EdgeState, Option<String>, Option<String>) {
+        match store {
+            None => self
+                .local
+                .get(id)
+                .cloned()
+                .unwrap_or((EdgeState::Dangling, None, None)),
+            Some(s) => match self.foreign.get(s) {
+                Some(Some(found)) if found.contains(id) => (EdgeState::Live, None, None),
+                Some(Some(_)) => (EdgeState::Dangling, None, None),
+                _ => (EdgeState::Unknown, None, None),
+            },
+        }
+    }
+}
+
+/// `id`'s edges in both directions, with the far ends checked.
+///
+/// An inbound edge's far end is always in this store (the table holds only
+/// edges declared by this store's files); an outbound one may be anywhere.
+pub async fn links_of(store: &MemoryStore, id: &str, filter: &LinkFilter) -> Result<LinksView> {
+    let full = store.resolve_id(id).await?;
+    let rows = store.edges_touching(&full).await?;
+    let ends: Vec<(String, Option<String>)> = rows
+        .iter()
+        .map(|r| {
+            if r.src_id == full {
+                (r.dst_id.clone(), r.dst_store.clone())
+            } else {
+                (r.src_id.clone(), None)
+            }
+        })
+        .collect();
+    let states = EndStates::gather(store, &ends).await?;
+    let mut view = LinksView {
+        id: full.clone(),
+        outbound: Vec::new(),
+        inbound: Vec::new(),
+        hidden: 0,
+    };
+    for row in rows {
+        let out = row.src_id == full;
+        let (other, other_store) = if out {
+            (row.dst_id.clone(), row.dst_store.clone())
+        } else {
+            (row.src_id.clone(), None)
+        };
+        let (state, summary, successor) = states.state(&other, other_store.as_deref());
+        if !filter.admits(&row.kind, &row.status, state) {
+            view.hidden += 1;
+            continue;
+        }
+        let edge = EdgeView {
+            direction: if out { Direction::Out } else { Direction::In },
+            other_id: other,
+            other_store,
+            other_summary: summary,
+            symmetric: row.kind.is_symmetric(),
+            kind: row.kind,
+            confidence: row.confidence,
+            origin: row.origin,
+            status: row.status,
+            created_at: row.created_at,
+            note: row.note,
+            state,
+            successor: if state == EdgeState::Invalidated {
+                successor
+            } else {
+                None
+            },
+        };
+        if out {
+            view.outbound.push(edge);
+        } else {
+            view.inbound.push(edge);
+        }
+    }
+    let order = |a: &EdgeView, b: &EdgeView| {
+        (a.kind.as_str(), &a.other_id).cmp(&(b.kind.as_str(), &b.other_id))
+    };
+    view.outbound.sort_by(order);
+    view.inbound.sort_by(order);
+    Ok(view)
+}
+
+// ---------------------------------------------------------------------------
+// Graph read API (the dashboard's graph view)
+// ---------------------------------------------------------------------------
+
+/// What [`load_graph`] returns.
+#[derive(Debug, Clone, Default)]
+pub struct GraphFilter {
+    /// `None` = every kind.
+    pub kinds: Option<Vec<LinkKind>>,
+    /// Include `proposed` edges (the review queue). Default off: a proposal
+    /// is not yet a claim.
+    pub include_proposed: bool,
+    pub include_rejected: bool,
+    /// Include invalidated memories as nodes, and edges touching them.
+    pub include_invalidated: bool,
+}
+
+/// A memory as a graph node.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphNode {
+    pub id: String,
+    pub summary: String,
+    #[serde(rename = "type")]
+    pub type_: MemoryType,
+    pub status: Status,
+    pub visibility: Visibility,
+    pub invalidated: bool,
+}
+
+/// An edge as the graph draws it.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphEdge {
+    pub src: String,
+    pub dst: String,
+    /// `None` = same store; otherwise the target is outside this graph.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_store: Option<String>,
+    pub kind: LinkKind,
+    pub symmetric: bool,
+    pub confidence: f64,
+    pub origin: LinkOrigin,
+    pub status: LinkStatus,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One store's graph.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoreGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+    /// Same-store edges left out because an end no longer exists.
+    pub dangling: usize,
+    /// Edges into another store, which this view does not open: included in
+    /// `edges` (with `dst_store` set), never counted as dangling.
+    pub external: usize,
+}
+
+/// Load a store's edges and node set, side-effect free.
+///
+/// Reads the index only (the `memories` projection and the `edges` table)
+/// and creates nothing, so it is safe on a store from
+/// [`MemoryStore::open_read_only`]; a store without an `edges` table (not yet
+/// migrated to 0.9.0) has no edges. Other stores are not opened: a
+/// cross-store edge is returned with its `dst_store` for the caller, which
+/// knows which stores it is showing, to resolve.
+pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<StoreGraph> {
+    let rows = store.list_filterable().await?;
+    let now = Utc::now();
+    let mut all_ids: HashSet<String> = HashSet::new();
+    let mut shown: HashSet<String> = HashSet::new();
+    let mut nodes = Vec::new();
+    for r in rows {
+        let invalidated = r.invalidated_at.is_some_and(|t| now >= t);
+        all_ids.insert(r.id.clone());
+        if invalidated && !filter.include_invalidated {
+            continue;
+        }
+        shown.insert(r.id.clone());
+        nodes.push(GraphNode {
+            id: r.id,
+            summary: r.summary,
+            type_: r.type_,
+            status: r.status,
+            visibility: r.visibility,
+            invalidated,
+        });
+    }
+    let mut graph = StoreGraph {
+        nodes,
+        edges: Vec::new(),
+        dangling: 0,
+        external: 0,
+    };
+    for row in store.list_edges().await? {
+        if let Some(kinds) = &filter.kinds {
+            if !kinds.contains(&row.kind) {
+                continue;
+            }
+        }
+        match row.status {
+            LinkStatus::Proposed if !filter.include_proposed => continue,
+            LinkStatus::Rejected if !filter.include_rejected => continue,
+            _ => {}
+        }
+        if !all_ids.contains(&row.src_id) {
+            graph.dangling += 1;
+            continue;
+        }
+        if row.dst_store.is_none() && !all_ids.contains(&row.dst_id) {
+            graph.dangling += 1;
+            continue;
+        }
+        if !shown.contains(&row.src_id) || (row.dst_store.is_none() && !shown.contains(&row.dst_id))
+        {
+            continue; // an end is invalidated and hidden
+        }
+        if row.dst_store.is_some() {
+            graph.external += 1;
+        }
+        graph.edges.push(GraphEdge {
+            src: row.src_id,
+            dst: row.dst_id,
+            dst_store: row.dst_store,
+            symmetric: row.kind.is_symmetric(),
+            kind: row.kind,
+            confidence: row.confidence,
+            origin: row.origin,
+            status: row.status,
+            created_at: row.created_at,
+            note: row.note,
+        });
+    }
+    Ok(graph)
+}
+
+// ---------------------------------------------------------------------------
+// Health (doctor)
+// ---------------------------------------------------------------------------
+
+/// A same-store edge whose far end is gone.
+#[derive(Debug, Clone, Serialize)]
+pub struct DanglingEdge {
+    pub src: String,
+    pub dst: String,
+    pub kind: LinkKind,
+}
+
+/// What `doctor` reports about a store's edges. Never a failure: every
+/// finding here is legal state (module docs), reported so it can be tidied.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct EdgeHealth {
+    pub total: usize,
+    pub dangling: Vec<DanglingEdge>,
+    /// Cross-store edges whose store could not be opened here.
+    pub unknown: usize,
+    /// Committed (shared, project-store) memories whose file names a
+    /// personal memory — the leak the link rules prevent, acquired some other
+    /// way (typically a visibility change after linking).
+    pub personal_leaks: Vec<DanglingEdge>,
+    /// Edges of a kind this binary does not know (a newer binary wrote them).
+    pub unknown_kinds: usize,
+}
+
+/// Check every edge of `store`. Side-effect free.
+pub async fn edge_health(store: &MemoryStore) -> Result<EdgeHealth> {
+    let edges = store.list_edges().await?;
+    let mut health = EdgeHealth {
+        total: edges.len(),
+        ..Default::default()
+    };
+    if edges.is_empty() {
+        return Ok(health);
+    }
+    let visibility: HashMap<String, Visibility> = store
+        .list_filterable()
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.visibility))
+        .collect();
+    let committed_store = !store.is_global() && !store.is_group();
+    let mut foreign: HashMap<String, Vec<String>> = HashMap::new();
+    for e in &edges {
+        if !e.kind.is_known() {
+            health.unknown_kinds += 1;
+        }
+        if let Some(s) = &e.dst_store {
+            foreign.entry(s.clone()).or_default().push(e.dst_id.clone());
+            continue;
+        }
+        let gone = !visibility.contains_key(&e.src_id) || !visibility.contains_key(&e.dst_id);
+        if gone {
+            health.dangling.push(DanglingEdge {
+                src: e.src_id.clone(),
+                dst: e.dst_id.clone(),
+                kind: e.kind.clone(),
+            });
+            continue;
+        }
+        if committed_store {
+            let owner_vis = visibility.get(&e.owner_id);
+            let other = if e.owner_id == e.src_id {
+                &e.dst_id
+            } else {
+                &e.src_id
+            };
+            if owner_vis == Some(&Visibility::Shared)
+                && visibility.get(other) == Some(&Visibility::Personal)
+            {
+                health.personal_leaks.push(DanglingEdge {
+                    src: e.src_id.clone(),
+                    dst: e.dst_id.clone(),
+                    kind: e.kind.clone(),
+                });
+            }
+        }
+    }
+    for (sid, ids) in foreign {
+        match open_store_by_id(&sid, true).await {
+            Ok(other) => {
+                let found = other.batch_exists(&ids).await.unwrap_or_default();
+                for e in edges
+                    .iter()
+                    .filter(|e| e.dst_store.as_deref() == Some(sid.as_str()))
+                {
+                    if !found.contains(&e.dst_id) {
+                        health.dangling.push(DanglingEdge {
+                            src: e.src_id.clone(),
+                            dst: e.dst_id.clone(),
+                            kind: e.kind.clone(),
+                        });
+                    }
+                }
+            }
+            Err(_) => health.unknown += ids.len(),
+        }
+    }
+    Ok(health)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::usage::Surface;
+    use crate::storage::InMemoryRegistry;
+    use crate::types::{Provenance, Visibility};
+    use tempfile::TempDir;
+
+    async fn store() -> (TempDir, MemoryStore) {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        (tmp, store)
+    }
+
+    async fn mem(store: &MemoryStore, summary: &str, visibility: Visibility) -> String {
+        let mut m = Memory::new(
+            MemoryType::Decision,
+            summary,
+            "content",
+            Provenance::human(),
+        );
+        m.visibility = visibility;
+        store.create(&m).await.unwrap()
+    }
+
+    fn params(src: &str, kind: LinkKind, dst: &str) -> LinkParams {
+        LinkParams {
+            src: src.into(),
+            kind,
+            dst: dst.into(),
+            dst_store: None,
+            confidence: None,
+            origin: LinkOrigin::Human,
+            status: None,
+            note: None,
+        }
+    }
+
+    fn eref(src: &str, kind: LinkKind, dst: &str) -> EdgeRef {
+        EdgeRef {
+            src: src.into(),
+            kind,
+            dst: dst.into(),
+            dst_store: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn symmetric_edge_is_stored_once_and_seen_from_both_ends() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+
+        let r = link(
+            &store,
+            params(&a[..24], LinkKind::RelatedTo, &b[..24]),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert!(r.created);
+        assert_eq!(
+            (r.src_id.as_str(), r.dst_id.as_str()),
+            (a.as_str(), b.as_str())
+        );
+        assert_eq!(
+            store.get(&a).await.unwrap().links[0].to,
+            b,
+            "full id, never a prefix"
+        );
+
+        // The reverse direction updates the existing copy instead of adding one.
+        let mut rev = params(&b, LinkKind::RelatedTo, &a);
+        rev.confidence = Some(0.4);
+        let r = link(&store, rev, Surface::Cli).await.unwrap();
+        assert!(!r.created);
+        assert_eq!(r.owner_id, a);
+        assert!(store.get(&b).await.unwrap().links.is_empty());
+        assert_eq!(store.get(&a).await.unwrap().links[0].confidence, 0.4);
+
+        let from_a = links_of(&store, &a, &LinkFilter::default()).await.unwrap();
+        let from_b = links_of(&store, &b, &LinkFilter::default()).await.unwrap();
+        assert_eq!(from_a.outbound.len(), 1);
+        assert_eq!(from_b.inbound.len(), 1);
+        assert_eq!(from_b.inbound[0].other_id, a);
+        assert!(from_b.inbound[0].symmetric);
+        assert_eq!(from_b.inbound[0].other_summary.as_deref(), Some("a"));
+
+        // Usage: every write records `linked` on the file it changed.
+        let events = crate::ops::usage::tests::logged(&store);
+        assert!(events
+            .iter()
+            .any(|e| e.kind == crate::ops::usage::UsageKind::Linked && e.memory_id == a));
+
+        // Unlinking from either end removes the one copy.
+        unlink(&store, eref(&b, LinkKind::RelatedTo, &a), Surface::Cli)
+            .await
+            .unwrap();
+        assert!(store.list_edges().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bad_input_is_refused() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        assert!(
+            link(&store, params(&a, LinkKind::Supports, &a), Surface::Cli)
+                .await
+                .is_err()
+        );
+        assert!(
+            link(&store, params(&a, LinkKind::Supports, "nope"), Surface::Cli)
+                .await
+                .is_err()
+        );
+        assert!(link(
+            &store,
+            params(&a, LinkKind::Other("x".into()), &a),
+            Surface::Cli
+        )
+        .await
+        .is_err());
+        let b = mem(&store, "b", Visibility::Shared).await;
+        let mut p = params(&a, LinkKind::Supports, &b);
+        p.confidence = Some(1.5);
+        assert!(link(&store, p, Surface::Cli).await.is_err());
+    }
+
+    /// The plan's "personal ids leaking into git" risk.
+    #[tokio::test]
+    async fn committed_memory_never_names_a_personal_one() {
+        let (_t, store) = store().await;
+        let shared = mem(&store, "shared", Visibility::Shared).await;
+        let personal = mem(&store, "personal", Visibility::Personal).await;
+
+        // Directed: refused, with the remedy.
+        let err = link(
+            &store,
+            params(&shared, LinkKind::Supports, &personal),
+            Surface::Cli,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("leak"), "{err}");
+        assert!(store.get(&shared).await.unwrap().links.is_empty());
+
+        // Symmetric: stored on the personal side, same meaning.
+        let r = link(
+            &store,
+            params(&shared, LinkKind::Contradicts, &personal),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.owner_id, personal);
+        assert!(r.stored_note.is_some());
+        assert!(store.get(&shared).await.unwrap().links.is_empty());
+        assert_eq!(store.get(&personal).await.unwrap().links[0].to, shared);
+
+        // The other direction (personal → shared) is fine as written.
+        link(
+            &store,
+            params(&personal, LinkKind::Supports, &shared),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+
+        // A visibility change after linking is what doctor catches.
+        store
+            .update_with(&personal, |m| {
+                m.visibility = Visibility::Shared;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let p2 = mem(&store, "p2", Visibility::Personal).await;
+        link(
+            &store,
+            params(&p2, LinkKind::Supports, &shared),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        store
+            .update_with(&shared, |m| {
+                m.links
+                    .push(Link::new(&p2, LinkKind::Supports, LinkOrigin::Human));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let health = edge_health(&store).await.unwrap();
+        assert_eq!(health.personal_leaks.len(), 1, "{health:?}");
+    }
+
+    #[tokio::test]
+    async fn supersedes_writes_the_canonical_fields_and_unlink_reopens() {
+        let (_t, store) = store().await;
+        let new = mem(&store, "new", Visibility::Shared).await;
+        let old = mem(&store, "old", Visibility::Shared).await;
+        let mut p = params(&new, LinkKind::Supersedes, &old);
+        p.note = Some("v2 replaces v1".into());
+        link(&store, p, Surface::Cli).await.unwrap();
+
+        let n = store.get(&new).await.unwrap();
+        assert_eq!(n.supersedes, vec![old.clone()]);
+        let o = store.get(&old).await.unwrap();
+        assert_eq!(o.superseded_by.as_deref(), Some(new.as_str()));
+        assert!(o.is_invalidated());
+        let edges = store.list_edges().await.unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "the field, the link and the mirror are one edge"
+        );
+        assert_eq!(edges[0].note.as_deref(), Some("v2 replaces v1"));
+
+        // Invalidated targets keep the edge but hide it by default.
+        let view = links_of(&store, &new, &LinkFilter::default())
+            .await
+            .unwrap();
+        assert!(view.outbound.is_empty());
+        assert_eq!(view.hidden, 1);
+        let all = links_of(&store, &new, &LinkFilter::all()).await.unwrap();
+        assert_eq!(all.outbound[0].state, EdgeState::Invalidated);
+
+        let r = unlink(&store, eref(&new, LinkKind::Supersedes, &old), Surface::Cli)
+            .await
+            .unwrap();
+        assert!(r.reopened);
+        assert!(store.get(&new).await.unwrap().supersedes.is_empty());
+        let o = store.get(&old).await.unwrap();
+        assert!(o.superseded_by.is_none() && o.invalidated_at.is_none());
+        assert!(store.list_edges().await.unwrap().is_empty());
+    }
+
+    async fn proposed_contradiction(store: &MemoryStore) -> (String, String) {
+        let a = mem(store, "a", Visibility::Shared).await;
+        let b = mem(store, "b", Visibility::Shared).await;
+        let mut p = params(&b, LinkKind::Contradicts, &a);
+        p.origin = LinkOrigin::Nli;
+        p.status = Some(LinkStatus::Proposed);
+        p.confidence = Some(0.87);
+        link(store, p, Surface::Cli).await.unwrap();
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn contradiction_verdicts() {
+        // Both stand: confirmed, nothing invalidated.
+        let (_t, store) = store().await;
+        let (a, b) = proposed_contradiction(&store).await;
+        let out = confirm_contradiction_direction(
+            &store,
+            &a,
+            &b,
+            ContradictionVerdict::BothStand,
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.outcome, "confirmed");
+        assert_eq!(
+            store.get(&b).await.unwrap().links[0].status,
+            LinkStatus::Confirmed
+        );
+        assert!(!store.get(&a).await.unwrap().is_invalidated());
+
+        // Reject: kept, as rejected — and hidden from the default view.
+        let (a, b) = proposed_contradiction(&store).await;
+        confirm_contradiction_direction(
+            &store,
+            &a,
+            &b,
+            ContradictionVerdict::Reject,
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get(&b).await.unwrap().links[0].status,
+            LinkStatus::Rejected
+        );
+        assert!(links_of(&store, &a, &LinkFilter::default())
+            .await
+            .unwrap()
+            .inbound
+            .is_empty());
+
+        // "A supersedes B": the edge becomes supersedes A → B, B is invalidated.
+        let (a, b) = proposed_contradiction(&store).await;
+        let out = confirm_contradiction_direction(
+            &store,
+            &a,
+            &b,
+            ContradictionVerdict::Supersedes {
+                winner: a[..24].to_string(),
+            },
+            Some("reviewed".into()),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.winner.as_deref(), Some(a.as_str()));
+        let am = store.get(&a).await.unwrap();
+        let bm = store.get(&b).await.unwrap();
+        assert_eq!(am.supersedes, vec![b.clone()]);
+        assert_eq!(bm.superseded_by.as_deref(), Some(a.as_str()));
+        assert!(bm.is_invalidated() && !am.is_invalidated());
+        assert!(bm.links.is_empty(), "the contradicts edge is gone");
+        let sup = am
+            .links
+            .iter()
+            .find(|l| l.kind == LinkKind::Supersedes)
+            .unwrap();
+        assert_eq!(sup.origin, LinkOrigin::Nli);
+        assert_eq!(sup.note.as_deref(), Some("reviewed"));
+    }
+
+    /// `resolve --keep` clears challenges; it must not take the edge too.
+    #[tokio::test]
+    async fn resolve_keep_does_not_remove_contradiction_edges() {
+        let (_t, store) = store().await;
+        let (a, b) = proposed_contradiction(&store).await;
+        crate::ops::challenge_memory(&store, &b, "conflicts with a", None, Surface::Cli)
+            .await
+            .unwrap();
+        crate::ops::resolve_memory(
+            &store,
+            crate::ops::ResolveParams {
+                id: b.clone(),
+                action: crate::ops::ResolveAction::Keep,
+                updated_content: None,
+                updated_summary: None,
+                superseded_by: None,
+            },
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let bm = store.get(&b).await.unwrap();
+        assert!(bm.challenges.is_empty());
+        assert_eq!(bm.links.len(), 1);
+        assert_eq!(bm.links[0].to, a);
+    }
+
+    #[tokio::test]
+    async fn deleted_targets_dangle_and_doctor_reports_them() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        link(&store, params(&a, LinkKind::Supports, &b), Surface::Cli)
+            .await
+            .unwrap();
+        store.delete(&b).await.unwrap();
+
+        assert_eq!(
+            store.get(&a).await.unwrap().links.len(),
+            1,
+            "a's file is untouched"
+        );
+        let view = links_of(&store, &a, &LinkFilter::default()).await.unwrap();
+        assert!(view.outbound.is_empty());
+        assert_eq!(view.hidden, 1);
+        let view = links_of(&store, &a, &LinkFilter::all()).await.unwrap();
+        assert_eq!(view.outbound[0].state, EdgeState::Dangling);
+
+        let health = edge_health(&store).await.unwrap();
+        assert_eq!(health.dangling.len(), 1);
+        let graph = load_graph(&store, &GraphFilter::default()).await.unwrap();
+        assert!(graph.edges.is_empty());
+        assert_eq!(graph.dangling, 1);
+    }
+
+    /// A store that cannot be opened is "unknown", never "dangling".
+    #[tokio::test]
+    async fn unopenable_cross_store_target_is_unknown() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let elsewhere = uuid::Uuid::now_v7().to_string();
+        let mut p = params(&a, LinkKind::DerivedFrom, &elsewhere);
+        p.dst_store = Some("0123456789abcdef".into());
+        let r = link(&store, p.clone(), Surface::Cli).await.unwrap();
+        assert_eq!(r.target_state, EdgeState::Unknown);
+        assert_eq!(r.dst_store.as_deref(), Some("0123456789abcdef"));
+
+        // A prefix cannot be resolved blind.
+        p.dst = elsewhere[..8].to_string();
+        assert!(link(&store, p, Surface::Cli).await.is_err());
+
+        let health = edge_health(&store).await.unwrap();
+        assert_eq!((health.unknown, health.dangling.len()), (1, 0));
+        let view = links_of(&store, &a, &LinkFilter::default()).await.unwrap();
+        assert_eq!(view.outbound[0].state, EdgeState::Unknown);
+        let graph = load_graph(&store, &GraphFilter::default()).await.unwrap();
+        assert_eq!(
+            (graph.edges.len(), graph.external, graph.dangling),
+            (1, 1, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn compress_moves_outbound_edges_onto_the_summary() {
+        let (_t, store) = store().await;
+        let s1 = mem(&store, "s1", Visibility::Shared).await;
+        let s2 = mem(&store, "s2", Visibility::Shared).await;
+        let ext = mem(&store, "ext", Visibility::Shared).await;
+        let fan = mem(&store, "fan", Visibility::Shared).await;
+        link(&store, params(&s1, LinkKind::Supports, &ext), Surface::Cli)
+            .await
+            .unwrap();
+        link(&store, params(&s2, LinkKind::Supports, &ext), Surface::Cli)
+            .await
+            .unwrap();
+        link(
+            &store,
+            params(&s1, LinkKind::DerivedFrom, &s2),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        link(&store, params(&fan, LinkKind::Supports, &s1), Surface::Cli)
+            .await
+            .unwrap();
+
+        let result = crate::ops::compress_apply(
+            &store,
+            crate::ops::CompressApplyParams {
+                source_ids: vec![s1.clone(), s2.clone()],
+                summary: "merged".into(),
+                content: "merged content".into(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let summary = store.get(&result.new_id).await.unwrap();
+        assert_eq!(
+            summary.links.len(),
+            1,
+            "one supports edge to ext, deduped: {:?}",
+            summary.links
+        );
+        assert_eq!(summary.links[0].to, ext);
+        assert_eq!(summary.links[0].origin, LinkOrigin::Compress);
+        assert!(store.get(&s1).await.unwrap().links.is_empty());
+        assert!(store.get(&s2).await.unwrap().links.is_empty());
+
+        // The inbound edge stays on `fan` and resolves through superseded_by.
+        let view = links_of(&store, &fan, &LinkFilter::all()).await.unwrap();
+        assert_eq!(view.outbound[0].other_id, s1);
+        assert_eq!(
+            view.outbound[0].successor.as_deref(),
+            Some(result.new_id.as_str())
+        );
+    }
+
+    /// The phase-4 read API on a read-only store, including one with no
+    /// edges table at all: nothing is created, and missing means none.
+    #[tokio::test]
+    async fn load_graph_is_side_effect_free_and_filters() {
+        let (tmp, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        let mut p = params(&a, LinkKind::Contradicts, &b);
+        p.status = Some(LinkStatus::Proposed);
+        link(&store, p, Surface::Cli).await.unwrap();
+        link(&store, params(&a, LinkKind::Supports, &b), Surface::Cli)
+            .await
+            .unwrap();
+
+        let ro = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        let g = load_graph(&ro, &GraphFilter::default()).await.unwrap();
+        assert_eq!(g.nodes.len(), 2);
+        assert_eq!(g.edges.len(), 1, "proposals are opt-in");
+        let g = load_graph(
+            &ro,
+            &GraphFilter {
+                include_proposed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(g.edges.len(), 2);
+        let g = load_graph(
+            &ro,
+            &GraphFilter {
+                include_proposed: true,
+                kinds: Some(vec![LinkKind::Contradicts]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(g.edges.len(), 1);
+
+        // Drop the table: the read-only view reports no edges and recreates nothing.
+        let lance = crate::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        let conn = lancedb::connect(lance.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        conn.drop_table(crate::storage::edge_index::EDGES_TABLE, &[])
+            .await
+            .unwrap();
+        let ro = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        let g = load_graph(&ro, &GraphFilter::default()).await.unwrap();
+        assert!(g.edges.is_empty());
+        assert!(crate::storage::edge_index::open(&conn)
+            .await
+            .unwrap()
+            .is_none());
+    }
+}

@@ -1099,6 +1099,89 @@ pub enum Command {
         global: bool,
     },
 
+    /// Link two memories with a typed edge (or update an existing edge)
+    ///
+    /// Kinds: contradicts, supersedes, supports, derived_from, related_to,
+    /// duplicates. Symmetric kinds (contradicts, related_to, duplicates) are
+    /// stored once and shown on both memories. Re-linking the same edge
+    /// updates its confidence, note and status (e.g. `--status rejected`).
+    Link {
+        /// Source memory ID (supports prefix matching)
+        src: String,
+
+        /// Edge kind
+        kind: String,
+
+        /// Target memory ID (prefix matching within the same store; a full
+        /// id for a target in another store)
+        dst: String,
+
+        /// The target's store, when it is not this one: `global`,
+        /// `group:<name>`, or a project id
+        #[arg(long)]
+        store: Option<String>,
+
+        /// How sure the link is, 0.0-1.0 (default 1.0)
+        #[arg(long)]
+        confidence: Option<f64>,
+
+        /// Why the two are linked
+        #[arg(long)]
+        note: Option<String>,
+
+        /// Review status: proposed, confirmed (default) or rejected
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Resolve a `contradicts` edge by direction: this memory (one of the
+        /// two) supersedes the other, whose validity window closes. The edge
+        /// is rewritten as `<winner> supersedes <loser>`
+        #[arg(long, conflicts_with_all = ["status", "confidence", "store"])]
+        winner: Option<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Remove an edge between two memories
+    Unlink {
+        /// Source memory ID (supports prefix matching)
+        src: String,
+
+        /// Edge kind
+        kind: String,
+
+        /// Target memory ID
+        dst: String,
+
+        /// The target's store, when it is not this one
+        #[arg(long)]
+        store: Option<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// List a memory's edges, outbound and inbound
+    Links {
+        /// Memory ID (supports prefix matching)
+        id: String,
+
+        /// Also show dangling, invalidated and rejected edges
+        #[arg(long)]
+        all: bool,
+
+        /// Only these kinds (repeatable)
+        #[arg(long)]
+        kind: Vec<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
     /// Show effective config values, thresholds, and the store's top tags
     Config {
         /// Number of top tags to show (most-used first)
@@ -1210,6 +1293,11 @@ pub enum Command {
         /// Source file that contradicts this memory
         #[arg(long)]
         source_file: Option<String>,
+
+        /// The memory this one contradicts (id or prefix): also propose a
+        /// `contradicts` edge between the two, for review with `engramdb link`
+        #[arg(long)]
+        against: Option<String>,
 
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]

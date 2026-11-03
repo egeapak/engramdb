@@ -80,6 +80,7 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                     // scripted consumer.
                     "drifted_entries": result.drifted_entries,
                     "undetermined": result.undetermined,
+                    "unparseable": result.unparseable,
                 })
             );
         } else {
@@ -118,6 +119,15 @@ async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) 
                 ));
                 for id in &result.undetermined {
                     outln!(formatter, "  {}", short_id(id));
+                }
+            }
+            if !result.unparseable.is_empty() {
+                formatter.print_warning(&format!(
+                    "{} memory files do not parse (fix by hand; nothing in them was reset):",
+                    result.unparseable.len()
+                ));
+                for bad in &result.unparseable {
+                    outln!(formatter, "  {}  {}", short_id(&bad.id), bad.error);
                 }
             }
             formatter.print_message("\nRun `engramdb reindex` to repair.");

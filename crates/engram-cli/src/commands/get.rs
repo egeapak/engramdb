@@ -73,12 +73,26 @@ pub async fn run_get(
         return Ok(());
     }
 
-    // Handle --full flag: show complete details without truncation
-    if full {
-        formatter.print_memory_full(&memory);
-    } else {
-        formatter.print_memory(&memory);
-    }
+    // Edges, both directions, with the default filter (dangling, invalidated
+    // and rejected hidden but counted). A read failure here is not a reason
+    // to withhold the memory itself: show it without, and say so.
+    let links = match engramdb::ops::links::links_of(
+        &store,
+        &memory.id,
+        &engramdb::ops::links::LinkFilter::default(),
+    )
+    .await
+    {
+        Ok(view) => Some(view),
+        Err(e) => {
+            formatter.print_warning(&format!("could not read this memory's edges: {e:#}"));
+            None
+        }
+    };
+
+    // `--full` is currently the same rendering (nothing is truncated yet).
+    let _ = full;
+    formatter.print_memory_with_links(&memory, links.as_ref());
 
     Ok(())
 }
@@ -117,6 +131,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

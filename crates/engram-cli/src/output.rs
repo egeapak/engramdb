@@ -9,6 +9,7 @@
 //! accordingly.
 
 use crate::project_tree::{build_render_model, RenderLine};
+use engramdb::ops::links::{Direction, EdgeState, EdgeView, LinksView};
 use engramdb::retrieval::engine::{RetrievalResult, ScoredMemory};
 use engramdb::storage::transcripts::sanitize_one_line;
 use engramdb::storage::IndexFilterable;
@@ -109,6 +110,88 @@ macro_rules! errraw {
 }
 
 pub(crate) use {errln, errraw, outln, outraw};
+
+/// Whether a links view has anything to show (edges, or hidden ones).
+fn links_view_nonempty(view: &LinksView) -> bool {
+    !view.outbound.is_empty() || !view.inbound.is_empty() || view.hidden > 0
+}
+
+/// The arrow for an edge as seen from the viewed memory.
+fn edge_arrow(e: &EdgeView) -> &'static str {
+    match (e.symmetric, e.direction) {
+        (true, _) => "<->",
+        (false, Direction::Out) => "->",
+        (false, Direction::In) => "<-",
+    }
+}
+
+/// What a far end's state adds to its row, if anything.
+fn edge_state_suffix(e: &EdgeView) -> String {
+    match e.state {
+        EdgeState::Live => String::new(),
+        EdgeState::Invalidated => match &e.successor {
+            Some(s) => format!(" [invalidated, superseded by {}]", short_id(s)),
+            None => " [invalidated]".to_string(),
+        },
+        EdgeState::Dangling => " [dangling]".to_string(),
+        EdgeState::Unknown => " [store not reachable]".to_string(),
+    }
+}
+
+fn edge_pretty_line(e: &EdgeView) -> String {
+    let store = e
+        .other_store
+        .as_deref()
+        .map(|s| format!(" @{s}"))
+        .unwrap_or_default();
+    let summary = e
+        .other_summary
+        .as_deref()
+        .map(|s| format!("  {}", sanitize_one_line(s)))
+        .unwrap_or_default();
+    format!(
+        "{} {} {}{}{}  ({}, {}, {:.2}){}",
+        e.kind,
+        edge_arrow(e),
+        short_id(&e.other_id),
+        store,
+        summary,
+        e.status,
+        e.origin,
+        e.confidence,
+        edge_state_suffix(e)
+    )
+}
+
+fn edge_plain_line(e: &EdgeView) -> String {
+    let dir = match e.direction {
+        Direction::Out => "out",
+        Direction::In => "in",
+    };
+    let state = match e.state {
+        EdgeState::Live => "live",
+        EdgeState::Invalidated => "invalidated",
+        EdgeState::Dangling => "dangling",
+        EdgeState::Unknown => "unknown",
+    };
+    let mut line = format!(
+        "edge direction={dir} kind={} other={} store={} status={} origin={} confidence={:.2} state={state} at={}",
+        e.kind,
+        e.other_id,
+        e.other_store.as_deref().unwrap_or("-"),
+        e.status,
+        e.origin,
+        e.confidence,
+        e.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    if let Some(s) = &e.successor {
+        line.push_str(&format!(" successor={s}"));
+    }
+    if let Some(n) = &e.note {
+        line.push_str(&format!(" note={n:?}"));
+    }
+    line
+}
 
 /// Helper function to truncate IDs to 13 characters.
 ///
@@ -1397,6 +1480,197 @@ impl OutputFormatter {
         }
     }
 
+    /// Print a memory and, when it has any, its edges (`get`).
+    ///
+    /// With no edges (shown or hidden) this is byte-identical to
+    /// [`print_memory`](Self::print_memory), so a store that never links
+    /// sees no change. Json adds an `edges` key beside the memory's own
+    /// `links` (the outbound list as stored), carrying both directions with
+    /// their far ends checked.
+    pub fn print_memory_with_links(&self, memory: &Memory, view: Option<&LinksView>) {
+        let Some(view) = view.filter(|v| links_view_nonempty(v)) else {
+            return self.print_memory(memory);
+        };
+        if self.silent {
+            return;
+        }
+        match self.format {
+            OutputFormat::Json => {
+                let mut value = serde_json::to_value(memory).unwrap();
+                value["edges"] = serde_json::to_value(view).unwrap();
+                outln!(self, "{}", serde_json::to_string_pretty(&value).unwrap());
+            }
+            OutputFormat::Pretty => {
+                self.print_memory_pretty(memory);
+                outln!(self, "Links:");
+                self.print_edge_lines(view);
+            }
+            OutputFormat::Plain => {
+                self.print_memory_plain(memory);
+                self.print_edge_lines(view);
+            }
+        }
+    }
+
+    /// Print one memory's edges, both directions (`links <id>`).
+    ///
+    /// Colourless in every format, like the usage view: the edges are a
+    /// table to read, and the kind is already spelled out.
+    pub fn print_links(&self, view: &LinksView) {
+        if self.silent {
+            return;
+        }
+        match self.format {
+            OutputFormat::Json => {
+                outln!(self, "{}", serde_json::to_string_pretty(view).unwrap());
+            }
+            OutputFormat::Plain => {
+                outln!(
+                    self,
+                    "memory={} outbound={} inbound={} hidden={}",
+                    view.id,
+                    view.outbound.len(),
+                    view.inbound.len(),
+                    view.hidden
+                );
+                self.print_edge_lines(view);
+            }
+            OutputFormat::Pretty => {
+                outln!(self, "Links of {}", view.id);
+                if view.outbound.is_empty() && view.inbound.is_empty() {
+                    outln!(self, "  (no edges)");
+                }
+                self.print_edge_lines(view);
+            }
+        }
+    }
+
+    /// The edge rows shared by [`print_links`](Self::print_links) and
+    /// [`print_memory_with_links`](Self::print_memory_with_links).
+    fn print_edge_lines(&self, view: &LinksView) {
+        let plain = matches!(self.format, OutputFormat::Plain);
+        for (label, edges) in [("Outbound", &view.outbound), ("Inbound", &view.inbound)] {
+            if edges.is_empty() {
+                continue;
+            }
+            if !plain {
+                outln!(self, "  {} ({}):", label, edges.len());
+            }
+            for e in edges.iter() {
+                if plain {
+                    outln!(self, "{}", edge_plain_line(e));
+                } else {
+                    outln!(self, "    {}", edge_pretty_line(e));
+                    if let Some(note) = &e.note {
+                        outln!(self, "      note: {}", sanitize_one_line(note));
+                    }
+                }
+            }
+        }
+        if view.hidden > 0 {
+            if plain {
+                outln!(self, "hidden={}", view.hidden);
+            } else {
+                outln!(
+                    self,
+                    "  ({} more hidden: dangling, invalidated or rejected; `engramdb links <id> --all` shows them)",
+                    view.hidden
+                );
+            }
+        }
+    }
+
+    /// Report a `link` (or a status change made through it).
+    pub fn print_link_result(&self, result: &engramdb::ops::links::LinkResult) {
+        if self.silent {
+            return;
+        }
+        if self.is_json() {
+            outln!(self, "{}", serde_json::to_string_pretty(result).unwrap());
+            return;
+        }
+        let verb = if result.created {
+            "Linked"
+        } else {
+            "Updated edge"
+        };
+        let store = result
+            .dst_store
+            .as_deref()
+            .map(|s| format!(" @{s}"))
+            .unwrap_or_default();
+        self.print_success(&format!(
+            "{verb} {} {} {}{store} ({})",
+            short_id(&result.src_id),
+            result.kind,
+            short_id(&result.dst_id),
+            result.status
+        ));
+        if let Some(note) = &result.stored_note {
+            self.print_hint(note);
+        }
+        match result.target_state {
+            EdgeState::Live => {}
+            EdgeState::Invalidated => {
+                self.print_hint("the target is invalidated; the edge is hidden by default")
+            }
+            EdgeState::Dangling => self.print_hint("the target does not exist (dangling edge)"),
+            EdgeState::Unknown => self.print_hint(
+                "the target's store could not be opened here; the edge is recorded unchecked",
+            ),
+        }
+    }
+
+    /// Report a reviewer's verdict on a `contradicts` edge.
+    pub fn print_contradiction_outcome(
+        &self,
+        outcome: &engramdb::ops::links::ContradictionOutcome,
+    ) {
+        if self.silent {
+            return;
+        }
+        if self.is_json() {
+            outln!(self, "{}", serde_json::to_string_pretty(outcome).unwrap());
+            return;
+        }
+        match (&outcome.winner, &outcome.loser) {
+            (Some(w), Some(l)) => self.print_success(&format!(
+                "Resolved contradiction: {} supersedes {} ({} is now invalidated)",
+                short_id(w),
+                short_id(l),
+                short_id(l)
+            )),
+            _ => self.print_success(&format!(
+                "Contradiction between {} and {}: {}",
+                short_id(&outcome.a),
+                short_id(&outcome.b),
+                outcome.outcome
+            )),
+        }
+    }
+
+    /// Report an `unlink`.
+    pub fn print_unlink_result(&self, result: &engramdb::ops::links::UnlinkResult) {
+        if self.silent {
+            return;
+        }
+        if self.is_json() {
+            outln!(self, "{}", serde_json::to_string_pretty(result).unwrap());
+            return;
+        }
+        self.print_success(&format!(
+            "Unlinked {} {} {}{}",
+            short_id(&result.src_id),
+            result.kind,
+            short_id(&result.dst_id),
+            if result.reopened {
+                " (target's validity window reopened)"
+            } else {
+                ""
+            }
+        ));
+    }
+
     /// Print project info in the configured format.
     pub fn print_project_info(&self, info: &ProjectInfoOutput) {
         if self.silent {
@@ -2262,6 +2536,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: fixed(2026, 1, 2, 3, 4, 5),
             updated_at: fixed(2026, 1, 2, 3, 4, 5),
@@ -3296,6 +3571,7 @@ mod tests {
             visibility: Visibility::Personal,
             audience: Some(vec!["__g_abcdef012345".to_string()]),
             challenges: vec![],
+            links: vec![],
             verified_at: Some(fixed(2026, 2, 3, 4, 5, 6)),
             created_at: fixed(2026, 1, 2, 3, 4, 5),
             updated_at: fixed(2026, 1, 3, 4, 5, 6),
@@ -3645,6 +3921,195 @@ mod tests {
     fn snap_memory_usage() {
         let report = memory_usage_report(true);
         snap_formats("memory_usage", |f| f.print_memory_usage(&report));
+    }
+
+    // ---- edges -----------------------------------------------------------
+
+    fn edge_view(
+        direction: Direction,
+        other: &str,
+        kind: engramdb::ops::links::LinkKind,
+        state: EdgeState,
+    ) -> EdgeView {
+        use engramdb::ops::links::{LinkOrigin, LinkStatus};
+        EdgeView {
+            direction,
+            other_id: other.to_string(),
+            other_store: None,
+            other_summary: Some("Custom CA breaks webpki downloads".to_string()),
+            symmetric: kind.is_symmetric(),
+            kind,
+            confidence: 1.0,
+            origin: LinkOrigin::Human,
+            status: LinkStatus::Confirmed,
+            created_at: fixed(2026, 10, 30, 9, 15, 0),
+            note: None,
+            state,
+            successor: None,
+        }
+    }
+
+    /// One edge of every shape the renderer distinguishes: directed out and
+    /// in, symmetric, cross-store unchecked, an invalidated end with its
+    /// successor, a proposed agent edge with a note, and a hidden count.
+    fn links_view() -> LinksView {
+        use engramdb::ops::links::{LinkKind, LinkOrigin, LinkStatus};
+        let other = "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+        let mut supports = edge_view(Direction::Out, other, LinkKind::Supports, EdgeState::Live);
+        supports.note = Some("measured on the sandbox\nsecond line".to_string());
+        let mut contradicts = edge_view(
+            Direction::In,
+            "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c",
+            LinkKind::Contradicts,
+            EdgeState::Live,
+        );
+        contradicts.origin = LinkOrigin::Agent;
+        contradicts.status = LinkStatus::Proposed;
+        contradicts.confidence = 0.6;
+        contradicts.note = Some("webpki rejects the gateway CA".to_string());
+        let mut foreign = edge_view(
+            Direction::Out,
+            "018f2a1b-1111-7e5f-8a9b-0c1d2e3f4a5d",
+            LinkKind::RelatedTo,
+            EdgeState::Unknown,
+        );
+        foreign.other_store = Some("__g_0123456789ab".to_string());
+        foreign.other_summary = None;
+        let mut derived = edge_view(
+            Direction::In,
+            "018f2a1b-2222-7e5f-8a9b-0c1d2e3f4a5e",
+            LinkKind::DerivedFrom,
+            EdgeState::Invalidated,
+        );
+        derived.successor = Some("018f2a1b-3333-7e5f-8a9b-0c1d2e3f4a5f".to_string());
+        LinksView {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            outbound: vec![foreign, supports],
+            inbound: vec![contradicts, derived],
+            hidden: 2,
+        }
+    }
+
+    fn empty_links_view() -> LinksView {
+        LinksView {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            outbound: vec![],
+            inbound: vec![],
+            hidden: 0,
+        }
+    }
+
+    #[test]
+    fn snap_links() {
+        let view = links_view();
+        snap_formats("links", |f| f.print_links(&view));
+    }
+
+    #[test]
+    fn snap_links_empty() {
+        let view = empty_links_view();
+        snap_formats("links_empty", |f| f.print_links(&view));
+    }
+
+    #[test]
+    fn snap_memory_with_links() {
+        let view = links_view();
+        snap_formats("memory_with_links", |f| {
+            f.print_memory_with_links(&test_memory(), Some(&view))
+        });
+    }
+
+    /// No edges at all: `get` must render exactly what it did before edges
+    /// existed, in every format.
+    #[test]
+    fn memory_without_links_renders_as_before() {
+        let view = empty_links_view();
+        for format in [
+            OutputFormat::Pretty,
+            OutputFormat::Json,
+            OutputFormat::Plain,
+        ] {
+            let (with, cap_with) = OutputFormatter::capturing(format);
+            with.print_memory_with_links(&rich_memory(), Some(&view));
+            let (without, cap_without) = OutputFormatter::capturing(format);
+            without.print_memory(&rich_memory());
+            assert_eq!(
+                cap_with.transcript(),
+                cap_without.transcript(),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snap_link_results() {
+        use engramdb::ops::links::{LinkKind, LinkResult, LinkStatus, UnlinkResult};
+        let linked = LinkResult {
+            owner_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            src_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            dst_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            dst_store: None,
+            kind: LinkKind::Duplicates,
+            status: LinkStatus::Confirmed,
+            created: true,
+            target_state: EdgeState::Live,
+            stored_note: Some(
+                "stored on 018f2a1b-3c4d (personal): a committed file must not name a personal memory"
+                    .to_string(),
+            ),
+        };
+        let updated = LinkResult {
+            created: false,
+            status: LinkStatus::Rejected,
+            kind: LinkKind::Supports,
+            dst_store: Some("__global_store__".to_string()),
+            target_state: EdgeState::Unknown,
+            stored_note: None,
+            ..linked.clone()
+        };
+        let unlinked = UnlinkResult {
+            owner_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            src_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            dst_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            kind: LinkKind::Supersedes,
+            reopened: true,
+        };
+        let resolved = engramdb::ops::links::ContradictionOutcome {
+            a: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            b: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            outcome: "superseded",
+            winner: Some("018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string()),
+            loser: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+        };
+        let both = engramdb::ops::links::ContradictionOutcome {
+            outcome: "confirmed",
+            winner: None,
+            loser: None,
+            ..resolved.clone()
+        };
+        snap_formats("link_results", |f| {
+            f.print_link_result(&linked);
+            f.print_link_result(&updated);
+            f.print_unlink_result(&unlinked);
+            f.print_contradiction_outcome(&resolved);
+            f.print_contradiction_outcome(&both);
+        });
+    }
+
+    /// The edge views are colourless, like the usage view.
+    #[test]
+    fn snap_color_links_stay_plain() {
+        let view = links_view();
+        assert_never_styled("links", OutputFormat::Pretty, |f| f.print_links(&view));
+    }
+
+    /// `get` keeps the memory's own styling; the edge rows below it add none.
+    #[test]
+    fn snap_color_memory_with_links() {
+        let view = links_view();
+        snap_colored("memory_with_links", |f| {
+            f.print_memory_with_links(&test_memory(), Some(&view))
+        });
     }
 
     #[test]

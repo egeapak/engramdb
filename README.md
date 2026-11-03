@@ -107,6 +107,7 @@ When integrated with Claude Code:
 | `challenge` | Challenge a memory's validity |
 | `review` | Interactive review of challenged/stale memories |
 | `verify` | Confirm a memory is still accurate (stamps `verified_at`, clears doctor-flagged reviews) |
+| `link` / `unlink` / `links` | Add, remove and list typed edges between memories (contradicts, supports, supersedes, …) |
 | `task` | Declare or complete the task this session works on (`current`/`complete`) |
 | `stats` | Show store statistics |
 | `doctor` | Check environment and store health (`--fix` to repair, `validate` to test models) |
@@ -163,6 +164,8 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `review` | List memories needing review |
 | `resolve` | Accept, update, invalidate, or delete a challenged memory |
 | `verify` | Re-confirm a memory is still accurate, refreshing fact decay |
+| `link` / `unlink` | Add or remove a typed edge between two memories |
+| `link_status` | Confirm, reject, or resolve the direction of an edge (e.g. a proposed contradiction) |
 | `task_current` | Declare (or read) the task this session is working on |
 | `task_complete` | Mark a task finished, demoting its task-scoped memories |
 | `stats` | Store statistics and health info |

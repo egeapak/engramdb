@@ -11,6 +11,10 @@ pub struct ChallengeParams {
     pub id: String,
     pub evidence: String,
     pub source_file: Option<String>,
+    /// The memory the challenged one contradicts: also propose a
+    /// `contradicts` edge between them (status `proposed`, the evidence as
+    /// its note) for a reviewer to confirm, direct or reject.
+    pub against: Option<String>,
 }
 
 /// Challenge a memory by providing counter-evidence.
@@ -41,6 +45,18 @@ pub async fn run_challenge(
             result.memory.status,
             result.memory.challenges.len()
         ));
+    }
+    if let Some(against) = params.against {
+        let edge = engramdb::ops::links::link(
+            &store,
+            engramdb::ops::links::challenge_edge(&result.memory.id, &against, &params.evidence),
+            engramdb::ops::Surface::Cli,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("the challenge was recorded, but the contradicts edge was not: {e:#}")
+        })?;
+        formatter.print_link_result(&edge);
     }
     Ok(())
 }

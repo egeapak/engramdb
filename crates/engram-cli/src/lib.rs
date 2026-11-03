@@ -577,6 +577,47 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_delete(&dir, global, &id, force, &formatter).await
         }
         Command::Verify { id, global } => commands::run_verify(&dir, global, &id, &formatter).await,
+        Command::Link {
+            src,
+            kind,
+            dst,
+            store,
+            confidence,
+            note,
+            status,
+            winner,
+            global,
+        } => {
+            commands::run_link(
+                &dir,
+                global,
+                commands::LinkArgs {
+                    src,
+                    kind,
+                    dst,
+                    store,
+                    confidence,
+                    note,
+                    status,
+                    winner,
+                },
+                &formatter,
+            )
+            .await
+        }
+        Command::Unlink {
+            src,
+            kind,
+            dst,
+            store,
+            global,
+        } => commands::run_unlink(&dir, global, &src, &kind, &dst, store, &formatter).await,
+        Command::Links {
+            id,
+            all,
+            kind,
+            global,
+        } => commands::run_links(&dir, global, &id, all, &kind, &formatter).await,
         Command::Task { command } => match command {
             TaskCommand::Current {
                 name,
@@ -635,6 +676,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             id,
             evidence,
             source_file,
+            against,
             global,
         } => {
             commands::run_challenge(
@@ -644,6 +686,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     id,
                     evidence,
                     source_file,
+                    against,
                 },
                 &formatter,
             )

@@ -79,6 +79,8 @@ engramdb get <id> [--full] [--raw] [--path] [--global]
 
 `<id>` supports prefix matching. `--raw` emits the raw markdown file; `--path` prints the file path on disk.
 
+A memory with links lists them after its fields (outbound and inbound; dangling, invalidated and rejected ones are counted but hidden). `--format json` adds them as an `edges` object; a memory without links prints exactly as before. See [links.md](./links.md).
+
 ## `query` — unified search
 
 ```bash
@@ -166,6 +168,17 @@ engramdb verify <id> [--global]
 
 Stamps `verified_at = now` and clears a doctor-flagged needs-review status. Fact-class memories decay from their last verification, so verifying a fact refreshes its score; `doctor` suggests verification for observations unverified longer than `[epistemic].observation_review_days`.
 
+## `link` / `unlink` / `links` — typed edges between memories
+
+```bash
+engramdb link <src> <kind> <dst> [--note <text>] [--confidence <0-1>] [--status proposed|confirmed|rejected] [--store <spec>] [--global]
+engramdb link <a> contradicts <b> --winner <id> [--note <text>]
+engramdb unlink <src> <kind> <dst> [--store <spec>] [--global]
+engramdb links <id> [--all] [--kind <kind>]... [--global]
+```
+
+Kinds: `contradicts`, `related_to`, `duplicates` (symmetric, stored once and listed on both memories), `supports`, `derived_from`, `supersedes` (directed). Re-linking the same pair and kind updates the link. `--store` names the target's store (`global`, `group:<name>`, a project id) when it is not this one. `--winner` resolves a `contradicts` link as `<winner> supersedes <loser>` and invalidates the loser. `links --all` also shows dangling, invalidated and rejected links. Full rules: [links.md](./links.md).
+
 ## `task` — session task lifecycle
 
 ```bash
@@ -180,10 +193,12 @@ engramdb task complete <NAME> [--global]
 ## `challenge` — flag a memory
 
 ```bash
-engramdb challenge <id> --evidence <text> [--source-file <path>] [--global]
+engramdb challenge <id> --evidence <text> [--source-file <path>] [--against <other-id>] [--global]
 ```
 
 Sets the memory's status to `Challenged` and records the evidence. Surface it later with `engramdb review --challenged-only`.
+
+`--against` names the memory this one contradicts: a `proposed` `contradicts` link between the two is added, with the evidence as its note, for a reviewer to confirm, reject or resolve with `engramdb link … --winner` ([links.md](./links.md)). The link is separate from the challenge — `review`'s keep clears the challenge and leaves the link.
 
 ## `review` — interactive review
 
@@ -249,6 +264,8 @@ Without a subcommand: full environment diagnostics (paths, embedding backend, da
 | `--global` | Check the global cross-project store instead of the current project. |
 
 `doctor` exits non-zero when any check fails (see [Exit codes](#exit-codes)).
+
+Two store checks concern memory files and links. A memory file whose hidden `<!-- engramdb -->` block does not parse — typically an unresolved merge conflict — is listed by name under the store check: such a file is skipped by `reindex` and refused by `get`/`update` rather than read with its hidden fields silently reset, so resolve the conflict by hand. **Memory edges** (shown only once the store has links) warns about dangling links (into a deleted memory) and about a committed memory that names a personal one; neither changes the exit code.
 
 ## `gc` — garbage collect
 

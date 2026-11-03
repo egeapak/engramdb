@@ -306,6 +306,17 @@ pub async fn compress_apply(
         }
     }
 
+    // Edges (schema 0.9.0): the closed sources' outbound edges move onto the
+    // summary, edges between sources are absorbed, and inbound edges resolve
+    // through each source's `superseded_by` (see `links::carry_links_onto`).
+    // Only sources this compress actually closed — a still-active one keeps
+    // its edges, like it keeps everything else.
+    let closed: Vec<crate::types::Memory> = source_ids
+        .iter()
+        .filter_map(|id| verified.get(id).filter(|m| m.is_invalidated()).cloned())
+        .collect();
+    super::links::carry_links_onto(store, &result.id, &closed).await;
+
     if !failed_sources.is_empty() {
         bail!(
             "Compressed memory {} was created, but {} source memor{} could not be invalidated: {}. \

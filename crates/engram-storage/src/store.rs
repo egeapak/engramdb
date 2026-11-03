@@ -703,6 +703,7 @@ impl MemoryStore {
             .upsert(&entry)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+        self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -832,6 +833,7 @@ impl MemoryStore {
             .upsert_batch(&entries)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e)))?;
+        self.sync_edges_locked(memories).await?;
 
         self.update_manifest_stats().await?;
 
@@ -1094,6 +1096,7 @@ impl MemoryStore {
         let mut updated: Vec<String> = Vec::new();
         let mut errors: Vec<(String, String)> = Vec::new();
         let mut entries: Vec<IndexEntry> = Vec::new();
+        let mut written: Vec<Memory> = Vec::new();
 
         for given in ids {
             let key = aliases.get(given).unwrap_or(given);
@@ -1131,6 +1134,7 @@ impl MemoryStore {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
             })?;
             entries.push(entry);
+            written.push(memory);
             updated.push(canonical);
         }
 
@@ -1138,6 +1142,7 @@ impl MemoryStore {
             self.lance_index.upsert_batch(&entries).await.map_err(|e| {
                 StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e))
             })?;
+            self.sync_edges_locked(&written).await?;
             // One refresh for the whole batch instead of one per memory.
             self.update_manifest_stats().await?;
         }
@@ -1264,11 +1269,47 @@ impl MemoryStore {
             .upsert(&entry)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+        self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
 
         Ok(())
+    }
+
+    /// Replace the `edges` rows owned by `memories` with what their files now
+    /// declare (`edge_index` module docs). Callers MUST hold the write lock.
+    ///
+    /// Runs on every write rather than only on writes that touched an edge
+    /// field: `src_invalidated` follows `invalidated_at`, and an ordinary
+    /// update can change that too. One commit per call.
+    async fn sync_edges_locked(&self, memories: &[Memory]) -> Result<()> {
+        let owners: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+        let rows: Vec<crate::edge_index::EdgeRow> = memories
+            .iter()
+            .flat_map(crate::edge_index::edges_of)
+            .collect();
+        crate::edge_index::replace_owned(self.lance_index.connection(), &owners, &rows)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges update failed: {e:#}")))
+    }
+
+    /// Every edge in this store, deduplicated (`edge_index::dedupe`). Empty
+    /// when the table does not exist yet. Read-only: creates nothing, so it
+    /// is safe on a store from [`Self::open_read_only`].
+    pub async fn list_edges(&self) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_all(self.lance_index.connection())
+            .await
+            .map(crate::edge_index::dedupe)
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+    }
+
+    /// The edges with `id` (a full id) at either end, deduplicated.
+    pub async fn edges_touching(&self, id: &str) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_touching(self.lance_index.connection(), id)
+            .await
+            .map(crate::edge_index::dedupe)
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
     }
 
     /// Delete a memory.
@@ -1394,6 +1435,7 @@ impl MemoryStore {
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB delete_chunks_batch failed: {}", e))
             })?;
+        self.delete_edges_locked(&to_delete).await?;
 
         // One refresh for the whole sweep instead of one per deletion.
         self.update_manifest_stats().await?;
@@ -1432,11 +1474,22 @@ impl MemoryStore {
         self.lance_index.delete_chunks(full_id).await.map_err(|e| {
             StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
         })?;
+        self.delete_edges_locked(&[full_id.to_string()]).await?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
 
         Ok(())
+    }
+
+    /// Drop the edge rows the deleted memories' files declared. Edges *into*
+    /// them, declared by other files, stay: a dangling edge is legal, and the
+    /// readers report it rather than this path silently rewriting other
+    /// memories' files.
+    async fn delete_edges_locked(&self, ids: &[String]) -> Result<()> {
+        crate::edge_index::delete_owned(self.lance_index.connection(), ids)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges delete failed: {e:#}")))
     }
 
     /// List all memories with filterable/displayable columns (12 of 14).
@@ -1896,6 +1949,7 @@ impl MemoryStore {
             .collect();
 
         let mut skipped = 0;
+        let mut edges: Vec<crate::edge_index::EdgeRow> = Vec::new();
 
         // Reindex shared memories
         let shared_dir = paths::memories_dir(&self.project_dir);
@@ -1907,6 +1961,7 @@ impl MemoryStore {
                     &chunk_ids,
                     &mut indexed_ids,
                     &recorded,
+                    &mut edges,
                 )
                 .await?;
         }
@@ -1921,6 +1976,7 @@ impl MemoryStore {
                     &chunk_ids,
                     &mut indexed_ids,
                     &recorded,
+                    &mut edges,
                 )
                 .await?;
         }
@@ -1969,6 +2025,22 @@ impl MemoryStore {
                     StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
                 })?;
         }
+
+        // The derived edges table (schema 0.9.0). Rebuilt whole in one commit
+        // unless another checkout shares this index: its files are invisible
+        // here, so its memories' rows would all look deleted — replace only
+        // the rows this checkout's memories own, like the upsert-only rows
+        // above. That same per-owner path is also correct for an incremental
+        // pass, whose removed ids were reconciled above; their rows go too.
+        let conn = self.lance_index.connection();
+        let edge_result = if foreign_checkout.is_none() {
+            crate::edge_index::rebuild(conn, &edges).await
+        } else {
+            crate::edge_index::replace_owned(conn, &indexed_ids, &edges).await
+        };
+        edge_result.map_err(|e| {
+            StorageError::Validation(format!("LanceDB edges rebuild failed: {e:#}"))
+        })?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -2376,6 +2448,7 @@ impl MemoryStore {
         chunk_ids: &std::collections::HashSet<String>,
         indexed_ids: &mut Vec<String>,
         recorded: &HashMap<String, RowIdentity>,
+        edges: &mut Vec<crate::edge_index::EdgeRow>,
     ) -> Result<usize> {
         use rayon::prelude::*;
 
@@ -2558,6 +2631,15 @@ impl MemoryStore {
             })
             .collect();
         indexed_ids.extend(owned.iter().map(|(id, _, _)| id.clone()));
+        // Every memory's edges, skipped rows included: the edges table is
+        // rebuilt whole (or per owner) from this, and deriving it is a walk
+        // over already-parsed memories — no I/O, so the incremental skip has
+        // nothing to save here.
+        edges.extend(
+            owned
+                .iter()
+                .flat_map(|(_, memory, _)| crate::edge_index::edges_of(memory)),
+        );
         if !entries_batch.is_empty() {
             self.lance_index
                 .upsert_batch(&entries_batch)
@@ -4374,6 +4456,135 @@ mod tests {
 
     async fn downgrade_dropping(dir: &Path, drop_cols: &[&str], version: &str) {
         crate::test_support::downgrade_dropping(dir, drop_cols, version).await
+    }
+
+    /// Reproduce a 0.8.0 store: no `edges` table at all, manifest stamped
+    /// 0.8.0. The table is new in 0.9.0 rather than a column, so dropping it
+    /// IS the previous version's on-disk shape.
+    async fn downgrade_to_0_8_0(dir: &Path) {
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id).unwrap();
+        let conn = lancedb::connect(lance_path.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        conn.drop_table(crate::edge_index::EDGES_TABLE, &[])
+            .await
+            .unwrap();
+        let manifest_path = paths::project_dir(dir).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.8.0".to_string();
+        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+    }
+
+    /// The 0.9.0 migration (edges), against a real 0.8.0 store whose files
+    /// already carry `supersedes` / `superseded_by`: a plain open creates the
+    /// table AND mirrors those fields into it, so inbound queries work at
+    /// once rather than after the next write.
+    #[tokio::test]
+    async fn schema_migration_to_0_9_0_builds_edges_from_a_real_0_8_0_store() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            let mut new = create_test_memory("mig9-new", Visibility::Shared);
+            new.supersedes = vec!["mig9-old".into()];
+            store.create(&new).await.unwrap();
+            let mut old = create_test_memory("mig9-old", Visibility::Shared);
+            old.superseded_by = Some("mig9-new".into());
+            store.create(&old).await.unwrap();
+        }
+        downgrade_to_0_8_0(tmp.path()).await;
+        {
+            let conn = lancedb::connect(
+                paths::lancedb_dir(&project_id::compute_project_id(tmp.path()))
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .execute()
+            .await
+            .unwrap();
+            assert!(
+                crate::edge_index::open(&conn).await.unwrap().is_none(),
+                "fixture still has the edges table, so the test proves nothing"
+            );
+        }
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        let edges = store.list_edges().await.unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "both fields describe one edge and fold to one: {edges:?}"
+        );
+        assert_eq!(edges[0].src_id, "mig9-new");
+        assert_eq!(edges[0].dst_id, "mig9-old");
+        assert_eq!(edges[0].kind, engram_types::LinkKind::Supersedes);
+        // Answered from the target's end too.
+        assert_eq!(store.edges_touching("mig9-old").await.unwrap().len(), 1);
+    }
+
+    /// The write path keeps the table in step with the files, and a delete
+    /// takes the deleted memory's own rows but leaves edges INTO it dangling.
+    #[tokio::test]
+    async fn edges_follow_writes_and_deletes() {
+        use engram_types::{Link, LinkKind, LinkOrigin};
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        store
+            .create(&create_test_memory("e-a", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("e-b", Visibility::Shared))
+            .await
+            .unwrap();
+        assert!(store.list_edges().await.unwrap().is_empty());
+
+        store
+            .update_with("e-a", |m| {
+                m.links
+                    .push(Link::new("e-b", LinkKind::Supports, LinkOrigin::Human));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store
+            .update_with("e-b", |m| {
+                m.links
+                    .push(Link::new("e-a", LinkKind::RelatedTo, LinkOrigin::Agent));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.list_edges().await.unwrap().len(), 2);
+        assert_eq!(store.edges_touching("e-a").await.unwrap().len(), 2);
+
+        // A reindex reproduces exactly the same table from the files.
+        let before = store.list_edges().await.unwrap();
+        store.reindex().await.unwrap();
+        let mut after = store.list_edges().await.unwrap();
+        let mut before = before;
+        before.sort_by_key(|r| r.edge_key());
+        after.sort_by_key(|r| r.edge_key());
+        assert_eq!(before, after);
+
+        store.delete("e-b").await.unwrap();
+        let left = store.list_edges().await.unwrap();
+        assert_eq!(left.len(), 1, "e-a's edge into the deleted e-b stays");
+        assert_eq!(left[0].src_id, "e-a");
+        assert_eq!(left[0].dst_id, "e-b");
     }
 
     /// The 0.7.0 schema migration (harvest provenance), against a store whose

@@ -489,6 +489,13 @@ impl LanceIndex {
         Ok(Some(store))
     }
 
+    /// The underlying connection, for the tables this struct does not own
+    /// (`edge_index`'s `edges`), so they share one connection and one
+    /// `lancedb/` directory with `memories` and `chunks`.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     /// Arrow schema for the memories table (metadata only, no vector).
     fn memories_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -3076,6 +3083,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -6,6 +6,7 @@
 //! - [`Decay`] - time-based relevance decay strategies
 //! - [`Provenance`] - source tracking (human, agent, inferred, imported)
 //! - [`Challenge`] - validity challenges to memories
+//! - [`Link`] - typed edges between memories
 //! - [`EngramConfig`] - all configuration for scoring, retrieval, and thresholds
 //!
 //! These types form the foundation of the memory storage and retrieval system,
@@ -16,6 +17,7 @@ pub mod config;
 mod decay;
 pub mod env;
 mod epistemic;
+mod link;
 mod memory;
 pub mod normalize;
 mod project_list_grouping;
@@ -36,6 +38,7 @@ pub use config::{
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;
 pub use epistemic::{Epistemic, Generality, Situation, Validity};
+pub use link::{Link, LinkKind, LinkOrigin, LinkStatus};
 pub use memory::{default_decay, Memory, MemoryType, MemoryUpdate, Status, Visibility};
 pub use normalize::{normalize, normalize_counts, normalize_set, KeywordStems, NORMALIZER_STAMP};
 pub use project_list_grouping::ProjectListGrouping;

@@ -403,7 +403,7 @@ pub async fn top_used(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::storage::InMemoryRegistry;
     use crate::types::{Memory, MemoryType, Provenance};

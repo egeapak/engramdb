@@ -53,8 +53,10 @@ use super::helpers::{
     sanitize_single_line, split_frontmatter, HIDDEN_META_END, HIDDEN_META_START,
 };
 use super::{yaml, MemoryParser, MemoryWriter, CURRENT_FORMAT_VERSION};
-use crate::error::Result;
-use engram_types::{Challenge, Decay, Epistemic, Memory, MemoryType, Status, Validity, Visibility};
+use crate::error::{Result, StorageError};
+use engram_types::{
+    Challenge, Decay, Epistemic, Link, Memory, MemoryType, Status, Validity, Visibility,
+};
 
 // ---------------------------------------------------------------------------
 // Frontmatter structs
@@ -113,6 +115,11 @@ struct HiddenMeta {
     source_sessions: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     challenges: Vec<Challenge>,
+    /// Outbound typed edges (schema v0.9.0). Last, so a file without edges
+    /// is byte-identical to one written before the field existed, and a file
+    /// with them only grows at the end of the block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    links: Vec<Link>,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +196,7 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     let updated_at = parse_datetime_field(prov_text, "Updated").unwrap_or(created_at);
 
     // Parse hidden metadata
-    let hidden = parse_hidden_meta(body);
+    let hidden = parse_hidden_meta(body)?;
 
     Ok(Memory {
         id: fm.id,
@@ -227,6 +234,7 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
             .filter(|s| crate::transcripts::is_valid_session_id(s))
             .collect(),
         challenges: hidden.challenges,
+        links: hidden.links,
         verified_at: hidden.verified_at,
         created_at,
         updated_at,
@@ -372,6 +380,7 @@ fn write_v2(memory: &Memory) -> Result<String> {
         audience: memory.audience.clone().filter(|a| !a.is_empty()),
         source_sessions: memory.source_sessions.clone(),
         challenges: memory.challenges.clone(),
+        links: memory.links.clone(),
     };
     let hidden_yaml = yaml::to_string(&hidden)?;
     out.push_str(&format!("\n<!-- engramdb\n{hidden_yaml}-->\n"));
@@ -433,32 +442,82 @@ fn extract_bold_field(body: &str, field: &str) -> Option<String> {
 /// no longer hijack the metadata; new writes escape such lines anyway). For
 /// legacy/hand-edited files without a line-anchored marker, fall back to the
 /// historical first-substring scan.
-fn parse_hidden_meta(body: &str) -> HiddenMeta {
+///
+/// # A present-but-broken block is an error, never a reset
+///
+/// This used to fall through to `HiddenMeta::default()` with a warning. The
+/// block holds `challenges`, `supersedes`, `superseded_by`, `source_sessions`,
+/// `links`, decay, expiry and validity, and every one of them is only ever
+/// *read back from this block* — so a default here was not a degraded read,
+/// it was the first half of a silent erase: the next `update` of any field
+/// rewrote the file from the defaults, and a merge-conflict marker in one
+/// field cost every other one. Now the parse fails, which makes the failure
+/// loud on every surface instead of on none: `get`/`update` return the error
+/// (so nothing can rewrite the file), `reindex` skips the file with a warning
+/// naming it, and `doctor` lists it with this message.
+///
+/// Three shapes are refused: an opening marker with no closing `-->`, a
+/// git conflict marker anywhere after the writer's last section (where no
+/// writer-emitted line can start with one), and YAML that does not parse.
+/// The legacy substring fallback stays lenient — it exists for files whose
+/// content merely *mentions* the marker, where an error would make an
+/// ordinary old file unreadable.
+fn parse_hidden_meta(body: &str) -> Result<HiddenMeta> {
     let lines: Vec<&str> = body.lines().collect();
+
+    // Conflict markers in the trailer. Everything after the last
+    // `## Provenance` heading is writer-emitted single-line fields plus the
+    // hidden block, so a line opening with a conflict marker there cannot be
+    // content. Checked before the block is located: a conflict *around* two
+    // whole blocks parses cleanly and would otherwise silently pick one side.
+    // Without a provenance section (a hand-written file), only the block
+    // itself is checked: a setext heading underline (`=======`) in content is
+    // ordinary markdown.
+    let trailer_start = lines
+        .iter()
+        .rposition(|l| l.trim_end() == "## Provenance")
+        .or_else(|| {
+            lines
+                .iter()
+                .rposition(|l| l.trim_end() == HIDDEN_META_START)
+        })
+        .unwrap_or(lines.len());
+    if let Some(marker) = lines[trailer_start..]
+        .iter()
+        .find(|l| is_conflict_marker(l))
+    {
+        return Err(StorageError::InvalidFormat(format!(
+            "unresolved merge conflict in the engramdb metadata block (line {:?}); \
+             resolve it in the file, then run `engramdb reindex`",
+            marker.trim_end()
+        )));
+    }
+
     if let Some(start) = lines
         .iter()
         .rposition(|line| line.trim_end() == HIDDEN_META_START)
     {
-        if let Some(len) = lines[start + 1..]
+        let Some(len) = lines[start + 1..]
             .iter()
             .position(|line| line.trim_end() == HIDDEN_META_END)
-        {
-            let yaml_content = lines[start + 1..start + 1 + len].join("\n");
-            match yaml::from_str(yaml_content.trim()) {
-                Ok(meta) => return meta,
-                Err(e) => {
-                    // Falling through to defaults silently ERASES the block's
-                    // fields (challenges, supersedes, decay, expires_at,
-                    // verified_at, visibility) on the next rewrite. A present-
-                    // but-unparseable block (hand edit, merge-conflict marker)
-                    // deserves at least a loud warning.
-                    tracing::warn!(
-                        "memory file has an unparseable engramdb metadata block \
-                         (challenges/decay/expiry will reset to defaults): {e}"
-                    );
-                }
-            }
+        else {
+            return Err(StorageError::InvalidFormat(
+                "the engramdb metadata block (`<!-- engramdb`) is never closed by `-->`; \
+                 fix the file by hand, then run `engramdb reindex`"
+                    .to_string(),
+            ));
+        };
+        let yaml_content = lines[start + 1..start + 1 + len].join("\n");
+        let yaml_content = yaml_content.trim();
+        if yaml_content.is_empty() {
+            return Ok(HiddenMeta::default());
         }
+        return yaml::from_str(yaml_content).map_err(|e| {
+            StorageError::InvalidFormat(format!(
+                "unparseable engramdb metadata block ({e}); nothing was reset — fix the \
+                 file by hand, then run `engramdb reindex`"
+            ))
+        });
     }
 
     // Legacy fallback: first substring occurrence anywhere in the body.
@@ -467,12 +526,22 @@ fn parse_hidden_meta(body: &str) -> HiddenMeta {
         if let Some(end_idx) = after_marker.find(HIDDEN_META_END) {
             let yaml_content = after_marker[..end_idx].trim();
             if let Ok(meta) = yaml::from_str(yaml_content) {
-                return meta;
+                return Ok(meta);
             }
         }
     }
 
-    HiddenMeta::default()
+    Ok(HiddenMeta::default())
+}
+
+/// A git merge-conflict marker line (`<<<<<<< `, `=======`, `>>>>>>> `, and
+/// diff3's `||||||| `).
+fn is_conflict_marker(line: &str) -> bool {
+    let line = line.trim_end();
+    line == "======="
+        || ["<<<<<<<", ">>>>>>>", "|||||||"]
+            .iter()
+            .any(|m| line == *m || line.starts_with(&format!("{m} ")))
 }
 
 #[cfg(test)]

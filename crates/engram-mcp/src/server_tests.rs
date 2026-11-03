@@ -82,6 +82,7 @@ fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
         title: None,
         title_strategy: None,
         project: None,
+        links: None,
     }
 }
 
@@ -148,6 +149,7 @@ async fn create_with_all_fields() {
         title: None,
         title_strategy: None,
         project: None,
+        links: None,
     };
     let result = server.memory_create(Parameters(input)).await;
     let val = parse_ok(&result);
@@ -288,6 +290,7 @@ async fn update_summary() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -336,6 +339,7 @@ async fn update_type() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -384,6 +388,7 @@ async fn update_status() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -444,6 +449,7 @@ async fn update_tags_add_remove() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     parse_ok(&result);
@@ -499,6 +505,7 @@ async fn update_criticality_validation() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_err(&result);
@@ -541,6 +548,7 @@ async fn update_decay_params() {
             audience: None,
             decay_ttl: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -1238,6 +1246,7 @@ async fn challenge_memory() {
             evidence: "Found contradicting evidence".to_string(),
             source_file: Some("src/test.rs".to_string()),
             project: None,
+            against: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -1260,6 +1269,7 @@ async fn review_shows_challenged() {
             evidence: "Evidence".to_string(),
             source_file: None,
             project: None,
+            against: None,
         }))
         .await
         .unwrap();
@@ -1294,6 +1304,7 @@ async fn review_with_type_filter() {
                 evidence: "Evidence".to_string(),
                 source_file: None,
                 project: None,
+                against: None,
             }))
             .await
             .unwrap();
@@ -1380,6 +1391,7 @@ async fn resolve_keep() {
             evidence: "Maybe wrong".to_string(),
             source_file: None,
             project: None,
+            against: None,
         }))
         .await
         .unwrap();
@@ -1415,6 +1427,7 @@ async fn resolve_delete() {
             evidence: "Definitely wrong".to_string(),
             source_file: None,
             project: None,
+            against: None,
         }))
         .await
         .unwrap();
@@ -2120,6 +2133,7 @@ fn update_input(id: &str, project: Option<String>) -> UpdateInput {
         decay_ttl: None,
         decay_floor: None,
         project,
+        links: None,
     }
 }
 
@@ -2196,6 +2210,7 @@ async fn cross_project_write_gate_rejects_when_disabled() {
             evidence: "contradiction".to_string(),
             source_file: None,
             project: Some(project_b),
+            against: None,
         }))
         .await;
     assert_blocked(&ch);
@@ -2378,6 +2393,7 @@ async fn cross_project_update() {
             decay_ttl: None,
             decay_floor: None,
             project: Some(project_b.clone()),
+            links: None,
         }))
         .await;
     let update_val = parse_ok(&update_result);
@@ -2570,6 +2586,7 @@ async fn cross_project_challenge_and_review() {
             evidence: "New evidence contradicts this".to_string(),
             source_file: None,
             project: Some(project_b.clone()),
+            against: None,
         }))
         .await;
     let challenge_val = parse_ok(&challenge_result);
@@ -2741,6 +2758,7 @@ async fn global_create_with_all_fields() {
         title: Some("Semver Convention".to_string()),
         title_strategy: None,
         project: global_project(),
+        links: None,
     };
     let result = server.memory_create(Parameters(input)).await;
     let val = parse_ok(&result);
@@ -2814,6 +2832,7 @@ async fn global_update() {
             decay_ttl: None,
             decay_floor: None,
             project: global_project(),
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -3237,6 +3256,7 @@ async fn global_challenge_and_review() {
             evidence: "Modern JS style guides recommend no semicolons".to_string(),
             source_file: Some(".eslintrc".to_string()),
             project: global_project(),
+            against: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -3280,6 +3300,7 @@ async fn global_resolve_keep() {
             evidence: "Might be wrong".to_string(),
             source_file: None,
             project: global_project(),
+            against: None,
         }))
         .await
         .unwrap();
@@ -3327,6 +3348,7 @@ async fn global_resolve_update() {
             evidence: "Needs update".to_string(),
             source_file: None,
             project: global_project(),
+            against: None,
         }))
         .await
         .unwrap();
@@ -3373,6 +3395,7 @@ async fn global_resolve_delete() {
             evidence: "Should be deleted".to_string(),
             source_file: None,
             project: global_project(),
+            against: None,
         }))
         .await
         .unwrap();
@@ -5203,6 +5226,7 @@ async fn verify_tool_stamps_and_update_reopens() {
         decay_ttl: None,
         decay_floor: None,
         project: None,
+        links: None,
     };
     update.clear_invalidated = Some(true);
     parse_ok(&server.memory_update(Parameters(update)).await);
@@ -7178,4 +7202,183 @@ async fn early_embedding_warning_rides_the_instructions_only() {
 
     client.cancel().await.unwrap();
     server_handle.await.unwrap().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// typed edges: link / unlink / link_status, links on create, get, against
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn link_tools_round_trip_and_get_shows_both_ends() {
+    let (_dir, server) = setup().await;
+    let a = create_and_get_id(&server, "decision", "Alpha", "first").await;
+    let b = create_and_get_id(&server, "decision", "Beta", "second").await;
+
+    let val = parse_ok(
+        &server
+            .memory_link(Parameters(LinkInput {
+                src: a.clone(),
+                kind: "supports".into(),
+                dst: b.clone(),
+                dst_store: None,
+                confidence: Some(0.9),
+                note: Some("same root cause".into()),
+                status: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(val["created"], true);
+    assert_eq!(val["kind"], "supports");
+
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: b.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["links"]["inbound"][0]["other_id"], a.as_str());
+    assert_eq!(got["links"]["inbound"][0]["note"], "same root cause");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: a.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["links"]["outbound"][0]["other_id"], b.as_str());
+
+    // Unknown kinds are a validation error at the boundary.
+    let err = server
+        .memory_link(Parameters(LinkInput {
+            src: a.clone(),
+            kind: "suports".into(),
+            dst: b.clone(),
+            dst_store: None,
+            confidence: None,
+            note: None,
+            status: None,
+            project: None,
+        }))
+        .await;
+    assert!(err.is_err());
+
+    parse_ok(
+        &server
+            .memory_unlink(Parameters(UnlinkInput {
+                src: a.clone(),
+                kind: "supports".into(),
+                dst: b.clone(),
+                dst_store: None,
+                project: None,
+            }))
+            .await,
+    );
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: a,
+                project: None,
+            }))
+            .await,
+    );
+    assert!(
+        got.get("links").is_none(),
+        "a never-linked view reads as before: {got}"
+    );
+}
+
+#[tokio::test]
+async fn create_links_param_adds_edges_and_reports_failures() {
+    let (_dir, server) = setup().await;
+    let target = create_and_get_id(&server, "decision", "Target", "t").await;
+    let mut input = create_input("decision", "Source", "s");
+    input.links = Some(vec![
+        LinkSpec {
+            to: target.clone(),
+            kind: "derived_from".into(),
+            store: None,
+            confidence: None,
+            note: None,
+            status: None,
+        },
+        LinkSpec {
+            to: "does-not-exist".into(),
+            kind: "supports".into(),
+            store: None,
+            confidence: None,
+            note: None,
+            status: None,
+        },
+    ]);
+    let val = parse_ok(&server.memory_create(Parameters(input)).await);
+    let id = val["id"].as_str().unwrap().to_string();
+    assert_eq!(val["link_errors"].as_array().unwrap().len(), 1, "{val}");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await,
+    );
+    assert_eq!(got["links"]["outbound"][0]["kind"], "derived_from");
+
+    // A typo'd kind fails the whole call before anything is written.
+    let mut bad = create_input("decision", "Never written", "x");
+    bad.links = Some(vec![LinkSpec {
+        to: target,
+        kind: "nope".into(),
+        store: None,
+        confidence: None,
+        note: None,
+        status: None,
+    }]);
+    assert!(server.memory_create(Parameters(bad)).await.is_err());
+}
+
+#[tokio::test]
+async fn challenge_against_proposes_a_contradiction_a_reviewer_resolves() {
+    let (_dir, server) = setup().await;
+    let old = create_and_get_id(&server, "decision", "Use structlog", "logging").await;
+    let new = create_and_get_id(&server, "decision", "Use tracing", "logging").await;
+    let val = parse_ok(
+        &server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: old.clone(),
+                evidence: "we moved to tracing".into(),
+                source_file: None,
+                project: None,
+                against: Some(new.clone()),
+            }))
+            .await,
+    );
+    assert_eq!(val["edge"]["kind"], "contradicts");
+    assert_eq!(val["edge"]["status"], "proposed");
+
+    let val = parse_ok(
+        &server
+            .memory_link_status(Parameters(LinkStatusInput {
+                src: old.clone(),
+                dst: new.clone(),
+                kind: None,
+                status: "confirmed".into(),
+                winner: Some(new.clone()),
+                note: None,
+                dst_store: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(val["outcome"], "superseded");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: old,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["superseded_by"], new.as_str());
+    assert!(got["invalidated_at"].is_string());
 }

@@ -1,0 +1,46 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "owner_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "src_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dst_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "dst_store": null,
+  "kind": "duplicates",
+  "status": "confirmed",
+  "created": true,
+  "target_state": "live",
+  "stored_note": "stored on 018f2a1b-3c4d (personal): a committed file must not name a personal memory"
+}
+{
+  "owner_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "src_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dst_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "dst_store": "__global_store__",
+  "kind": "supports",
+  "status": "rejected",
+  "created": false,
+  "target_state": "unknown"
+}
+{
+  "owner_id": "550e8400-e29b-41d4-a716-446655440000",
+  "src_id": "550e8400-e29b-41d4-a716-446655440000",
+  "dst_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "kind": "supersedes",
+  "reopened": true
+}
+{
+  "a": "550e8400-e29b-41d4-a716-446655440000",
+  "b": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "outcome": "superseded",
+  "winner": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "loser": "550e8400-e29b-41d4-a716-446655440000"
+}
+{
+  "a": "550e8400-e29b-41d4-a716-446655440000",
+  "b": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "outcome": "confirmed"
+}
+--- stderr ---

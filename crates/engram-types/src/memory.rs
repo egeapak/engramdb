@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{Challenge, Decay, Epistemic, Provenance, Validity};
+use super::{Challenge, Decay, Epistemic, Link, Provenance, Validity};
 
 /// Type of memory - categorizes the kind of knowledge stored
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -115,11 +115,19 @@ pub enum Status {
 }
 
 /// Visibility level of a memory
+///
+/// The lowercase aliases are for hand-edited hidden blocks (`visibility:
+/// shared`): the writer emits `Shared`, the `## Scope` line spells it
+/// lowercase, and since a hidden block that does not parse is now an error
+/// rather than a silent reset, a spelling the old parser quietly discarded
+/// must not start making files unreadable.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Visibility {
     /// Shared across all agents/sessions
+    #[serde(alias = "shared")]
     Shared,
     /// Personal to a specific agent/session
+    #[serde(alias = "personal")]
     Personal,
 }
 
@@ -253,6 +261,23 @@ pub struct Memory {
     #[serde(default)]
     pub challenges: Vec<Challenge>,
 
+    /// Outbound typed edges to other memories (schema v0.9.0).
+    ///
+    /// Only the **outbound** half is stored, in this memory's file; inbound
+    /// edges are answered by the index's derived `edges` table. Symmetric
+    /// kinds are stored once, on whichever side wrote them. `supersedes` is
+    /// not duplicated here: the [`Memory::supersedes`] list stays canonical
+    /// for that kind and the edges table mirrors it.
+    ///
+    /// Separate from [`Memory::challenges`] on purpose: `resolve --keep`
+    /// clears every challenge, and that must not delete a contradiction edge.
+    ///
+    /// Written only through add/remove read-modify-writes
+    /// (`ops::link`/`ops::unlink`), never replaced wholesale — there is no
+    /// `MemoryUpdate` field for it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+
     /// Timestamp of last verification/resolution
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_at: Option<DateTime<Utc>>,
@@ -314,6 +339,7 @@ impl Memory {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: now,
             updated_at: now,

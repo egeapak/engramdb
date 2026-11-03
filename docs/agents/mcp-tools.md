@@ -52,6 +52,8 @@ Every returned memory carries `epistemic` (always) plus `valid_while`, `valid_fr
 
 Returns the full memory object including `details` (which is lazy-loaded in `query`).
 
+When the memory has edges, the response adds `links: {outbound, inbound, hidden}`. Each edge names the `other_id` (and `other_store`, `other_summary`), `kind`, `symmetric`, `status`, `origin`, `confidence`, `note`, and the far end's `state` (`live`, `invalidated` with its `successor`, `dangling`, or `unknown` for a store not reachable here). Dangling, invalidated and rejected edges are hidden and counted in `hidden`. A memory without edges reads exactly as before.
+
 ### `list` (read-only)
 
 **List memories with filtering, sorting, and limiting.**
@@ -88,6 +90,7 @@ Each entry includes `epistemic` (always) and `invalidated_at` / `valid_from` whe
 | `confidence?` | `f64` | 0..1, default 0.8. |
 | `visibility?` | `"shared"` \| `"personal"` | Default `"shared"`. |
 | `supersedes?` | `array[string]` | IDs this memory replaces (closes their validity windows). |
+| `links?` | `array[object]` | Edges to add from the new memory: `{to, kind, store?, confidence?, note?, status?}` (see [`link`](#link-mutates)). Applied after the write, origin `agent`; per-edge failures come back in `link_errors` and never undo the create. |
 | `epistemic?` | `"fact"` \| `"observation"` \| `"decision"` | Epistemic class. Defaults from `type`; set only when it differs. |
 | `premise?` | `string` | Premise this memory depends on, e.g. `"while we pin ort rc.12"`. State it if the memory becomes wrong when something specific changes. |
 | `invalidated_by?` | `array[string]` | Paths/globs whose change invalidates this memory (distinct from `physical`, which is where it applies). |
@@ -120,6 +123,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `tags?` | `array[string]` | **Replaces** all tags. |
 | `tags_add?` | `array[string]` | Incrementally add tags (merged with existing). |
 | `tags_remove?` | `array[string]` | Incrementally remove tags. |
+| `links?` | `array[object]` | Edges to **add** (or update, same target and kind) from this memory, as on `create`. Never removes one — use `unlink`. Failures come back in `link_errors`. |
 | `criticality?` | `f64` | |
 | `confidence?` | `f64` | |
 | `visibility?` | `"shared"` \| `"personal"` | |
@@ -162,6 +166,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `id` | `string` | Required. |
 | `evidence` | `string` | Required. What contradicts the memory. |
 | `source_file?` | `string` | File where evidence was found. |
+| `against?` | `string` | The memory this one contradicts. Also proposes a `contradicts` edge between the two (status `proposed`, origin `agent`, the evidence as its note), returned as `edge` (or `edge_error`). Resolve it with [`link_status`](#link_status-mutates). |
 | `project?` | `string` | See conventions. |
 
 ### `review` (read-only)
@@ -205,6 +210,50 @@ The `memory-session-end` prompt also reports how many active memories are past t
 | `project?` | `string` | See conventions. |
 
 Returns `{ id, verified, review_cleared }`.
+
+---
+
+## Edge tools
+
+Typed edges between memories. Kinds: `contradicts`, `related_to`, `duplicates` (symmetric — stored once, seen from both ends), `supports`, `derived_from`, `supersedes` (directed; `supersedes` also closes the target's validity window, like `create`'s `supersedes`). Statuses: `proposed`, `confirmed` (the default for an explicit link), `rejected` (kept so it is not proposed again). A shared — committed — memory never names a personal one: a symmetric edge is stored on the personal side, a directed one is refused. Edges into a deleted memory are left dangling and reported by `doctor`. Full rules: [docs/users/links.md](../users/links.md).
+
+### `link` (mutates)
+
+**Add an edge, or update the same edge** (same source, target, kind and store).
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `src` | `string` | Required. Source memory id (prefix ok). |
+| `kind` | `string` | Required. |
+| `dst` | `string` | Required. Target id; a prefix is resolved within the same store, a target in another store needs the full id. |
+| `dst_store?` | `string` | `"global"`, `"group:<name>"` or a 16-char project id when the target is not in the source's store. A store that cannot be opened here is recorded as `unknown`, never dangling. |
+| `confidence?` | `f64` | 0..1, default 1.0. |
+| `note?` | `string` | Why the edge holds (≤ 1000 chars). |
+| `status?` | `"proposed"` \| `"confirmed"` | Default `confirmed`. |
+| `project?` | `string` | See conventions. |
+
+Returns `{owner_id, src_id, dst_id, dst_store, kind, status, created, target_state, stored_note?}`; `owner_id` differs from `src_id` when a symmetric edge was stored on the other side (`stored_note` says why).
+
+### `unlink` (mutates)
+
+**Remove one edge.** `src`, `kind`, `dst`, `dst_store?`, `project?`. For a symmetric kind either end works. Removing `supersedes` also removes the canonical entry and reopens the target's window when this edge was what closed it (`reopened: true`).
+
+### `link_status` (mutates)
+
+**Review an edge.**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `src` | `string` | Required. One end. |
+| `dst` | `string` | Required. The other end. |
+| `kind?` | `string` | Default `contradicts`. |
+| `status` | `"confirmed"` \| `"rejected"` \| `"proposed"` | Required. |
+| `winner?` | `string` | `contradicts` only: the memory that is right. The edge becomes `winner supersedes loser` and the loser is invalidated; only it is demoted. Without `winner`, `confirmed` means both stand, in conflict. |
+| `note?` | `string` | Reviewer's note. |
+| `dst_store?` | `string` | As on `link`. |
+| `project?` | `string` | See conventions. |
+
+Edges are separate from challenges: `resolve` with `action: "keep"` clears a memory's challenges and leaves its edges alone.
 
 ---
 

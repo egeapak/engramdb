@@ -12,6 +12,7 @@ pub mod bash_retry;
 pub mod config;
 pub mod conversation_index;
 pub mod digest;
+pub mod edge_index;
 pub mod error;
 pub mod harvest_state;
 pub mod hook_seen;
@@ -35,6 +36,7 @@ pub mod write_lock;
 
 pub use conversation_index::{ConversationHit, ConversationIndex, ConversationRow, MatchedOn};
 pub use digest::FileDigest;
+pub use edge_index::{EdgeField, EdgeRow};
 pub use error::{Result, StorageError};
 pub use lance_index::{
     Fragmentation, IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary,

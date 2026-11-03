@@ -16,6 +16,7 @@ pub mod get;
 pub mod harvest;
 pub mod harvest_index;
 pub mod harvest_pin;
+pub mod links;
 pub mod list;
 pub mod maintenance;
 pub mod parsing;
@@ -71,6 +72,10 @@ pub use harvest_index::{
 pub use harvest_pin::{
     evidence_links, expired_evidence, link_memories, sessions_with_bytes, EvidenceLinks,
     ExpiredEvidence, LinkReport,
+};
+pub use links::{
+    confirm_contradiction_direction, link, links_of, load_graph, set_link_status, unlink,
+    ContradictionVerdict, EdgeRef, GraphFilter, LinkFilter, LinkParams, LinksView, StoreGraph,
 };
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{
