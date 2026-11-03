@@ -11,10 +11,17 @@
 //!   by `winner supersedes loser`; only the loser's validity window closes.
 //!
 //! and rejected like any other kind (kept as `rejected`, so a proposer never
-//! raises it again). Every write goes through `ops::links`
-//! (`set_link_status`, `confirm_contradiction_direction`), which records the
-//! `linked` (and, for a supersession, `resolved`) usage events — from
-//! [`Surface::Dashboard`].
+//! raises it again). Every write goes through `ops::links` (`review_link`,
+//! `review_contradiction`), which records the `linked` (and `resolved`)
+//! usage events — from [`Surface::Dashboard`].
+//!
+//! **Only a proposed edge is reviewed.** The status is checked under the
+//! store's write lock: a request for the state the edge is already in (a
+//! double submit, a second tab) is a no-op answered `changed: false`; an edge
+//! someone else already reviewed differently is 409 `not_proposed`. Settling a
+//! contradiction any way also resolves the NLI challenge it came with, and the
+//! response lists the memories whose challenge was resolved, so the page can
+//! say so.
 //!
 //! **Gated three times.** The security guard refuses any non-GET without
 //! this dashboard's `Origin` and CSRF header (on top of the bearer token);
@@ -124,22 +131,24 @@ async fn open_writable(location: &Location) -> Result<MemoryStore, ApiError> {
     })
 }
 
-/// An `ops::links` refusal (no such edge, a loser already superseded, a
-/// personal-id leak) is the request's problem, not the server's: 409 with
-/// the reason. A missing memory stays a 404.
+/// How a failed review maps to HTTP. The request's problem gets 4xx: no such
+/// edge or memory (404); an edge already reviewed elsewhere (409
+/// `not_proposed`, naming its status); an `ops::links` refusal — a loser
+/// already superseded, a personal-id leak — which is an `anyhow` message with
+/// no storage error inside (409 `edge_write_refused`). Anything from storage
+/// itself (I/O, the index) is the server's problem: 500.
 fn write_error(e: anyhow::Error) -> ApiError {
     if let Some(missing) = e.downcast_ref::<links::EdgeNotFound>() {
         return ApiError::not_found("unknown_edge", missing.to_string());
+    }
+    if let Some(np) = e.downcast_ref::<links::NotProposed>() {
+        return ApiError::new(StatusCode::CONFLICT, "not_proposed", np.to_string());
     }
     match e.downcast::<StorageError>() {
         Ok(StorageError::NotFound(id)) => {
             ApiError::not_found("unknown_memory", format!("no memory {id} in this store"))
         }
-        Ok(other) => ApiError::new(
-            StatusCode::CONFLICT,
-            "edge_write_refused",
-            other.to_string(),
-        ),
+        Ok(other) => ApiError::internal(other),
         Err(e) => ApiError::new(StatusCode::CONFLICT, "edge_write_refused", format!("{e:#}")),
     }
 }
@@ -147,7 +156,7 @@ fn write_error(e: anyhow::Error) -> ApiError {
 async fn write<F, Fut>(state: &AppState, id: &str, f: F) -> ApiResult
 where
     F: FnOnce(MemoryStore) -> Fut,
-    Fut: std::future::Future<Output = Result<serde_json::Value, ApiError>>,
+    Fut: std::future::Future<Output = anyhow::Result<links::ReviewOutcome>>,
 {
     if !state.allow_writes {
         return Err(read_only());
@@ -157,9 +166,59 @@ where
     let result = f(store).await;
     // Even a refused write may have opened (and migrated) the store.
     state.stores.invalidate(&location).await;
-    ok(&result?)
+    let out = result.map_err(write_error)?;
+    ok(&out)
 }
 
+/// A confirm's verdict, validated before any store is opened.
+fn verdict_of(b: &EdgeBody, kind: &LinkKind) -> Result<Option<ContradictionVerdict>, ApiError> {
+    if *kind != LinkKind::Contradicts {
+        if b.verdict.is_some() || b.winner.is_some() {
+            return Err(ApiError::bad_request(
+                "`verdict` and `winner` apply to contradicts edges only",
+            ));
+        }
+        return Ok(None);
+    }
+    let verdict = match b.verdict.as_deref() {
+        Some("both_stand") => ContradictionVerdict::BothStand,
+        Some("supersedes") => ContradictionVerdict::Supersedes {
+            winner: b
+                .winner
+                .clone()
+                .filter(|w| !w.trim().is_empty())
+                .ok_or_else(|| {
+                    ApiError::bad_request("verdict \"supersedes\" needs a `winner` id")
+                })?,
+        },
+        Some(other) => {
+            return Err(ApiError::bad_request(format!(
+                "unknown verdict {other:?}: use both_stand or supersedes"
+            )))
+        }
+        None => {
+            return Err(ApiError::bad_request(
+                "confirming a contradiction needs a `verdict`: both_stand or supersedes",
+            ))
+        }
+    };
+    if b.dst_store.is_some() && verdict != ContradictionVerdict::BothStand {
+        return Err(ApiError::bad_request(
+            "a supersession cannot cross stores; confirm a cross-store contradiction as \
+             both_stand",
+        ));
+    }
+    if b.winner.is_some() && !matches!(verdict, ContradictionVerdict::Supersedes { .. }) {
+        return Err(ApiError::bad_request(
+            "`winner` applies to the supersedes verdict only",
+        ));
+    }
+    Ok(Some(verdict))
+}
+
+/// Confirm a proposed edge. Answers [`links::ReviewOutcome`]: `changed:
+/// false` for a repeated submit, and the memories whose NLI challenge the
+/// review resolved.
 pub(crate) async fn confirm_edge(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -169,72 +228,34 @@ pub(crate) async fn confirm_edge(
         return Err(read_only());
     }
     let (b, kind) = parse(&body)?;
+    let verdict = verdict_of(&b, &kind)?;
     write(&state, &id, move |store| async move {
-        if kind == LinkKind::Contradicts {
-            let verdict =
-                match b.verdict.as_deref() {
-                    Some("both_stand") => ContradictionVerdict::BothStand,
-                    Some("supersedes") => ContradictionVerdict::Supersedes {
-                        winner: b
-                            .winner
-                            .clone()
-                            .filter(|w| !w.trim().is_empty())
-                            .ok_or_else(|| {
-                                ApiError::bad_request("verdict \"supersedes\" needs a `winner` id")
-                            })?,
-                    },
-                    Some(other) => {
-                        return Err(ApiError::bad_request(format!(
-                            "unknown verdict {other:?}: use both_stand or supersedes"
-                        )))
-                    }
-                    None => return Err(ApiError::bad_request(
-                        "confirming a contradiction needs a `verdict`: both_stand or supersedes",
-                    )),
-                };
-            if b.dst_store.is_some() && verdict != ContradictionVerdict::BothStand {
-                return Err(ApiError::bad_request(
-                    "a supersession cannot cross stores; confirm a cross-store contradiction as \
-                     both_stand",
-                ));
+        match verdict {
+            Some(v) if b.dst_store.is_none() => {
+                links::review_contradiction(&store, &b.src, &b.dst, v, b.note, Surface::Dashboard)
+                    .await
             }
-            if b.dst_store.is_none() {
-                let out = links::confirm_contradiction_direction(
+            _ => {
+                links::review_link(
                     &store,
-                    &b.src,
-                    &b.dst,
-                    verdict,
+                    EdgeRef {
+                        src: b.src,
+                        kind,
+                        dst: b.dst,
+                        dst_store: b.dst_store,
+                    },
+                    LinkStatus::Confirmed,
                     b.note,
                     Surface::Dashboard,
                 )
                 .await
-                .map_err(write_error)?;
-                return serde_json::to_value(out).map_err(ApiError::internal);
             }
-        } else if b.verdict.is_some() || b.winner.is_some() {
-            return Err(ApiError::bad_request(
-                "`verdict` and `winner` apply to contradicts edges only",
-            ));
         }
-        let out = links::set_link_status(
-            &store,
-            EdgeRef {
-                src: b.src,
-                kind,
-                dst: b.dst,
-                dst_store: b.dst_store,
-            },
-            LinkStatus::Confirmed,
-            b.note,
-            Surface::Dashboard,
-        )
-        .await
-        .map_err(write_error)?;
-        serde_json::to_value(out).map_err(ApiError::internal)
     })
     .await
 }
 
+/// Reject a proposed edge (kept as `rejected`, never proposed again).
 pub(crate) async fn reject_edge(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -250,7 +271,7 @@ pub(crate) async fn reject_edge(
         ));
     }
     write(&state, &id, move |store| async move {
-        let out = links::set_link_status(
+        links::review_link(
             &store,
             EdgeRef {
                 src: b.src,
@@ -263,8 +284,6 @@ pub(crate) async fn reject_edge(
             Surface::Dashboard,
         )
         .await
-        .map_err(write_error)?;
-        serde_json::to_value(out).map_err(ApiError::internal)
     })
     .await
 }

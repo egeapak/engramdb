@@ -343,10 +343,12 @@ dl.meta dd { overflow-wrap: anywhere; }
 .cx.k-related_to .cn, .cx.k-duplicates .cn { stroke: var(--ink-3); stroke-width: 1.8; }
 .cx.k-duplicates .cn { stroke-dasharray: 9 3 2 3; }
 .cx.k-contradicts .cn { stroke: var(--red); stroke-width: 4; }
-.cx.s-proposed .cn { stroke-dasharray: 6 5; }
+/* Proposed: each kind keeps its own pattern, faded, so a proposed
+   "derived from" still reads as dotted. A contradiction stays red and gains
+   a dash, since it is the one proposal that asks for attention. */
+.cx.s-proposed:not(.k-contradicts) .cn, .cx.s-proposed:not(.k-contradicts) .chev { opacity: .5; }
+.cx.s-proposed.k-supports .cn, .cx.s-proposed.k-supersedes .cn { stroke-dasharray: 6 5; }
 .cx.s-proposed.k-contradicts .cn { stroke-dasharray: 11 6; }
-.cx.s-proposed:not(.k-contradicts) .cn { stroke: var(--ink-3); }
-.cx.s-proposed .chev { stroke: var(--ink-3); }
 .cx.s-rejected .cn { stroke: var(--ink-3); stroke-dasharray: 1.5 5; stroke-width: 2; }
 .cx.s-rejected .term { stroke: var(--ink-3); }
 .cx.x-dangling .cn, .cx.x-unknown .cn { stroke-dasharray: 3 3; }
@@ -369,6 +371,14 @@ dl.meta dd { overflow-wrap: anywhere; }
 .map.z-mid .lbl.major, .map.z-near .lbl { display: inline; }
 .map .lbl.on { display: inline; }
 .map .st, .map .cx, .map .ln, .map .lb { transition: opacity .15s; }
+.map .st:focus { outline: none; }
+.map .st:focus .ring, .map .st:focus-visible .ring { stroke: var(--focus); stroke-width: 3.4; }
+.g-tip { position: absolute; z-index: 2; max-width: min(320px, calc(100% - 16px)); padding: 6px 9px; background: var(--bg); color: var(--ink); border: 1.5px solid var(--rule-2); border-radius: 4px; font-size: 12.5px; line-height: 1.35; pointer-events: none; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.g-tip[hidden], .g-hint[hidden] { display: none; }
+.g-hint { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); z-index: 2; padding: 5px 10px; background: var(--ink); color: var(--bg); border-radius: 4px; font-size: 12.5px; pointer-events: none; max-width: calc(100% - 24px); text-align: center; }
+.linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.linkish:hover { color: var(--ink-2); }
+.linkish:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .map.has-focus .st:not(.on), .map.has-focus .cx:not(.on) { opacity: .14; }
 .map.has-focus .ln, .map.has-focus .lb { opacity: .3; }
 .map.has-focus .cx.on .cn { stroke-width: 3.4; }
@@ -385,6 +395,7 @@ dl.meta dd { overflow-wrap: anywhere; }
 .g-card .hint { color: var(--ink-2); font-size: 13px; }
 .g-card .small { font-size: 12px; overflow-wrap: anywhere; }
 .g-card .eyebrow { margin-top: 4px; }
+.g-card > a.btn { margin: 2px 0 16px; }
 .card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .sign.sm { margin-bottom: 6px; gap: 8px; }
 .sign.sm .sc { font-size: 13px; overflow-wrap: anywhere; }

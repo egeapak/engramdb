@@ -165,6 +165,14 @@ fn flag(q: &HashMap<String, String>, name: &str, default: bool) -> Result<bool, 
 }
 
 /// Probe the stores the external edges point into (module docs).
+///
+/// Each probe runs on the blocking pool — opening a store stats its
+/// directory and reads the registry synchronously, and on a hung mount that
+/// would stall a runtime worker where no timeout could fire — and all of
+/// them run at once, each bounded by [`crate::projects::ROW_TIMEOUT`], so the
+/// whole step takes one timeout at most, not one per store. A probe that
+/// times out is `None` (its edges are `unknown`) and its blocking thread is
+/// left to finish on its own, as `projects` does.
 async fn foreign_states(edges: &[&GraphEdge]) -> HashMap<String, Option<HashSet<String>>> {
     let mut by_store: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in edges {
@@ -173,22 +181,40 @@ async fn foreign_states(edges: &[&GraphEdge]) -> HashMap<String, Option<HashSet<
         }
     }
     let mut out = HashMap::new();
+    let mut probes = tokio::task::JoinSet::new();
+    let runtime = tokio::runtime::Handle::current();
     for (i, (sid, ids)) in by_store.into_iter().enumerate() {
         if i >= MAX_FOREIGN_STORES {
             out.insert(sid, None);
             continue;
         }
-        let probe = async {
-            let other = engramdb::ops::links::open_store_by_id(&sid, true)
-                .await
-                .ok()?;
-            other.batch_exists(&ids).await.ok()
-        };
-        let found = tokio::time::timeout(crate::projects::ROW_TIMEOUT, probe)
-            .await
-            .ok()
-            .flatten();
-        out.insert(sid, found);
+        let rt = runtime.clone();
+        probes.spawn(async move {
+            let probe = tokio::task::spawn_blocking(move || {
+                rt.block_on(async {
+                    let other = engramdb::ops::links::open_store_by_id(&sid, true)
+                        .await
+                        .ok()?;
+                    other.batch_exists(&ids).await.ok()
+                })
+                .map(|found| (sid.clone(), found))
+                .ok_or(sid)
+            });
+            tokio::time::timeout(crate::projects::ROW_TIMEOUT, probe).await
+        });
+    }
+    while let Some(done) = probes.join_next().await {
+        match done {
+            Ok(Ok(Ok(Ok((sid, found))))) => {
+                out.insert(sid, Some(found));
+            }
+            Ok(Ok(Ok(Err(sid)))) => {
+                out.insert(sid, None);
+            }
+            // Timed out or panicked: the store stays out of `out`, and the
+            // caller reads a missing entry as "could not check" (`unknown`).
+            _ => {}
+        }
     }
     out
 }

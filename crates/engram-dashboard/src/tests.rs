@@ -1310,6 +1310,17 @@ async fn edge_fixture() -> EdgeFixture {
         ops_links::link(&store, p, Surface::Cli).await.unwrap();
     }
     store.delete(&gone.id).await.unwrap();
+    // The challenge NLI wrote alongside the proposed contradiction.
+    engramdb::nli::challenge_memory(
+        &store,
+        c,
+        &format!(
+            "NLI contradiction (score: 0.91): new memory 'x' ({b}) contradicts this observation"
+        ),
+        None,
+    )
+    .await
+    .unwrap();
     EdgeFixture { fx, gone: gone.id }
 }
 
@@ -1634,6 +1645,20 @@ async fn confirm_and_reject_write_through_ops_and_refresh_the_cache() {
     assert!(resolved.iter().any(|e| &e.memory_id == b), "{resolved:?}");
     let (_, after) = get_json(&app, &graph).await;
     assert_eq!(after["counts"]["proposed_contradictions"], 0);
+    // The same supersede again (a double click): a no-op, not an error.
+    let r = send(
+        &app,
+        post_edge(
+            &format!("/api/projects/{}/edges/confirm", fx.id),
+            serde_json::json!({
+                "src": b, "kind": "contradicts", "dst": c,
+                "verdict": "supersedes", "winner": c,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    assert_eq!(r.json()["changed"], false);
 }
 
 #[tokio::test]
@@ -1651,13 +1676,68 @@ async fn both_stand_confirms_the_contradiction() {
     )
     .await;
     assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    let v = r.json();
+    assert_eq!(v["outcome"], "confirmed");
+    assert_eq!(v["changed"], true);
+    // The NLI challenge on `c` about `b` is resolved, and the page is told.
+    assert_eq!(v["resolved_challenges"], serde_json::json!([c]));
     assert_eq!(
         edge_status(&fx.dir, b, LinkKind::Contradicts, c).await,
         Some(LinkStatus::Confirmed)
     );
     let store = MemoryStore::open_read_only(&fx.dir).await.unwrap();
     assert!(store.get(b).await.unwrap().invalidated_at.is_none());
-    assert!(store.get(c).await.unwrap().invalidated_at.is_none());
+    let cm = store.get(c).await.unwrap();
+    assert!(cm.invalidated_at.is_none());
+    // Only the fixture's unrelated (hand-written) challenge is left.
+    assert_eq!(cm.challenges.len(), 1);
+    assert!(!cm.challenges[0].evidence.contains("NLI"));
+    assert!(dashboard_events(&fx.dir, UsageKind::Resolved)
+        .iter()
+        .any(|e| &e.memory_id == c));
+
+    // A double submit is a no-op; a different verdict on the reviewed edge
+    // is 409, and nothing changes.
+    let confirm = format!("/api/projects/{}/edges/confirm", fx.id);
+    let reject = format!("/api/projects/{}/edges/reject", fx.id);
+    let both =
+        serde_json::json!({"src": c, "kind": "contradicts", "dst": b, "verdict": "both_stand"});
+    let r = send(&app, post_edge(&confirm, both)).await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.json()["changed"], false);
+    let r = send(
+        &app,
+        post_edge(
+            &reject,
+            serde_json::json!({"src": c, "kind": "contradicts", "dst": b}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.json());
+    assert_eq!(r.json()["error"]["code"], "not_proposed");
+    let r = send(
+        &app,
+        post_edge(
+            &confirm,
+            serde_json::json!({"src": c, "kind": "contradicts", "dst": b, "verdict": "supersedes", "winner": c}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT, "{}", r.json());
+    assert_eq!(
+        edge_status(&fx.dir, b, LinkKind::Contradicts, c).await,
+        Some(LinkStatus::Confirmed)
+    );
+    // A confirmed human edge cannot be flipped from a stale tab.
+    let r = send(
+        &app,
+        post_edge(
+            &reject,
+            serde_json::json!({"src": b, "kind": "supports", "dst": fx.ids[3]}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::CONFLICT);
     // A contradiction must be confirmed with a verdict.
     let r = send(
         &app,

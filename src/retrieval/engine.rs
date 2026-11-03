@@ -469,6 +469,27 @@ impl RetrievalEngine {
         Ok(())
     }
 
+    /// [`Self::embed_memory`], returning the vector an ingest searches with
+    /// (the unit mean of the memory's chunk vectors, [`mean_direction`]) so
+    /// [`Self::ingest_findings`] needs no embed of its own. `Ok(None)` when no
+    /// provider is configured or the memory has no text to embed.
+    pub async fn embed_for_ingest(&self, memory: &Memory) -> anyhow::Result<Option<Vec<f32>>> {
+        let Some(provider) = &self.embedding_provider else {
+            return Ok(None);
+        };
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        embed_memory_with(
+            provider.as_ref(),
+            &self.store,
+            memory,
+            chunk_tokens,
+            self.config.embeddings.metadata_vector,
+            self.ingest_telemetry().as_ref(),
+        )
+        .await
+    }
+
     /// [`Self::embed_memory`] for many memories: one batched inference and
     /// one batched chunk write for the whole set.
     ///
@@ -636,7 +657,7 @@ impl RetrievalEngine {
         let telemetry = self.ingest_telemetry();
 
         Some(tokio::spawn(async move {
-            if let Err(e) = embed_memory_with(
+            let query = match embed_memory_with(
                 provider.as_ref(),
                 &store,
                 &memory,
@@ -646,21 +667,26 @@ impl RetrievalEngine {
             )
             .await
             {
-                tracing::warn!(
-                    memory_id = %memory.id,
-                    "Background embed failed: {}",
-                    e
-                );
-                return;
-            }
+                Ok(Some(q)) => q,
+                // Nothing to embed: no vector to search with either.
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        memory_id = %memory.id,
+                        "Background embed failed: {}",
+                        e
+                    );
+                    return;
+                }
+            };
 
             let findings = ingest_findings_with(
                 nli_provider.as_deref(),
-                provider.as_ref(),
                 &store,
                 &nli_config,
                 &links_config,
                 &memory,
+                query,
             )
             .await;
             if !findings.contradictions.is_empty() {
@@ -685,23 +711,21 @@ impl RetrievalEngine {
     /// What an ingest found next to `memory` — its NLI contradictions (when
     /// `[nli]` is on) and its embedding neighbours above
     /// `[links].related_threshold` (when the similarity proposer is on) — from
-    /// one embed and one vector search. Never fails: a failure is logged and
-    /// leaves the part it would have filled empty.
-    pub async fn ingest_findings(&self, memory: &Memory) -> IngestFindings {
-        let Some(provider) = &self.embedding_provider else {
-            return IngestFindings::default();
-        };
+    /// one vector search with `query`, the vector [`Self::embed_for_ingest`]
+    /// just computed: no embed of its own. Never fails: a failure is logged
+    /// and leaves the part it would have filled empty.
+    pub async fn ingest_findings(&self, memory: &Memory, query: Vec<f32>) -> IngestFindings {
         let nli = match &self.nli_provider {
             Some(p) if self.config.nli.enabled => Some(p.as_ref()),
             _ => None,
         };
         ingest_findings_with(
             nli,
-            provider.as_ref(),
             &self.store,
             &self.config.nli,
             &self.config.links,
             memory,
+            query,
         )
         .await
     }
@@ -2001,7 +2025,7 @@ async fn embed_memory_with(
     chunk_tokens: usize,
     metadata_vector: bool,
     telemetry: Option<&IngestTelemetry>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<Vec<f32>>> {
     let t = std::time::Instant::now();
     let chunks = embedding_texts(memory, chunk_tokens, metadata_vector);
     if let Some(t_) = telemetry {
@@ -2010,7 +2034,7 @@ async fn embed_memory_with(
 
     if chunks.is_empty() {
         store.delete_chunks(&memory.id).await?;
-        return Ok(());
+        return Ok(None);
     }
     let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
 
@@ -2034,6 +2058,8 @@ async fn embed_memory_with(
     if let Some(t_) = telemetry {
         t_.record("create.embed_batch", t.elapsed().as_secs_f64() * 1000.0);
     }
+    // The ingest's search vector (see `RetrievalEngine::embed_for_ingest`).
+    let query = mean_direction(&vectors);
 
     let t = std::time::Instant::now();
     // Freshness-guarded: this runs in detached ingest tasks with no ordering
@@ -2075,7 +2101,38 @@ async fn embed_memory_with(
             tracing::warn!("failed to stamp embedding fingerprint on first embed: {e}");
         }
     }
-    Ok(())
+    Ok(query)
+}
+
+/// The unit-length mean of a memory's chunk vectors: the search vector an
+/// ingest uses for its neighbours. It stands for the whole memory the way the
+/// separate `summary content` embed it replaces did; searching with the
+/// metadata row alone scored templated memories (same title shape, same
+/// tags) as near-duplicates and flooded the proposers. `None` for no vectors
+/// or a zero mean.
+fn mean_direction(vectors: &[Vec<f32>]) -> Option<Vec<f32>> {
+    let first = vectors.first()?;
+    if vectors.len() == 1 {
+        return Some(first.clone());
+    }
+    let mut mean = vec![0.0f32; first.len()];
+    let dims = first.len();
+    for v in vectors.iter().filter(|v| v.len() == dims) {
+        // Each chunk counts once whatever its own norm.
+        let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if n > 0.0 && n.is_finite() {
+            for (m, x) in mean.iter_mut().zip(v) {
+                *m += x / n;
+            }
+        }
+    }
+    let n = mean.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if n > 0.0 && n.is_finite() {
+        mean.iter_mut().for_each(|x| *x /= n);
+        Some(mean)
+    } else {
+        None
+    }
 }
 
 /// What [`RetrievalEngine::ingest_findings`] found next to a new memory.
@@ -2086,6 +2143,11 @@ pub struct IngestFindings {
     /// Live neighbours at or above `[links].related_threshold`, best first,
     /// at most `[links].similar_candidates`. Scores are the vector search's.
     pub neighbours: Vec<crate::storage::lance_index::VectorMatch>,
+    /// Neighbours NLI classified and found *not* contradictory. Only these
+    /// may be proposed as `duplicates`: a negated pair ("X is on" / "X is
+    /// off") embeds almost identically, so similarity alone cannot tell a
+    /// duplicate from a contradiction. Empty when NLI is off.
+    pub nli_cleared: std::collections::HashSet<String>,
 }
 
 /// The step `spawn_ingest` runs last (see there). Boxed so `ops` can hand in
@@ -2100,39 +2162,35 @@ pub type IngestFollowUp = Box<
 >;
 
 /// [`RetrievalEngine::ingest_findings`] in free-function form, for the
-/// spawned ingest task. One embed of the memory's text and one vector search
-/// sized for whichever of the two consumers asks for more candidates.
+/// spawned ingest task. One vector search with the vector the ingest's embed
+/// just produced, sized for whichever of the two consumers asks for more
+/// candidates.
 async fn ingest_findings_with(
     nli: Option<&dyn NliProvider>,
-    embedding_provider: &dyn EmbeddingProvider,
     store: &MemoryStore,
     nli_config: &crate::types::NliConfig,
     links_config: &crate::types::LinksConfig,
     memory: &Memory,
+    query: Vec<f32>,
 ) -> IngestFindings {
     let want_similar = links_config.similar_enabled();
     if nli.is_none() && !want_similar {
         return IngestFindings::default();
     }
+    // Neighbours are filtered after the search (the memory itself, then
+    // invalidated ones), so the similarity side over-fetches: +1 for the
+    // memory itself and as many again for history. Bounded by
+    // `similar_candidates` (validated <= 50).
+    let similar_limit = 2 * links_config.similar_candidates + 1;
     let limit = match (nli.is_some(), want_similar) {
-        (true, true) => nli_config
-            .max_comparisons
-            .max(links_config.similar_candidates + 1),
+        (true, true) => nli_config.max_comparisons.max(similar_limit),
         (true, false) => nli_config.max_comparisons,
-        // +1: the memory itself is its own nearest neighbour.
-        _ => links_config.similar_candidates + 1,
+        _ => similar_limit,
     };
-    let text = format!("{} {}", memory.summary, memory.content);
-    let matches = match embedding_provider.embed(&text).await {
-        Ok(v) => match store.vector_search(v, limit, None).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(memory_id = %memory.id, "ingest neighbour search failed: {e}");
-                return IngestFindings::default();
-            }
-        },
+    let matches = match store.vector_search(query, limit, None).await {
+        Ok(m) => m,
         Err(e) => {
-            tracing::warn!(memory_id = %memory.id, "ingest embed for neighbour search failed: {e}");
+            tracing::warn!(memory_id = %memory.id, "ingest neighbour search failed: {e}");
             return IngestFindings::default();
         }
     };
@@ -2143,8 +2201,16 @@ async fn ingest_findings_with(
             .take(nli_config.max_comparisons)
             .cloned()
             .collect();
-        match contradictions_among(nli, store, nli_config, memory, nli_matches).await {
-            Ok(c) => findings.contradictions = c,
+        match classify_among(nli, store, nli_config, memory, nli_matches).await {
+            Ok(all) => {
+                for (id, result) in all {
+                    if f64::from(result.contradiction) >= nli_config.contradiction_threshold {
+                        findings.contradictions.push((id, result));
+                    } else {
+                        findings.nli_cleared.insert(id);
+                    }
+                }
+            }
             Err(e) => {
                 tracing::warn!(memory_id = %memory.id, "Background contradiction detection failed: {e}")
             }
@@ -2154,7 +2220,6 @@ async fn ingest_findings_with(
         let close: Vec<_> = matches
             .into_iter()
             .filter(|m| m.id != memory.id && m.score >= links_config.related_threshold)
-            .take(links_config.similar_candidates)
             .collect();
         // Invalidated neighbours are history, not relations worth proposing.
         let ids: Vec<&str> = close.iter().map(|m| m.id.as_str()).collect();
@@ -2169,7 +2234,11 @@ async fn ingest_findings_with(
                     .collect()
             })
             .unwrap_or_default();
-        findings.neighbours = close.into_iter().filter(|m| live.contains(&m.id)).collect();
+        findings.neighbours = close
+            .into_iter()
+            .filter(|m| live.contains(&m.id))
+            .take(links_config.similar_candidates)
+            .collect();
     }
     findings
 }
@@ -2198,6 +2267,22 @@ async fn detect_contradictions_with(
 /// The NLI half of [`detect_contradictions_with`], over vector matches the
 /// caller already has.
 async fn contradictions_among(
+    nli: &dyn NliProvider,
+    store: &MemoryStore,
+    nli_config: &crate::types::NliConfig,
+    memory: &Memory,
+    matches: Vec<crate::storage::lance_index::VectorMatch>,
+) -> anyhow::Result<Vec<(String, NliResult)>> {
+    Ok(classify_among(nli, store, nli_config, memory, matches)
+        .await?
+        .into_iter()
+        .filter(|(_, r)| f64::from(r.contradiction) >= nli_config.contradiction_threshold)
+        .collect())
+}
+
+/// Every live candidate among `matches` (above `[nli].similarity_threshold`,
+/// not the memory itself) with its NLI result, contradictory or not.
+async fn classify_among(
     nli: &dyn NliProvider,
     store: &MemoryStore,
     nli_config: &crate::types::NliConfig,
@@ -2245,15 +2330,11 @@ async fn contradictions_among(
         .collect();
 
     let results = nli.classify_batch(&pair_refs).await?;
-
-    let mut contradictions = Vec::new();
-    for (mem, result) in candidate_memories.iter().zip(results) {
-        if result.contradiction as f64 >= nli_config.contradiction_threshold {
-            contradictions.push((mem.id.clone(), result));
-        }
-    }
-
-    Ok(contradictions)
+    Ok(candidate_memories
+        .iter()
+        .map(|m| m.id.clone())
+        .zip(results)
+        .collect())
 }
 
 #[cfg(test)]
@@ -2264,6 +2345,17 @@ mod tests {
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
     // of how the config was constructed, so the relevance gate can never be
     // silently disabled (negative) or turned into a filter-everything NaN.
+    #[test]
+    fn the_ingest_query_is_the_unit_mean_of_the_chunks() {
+        assert_eq!(mean_direction(&[]), None);
+        assert_eq!(mean_direction(&[vec![3.0, 4.0]]), Some(vec![3.0, 4.0]));
+        // Each chunk weighs the same whatever its norm; the result is unit.
+        let m = mean_direction(&[vec![10.0, 0.0], vec![0.0, 1.0]]).unwrap();
+        assert!((m[0] - m[1]).abs() < 1e-6);
+        assert!((m[0] * m[0] + m[1] * m[1] - 1.0).abs() < 1e-6);
+        assert_eq!(mean_direction(&[vec![1.0, 0.0], vec![-1.0, 0.0]]), None);
+    }
+
     #[test]
     fn filter_threshold_is_bounded() {
         // POSITIVE: in-range values pass through unchanged.
@@ -5970,6 +6062,181 @@ mod tests {
                 "in-window memories carry real semantic scores"
             );
         }
+    }
+    /// [`ConstantEmbedding`] that counts its calls, or always fails.
+    struct CountingEmbedding {
+        embeds: std::sync::atomic::AtomicUsize,
+        batches: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl CountingEmbedding {
+        fn new(fail: bool) -> Arc<Self> {
+            Arc::new(Self {
+                embeds: Default::default(),
+                batches: Default::default(),
+                fail,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for CountingEmbedding {
+        async fn embed(&self, t: &str) -> anyhow::Result<Vec<f32>> {
+            self.embeds
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("stub embed failure");
+            }
+            ConstantEmbedding.embed(t).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.batches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                anyhow::bail!("stub embed failure");
+            }
+            ConstantEmbedding.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/constant-stub".to_string()
+        }
+    }
+
+    async fn ingest_fixture(
+        provider: Arc<CountingEmbedding>,
+        similar_candidates: usize,
+    ) -> (
+        tempfile::TempDir,
+        MemoryStore,
+        RetrievalEngine,
+        Vec<String>,
+        Memory,
+    ) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for summary in ["one", "two", "three", "four"] {
+            let m = Memory::new(
+                MemoryType::Decision,
+                summary,
+                "body",
+                crate::types::Provenance::human(),
+            );
+            store.create(&m).await.unwrap();
+            embed_memory_with(&ConstantEmbedding, &store, &m, 256, true, None)
+                .await
+                .unwrap();
+            ids.push(m.id);
+        }
+        // One neighbour is history: never proposed.
+        store
+            .invalidate_with(&ids[3], None, chrono::Utc::now())
+            .await
+            .unwrap();
+        let mut config = EngramConfig::default();
+        config.links.similar_candidates = similar_candidates;
+        let dyn_provider: Arc<dyn EmbeddingProvider> = provider;
+        let engine =
+            RetrievalEngine::new(store.clone(), config).with_embedding_provider(dyn_provider);
+        let probe = Memory::new(
+            MemoryType::Decision,
+            "probe",
+            "body",
+            crate::types::Provenance::human(),
+        );
+        store.create(&probe).await.unwrap();
+        (temp_dir, store, engine, ids, probe)
+    }
+
+    /// The ingest's neighbour search reuses the vector its own embed made:
+    /// one `embed_batch`, no `embed`. The follow-up gets live neighbours only,
+    /// never the memory itself, at most `similar_candidates`.
+    #[tokio::test]
+    async fn spawn_ingest_hands_live_neighbours_to_the_follow_up_without_a_second_embed() {
+        let provider = CountingEmbedding::new(false);
+        let (_t, _store, engine, ids, probe) = ingest_fixture(Arc::clone(&provider), 2).await;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let follow_up: IngestFollowUp = Box::new(move |_store, memory, findings| {
+            Box::pin(async move {
+                let _ = tx.send((memory.id, findings));
+            })
+        });
+        engine
+            .spawn_ingest(probe.clone(), Some(follow_up))
+            .unwrap()
+            .await
+            .unwrap();
+        let (id, findings) = rx.await.expect("follow-up ran");
+        assert_eq!(id, probe.id);
+        assert_eq!(findings.neighbours.len(), 2, "{:?}", findings.neighbours);
+        for n in &findings.neighbours {
+            assert!(n.id != probe.id && n.id != ids[3], "{n:?}");
+            assert!(ids[..3].contains(&n.id));
+        }
+        assert!(findings.nli_cleared.is_empty(), "NLI is off");
+        assert_eq!(
+            provider.batches.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(provider.embeds.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The inline path: `embed_for_ingest` + `ingest_findings`, the same
+        // single embed.
+        let query = engine.embed_for_ingest(&probe).await.unwrap().unwrap();
+        let findings = engine.ingest_findings(&probe, query).await;
+        assert_eq!(findings.neighbours.len(), 2);
+        assert_eq!(provider.embeds.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_ingest_skips_the_follow_up_when_the_embed_fails() {
+        let provider = CountingEmbedding::new(true);
+        let (_t, _store, engine, _ids, probe) = ingest_fixture(provider, 5).await;
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&ran);
+        let follow_up: IngestFollowUp = Box::new(move |_s, _m, _f| {
+            Box::pin(async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        });
+        engine
+            .spawn_ingest(probe, Some(follow_up))
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// With NLI on, a neighbour it classifies as not contradictory is
+    /// `nli_cleared` (eligible for `duplicates`); a contradictory one is not.
+    #[tokio::test]
+    async fn ingest_findings_records_which_neighbours_nli_cleared() {
+        let provider = CountingEmbedding::new(false);
+        let (_t, store, _engine, _ids, probe) = ingest_fixture(Arc::clone(&provider), 5).await;
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.similarity_threshold = 0.0;
+        let dyn_provider: Arc<dyn EmbeddingProvider> = provider;
+        let contradicting = RetrievalEngine::new(store.clone(), config.clone())
+            .with_embedding_provider(Arc::clone(&dyn_provider))
+            .with_nli_provider(Arc::new(AlwaysContradicts));
+        let q = contradicting
+            .embed_for_ingest(&probe)
+            .await
+            .unwrap()
+            .unwrap();
+        let f = contradicting.ingest_findings(&probe, q).await;
+        assert_eq!(f.contradictions.len(), 3);
+        assert!(f.nli_cleared.is_empty());
     }
 }
 

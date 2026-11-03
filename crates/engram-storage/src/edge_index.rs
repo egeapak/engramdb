@@ -238,18 +238,21 @@ fn row_from_link(memory: &Memory, link: &Link, src_invalidated: bool) -> EdgeRow
     }
 }
 
-/// Fold rows that describe the same logical edge (module docs), preferring
-/// the row the *source* declared — it carries the edge's real metadata — and
-/// otherwise the first seen. Order of first appearance is kept.
+/// How decided a review state is: confirmed > rejected > proposed, so a
+/// reviewer's "no" on one copy of a symmetric edge is never shadowed by a
+/// stale `proposed` copy in the other file.
 fn status_rank(s: &LinkStatus) -> u8 {
     match s {
         LinkStatus::Confirmed => 3,
-        LinkStatus::Proposed => 2,
-        LinkStatus::Rejected => 1,
+        LinkStatus::Rejected => 2,
+        LinkStatus::Proposed => 1,
         LinkStatus::Other(_) => 0,
     }
 }
 
+/// Fold rows that describe the same logical edge (module docs), preferring
+/// the row the *source* declared — it carries the edge's real metadata — and
+/// otherwise the first seen. Order of first appearance is kept.
 pub fn dedupe(rows: Vec<EdgeRow>) -> Vec<EdgeRow> {
     let mut index: HashMap<(String, String, String, Option<String>), usize> = HashMap::new();
     let mut out: Vec<EdgeRow> = Vec::new();
@@ -258,7 +261,7 @@ pub fn dedupe(rows: Vec<EdgeRow>) -> Vec<EdgeRow> {
             Some(&i) => {
                 // Prefer the source-declared row (it carries the metadata);
                 // between two copies of a symmetric edge, the more decided
-                // review state (confirmed > proposed > rejected) wins.
+                // review state (confirmed > rejected > proposed) wins.
                 let better = (out[i].owner_id != out[i].src_id && row.owner_id == row.src_id)
                     || (row.kind.is_symmetric()
                         && status_rank(&row.status) > status_rank(&out[i].status));

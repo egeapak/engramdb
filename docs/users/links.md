@@ -93,10 +93,22 @@ changes no score and no retrieval result.
   other memory, `origin: nli`, with the NLI contradiction score as its
   confidence.
 - **Similar memories** — a neighbour at or above
-  `[links].duplicate_threshold` (0.92) is proposed as `duplicates`; one at or
-  above `[links].related_threshold` (0.80) as `related_to`; both
-  `origin: similarity`, with the similarity as confidence. This needs only
-  embeddings, not NLI.
+  `[links].related_threshold` (0.80) is proposed as `related_to`,
+  `origin: similarity`, with the similarity as confidence. It becomes
+  `duplicates` instead only when it is also at or above
+  `[links].duplicate_threshold` (0.92) **and** NLI ran on the pair and found
+  no contradiction: two memories can sit very close in embedding space and
+  still disagree ("X is enabled" / "X is disabled"), and a proposed duplicate
+  invites deleting one of them. Without `[nli].enabled`, close neighbours are
+  proposed as `related_to`. Similarity proposals need only embeddings.
+
+Proposing costs no extra model call: the neighbour search reuses the vectors
+the memory was just embedded with (their mean direction), and the NLI check
+is the one `[nli]` already runs. What it adds to `add` is the search and the
+proposal writes. Measured on a debug build (`add`, 25 runs, median): about
++90 ms over `propose_similar = false` when nothing is proposed, and
++110–300 ms when proposals are written, depending on how many. Set
+`propose_similar = false` if `add` latency matters more than suggestions.
 
 The proposers follow the same rules as `link`, plus three of their own:
 
@@ -105,7 +117,12 @@ The proposers follow the same rules as `link`, plus three of their own:
   proposed. A link you rejected is therefore never proposed again.
 - **They are capped.** A memory carries at most
   `[links].max_proposals_per_memory` (3) unreviewed automatic proposals,
-  counted on both ends; contradictions take the slots first.
+  counted on both ends; contradictions take the slots first. Only proposals
+  whose other end still exists and is still valid count, so a proposal to a
+  deleted or superseded memory frees its slot. Two memories created at the
+  same moment can each see the other's slot as free, so a memory can end up
+  one or two proposals over the cap; nothing is lost, the cap is a soft
+  limit.
 - **They never run in a hook.** Only `add`/`create` (and MCP `update`) do
   this work, never the per-prompt or per-tool-call hooks.
 

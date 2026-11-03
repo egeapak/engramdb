@@ -921,16 +921,263 @@ pub async fn set_link_status(
              `unlink` it (which reopens the target)"
         );
     }
+    match write_status(store, edge, status, note, surface, false).await? {
+        Some(r) => Ok(r),
+        // Unreachable without the precondition; answer as a no-op.
+        None => bail!("edge status unchanged"),
+    }
+}
+
+/// The edge a review named is no longer `proposed`: someone reviewed it
+/// already (another tab, the CLI). Typed so a front end can answer
+/// "conflict" and say what it is now.
+#[derive(Debug)]
+pub struct NotProposed {
+    pub current: LinkStatus,
+}
+
+impl std::fmt::Display for NotProposed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "this edge is already {}, not proposed: it was reviewed elsewhere. Reload to see it",
+            self.current.as_str()
+        )
+    }
+}
+
+impl std::error::Error for NotProposed {}
+
+/// What a review write did, for a front end to say.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewOutcome {
+    /// `confirmed`, `rejected`, `superseded`.
+    pub outcome: &'static str,
+    /// `false` when the edge was already in the requested state (a repeated
+    /// submit): nothing was written and no event recorded.
+    pub changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loser: Option<String>,
+    /// Memories whose NLI challenge about the other end was resolved by this
+    /// review ([`resolve_nli_challenges`]).
+    pub resolved_challenges: Vec<String>,
+}
+
+/// A reviewer's verdict on a **proposed** edge: confirm or reject it. Unlike
+/// [`set_link_status`] this requires the edge to still be `proposed`, checked
+/// under the write lock: an edge already in `to` is a no-op (`changed:
+/// false`, no event — a double submit), any other status is
+/// [`NotProposed`]. Settling a same-store `contradicts` edge either way also
+/// resolves the NLI challenges it came with ([`resolve_nli_challenges`]); for
+/// the supersede verdict use [`review_contradiction`].
+pub async fn review_link(
+    store: &MemoryStore,
+    edge: EdgeRef,
+    to: LinkStatus,
+    note: Option<String>,
+    surface: super::usage::Surface,
+) -> Result<ReviewOutcome> {
+    if to == LinkStatus::Proposed {
+        bail!("a review confirms or rejects; it cannot set an edge back to proposed");
+    }
+    let contradicts = edge.kind == LinkKind::Contradicts && edge.dst_store.is_none();
+    let outcome = if to == LinkStatus::Rejected {
+        "rejected"
+    } else {
+        "confirmed"
+    };
+    let written = write_status(store, edge, to, note, surface, true).await?;
+    let mut resolved_challenges = Vec::new();
+    if let (true, Some(r)) = (contradicts, &written) {
+        resolved_challenges =
+            resolve_nli_challenges(store, &r.src_id, &r.dst_id, surface, None).await;
+    }
+    Ok(ReviewOutcome {
+        outcome,
+        changed: written.is_some(),
+        winner: None,
+        loser: None,
+        resolved_challenges,
+    })
+}
+
+/// [`confirm_contradiction_direction`] for a reviewer of a **proposed**
+/// `contradicts` edge (the dashboard), with [`review_link`]'s precondition: a
+/// repeated submit is a no-op (`changed: false`), an edge reviewed elsewhere
+/// is [`NotProposed`]. Every verdict also resolves the NLI challenges the
+/// contradiction came with ([`resolve_nli_challenges`]): the reviewer has
+/// settled the pair, so neither memory keeps paying a score penalty for it —
+/// "both stand" records the conflict as a confirmed edge instead.
+pub async fn review_contradiction(
+    store: &MemoryStore,
+    a: &str,
+    b: &str,
+    verdict: ContradictionVerdict,
+    note: Option<String>,
+    surface: super::usage::Surface,
+) -> Result<ReviewOutcome> {
+    let edge = EdgeRef {
+        src: a.to_string(),
+        kind: LinkKind::Contradicts,
+        dst: b.to_string(),
+        dst_store: None,
+    };
+    match verdict {
+        ContradictionVerdict::BothStand | ContradictionVerdict::Reject => {
+            let to = if verdict == ContradictionVerdict::Reject {
+                LinkStatus::Rejected
+            } else {
+                LinkStatus::Confirmed
+            };
+            review_link(store, edge, to, note, surface).await
+        }
+        ContradictionVerdict::Supersedes { winner } => {
+            let (_, stored, a_id, b_id) = match locate(store, &edge).await {
+                Ok(v) => v,
+                Err(e) if e.downcast_ref::<EdgeNotFound>().is_some() => {
+                    // Gone: a repeated submit of this same verdict leaves
+                    // `winner supersedes loser` behind.
+                    let w = winner.trim();
+                    let (ra, rb) = (store.resolve_id(a).await?, store.resolve_id(b).await?);
+                    let (win, lose) = if !w.is_empty() && ra.starts_with(w) {
+                        (ra, rb)
+                    } else {
+                        (rb, ra)
+                    };
+                    let done = store.get(&win).await?.supersedes.contains(&lose);
+                    if done {
+                        return Ok(ReviewOutcome {
+                            outcome: "superseded",
+                            changed: false,
+                            winner: Some(win),
+                            loser: Some(lose),
+                            resolved_challenges: vec![],
+                        });
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            };
+            if stored.status != LinkStatus::Proposed {
+                return Err(NotProposed {
+                    current: stored.status,
+                }
+                .into());
+            }
+            let out = confirm_contradiction_direction(
+                store,
+                &a_id,
+                &b_id,
+                ContradictionVerdict::Supersedes { winner },
+                note,
+                surface,
+            )
+            .await?;
+            // The loser already recorded `resolved` (its window closed).
+            let resolved_challenges =
+                resolve_nli_challenges(store, &a_id, &b_id, surface, out.loser.as_deref()).await;
+            Ok(ReviewOutcome {
+                outcome: out.outcome,
+                changed: true,
+                winner: out.winner,
+                loser: out.loser,
+                resolved_challenges,
+            })
+        }
+    }
+}
+
+/// Remove the NLI challenges `a` and `b` carry about each other
+/// ([`crate::nli::names_nli_contradiction_with`]); a memory left with no
+/// challenge goes back to `active` from `challenged` / `needs_review`. Records
+/// `resolved` (related = the other end) for each memory changed, except
+/// `already_recorded` (a superseded loser that recorded it). Best-effort: a
+/// failed write is logged and the memory is left out of the result.
+pub async fn resolve_nli_challenges(
+    store: &MemoryStore,
+    a: &str,
+    b: &str,
+    surface: super::usage::Surface,
+    already_recorded: Option<&str>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (id, other) in [(a, b), (b, a)] {
+        let Ok(m) = store.get(id).await else { continue };
+        if !m
+            .challenges
+            .iter()
+            .any(|c| crate::nli::names_nli_contradiction_with(c, other))
+        {
+            continue;
+        }
+        let other_id = other.to_string();
+        let res = store
+            .update_with(id, |m| {
+                m.challenges
+                    .retain(|c| !crate::nli::names_nli_contradiction_with(c, &other_id));
+                if m.challenges.is_empty()
+                    && matches!(
+                        m.status,
+                        crate::types::Status::Challenged | crate::types::Status::NeedsReview
+                    )
+                {
+                    m.status = crate::types::Status::Active;
+                }
+                Ok(())
+            })
+            .await;
+        match res {
+            Ok(_) => {
+                if already_recorded != Some(id) {
+                    super::usage::record_write(
+                        store,
+                        id,
+                        super::usage::UsageKind::Resolved,
+                        surface,
+                        Some(other),
+                    )
+                    .await;
+                }
+                out.push(id.to_string());
+            }
+            Err(e) => tracing::warn!(memory_id = id, "NLI challenge not resolved: {e:#}"),
+        }
+    }
+    out
+}
+
+/// The status write behind [`set_link_status`] and [`review_link`].
+/// `require_proposed` checks the stored status under the write lock:
+/// `Ok(None)` when it already equals `status`, [`NotProposed`] for any other
+/// non-proposed status. Both copies of a symmetric same-store edge are
+/// updated (concurrent proposers can leave one in each file; updating only
+/// the first found let the other's `proposed` win the next read).
+async fn write_status(
+    store: &MemoryStore,
+    edge: EdgeRef,
+    status: LinkStatus,
+    note: Option<String>,
+    surface: super::usage::Surface,
+    require_proposed: bool,
+) -> Result<Option<LinkResult>> {
     let note = validate_note(note)?;
     let (owner, stored, src_id, dst_id) = locate(store, &edge).await?;
     let new_status = status.clone();
-    store
+    let mirror_note = note.clone();
+    let mut seen: Option<LinkStatus> = None;
+    let written = store
         .update_with(&owner, |m| {
             let l = m
                 .links
                 .iter_mut()
                 .find(|l| l.same_edge(&stored))
                 .ok_or_else(|| anyhow!("edge vanished before its status could be set"))?;
+            if require_proposed && l.status != LinkStatus::Proposed {
+                seen = Some(l.status.clone());
+                bail!("edge is no longer proposed");
+            }
             l.status = new_status;
             l.at = Some(Utc::now());
             if note.is_some() {
@@ -938,8 +1185,47 @@ pub async fn set_link_status(
             }
             Ok(())
         })
-        .await?;
-    let related = if owner == src_id { &dst_id } else { &src_id };
+        .await;
+    if let Some(current) = seen {
+        if current == status {
+            return Ok(None);
+        }
+        return Err(NotProposed { current }.into());
+    }
+    written?;
+    let other = if owner == src_id { &dst_id } else { &src_id };
+    if stored.kind.is_symmetric() && stored.store.is_none() {
+        let reverse = Link {
+            to: owner.clone(),
+            ..stored.clone()
+        };
+        let has_copy = store
+            .get(other)
+            .await
+            .map(|m| m.links.iter().any(|l| l.same_edge(&reverse)))
+            .unwrap_or(false);
+        if has_copy {
+            let mirror_status = status.clone();
+            if let Err(e) = store
+                .update_with(other, |m| {
+                    if let Some(l) = m.links.iter_mut().find(|l| l.same_edge(&reverse)) {
+                        l.status = mirror_status;
+                        l.at = Some(Utc::now());
+                        if mirror_note.is_some() {
+                            l.note = mirror_note;
+                        }
+                    }
+                    Ok(())
+                })
+                .await
+            {
+                // The owner's copy is written; reads prefer the decided
+                // state (`status_rank`), so a stale `proposed` mirror loses.
+                tracing::warn!(memory_id = %other, "second copy of the edge not updated: {e:#}");
+            }
+        }
+    }
+    let related = other;
     super::usage::record_write(
         store,
         &owner,
@@ -948,7 +1234,7 @@ pub async fn set_link_status(
         Some(related),
     )
     .await;
-    Ok(LinkResult {
+    Ok(Some(LinkResult {
         owner_id: owner,
         src_id,
         dst_id,
@@ -958,7 +1244,7 @@ pub async fn set_link_status(
         created: false,
         target_state: EdgeState::Live,
         stored_note: None,
-    })
+    }))
 }
 
 /// A reviewer's answer to a `contradicts` edge (plan: "Contradiction
@@ -1108,11 +1394,14 @@ pub async fn confirm_contradiction_direction(
     }
 }
 
+/// How decided a review state is: confirmed > rejected > proposed. A
+/// reviewer's "no" outranks an unreviewed proposal, so a rejected copy of an
+/// edge is never shadowed by a stale proposed one.
 fn status_rank(s: &LinkStatus) -> u8 {
     match s {
         LinkStatus::Confirmed => 3,
-        LinkStatus::Proposed => 2,
-        LinkStatus::Rejected => 1,
+        LinkStatus::Rejected => 2,
+        LinkStatus::Proposed => 1,
         LinkStatus::Other(_) => 0,
     }
 }
@@ -2636,5 +2925,164 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    fn proposed(src: &str, kind: LinkKind, dst: &str) -> LinkParams {
+        LinkParams {
+            status: Some(LinkStatus::Proposed),
+            origin: LinkOrigin::Nli,
+            ..params(src, kind, dst)
+        }
+    }
+
+    /// Two racing proposers can leave one copy of a symmetric edge in each
+    /// file. A review updates both, and a read prefers the decided state, so
+    /// a rejection sticks.
+    #[tokio::test]
+    async fn a_review_updates_both_copies_of_a_symmetric_edge() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        link(&store, proposed(&a, LinkKind::RelatedTo, &b), Surface::Cli)
+            .await
+            .unwrap();
+        // The racing writer's copy, on the other side.
+        let copy = store.get(&a).await.unwrap().links[0].clone();
+        let a_id = a.clone();
+        store
+            .update_with(&b, move |m| {
+                m.links.push(Link { to: a_id, ..copy });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let out = review_link(
+            &store,
+            eref(&b, LinkKind::RelatedTo, &a),
+            LinkStatus::Rejected,
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert!(out.changed);
+        for id in [&a, &b] {
+            let m = store.get(id).await.unwrap();
+            assert_eq!(m.links.len(), 1, "{id}");
+            assert_eq!(m.links[0].status, LinkStatus::Rejected, "{id}");
+        }
+        let rows = store.list_edges().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, LinkStatus::Rejected);
+    }
+
+    #[test]
+    fn a_rejection_outranks_a_proposal() {
+        assert!(status_rank(&LinkStatus::Rejected) > status_rank(&LinkStatus::Proposed));
+        assert!(status_rank(&LinkStatus::Confirmed) > status_rank(&LinkStatus::Rejected));
+    }
+
+    /// A review applies to a proposed edge only: the same verdict again is a
+    /// no-op, a different one after someone reviewed it is `NotProposed`.
+    #[tokio::test]
+    async fn a_review_needs_the_edge_still_proposed() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        link(&store, proposed(&a, LinkKind::Supports, &b), Surface::Cli)
+            .await
+            .unwrap();
+        let review = |to| {
+            review_link(
+                &store,
+                eref(&a, LinkKind::Supports, &b),
+                to,
+                None,
+                Surface::Cli,
+            )
+        };
+        assert!(review(LinkStatus::Confirmed).await.unwrap().changed);
+        let again = review(LinkStatus::Confirmed).await.unwrap();
+        assert!(!again.changed);
+        let err = review(LinkStatus::Rejected).await.unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<NotProposed>().unwrap().current,
+            LinkStatus::Confirmed
+        );
+        assert_eq!(
+            store.get(&a).await.unwrap().links[0].status,
+            LinkStatus::Confirmed
+        );
+        // A human edge confirmed by `link` is never flipped by a review.
+        let c = mem(&store, "c", Visibility::Shared).await;
+        link(&store, params(&a, LinkKind::Supports, &c), Surface::Cli)
+            .await
+            .unwrap();
+        let err = review_link(
+            &store,
+            eref(&a, LinkKind::Supports, &c),
+            LinkStatus::Rejected,
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.downcast_ref::<NotProposed>().is_some());
+    }
+
+    async fn nli_challenged(store: &MemoryStore, id: &str, about: &str) {
+        let evidence = format!(
+            "NLI contradiction (score: 0.91): new memory 'x' ({about}) contradicts this observation"
+        );
+        crate::nli::challenge_memory(store, id, &evidence, None)
+            .await
+            .unwrap();
+        // An unrelated challenge on the other memory stays.
+    }
+
+    /// Settling a contradiction resolves the NLI challenge it came with, on
+    /// whichever side carries it; an unrelated challenge stays.
+    #[tokio::test]
+    async fn settling_a_contradiction_resolves_its_nli_challenge() {
+        for verdict in ["reject", "both_stand", "supersede"] {
+            let (_t, store) = store().await;
+            let a = mem(&store, "Cache is on", Visibility::Shared).await;
+            let b = mem(&store, "Cache is off", Visibility::Shared).await;
+            link(
+                &store,
+                proposed(&b, LinkKind::Contradicts, &a),
+                Surface::Cli,
+            )
+            .await
+            .unwrap();
+            nli_challenged(&store, &a, &b).await;
+            crate::nli::challenge_memory(&store, &b, "hand-written: check the docs", None)
+                .await
+                .unwrap();
+            let v = match verdict {
+                "reject" => ContradictionVerdict::Reject,
+                "both_stand" => ContradictionVerdict::BothStand,
+                _ => ContradictionVerdict::Supersedes { winner: a.clone() },
+            };
+            let out = review_contradiction(&store, &a, &b, v.clone(), None, Surface::Cli)
+                .await
+                .unwrap();
+            assert!(out.changed, "{verdict}");
+            assert_eq!(out.resolved_challenges, vec![a.clone()], "{verdict}");
+            let am = store.get(&a).await.unwrap();
+            assert!(am.challenges.is_empty(), "{verdict}");
+            assert_eq!(am.status, crate::types::Status::Active, "{verdict}");
+            let bm = store.get(&b).await.unwrap();
+            assert_eq!(
+                bm.challenges.len(),
+                1,
+                "{verdict}: unrelated challenge kept"
+            );
+            // A repeated submit is a no-op.
+            let again = review_contradiction(&store, &a, &b, v, None, Surface::Cli)
+                .await
+                .unwrap();
+            assert!(!again.changed, "{verdict}");
+        }
     }
 }

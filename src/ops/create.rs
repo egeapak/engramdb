@@ -358,23 +358,31 @@ async fn create_memory_unrecorded(
                 // and the natural retry would write a DUPLICATE memory. The
                 // memory degrades to keyword-only retrieval until a reindex.
                 let saved = memory;
-                if let Err(e) = engine.embed_memory(&saved).await {
-                    tracing::warn!(
-                        memory_id = %saved.id,
-                        "memory created but embedding failed (semantic search \
-                         will miss it until `engramdb reindex --embeddings-only`): {e}"
-                    );
-                }
+                let query = match engine.embed_for_ingest(&saved).await {
+                    Ok(q) => q,
+                    Err(e) => {
+                        tracing::warn!(
+                            memory_id = %saved.id,
+                            "memory created but embedding failed (semantic search \
+                             will miss it until `engramdb reindex --embeddings-only`): {e}"
+                        );
+                        None
+                    }
+                };
 
                 // Detect contradictions with existing memories and find its
-                // embedding neighbours (best-effort, one embed + one search).
-                // Challenge writes are spawned so create_memory returns
-                // without waiting for them; per-write errors are logged
-                // inside the helper. Edge proposals run inline: they are a
-                // bounded handful of small writes (`[links]
-                // max_proposals_per_memory`), and a one-shot CLI that exits
-                // right after would otherwise drop them.
-                let findings = engine.ingest_findings(&saved).await;
+                // embedding neighbours: one vector search with the vector the
+                // embed above just computed (no second embed), skipped when
+                // that embed failed. Challenge writes are spawned so
+                // create_memory returns without waiting for them; per-write
+                // errors are logged inside the helper. Edge proposals run
+                // inline: they are a bounded handful of small writes
+                // (`[links] max_proposals_per_memory`), and a one-shot CLI
+                // that exits right after would otherwise drop them.
+                let Some(query) = query else {
+                    return Ok(CreateResult { id, summary });
+                };
+                let findings = engine.ingest_findings(&saved, query).await;
                 if !findings.contradictions.is_empty() {
                     tracing::debug!(
                         memory_id = %saved.id,

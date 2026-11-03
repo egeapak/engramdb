@@ -2,10 +2,14 @@
 //!
 //! Both proposers run on what an ingest already computed
 //! ([`crate::retrieval::IngestFindings`]: the NLI pairs and the vector
-//! neighbours of a memory that was just embedded), so they cost no model call
-//! of their own and never run on a hook path — hooks do not create memories.
-//! They run on `create` (the MCP background ingest and the CLI's inline one)
-//! and on an MCP `update`, which is exactly where NLI already runs.
+//! neighbours of a memory that was just embedded). The ingest searches with
+//! the vector its own embed just produced, so the proposers add **no model
+//! call**: their cost is one vector search (shared with NLI when it is on), a
+//! batched read of the neighbours, and an `edges_touching` read per candidate
+//! pair — measured at a few percent of a CLI `add` (see `docs/users/links.md`).
+//! They never run on a hook path — hooks do not create memories. They run on
+//! `create` (the MCP background ingest and the CLI's inline one) and on an
+//! MCP `update`, which is exactly where NLI already runs.
 //!
 //! Every proposal goes through [`super::links::link`] with `status:
 //! proposed`, so it inherits the edge rules there — the personal-id rule
@@ -23,7 +27,21 @@
 //!   automatic proposals (`origin: nli | similarity`, `status: proposed`) may
 //!   touch one memory; a proposal is skipped when either end is at it, so a
 //!   noisy model cannot flood a committed file. Contradictions are proposed
-//!   before neighbours, so they win the slots.
+//!   before neighbours, so they win the slots. A pending proposal whose other
+//!   end was deleted or invalidated does not count: no review queue lists it,
+//!   so counting it would cap a memory forever behind proposals nobody can
+//!   see. **Declared overshoot:** the cap and the existing-edge check are read
+//!   before the write, outside the store lock, so ingests of *different*
+//!   memories racing on the same neighbour can each see room and together
+//!   leave it up to (racing ingests − 1) proposals over the cap. Taking the
+//!   lock across the read would serialize every ingest on a shared
+//!   neighbour; the overshoot is bounded by the cap per racing ingest and is
+//!   cleared by review like any other proposal.
+//! - **`duplicates` needs NLI.** A neighbour at or above
+//!   `duplicate_threshold` is proposed as `duplicates` only when NLI ran on
+//!   that pair and did not find a contradiction; otherwise it is proposed as
+//!   `related_to`. Similarity alone cannot tell "X is on" from "X is off" —
+//!   a negated pair embeds almost identically.
 //! - **No score change.** A proposed edge is not read by scoring (phase 5
 //!   reads confirmed edges only), the same rule as `NeedsReview`.
 //!
@@ -79,24 +97,44 @@ fn is_auto_pending(origin: &LinkOrigin, status: &LinkStatus) -> bool {
     *status == LinkStatus::Proposed && matches!(origin, LinkOrigin::Nli | LinkOrigin::Similarity)
 }
 
-/// Pending automatic proposals touching `id`, and the same-store ids it is
-/// already joined to by any edge.
+/// Pending automatic proposals touching `id` whose other end is live, and
+/// the same-store ids it is already joined to by any edge.
 async fn neighbourhood(
     store: &MemoryStore,
     id: &str,
 ) -> anyhow::Result<(usize, std::collections::HashSet<String>)> {
     let rows = store.edges_touching(id).await?;
-    let mut pending = 0;
+    let mut pending_others: Vec<String> = Vec::new();
     let mut joined = std::collections::HashSet::new();
     for r in rows {
-        if is_auto_pending(&r.origin, &r.status) {
-            pending += 1;
+        let other = if r.src_id == id {
+            r.dst_id.clone()
+        } else {
+            r.src_id.clone()
+        };
+        // Proposers only write same-store edges.
+        if is_auto_pending(&r.origin, &r.status) && r.dst_store.is_none() {
+            pending_others.push(other.clone());
         }
         if r.dst_store.is_none() {
-            let other = if r.src_id == id { r.dst_id } else { r.src_id };
             joined.insert(other);
         }
     }
+    let pending = if pending_others.is_empty() {
+        0
+    } else {
+        // Only proposals a review queue can show count (module docs).
+        let refs: Vec<&str> = pending_others.iter().map(String::as_str).collect();
+        let now = chrono::Utc::now();
+        let live: std::collections::HashSet<String> = store
+            .get_batch(&refs)
+            .await?
+            .into_iter()
+            .filter(|(_, m)| !m.is_invalidated_at(now))
+            .map(|(id, _)| id)
+            .collect();
+        pending_others.iter().filter(|o| live.contains(*o)).count()
+    };
     Ok((pending, joined))
 }
 
@@ -216,13 +254,17 @@ pub async fn propose_contradictions(
     propose(store, memory_id, candidates, cfg.max_proposals_per_memory).await
 }
 
-/// Propose `duplicates` (at or above `duplicate_threshold`) or `related_to`
-/// (at or above `related_threshold`) for each `(neighbour id, similarity)`,
-/// best first. Neighbours below both thresholds are ignored.
+/// Propose `duplicates` or `related_to` for each `(neighbour id,
+/// similarity)`, best first; neighbours below `related_threshold` are
+/// ignored. `duplicates` needs the similarity at or above
+/// `duplicate_threshold` **and** the neighbour in `nli_cleared` (NLI ran on
+/// the pair and found no contradiction — module docs); anything else above
+/// `related_threshold` is `related_to`.
 pub async fn propose_similar(
     store: &MemoryStore,
     memory_id: &str,
     neighbours: &[(String, f64)],
+    nli_cleared: &std::collections::HashSet<String>,
     cfg: &LinksConfig,
 ) -> ProposalReport {
     if !cfg.similar_enabled() {
@@ -237,7 +279,7 @@ pub async fn propose_similar(
         .into_iter()
         .take(cfg.similar_candidates)
         .map(|(other, score)| {
-            let kind = if *score >= cfg.duplicate_threshold {
+            let kind = if *score >= cfg.duplicate_threshold && nli_cleared.contains(other) {
                 LinkKind::Duplicates
             } else {
                 LinkKind::RelatedTo
@@ -273,7 +315,7 @@ pub async fn apply_ingest_findings(
         .iter()
         .map(|m| (m.id.clone(), m.score))
         .collect();
-    let s = propose_similar(store, memory_id, &neighbours, cfg).await;
+    let s = propose_similar(store, memory_id, &neighbours, &findings.nli_cleared, cfg).await;
     if !c.proposed.is_empty() || !s.proposed.is_empty() {
         tracing::debug!(
             memory_id,
@@ -322,6 +364,14 @@ mod tests {
         LinksConfig::default()
     }
 
+    fn none() -> std::collections::HashSet<String> {
+        Default::default()
+    }
+
+    fn cleared(ids: &[&String]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| s.to_string()).collect()
+    }
+
     async fn all_edges(store: &MemoryStore, id: &str) -> Vec<crate::ops::links::EdgeView> {
         let v = links_of(store, id, &LinkFilter::all()).await.unwrap();
         v.outbound.into_iter().chain(v.inbound).collect()
@@ -361,6 +411,7 @@ mod tests {
                 (weak.clone(), 0.5),
                 (dup.clone(), 0.97),
             ],
+            &cleared(&[&dup]),
             &cfg(),
         )
         .await;
@@ -385,7 +436,7 @@ mod tests {
         let hub = mem(&store, "hub", Visibility::Shared).await;
         let others: Vec<String> = futures_ids(&store, 4).await;
         let pairs: Vec<(String, f64)> = others.iter().map(|o| (o.clone(), 0.85)).collect();
-        let r = propose_similar(&store, &hub, &pairs, &c).await;
+        let r = propose_similar(&store, &hub, &pairs, &none(), &c).await;
         assert_eq!(r.proposed.len(), 2);
         assert_eq!(
             r.skipped
@@ -399,7 +450,7 @@ mod tests {
         // one proposal; with a cap of 1 it takes no second one.
         c.max_proposals_per_memory = 1;
         let fresh = mem(&store, "fresh", Visibility::Shared).await;
-        let r = propose_similar(&store, &fresh, &[(others[0].clone(), 0.85)], &c).await;
+        let r = propose_similar(&store, &fresh, &[(others[0].clone(), 0.85)], &none(), &c).await;
         assert!(r.proposed.is_empty());
         assert_eq!(r.skipped, vec![(others[0].clone(), SkipReason::Capped)]);
 
@@ -418,12 +469,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let r = propose_similar(&store, &fresh, &[(others[0].clone(), 0.85)], &c).await;
+        let r = propose_similar(&store, &fresh, &[(others[0].clone(), 0.85)], &none(), &c).await;
         assert_eq!(r.proposed.len(), 1);
 
         // Off switches.
         c.max_proposals_per_memory = 0;
-        let r = propose_similar(&store, &fresh, &[(others[3].clone(), 0.99)], &c).await;
+        let r = propose_similar(&store, &fresh, &[(others[3].clone(), 0.99)], &none(), &c).await;
         assert!(r.proposed.is_empty() && r.skipped.is_empty());
         let off = LinksConfig {
             propose_similar: false,
@@ -431,7 +482,7 @@ mod tests {
             ..cfg()
         };
         assert!(
-            propose_similar(&store, &fresh, &[(others[3].clone(), 0.99)], &off)
+            propose_similar(&store, &fresh, &[(others[3].clone(), 0.99)], &none(), &off)
                 .await
                 .proposed
                 .is_empty()
@@ -480,7 +531,7 @@ mod tests {
             let r = propose_contradictions(&store, x, &[(y.clone(), 0.99)], &cfg()).await;
             assert_eq!(r.skipped, vec![(y.clone(), SkipReason::Existing)]);
             // Nor does a similarity proposal stack on top of it.
-            let r = propose_similar(&store, x, &[(y.clone(), 0.99)], &cfg()).await;
+            let r = propose_similar(&store, x, &[(y.clone(), 0.99)], &none(), &cfg()).await;
             assert_eq!(r.skipped, vec![(y.clone(), SkipReason::Existing)]);
         }
         let edges = all_edges(&store, &a).await;
@@ -504,7 +555,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let r = propose_similar(&store, &c, &[(a.clone(), 0.99)], &cfg()).await;
+        let r = propose_similar(&store, &c, &[(a.clone(), 0.99)], &none(), &cfg()).await;
         assert_eq!(r.skipped, vec![(a.clone(), SkipReason::Existing)]);
         let s = all_edges(&store, &c).await;
         assert_eq!(s.len(), 1);
@@ -512,7 +563,7 @@ mod tests {
         assert_eq!(s[0].note.as_deref(), Some("hand-made"));
 
         // The memory itself is never a candidate.
-        let r = propose_similar(&store, &c, &[(c.clone(), 1.0)], &cfg()).await;
+        let r = propose_similar(&store, &c, &[(c.clone(), 1.0)], &none(), &cfg()).await;
         assert_eq!(r.skipped, vec![(c.clone(), SkipReason::SelfLoop)]);
     }
 
@@ -530,7 +581,14 @@ mod tests {
         assert_eq!(p.links[0].to, shared);
         assert_eq!(p.links[0].origin, LinkOrigin::Nli);
         // And it is still the one edge between them.
-        let r = propose_similar(&store, &shared, &[(personal.clone(), 0.99)], &cfg()).await;
+        let r = propose_similar(
+            &store,
+            &shared,
+            &[(personal.clone(), 0.99)],
+            &none(),
+            &cfg(),
+        )
+        .await;
         assert_eq!(r.skipped, vec![(personal.clone(), SkipReason::Existing)]);
     }
 
@@ -553,6 +611,7 @@ mod tests {
                 id: y.clone(),
                 score: 0.99,
             }],
+            ..Default::default()
         };
         let (cr, sr) = apply_ingest_findings(&store, &new, &findings, &c).await;
         assert_eq!(cr.proposed, vec![(x, LinkKind::Contradicts)]);
@@ -564,7 +623,7 @@ mod tests {
         let (_t, store) = store().await;
         let a = mem(&store, "a", Visibility::Shared).await;
         let b = mem(&store, "b", Visibility::Shared).await;
-        propose_similar(&store, &a, &[(b.clone(), 0.85)], &cfg()).await;
+        propose_similar(&store, &a, &[(b.clone(), 0.85)], &none(), &cfg()).await;
         let events = crate::telemetry::usage::load_memory_events(&store.project_dir)
             .unwrap()
             .events;
@@ -576,5 +635,54 @@ mod tests {
         assert_eq!(linked[0].surface, Surface::Maintenance);
         assert_eq!(linked[0].memory_id, a);
         assert_eq!(linked[0].related_id.as_deref(), Some(b.as_str()));
+    }
+
+    #[tokio::test]
+    async fn duplicates_need_nli_to_clear_the_pair() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "Cache is on", Visibility::Shared).await;
+        let b = mem(&store, "Cache is off", Visibility::Shared).await;
+        let c = mem(&store, "Cache stays on", Visibility::Shared).await;
+        // Without NLI a near-identical neighbour is only `related_to`.
+        let r = propose_similar(&store, &a, &[(b.clone(), 0.97)], &none(), &cfg()).await;
+        assert_eq!(r.proposed, vec![(b, LinkKind::RelatedTo)]);
+        // NLI ran on the pair and found no contradiction: `duplicates`.
+        let r = propose_similar(&store, &a, &[(c.clone(), 0.97)], &cleared(&[&c]), &cfg()).await;
+        assert_eq!(r.proposed, vec![(c, LinkKind::Duplicates)]);
+    }
+
+    #[tokio::test]
+    async fn proposals_to_gone_or_invalidated_memories_free_their_slot() {
+        let (_t, store) = store().await;
+        let c = LinksConfig {
+            max_proposals_per_memory: 1,
+            ..cfg()
+        };
+        let hub = mem(&store, "hub", Visibility::Shared).await;
+        let gone = mem(&store, "gone", Visibility::Shared).await;
+        let old = mem(&store, "old", Visibility::Shared).await;
+        let fresh = mem(&store, "fresh", Visibility::Shared).await;
+        let next = mem(&store, "next", Visibility::Shared).await;
+        assert_eq!(
+            propose_similar(&store, &hub, &[(gone.clone(), 0.85)], &none(), &c)
+                .await
+                .proposed
+                .len(),
+            1
+        );
+        // At the cap...
+        let r = propose_similar(&store, &hub, &[(fresh.clone(), 0.85)], &none(), &c).await;
+        assert_eq!(r.skipped, vec![(fresh.clone(), SkipReason::Capped)]);
+        // ...until the other end is deleted: no queue lists that proposal.
+        store.delete(&gone).await.unwrap();
+        let r = propose_similar(&store, &hub, &[(old.clone(), 0.85)], &none(), &c).await;
+        assert_eq!(r.proposed.len(), 1, "{r:?}");
+        // The same for an invalidated end.
+        store
+            .invalidate_with(&old, None, chrono::Utc::now())
+            .await
+            .unwrap();
+        let r = propose_similar(&store, &hub, &[(next.clone(), 0.85)], &none(), &c).await;
+        assert_eq!(r.proposed.len(), 1, "{r:?}");
     }
 }

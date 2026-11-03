@@ -71,18 +71,27 @@ connector between two stations is an edge (see [Linking memories](./links.md)):
 | Line with an arrow | `supports` |
 | Dotted line with an arrow | `derived_from` |
 | Thin grey line / grey dash-dot | `related_to` / `duplicates` |
-| Any kind, dashed | proposed, not yet reviewed |
+| Any other kind, faded | proposed, not yet reviewed |
 | Ending at a crossed-out station | the far end was deleted (dangling) |
 | Ending at a `?` | the far end is in a store that could not be opened here |
 
-Station size follows reads, so a memory nothing reads is small. Filters (kinds,
+Station size follows reads, so a memory nothing reads is small. Labels are
+the start of each memory's summary; where one would overlap another label or
+a station it is left out, and more appear as you zoom in. Filters (kinds,
 whether to include proposed, rejected and invalidated, and one line) live in
-the address bar, so a filtered map can be bookmarked. Drag or use the arrow
-keys to pan, the wheel, a pinch or `+`/`-` to zoom, and `0` or *Fit* to see it
-all. Hovering (or focusing) a station shows a card with its connections;
-clicking it opens the memory. Clicking a connector pins it in the card, where
-a proposed one can be reviewed. Below the map, a table lists every connector
-for keyboard and screen-reader use.
+the address bar, so a filtered map can be bookmarked. Toggling a kind,
+proposed or rejected only hides or shows connectors: stations stay where
+they are. Drag or use the arrow keys to pan, a pinch or `+`/`-` to zoom, and
+`0` or *Fit* to see it all. The wheel zooms only once you have clicked into
+the map (or while holding Ctrl/⌘), so scrolling the page past it never zooms
+by accident. `]` and `[` step through the stations.
+
+Hovering (or focusing) a station or connector shows a short tooltip.
+Clicking it pins it in the card beside the map (below it on a phone, which
+scrolls to it): a station's card lists its connections and has an *Open
+memory* link; a proposed connector's card is where it is reviewed. Below the
+map, a table lists the proposed connectors; *Show all connectors* expands it
+to every one, for keyboard and screen-reader use.
 
 A large store shows its most connected memories first (800 by default); the
 page says when it is partial, and picking a line shows the rest of it. The
@@ -114,8 +123,19 @@ Any other proposed edge is confirmed or rejected. Every choice asks once more
 in the page, saying what will happen, before anything is written. The write
 goes through the same code as `engramdb link`, takes the project's write lock,
 and records a `linked` event (and `resolved` on a superseded loser) from the
-`dashboard` surface. Without `--allow-writes` the buttons are shown disabled,
-with the command to restart. Nothing else on the page writes.
+`dashboard` surface. A symmetric edge (`contradicts`, `related_to`,
+`duplicates`) is stored on both memories, and a review updates both copies.
+
+Settling a contradiction — any of the four choices — also resolves the NLI
+challenge that named the other memory, on either side, and the page says
+which memories it cleared. A memory left with no other challenge goes back
+to `active`.
+
+Only an edge that is still proposed can be reviewed. Sending the same
+review twice (a double click, a second tab) changes nothing and the page says
+"Already done"; a different review of an edge someone already settled is
+refused with `409 not_proposed`. Without `--allow-writes` the buttons are
+shown disabled, with the command to restart. Nothing else on the page writes.
 
 ## What it reads, and what it never does
 

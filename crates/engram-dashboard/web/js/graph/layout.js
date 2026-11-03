@@ -1,4 +1,5 @@
-// Route-map layout v1: a seeded force simulation snapped to a grid.
+// Route-map layout v2: a seeded force simulation snapped to a grid, with
+// collision-free station labels.
 //
 // Pure functions over plain data, so the same module runs in the layout
 // worker (layout-worker.js) and, when a worker cannot start, on the main
@@ -9,25 +10,44 @@
 // Steps:
 //   1. Lines (logical scopes) start as compact blocks, each line's stations
 //      in a serpentine so consecutive stations are neighbours; blocks are
-//      shelf-packed.
+//      shelf-packed to the map box's aspect ratio, so Fit uses the whole box.
 //   2. A force simulation: soft repulsion through a spatial hash (O(n) per
 //      step, so ~1000 stations stay fast), springs along edges, stronger
 //      springs along each line's station chain, weak gravity to the line's
 //      block, all under a cooling step cap.
-//   3. Snap: stations claim grid points, most connected first, each taking
-//      the nearest free point.
-//   4. Routing: line chains and edges become polylines of horizontal,
-//      vertical and 45° segments (straight–diagonal–straight for lines,
+//   3. Snap: stations claim points of a grid wider than it is tall (labels
+//      are wider than they are tall), most connected first, each taking the
+//      nearest free point.
+//   4. Lines: each line visits its stations in a nearest-neighbour order
+//      from one end, so it does not double back across the map.
+//   5. Routing: line chains and edges become polylines of horizontal,
+//      vertical and diagonal segments (straight–diagonal–straight for lines,
 //      diagonal–straight for edges, so an edge rarely hides under its line).
-//      True octilinear metro routing (no crossings, aligned stations) is
-//      out of scope for v1.
+//      True octilinear metro routing (no crossings) is out of scope.
+//   6. Labels: most important station first (degree, then reads), each label
+//      takes the first free spot of below / above / right / left that hits
+//      no station and no label already placed; a label with no free spot is
+//      dropped (the page shows it on hover and focus instead).
 //
-// Input:  { nodes: [{ id, line, slot, scope, degree }], edges: [{ s, t }] }
+// Positions depend on the nodes and edges given and nothing else, so the
+// caller can keep a map steady across display filters by laying out one
+// fixed edge set and only drawing a subset of it.
+//
+// Input:  { nodes: [{ id, line, slot, scope, degree, r, label, weight }],
+//           edges: [{ s, t }], aspect: box height / width }
 //         (`t` < 0: a stub — dangling or cross-store — drawn off `s`).
 // Output: { pos: [x0, y0, x1, y1, …], routes: [[[x, y], …], …] per edge,
-//           lines: [{ key, slot, pts: [[x, y], …] }], bounds: {x, y, w, h} }
+//           lines: [{ key, slot, pts: [[x, y], …] }],
+//           labels: [{ x, y, w, anchor } | null] per node, bounds: {x, y, w, h} }
 
 export const GRID = 48;
+/** Grid pitch after snapping: columns are wider than rows (labels). */
+export const GX = 104;
+export const GY = 60;
+/** Label metrics in map units (CSS: .map .lbl, 11.5px, weight 600). */
+export const LABEL_H = 14;
+const CHAR_W = 6.6;
+export const labelWidth = (text) => Math.ceil(String(text).length * CHAR_W) + 4;
 
 function fnv(str) {
   let h = 0x811c9dc5;
@@ -66,7 +86,7 @@ function linesOf(nodes, order) {
 }
 
 /** Step 1: serpentine blocks, shelf-packed. */
-function seed(nodes, lines, rand, px, py) {
+function seed(nodes, lines, rand, px, py, aspect) {
   const step = GRID * 1.5;
   const blocks = lines.map((l) => {
     const m = l.members.length;
@@ -76,7 +96,11 @@ function seed(nodes, lines, rand, px, py) {
   });
   const area = blocks.reduce((a, b) => a + b.w * b.h, 0);
   const widest = blocks.reduce((a, b) => Math.max(a, b.w), 0);
-  const width = Math.max(widest, Math.sqrt(area) * 1.4);
+  // Pack for the box: the snap stretches x and y by different factors (GX
+  // vs GY per cell), so the simulation's own aspect is the box's scaled by
+  // GX/GY.
+  const simAspect = Math.min(4, Math.max(0.2, (aspect || 0.6) * (GX / GY)));
+  const width = Math.max(widest, Math.sqrt(area / simAspect));
   let x = 0;
   let y = 0;
   let shelf = 0;
@@ -177,14 +201,36 @@ function simulate(nodes, edges, lines, px, py) {
   }
 }
 
-/** Step 3: every station claims the nearest free grid point. */
-function snap(nodes, px, py) {
+/** Step 3: every station claims the nearest free point of the GX × GY grid. */
+function snap(nodes, px, py, aspect) {
   const n = nodes.length;
+  // The simulation does not keep the seed's shape (repulsion and gravity
+  // round it off), so the snap restores the box's aspect: x and y get
+  // separate scales whose product keeps the density, bounded so a station
+  // never moves far from its neighbours' side.
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let y0 = Infinity;
+  let y1 = -Infinity;
+  for (let i = 0; i < n; i++) {
+    x0 = Math.min(x0, px[i]);
+    x1 = Math.max(x1, px[i]);
+    y0 = Math.min(y0, py[i]);
+    y1 = Math.max(y1, py[i]);
+  }
+  const sw = Math.max(GRID, x1 - x0);
+  const sh = Math.max(GRID, y1 - y0);
+  const q = Math.min(3, Math.max(1 / 3, ((aspect || 0.6) * sw * GX) / (sh * GY)));
   const order = [...Array(n).keys()].sort((a, b) => (nodes[b].degree || 0) - (nodes[a].degree || 0) || cmp(nodes[a].id, nodes[b].id));
   const taken = new Set();
+  // The simulation keeps stations ~1.4 GRID apart; one grid cell per
+  // 1.15 GRID keeps them about one cell apart on the stretched grid.
+  const k = 1 / (GRID * 1.15);
+  const kx = n > 2 ? k / Math.sqrt(q) : k;
+  const ky = n > 2 ? k * Math.sqrt(q) : k;
   for (const i of order) {
-    const fx = px[i] / GRID;
-    const fy = py[i] / GRID;
+    const fx = px[i] * kx;
+    const fy = py[i] * ky;
     const gx0 = Math.round(fx);
     const gy0 = Math.round(fy);
     let best = null;
@@ -205,10 +251,122 @@ function snap(nodes, px, py) {
       }
     }
     taken.add(best[0] + ',' + best[1]);
-    px[i] = best[0] * GRID;
-    py[i] = best[1] * GRID;
+    px[i] = best[0] * GX;
+    py[i] = best[1] * GY;
   }
   return taken;
+}
+
+/** Step 4: order each line's stations as a path from one end. */
+function orderLines(lines, px, py) {
+  for (const l of lines) {
+    const m = l.members;
+    if (m.length < 3) continue;
+    let cx = 0;
+    let cy = 0;
+    for (const i of m) {
+      cx += px[i];
+      cy += py[i];
+    }
+    cx /= m.length;
+    cy /= m.length;
+    // Start at the station farthest from the line's centre: an end.
+    let start = m[0];
+    let far = -1;
+    for (const i of m) {
+      const d = (px[i] - cx) ** 2 + (py[i] - cy) ** 2;
+      if (d > far + 1e-9) {
+        far = d;
+        start = i;
+      }
+    }
+    const left = new Set(m);
+    left.delete(start);
+    const path = [start];
+    let cur = start;
+    while (left.size) {
+      let best = -1;
+      let bd = Infinity;
+      for (const j of left) {
+        const d = (px[j] - px[cur]) ** 2 + (py[j] - py[cur]) ** 2;
+        if (d < bd - 1e-9 || (Math.abs(d - bd) <= 1e-9 && j < best)) {
+          bd = d;
+          best = j;
+        }
+      }
+      left.delete(best);
+      path.push(best);
+      cur = best;
+    }
+    l.members = path;
+  }
+}
+
+/** Step 6: greedy, collision-free label placement. */
+function placeLabels(nodes, px, py, lines) {
+  const n = nodes.length;
+  const out = new Array(n).fill(null);
+  const boxes = [];
+  const CELL = 120;
+  const grid = new Map();
+  const keyOf = (cx, cy) => cx + ',' + cy;
+  const add = (b) => {
+    boxes.push(b);
+    for (let cx = Math.floor(b.x0 / CELL); cx <= Math.floor(b.x1 / CELL); cx++) {
+      for (let cy = Math.floor(b.y0 / CELL); cy <= Math.floor(b.y1 / CELL); cy++) {
+        const k = keyOf(cx, cy);
+        if (!grid.has(k)) grid.set(k, []);
+        grid.get(k).push(b);
+      }
+    }
+  };
+  const hits = (b) => {
+    for (let cx = Math.floor(b.x0 / CELL); cx <= Math.floor(b.x1 / CELL); cx++) {
+      for (let cy = Math.floor(b.y0 / CELL); cy <= Math.floor(b.y1 / CELL); cy++) {
+        for (const o of grid.get(keyOf(cx, cy)) || []) {
+          if (b.x0 < o.x1 && o.x0 < b.x1 && b.y0 < o.y1 && o.y0 < b.y1) return true;
+        }
+      }
+    }
+    return false;
+  };
+  // Every station is an obstacle first.
+  for (let i = 0; i < n; i++) {
+    const r = (nodes[i].r || 6) + 3;
+    add({ x0: px[i] - r, y0: py[i] - r, x1: px[i] + r, y1: py[i] + r });
+  }
+  // So is each line's badge (views/graph.js draws it 24 × 24, centred up
+  // and left of the line's first station).
+  for (const l of lines || []) {
+    if (!l.key || !l.members.length) continue;
+    const i = l.members[0];
+    add({ x0: px[i] - 38, y0: py[i] - 36, x1: px[i] - 10, y1: py[i] - 8 });
+  }
+  const order = [...Array(n).keys()].sort(
+    (a, b) => (nodes[b].degree || 0) - (nodes[a].degree || 0) || (nodes[b].weight || 0) - (nodes[a].weight || 0) || cmp(nodes[a].id, nodes[b].id),
+  );
+  for (const i of order) {
+    const text = nodes[i].label;
+    if (!text) continue;
+    const w = labelWidth(text);
+    const r = (nodes[i].r || 6) + 4;
+    const x = px[i];
+    const y = py[i];
+    const spots = [
+      { x, y: y + r + LABEL_H - 2, anchor: 'middle', b: { x0: x - w / 2, y0: y + r, x1: x + w / 2, y1: y + r + LABEL_H } },
+      { x, y: y - r - 4, anchor: 'middle', b: { x0: x - w / 2, y0: y - r - LABEL_H, x1: x + w / 2, y1: y - r } },
+      { x: x + r + 2, y: y + 4, anchor: 'start', b: { x0: x + r, y0: y - LABEL_H / 2, x1: x + r + 2 + w, y1: y + LABEL_H / 2 } },
+      { x: x - r - 2, y: y + 4, anchor: 'end', b: { x0: x - r - 2 - w, y0: y - LABEL_H / 2, x1: x - r, y1: y + LABEL_H / 2 } },
+    ];
+    for (const sp of spots) {
+      if (!hits(sp.b)) {
+        add(sp.b);
+        out[i] = { x: sp.x, y: sp.y, w, anchor: sp.anchor, box: sp.b };
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 const sign = (v) => (v > 0 ? 1 : v < 0 ? -1 : 0);
@@ -252,18 +410,22 @@ export function layout(input) {
   const px = new Float64Array(n);
   const py = new Float64Array(n);
   const order = [...Array(n).keys()].sort((a, b) => cmp(nodes[a].id, nodes[b].id));
-  const rand = prng(fnv(order.map((i) => nodes[i].id).join('|') + '#' + edges.length));
+  // Seeded from the station ids alone, so the same stations start alike
+  // whatever edges are drawn.
+  const rand = prng(fnv(order.map((i) => nodes[i].id).join('|')));
   const lines = linesOf(nodes, order);
-  seed(nodes, lines, rand, px, py);
+  seed(nodes, lines, rand, px, py, input.aspect);
   if (n > 1) simulate(nodes, edges, lines, px, py);
-  const taken = snap(nodes, px, py);
+  const taken = snap(nodes, px, py, input.aspect);
+  orderLines(lines, px, py);
+  const labels = placeLabels(nodes, px, py, lines);
 
   const P = (i) => [px[i], py[i]];
   const routes = edges.map((e, k) => {
     if (e.t >= 0) return edgeRoute(P(e.s), P(e.t));
     // A stub: the first free neighbouring direction, in an edge-derived order.
-    const gx = px[e.s] / GRID;
-    const gy = py[e.s] / GRID;
+    const gx = px[e.s] / GX;
+    const gy = py[e.s] / GY;
     const start = fnv(String(k) + (nodes[e.s] ? nodes[e.s].id : '')) % 8;
     let dir = DIRS[start];
     for (let j = 0; j < 8; j++) {
@@ -273,7 +435,7 @@ export function layout(input) {
         break;
       }
     }
-    const len = GRID * 0.9;
+    const len = GY * 0.75;
     const norm = Math.hypot(dir[0], dir[1]);
     return [P(e.s), [px[e.s] + (dir[0] / norm) * len, py[e.s] + (dir[1] / norm) * len]];
   });
@@ -296,17 +458,29 @@ export function layout(input) {
     maxX = Math.max(maxX, x);
     maxY = Math.max(maxY, y);
   };
-  for (let i = 0; i < n; i++) grow(px[i], py[i]);
+  for (let i = 0; i < n; i++) {
+    const r = (nodes[i].r || 6) + 6;
+    grow(px[i] - r, py[i] - r);
+    grow(px[i] + r, py[i] + r);
+  }
   for (const r of routes) for (const p of r) grow(p[0], p[1]);
+  for (const l of labels) {
+    if (!l) continue;
+    grow(l.box.x0, l.box.y0);
+    grow(l.box.x1, l.box.y1);
+  }
+  // Line badges sit up and left of each line's first station.
+  for (const l of lineOut) if (l.key && l.pts.length) grow(l.pts[0][0] - 40, l.pts[0][1] - 36);
   if (!n) {
     minX = minY = 0;
     maxX = maxY = GRID;
   }
-  const pad = GRID * 1.5;
+  const pad = 16;
   return {
     pos: Array.from({ length: n * 2 }, (_, k) => (k % 2 ? py[k >> 1] : px[k >> 1])),
     routes,
     lines: lineOut,
-    bounds: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2 + GRID * 4, h: maxY - minY + pad * 2 },
+    labels: labels.map((l) => (l ? { x: l.x, y: l.y, w: l.w, anchor: l.anchor } : null)),
+    bounds: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 },
   };
 }
