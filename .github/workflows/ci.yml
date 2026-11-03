@@ -372,6 +372,10 @@ jobs:
           name: nextest-all-features
           path: nextest-all-features.tar.zst
           # Already zstd: re-deflating it costs time and saves nothing.
+          # Measured (run 41599658093): `nextest archive` packs 536 files in
+          # 5.3 s, the 571 MB upload takes 8 s, a shard's download 6-39 s and
+          # nextest's extraction ~6 s. That is under a minute of a ~3 min
+          # shard, so the archive is not worth splitting or recompressing.
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
