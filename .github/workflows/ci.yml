@@ -39,6 +39,16 @@ permissions:
 # pushes and had to compile ~580 crates from scratch (5-9 min) each time. A PR
 # branch's own cache only ever helped a PR that changed Cargo.lock, since
 # rust-cache never stores workspace crates anyway.
+#
+# That includes Dependabot PRs, deliberately. Their Cargo.lock differs, so the
+# exact key misses, but rust-cache's restore key (`v0-rust-<job>-<os>-<env
+# hash>`, no lockfile hash) still matches master's newest entry for the same
+# job: the run restores master's dependencies and rebuilds only the bumped
+# crates and their dependents. Saving there would buy a full-hit second push
+# at ~6.5 GB per run, scoped to that PR's ref alone, which is exactly the
+# eviction of master's entries this policy exists to stop. (The Dependabot run
+# 41399668398, before this policy, restored nothing: by then PR saves had
+# evicted master's `test` entry, so it compiled all 584 crates in 9 min.)
 
 # Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
 # they need the full ONNX runtime plus downloaded embedding models, and
