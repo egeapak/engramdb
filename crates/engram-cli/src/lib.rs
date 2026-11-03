@@ -599,7 +599,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             all_projects,
             global,
             daemon,
-        } => commands::run_stats(&dir, global, daemon, backend, all_projects, &formatter).await,
+            memory,
+            top,
+            by,
+        } => {
+            let usage = commands::stats::UsageArgs {
+                memory,
+                top,
+                by: by.into(),
+            };
+            commands::run_stats(
+                &dir,
+                global,
+                daemon,
+                backend,
+                all_projects,
+                usage,
+                &formatter,
+            )
+            .await
+        }
         Command::Doctor {
             command,
             global,

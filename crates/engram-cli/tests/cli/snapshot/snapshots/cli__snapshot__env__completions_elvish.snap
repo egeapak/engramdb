@@ -406,6 +406,9 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand --help 'Print help (see more with ''--help'')'
         }
         &'engramdb;stats'= {
+            cand --memory 'Show one memory''s usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix'
+            cand --top 'Append the N most-used memories'
+            cand --by 'Which read signal orders --top; the others break ties (they are never summed)'
             cand --format 'Output format'
             cand --dir 'Working directory (default: current directory)'
             cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'

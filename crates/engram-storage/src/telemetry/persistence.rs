@@ -73,9 +73,16 @@ const STARTUP_REPLAY_CAP: usize = 50_000;
 const FLUSH_BATCH_MAX: usize = 1_024;
 
 /// Resolve the LanceDB connection root for a project ID.
+///
+/// A group store's tables live in its own `groups/<id>/lancedb/`, like its
+/// memories: usage events for a group memory land in the group's log (the
+/// owner's), and resolving a group id to `projects/<id>/` would point at a
+/// directory that never exists, so every write would be refused.
 pub(crate) fn lancedb_root(project_id: &str) -> Result<PathBuf> {
     if project_id == GLOBAL_PROJECT_ID {
         global_lancedb_dir().context("resolving global lancedb dir")
+    } else if crate::paths::is_group_id(project_id) {
+        crate::paths::group_lancedb_dir(project_id).context("resolving group lancedb dir")
     } else {
         lancedb_dir(project_id).context("resolving project lancedb dir")
     }

@@ -175,7 +175,9 @@ async fn compute_query_result(
     // When querying a shared store directly (`--global`/`--group`), there is no
     // cross-store fan-in to do — we ARE the shared store. Short-circuit.
     if direct_shared {
-        return engramdb::ops::query_memories(&engine, &query).await;
+        let result = engramdb::ops::query_memories(&engine, &query).await?;
+        record_returned(&engine, &result, &Default::default(), query.mode);
+        return Ok(result);
     }
 
     // N-way fan-in (ops::query_memories_with_extra_stores): fold in every group
@@ -249,7 +251,26 @@ async fn compute_query_result(
         );
     }
 
+    record_returned(&engine, &outcome.result, &outcome.owners, query.mode);
     Ok(outcome.result)
+}
+
+/// Record `returned` for what this query answered (each memory in its
+/// owning store's log). The CLI has no session id.
+fn record_returned(
+    engine: &engramdb::retrieval::engine::RetrievalEngine,
+    result: &RetrievalResult,
+    owners: &std::collections::HashMap<String, engramdb::ops::StoreRef>,
+    mode: RetrievalMode,
+) {
+    engramdb::ops::record_returned(
+        engine,
+        result,
+        owners,
+        mode,
+        engramdb::ops::Surface::Cli,
+        None,
+    );
 }
 
 #[cfg(test)]

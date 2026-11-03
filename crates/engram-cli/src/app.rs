@@ -537,6 +537,27 @@ pub enum OutputFormat {
     Plain,
 }
 
+/// The read signal that orders `stats --top`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UsageSortArg {
+    /// Opened explicitly by id (`get`)
+    Fetched,
+    /// Rendered into an agent's context by a hook
+    Injected,
+    /// Returned by a `query`
+    Returned,
+}
+
+impl From<UsageSortArg> for engramdb::ops::UsageSort {
+    fn from(a: UsageSortArg) -> Self {
+        match a {
+            UsageSortArg::Fetched => Self::Fetched,
+            UsageSortArg::Injected => Self::Injected,
+            UsageSortArg::Returned => Self::Returned,
+        }
+    }
+}
+
 /// EngramDB command-line interface.
 #[derive(Parser)]
 #[command(
@@ -1093,6 +1114,19 @@ pub enum Command {
         /// Show the shared embedding daemon's metrics instead of memory-store stats
         #[arg(long)]
         daemon: bool,
+
+        /// Show one memory's usage (returned / injected / fetched, writes, last 30 days)
+        /// instead of store stats. Accepts a unique id prefix.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["daemon", "top"])]
+        memory: Option<String>,
+
+        /// Append the N most-used memories
+        #[arg(long, value_name = "N")]
+        top: Option<usize>,
+
+        /// Which read signal orders --top; the others break ties (they are never summed)
+        #[arg(long, value_enum, default_value_t = UsageSortArg::Fetched, requires = "top")]
+        by: UsageSortArg,
     },
 
     /// Check environment and store health
@@ -1839,6 +1873,7 @@ mod tests {
                 daemon,
                 global,
                 all_projects,
+                ..
             } => {
                 assert!(daemon);
                 assert!(!global);
@@ -1851,6 +1886,35 @@ mod tests {
             Command::Stats { daemon, .. } => assert!(!daemon),
             _ => panic!("Expected Stats command"),
         }
+    }
+
+    #[test]
+    fn stats_usage_flags_parse_and_conflict() {
+        match Cli::try_parse_from(["engramdb", "stats", "--top", "5", "--by", "injected"])
+            .unwrap()
+            .command
+        {
+            Command::Stats {
+                top, by, memory, ..
+            } => {
+                assert_eq!(top, Some(5));
+                assert_eq!(by, UsageSortArg::Injected);
+                assert_eq!(memory, None);
+            }
+            _ => panic!("Expected Stats command"),
+        }
+        match Cli::try_parse_from(["engramdb", "stats", "--memory", "abc"])
+            .unwrap()
+            .command
+        {
+            Command::Stats { memory, by, .. } => {
+                assert_eq!(memory.as_deref(), Some("abc"));
+                assert_eq!(by, UsageSortArg::Fetched, "the default order");
+            }
+            _ => panic!("Expected Stats command"),
+        }
+        assert!(Cli::try_parse_from(["engramdb", "stats", "--memory", "a", "--top", "3"]).is_err());
+        assert!(Cli::try_parse_from(["engramdb", "stats", "--by", "returned"]).is_err());
     }
 
     // List command parsing (6 tests)

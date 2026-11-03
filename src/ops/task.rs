@@ -332,9 +332,14 @@ pub struct PromotionReport {
     pub promoted: Vec<String>,
 }
 
-/// Count, per memory id, the DISTINCT sessions whose retrievals returned it
-/// (from the §11.3 telemetry rows). Pure so the counting is testable without
-/// LanceDB.
+/// Count, per memory id, the DISTINCT sessions whose retrievals returned it,
+/// from the legacy `stats_events` `Retrieval` rows. Pure so the counting is
+/// testable without LanceDB.
+///
+/// Those rows are no longer written (the engine recorded them only for the
+/// MCP server); promotion now reads `returned` usage events, which the CLI
+/// records too. The legacy rows are still read and unioned in, so history
+/// recorded before the upgrade keeps counting until it ages out.
 pub fn count_retrieval_sessions(
     events: &[crate::telemetry::EventRow],
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
@@ -376,8 +381,15 @@ pub async fn promote_reconfirmed_memories(
         return Ok(PromotionReport::default());
     }
 
-    let events = crate::telemetry::persistence::load_recent(&store.project_id, 50_000).await?;
-    let sessions_by_memory = count_retrieval_sessions(&events);
+    // `returned` usage events (table + undrained log), unioned with the
+    // legacy rows. A union of session sets: a session in both counts once.
+    let mut sessions_by_memory =
+        crate::telemetry::usage::returned_sessions(&store.project_dir, &store.project_id, None)
+            .await;
+    let legacy = crate::telemetry::persistence::load_recent(&store.project_id, 50_000).await?;
+    for (id, sessions) in count_retrieval_sessions(&legacy) {
+        sessions_by_memory.entry(id).or_default().extend(sessions);
+    }
     if sessions_by_memory.is_empty() {
         return Ok(PromotionReport::default());
     }
@@ -427,7 +439,17 @@ pub async fn promote_reconfirmed_memories(
                 })
                 .await;
             match promoted {
-                Ok(_) => report.promoted.push(id.clone()),
+                Ok(_) => {
+                    super::usage::record_write(
+                        store,
+                        id,
+                        super::usage::UsageKind::Promoted,
+                        super::usage::Surface::Maintenance,
+                        None,
+                    )
+                    .await;
+                    report.promoted.push(id.clone())
+                }
                 Err(e) => tracing::warn!(memory_id = %id, "auto-promotion failed: {e}"),
             }
         } else {
@@ -540,6 +562,67 @@ mod promotion_tests {
             m.valid_while.unwrap().origin_task.as_deref(),
             Some("feat-x")
         );
+    }
+
+    /// Promotion reads `returned` usage events (the CLI's included), and a
+    /// session seen in both those and a legacy row counts once.
+    #[tokio::test]
+    async fn promotion_reads_returned_usage_events_and_unions_legacy_rows() {
+        use crate::ops::usage::{MemoryEvent, StoreRef, Surface, UsageKind};
+        let (_t, store, mut config) = store_with_task_memory(true).await;
+        let returned = |sid: &str| {
+            MemoryEvent::new(
+                "promo-1",
+                &store.project_id,
+                UsageKind::Returned,
+                Surface::Cli,
+            )
+            .with_session(Some(sid))
+        };
+        // Two later sessions in the usage log, one of them also legacy, and
+        // an injected-only session that must not count.
+        crate::ops::usage::write_events(
+            &StoreRef::of(&store),
+            &[
+                returned("s1"),
+                returned("s2"),
+                MemoryEvent::new(
+                    "promo-1",
+                    &store.project_id,
+                    UsageKind::Injected,
+                    Surface::HookPrompt,
+                )
+                .with_session(Some("s9")),
+            ],
+        );
+        crate::telemetry::persistence::append_events(
+            &store.project_id,
+            &[retrieval_event("s2", &["promo-1"])],
+            None,
+        )
+        .await;
+        config.epistemic.auto_promote = false;
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert!(report.suggestions.is_empty(), "two distinct sessions < 3");
+
+        crate::telemetry::persistence::append_events(
+            &store.project_id,
+            &[retrieval_event("s3", &["promo-1"])],
+            None,
+        )
+        .await;
+        config.epistemic.auto_promote = true;
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert_eq!(report.promoted, vec!["promo-1".to_string()]);
+        let events = crate::telemetry::usage::load_memory_events(&store.project_dir)
+            .unwrap()
+            .events;
+        let promoted: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == UsageKind::Promoted)
+            .collect();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].surface, Surface::Maintenance);
     }
 
     #[tokio::test]

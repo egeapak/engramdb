@@ -565,6 +565,19 @@ struct StatsInput {
     )]
     #[serde(default)]
     all_projects: Option<bool>,
+    #[schemars(
+        description = "A memory id (or unique prefix): add a `memory_usage` object with that memory's usage — returned / injected / fetched counts (separate signals, never summed), distinct sessions, writes, and a 30-day daily series."
+    )]
+    #[serde(default)]
+    memory_id: Option<String>,
+    #[schemars(description = "Add a `top_used` list of the N most-used memories in this store.")]
+    #[serde(default)]
+    top: Option<usize>,
+    #[schemars(
+        description = "Read signal that orders `top`: fetched (default), injected or returned. The others break ties; they are never summed."
+    )]
+    #[serde(default)]
+    by: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2289,6 +2302,7 @@ impl EngramDbServer {
                 embed_async: true,
             },
             Some(&engine),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -2382,10 +2396,11 @@ impl EngramDbServer {
         // write gate, this visibility is registry-trust-level (advisory).
         let targets_shared_store = Self::is_global(input.project.as_deref())
             || Self::is_group_target(input.project.as_deref());
-        let result = if targets_shared_store {
-            ops::query_memories(&engine, &query)
+        let (result, owners) = if targets_shared_store {
+            let result = ops::query_memories(&engine, &query)
                 .await
-                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            (result, Default::default())
         } else {
             let project_id = self.pid_for_input(input.project.as_deref());
             let registry = self
@@ -2437,8 +2452,16 @@ impl EngramDbServer {
                     "some subscribed/global stores were unreadable and were skipped in fan-in"
                 );
             }
-            outcome.result
+            (outcome.result, outcome.owners)
         };
+        ops::record_returned(
+            &engine,
+            &result,
+            &owners,
+            mode,
+            ops::Surface::Mcp,
+            Some(&self.session_id),
+        );
 
         let memories: Vec<ScoredMemoryOutput> = result
             .memories
@@ -2507,6 +2530,13 @@ impl EngramDbServer {
             error_response(code, &e.to_string())
         })?;
 
+        ops::record_fetched(
+            &store,
+            &memory.id,
+            ops::Surface::Mcp,
+            Some(&self.session_id),
+        )
+        .await;
         let r = serde_json::to_string(&memory_to_output(&memory, true))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2624,6 +2654,7 @@ impl EngramDbServer {
                 embed_async: true,
             },
             Some(&engine),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| {
@@ -2664,7 +2695,7 @@ impl EngramDbServer {
         self.check_cross_project_write(input.project.as_deref())
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
-        ops::delete_memory(&store, &input.id)
+        ops::delete_memory(&store, &input.id, ops::Surface::Mcp)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
@@ -2694,6 +2725,7 @@ impl EngramDbServer {
             &input.id,
             &input.evidence,
             input.source_file.as_deref(),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -2803,6 +2835,7 @@ impl EngramDbServer {
                 updated_summary: input.updated_summary,
                 superseded_by: input.superseded_by,
             },
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -2830,7 +2863,7 @@ impl EngramDbServer {
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
 
-        let result = ops::verify_memory(&store, &input.id)
+        let result = ops::verify_memory(&store, &input.id, ops::Surface::Mcp)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
@@ -2962,6 +2995,7 @@ impl EngramDbServer {
                 embed_async: true,
             },
             Some(&engine),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -3063,6 +3097,34 @@ impl EngramDbServer {
             if !hooks.is_empty() {
                 payload["hooks"] = serde_json::to_value(&hooks).unwrap_or_default();
             }
+        }
+        // Per-memory usage, from the store's usage events (table + undrained
+        // log). Additive keys, present only when asked for.
+        if let Some(id) = input.memory_id.as_deref() {
+            let report = ops::memory_usage_report(&store, id).await.map_err(|e| {
+                let code = if is_not_found(&e) {
+                    ErrorCode::MemoryNotFound
+                } else {
+                    ErrorCode::InternalError
+                };
+                error_response(code, &e.to_string())
+            })?;
+            payload["memory_usage"] = serde_json::to_value(&report).unwrap_or_default();
+        }
+        if let Some(n) = input.top {
+            let by = match input.by.as_deref() {
+                None => ops::UsageSort::default(),
+                Some(s) => ops::UsageSort::parse(s).ok_or_else(|| {
+                    error_response(
+                        ErrorCode::ValidationError,
+                        &format!("by must be fetched, injected or returned, got {s:?}"),
+                    )
+                })?,
+            };
+            payload["top_used"] = serde_json::json!({
+                "by": by.as_str(),
+                "memories": ops::top_used(&store, n, by).await,
+            });
         }
 
         let r = serde_json::to_string(&payload)

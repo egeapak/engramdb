@@ -199,6 +199,8 @@ By default it lists flagged memories (challenged / needs-review). `--stale-after
 
 ```bash
 engramdb stats [--all-projects] [--global] [--daemon]
+engramdb stats --memory <ID>
+engramdb stats --top <N> [--by fetched|injected|returned]
 ```
 
 | Flag | What you see |
@@ -207,6 +209,8 @@ engramdb stats [--all-projects] [--global] [--daemon]
 | `--all-projects` | Cross-project runtime telemetry breakdown. |
 | `--global` | Stats for the global store. |
 | `--daemon` | Embedding-daemon request metrics (see [daemon.md](./daemon.md)). |
+| `--memory <ID>` | One memory's usage instead of store stats (a unique id prefix works). |
+| `--top <N>` | Appends the N most-used memories, ordered by `--by` (default `fetched`). |
 
 Without `--global` or `--daemon`, the output also has a **Hook calls** section: for each `engramdb hook <event>`, how many times it ran in this project, how many returned an error, the average, and the p50 / p95 / p99 wall time in milliseconds. When a hook ran both through the daemon and in its own process, a per-path breakdown follows (`daemon` / `in-process`); with one path, the path is named on the hook's line.
 
@@ -214,6 +218,18 @@ Without `--global` or `--daemon`, the output also has a **Hook calls** section: 
 - **Window.** Counts, errors and averages cover the last `[stats].retention_days` (90 by default). Percentiles use the newest 10,000 calls per hook and path.
 - **What the time measures.** For an in-process hook, from command start to handler return. For a daemon hook, the handler inside the daemon. Process start-up (about 6 ms on a release build) is not included in either.
 - Set `[stats].enabled = false` to stop recording. In `--json` output the section is the `hooks` key.
+
+**Per-memory usage.** Every memory keeps three read counts, reported side by side and never added together, because they measure different things:
+
+- **returned** — it was in the answer to a `query` (CLI or MCP), with its rank and score;
+- **injected** — a hook put it into an agent's context (only what fit the hook's character budget);
+- **fetched** — someone opened it by id (`get`, CLI or MCP).
+
+Returned and injected also count distinct sessions. Writes are counted too (updates, challenges, and the last write of any kind, including create, resolve, verify, promote, merge and delete); `reindex` and `migrate` record nothing. `--memory` shows all of this plus the active days of the last 30; `--top` sorts by one signal and breaks ties with the others. In `--json` output they are the whole document (`--memory`) and the `top_used` key; the MCP `stats` tool takes `memory_id`, `top` and `by` and answers with `memory_usage` and `top_used`.
+
+- **Where the data comes from.** The CLI, the MCP server and hooks in their own process append a line to `.engramdb/state/memory_events.jsonl` of the store that owns the memory — a group or global memory's events land in that store, not in the project that found it. Hooks the daemon runs are buffered and written every 60 s and when the daemon stops. The daemon, `gc` and the automatic maintenance pass move the log into the store's `memory_events` table and its `memory_usage` rollup, for the project and every group and global store it reads. `stats` reads table and log, and counts nothing twice.
+- **Window.** Raw events are kept for `[stats].retention_days`; lifetime counts survive in the rollup after the events are pruned. The 30-day series reads raw events, so a shorter retention zeroes its oldest days.
+- **What is lost.** A daemon killed with `SIGKILL` loses up to 60 s of buffered hook events; a hook whose daemon reply was lost records nothing; uninitialized directories and `[stats].enabled = false` record nothing. Counts are machine-local: they do not travel with a clone, and deleting a store's `lancedb/` directory deletes them.
 
 ## `doctor` — health check
 

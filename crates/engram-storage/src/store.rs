@@ -2206,6 +2206,13 @@ impl MemoryStore {
 
     /// Resolve a prefix ID to a full ID using a LanceDB WHERE filter.
     async fn resolve_full_id(&self, id: &str) -> Result<String> {
+        self.resolve_id(id).await
+    }
+
+    /// The full id a unique prefix (or a full id) names, from the index.
+    /// `NotFound` when nothing matches, `Validation` when the prefix is
+    /// ambiguous.
+    pub async fn resolve_id(&self, id: &str) -> Result<String> {
         let matches = self.lance_index.find_ids_by_prefix(id).await.map_err(|e| {
             StorageError::Validation(format!("LanceDB prefix search failed: {}", e))
         })?;

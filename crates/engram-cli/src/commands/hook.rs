@@ -23,6 +23,7 @@ use engramdb::types::{Epistemic, Generality, MemoryType, Situation};
 // itself); the hook still pre-relativizes so the injected context shows
 // repo-relative paths.
 use engramdb::daemon::HookCall;
+use engramdb::ops::Surface;
 use engramdb::storage::paths::relativize_path;
 use engramdb::storage::{MemoryStore, RegistryBackend};
 use std::io::Read;
@@ -647,7 +648,17 @@ fn memory_file_id(relative_path: &str) -> Option<String> {
 /// Core hook logic: given input JSON, project dir, and store, retrieve and format.
 ///
 /// Returns `Ok(Some(json))` if memories were found, `Ok(None)` if nothing to output.
+#[cfg(test)]
 async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Result<Option<String>> {
+    process_hook_input_in(input, dir, store, &UsageSink::Log).await
+}
+
+async fn process_hook_input_in(
+    input: &str,
+    dir: &Path,
+    store: MemoryStore,
+    usage: &UsageSink<'_>,
+) -> Result<Option<String>> {
     let file_path = match extract_file_path(input) {
         Some(fp) => fp,
         None => return Ok(None),
@@ -732,7 +743,15 @@ async fn process_hook_input(input: &str, dir: &Path, store: MemoryStore) -> Resu
         class_order.as_deref(),
         engine.config().hooks.preview_chars,
     );
-    record_shown(&memories, &context, input, dir);
+    let shown = record_shown(&memories, &context, input, dir);
+    record_injected(
+        &engine,
+        &memories,
+        &shown,
+        input,
+        Surface::HookPreTool,
+        usage,
+    );
     let json = build_hook_response("PreToolUse", &context)?;
     Ok(Some(json))
 }
@@ -748,7 +767,14 @@ async fn process_session_start(
     min_criticality: f64,
     input: &str,
 ) -> Result<Option<String>> {
-    process_session_start_in(dir, min_criticality, input, &StoreSource::Fresh).await
+    process_session_start_in(
+        dir,
+        min_criticality,
+        input,
+        &StoreSource::Fresh,
+        &UsageSink::Log,
+    )
+    .await
 }
 
 async fn process_session_start_in(
@@ -756,6 +782,7 @@ async fn process_session_start_in(
     min_criticality: f64,
     input: &str,
     stores: &StoreSource<'_>,
+    usage: &UsageSink<'_>,
 ) -> Result<Option<String>> {
     let store = match stores.open(dir).await {
         Ok(s) => s,
@@ -826,7 +853,15 @@ async fn process_session_start_in(
     // A new, cleared or compacted context holds nothing the earlier hooks
     // injected: start the record over from what this injection shows.
     forget_shown(input, dir);
-    record_shown(&memories, &context, input, dir);
+    let shown = record_shown(&memories, &context, input, dir);
+    record_injected(
+        &engine,
+        &memories,
+        &shown,
+        input,
+        Surface::HookSessionStart,
+        usage,
+    );
     let json = build_hook_response("SessionStart", &context)?;
     Ok(Some(json))
 }
@@ -894,18 +929,70 @@ fn drop_already_shown(memories: Vec<ScoredMemory>, input: &str, dir: &Path) -> V
 }
 
 /// Record the memories `context` actually rendered (an entry the budget left
-/// out was not shown, so a later hook may still show it).
-fn record_shown(memories: &[ScoredMemory], context: &str, input: &str, dir: &Path) {
-    let Some(session_id) = extract_context_id(input) else {
-        return;
-    };
+/// out was not shown, so a later hook may still show it), and return their
+/// ids.
+fn record_shown(memories: &[ScoredMemory], context: &str, input: &str, dir: &Path) -> Vec<String> {
     let ids: Vec<String> = memories
         .iter()
         .filter(|sm| context.contains(&format!("id: {}", sm.memory.id)))
         .map(|sm| sm.memory.id.clone())
         .collect();
+    let Some(session_id) = extract_context_id(input) else {
+        return ids;
+    };
     if let Err(e) = engramdb::storage::hook_seen::mark_seen(dir, &session_id, &ids) {
         tracing::debug!("hook record write failed (non-fatal): {e}");
+    }
+    ids
+}
+
+/// Where a hook's `injected` usage events go.
+pub enum UsageSink<'a> {
+    /// Append to the store's JSONL log (a hook in its own process).
+    Log,
+    /// Hand them to the daemon, which buffers and flushes them with its hook
+    /// events.
+    Collect(&'a std::sync::Mutex<Vec<engramdb::ops::usage::MemoryEvent>>),
+}
+
+/// Record `injected` for the memories a hook rendered (`shown`, from
+/// [`record_shown`]): only what fit the budget, never the candidate pool.
+/// Hooks record no other read signal — a `returned` per hook would count the
+/// whole pool on every Read or Edit. `rank` is the position in what was
+/// shown. Gated on `[stats].enabled`.
+fn record_injected(
+    engine: &engramdb::retrieval::engine::RetrievalEngine,
+    memories: &[ScoredMemory],
+    shown: &[String],
+    input: &str,
+    surface: Surface,
+    usage: &UsageSink<'_>,
+) {
+    if shown.is_empty() || !engine.config().stats.enabled {
+        return;
+    }
+    let store = engine.store();
+    let session = extract_session_id(input);
+    let events: Vec<engramdb::ops::usage::MemoryEvent> = memories
+        .iter()
+        .filter(|sm| shown.contains(&sm.memory.id))
+        .enumerate()
+        .map(|(i, sm)| {
+            engramdb::ops::usage::MemoryEvent::new(
+                &sm.memory.id,
+                &store.project_id,
+                engramdb::ops::UsageKind::Injected,
+                surface,
+            )
+            .with_session(session.as_deref())
+            .with_rank(i + 1, sm.score)
+        })
+        .collect();
+    match usage {
+        UsageSink::Log => {
+            engramdb::ops::usage::write_events(&engramdb::ops::StoreRef::of(store), &events)
+        }
+        UsageSink::Collect(buf) => buf.lock().unwrap_or_else(|e| e.into_inner()).extend(events),
     }
 }
 
@@ -1066,7 +1153,7 @@ async fn process_user_prompt_submit_with(
     dir: &Path,
     model: &SituationModel,
 ) -> Result<Option<String>> {
-    process_user_prompt_submit_in(input, dir, model, &StoreSource::Fresh).await
+    process_user_prompt_submit_in(input, dir, model, &StoreSource::Fresh, &UsageSink::Log).await
 }
 
 async fn process_user_prompt_submit_in(
@@ -1074,6 +1161,7 @@ async fn process_user_prompt_submit_in(
     dir: &Path,
     model: &SituationModel,
     stores: &StoreSource<'_>,
+    usage: &UsageSink<'_>,
 ) -> Result<Option<String>> {
     let prompt = match extract_prompt(input) {
         Some(p) => p,
@@ -1157,7 +1245,15 @@ async fn process_user_prompt_submit_in(
         class_order.as_deref(),
         engine.config().hooks.preview_chars,
     );
-    record_shown(&memories, &context, input, dir);
+    let shown = record_shown(&memories, &context, input, dir);
+    record_injected(
+        &engine,
+        &memories,
+        &shown,
+        input,
+        Surface::HookPrompt,
+        usage,
+    );
     let json = build_hook_response("UserPromptSubmit", &context)?;
     Ok(Some(json))
 }
@@ -1978,6 +2074,9 @@ impl StoreCache {
 pub struct HookEnv<'a> {
     pub stores: StoreSource<'a>,
     pub situation: SituationModel,
+    /// Where `injected` usage events go: the JSONL log, or the daemon's
+    /// buffer.
+    pub usage: UsageSink<'a>,
 }
 
 /// Run one hook and return what it would print. The single entry point for
@@ -2001,15 +2100,15 @@ pub async fn execute_hook(
                     return Ok(None);
                 }
             };
-            process_hook_input(input, dir, store).await
+            process_hook_input_in(input, dir, store, &env.usage).await
         }
         HookCall::SessionStart { min_criticality } => {
             let min_criticality = sanitize_min_criticality(*min_criticality);
-            process_session_start_in(dir, min_criticality, input, &env.stores).await
+            process_session_start_in(dir, min_criticality, input, &env.stores, &env.usage).await
         }
         HookCall::UserPromptSubmit => {
             Ok(
-                process_user_prompt_submit_in(input, dir, &env.situation, &env.stores)
+                process_user_prompt_submit_in(input, dir, &env.situation, &env.stores, &env.usage)
                     .await
                     .unwrap_or(None),
             )
@@ -2086,6 +2185,7 @@ pub async fn run_in_process(
         } else {
             SituationModel::DaemonOrInProcess
         },
+        usage: UsageSink::Log,
     };
     let output = execute_hook(call, dir, input, &env).await?;
     print_hook_output(output.as_deref());
@@ -2149,9 +2249,11 @@ impl DaemonHookExecutor {
             } else {
                 SituationModel::KeywordOnly
             };
+        let usage_events = std::sync::Mutex::new(Vec::new());
         let env = HookEnv {
             stores: StoreSource::Cached(&self.stores),
             situation,
+            usage: UsageSink::Collect(&usage_events),
         };
         let (stdout, ok) = match execute_hook(call, &root, stdin, &env).await {
             Ok(out) => (out, true),
@@ -2174,6 +2276,7 @@ impl DaemonHookExecutor {
             stdout,
             ok,
             project,
+            usage_events: usage_events.into_inner().unwrap_or_else(|e| e.into_inner()),
         }
     }
 }
@@ -4722,8 +4825,95 @@ mod daemon_executor_tests {
         let env = HookEnv {
             stores: StoreSource::Fresh,
             situation: SituationModel::KeywordOnly,
+            usage: UsageSink::Log,
         };
         execute_hook(call, dir, input, &env).await.unwrap()
+    }
+
+    fn logged_usage(dir: &Path) -> Vec<engramdb::ops::usage::MemoryEvent> {
+        engramdb::telemetry::usage::load_memory_events(dir)
+            .unwrap()
+            .events
+    }
+
+    /// In its own process a hook appends `injected` — and nothing else — to
+    /// the JSONL log, one event per memory it rendered, under its own
+    /// surface; in the daemon the same events come back in the run for the
+    /// daemon to buffer, and nothing touches the log.
+    #[tokio::test]
+    async fn hooks_record_only_injected_on_both_paths() {
+        let (tmp, store) = setup_store_with_memories().await;
+        let file = tmp.path().join("src/main.rs");
+        let here =
+            in_process_run(&HookCall::PreToolUse, tmp.path(), &read_event(&file, "u1")).await;
+        assert!(here.is_some());
+        let logged = logged_usage(tmp.path());
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged
+            .iter()
+            .all(|e| e.kind == engramdb::ops::UsageKind::Injected
+                && e.surface == Surface::HookPreTool
+                && e.store_id == store.project_id
+                && e.session_id.as_deref() == Some("u1")));
+        assert_eq!(logged[0].rank, Some(1));
+
+        in_process_run(
+            &HookCall::SessionStart {
+                min_criticality: 0.5,
+            },
+            tmp.path(),
+            "{\"session_id\":\"u2\"}",
+        )
+        .await;
+        let logged = logged_usage(tmp.path());
+        assert!(logged[2..]
+            .iter()
+            .all(|e| e.surface == Surface::HookSessionStart));
+
+        let exec = DaemonHookExecutor::new().unwrap();
+        let before = logged_usage(tmp.path()).len();
+        let run = daemon_run(
+            &exec,
+            &HookCall::PreToolUse,
+            tmp.path(),
+            &read_event(&file, "u3"),
+        )
+        .await;
+        assert_eq!(run.usage_events.len(), 2);
+        assert!(run
+            .usage_events
+            .iter()
+            .all(|e| e.surface == Surface::HookPreTool));
+        assert_eq!(
+            logged_usage(tmp.path()).len(),
+            before,
+            "the daemon path writes no JSONL"
+        );
+
+        // A second Read in the same session shows nothing new: no event.
+        let again = daemon_run(
+            &exec,
+            &HookCall::PreToolUse,
+            tmp.path(),
+            &read_event(&file, "u3"),
+        )
+        .await;
+        assert!(again.usage_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hooks_record_no_usage_with_stats_disabled() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let config = tmp.path().join(".engramdb/config.toml");
+        let text = std::fs::read_to_string(&config).unwrap_or_default();
+        std::fs::write(&config, format!("{text}\n[stats]\nenabled = false\n")).unwrap();
+        let file = tmp.path().join("src/main.rs");
+        assert!(
+            in_process_run(&HookCall::PreToolUse, tmp.path(), &read_event(&file, "d1"))
+                .await
+                .is_some()
+        );
+        assert!(logged_usage(tmp.path()).is_empty());
     }
 
     /// The daemon prints exactly what the hook's own process prints. Distinct

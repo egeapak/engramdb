@@ -1,0 +1,234 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "memory_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+  "summary": "Blocking calls deadlock the daemon",
+  "store_id": "a1b2c3d4e5f60718",
+  "returned": 3,
+  "injected": 12,
+  "fetched": 4,
+  "returned_sessions": 2,
+  "injected_sessions": 1,
+  "last_returned_at": "2026-10-30T09:15:00Z",
+  "last_injected_at": "2026-11-01T14:00:00Z",
+  "last_fetched_at": "2026-11-02T08:30:00Z",
+  "updated_n": 2,
+  "challenged_n": 1,
+  "last_written_at": "2026-10-20T12:00:00Z",
+  "daily": [
+    {
+      "day": "2026-10-05",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-06",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-07",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-08",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-09",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-10",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-11",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-12",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-13",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-14",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-15",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-16",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-17",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-18",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-19",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-20",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-21",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-22",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-23",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-24",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-25",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-26",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-27",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-28",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-29",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-30",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-10-31",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-11-01",
+      "returned": 3,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-11-02",
+      "returned": 0,
+      "injected": 12,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "2026-11-03",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 4,
+      "writes": 1
+    }
+  ]
+}
+--- stderr ---

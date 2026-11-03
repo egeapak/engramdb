@@ -64,7 +64,7 @@ pub async fn run_delete(
         }
     }
 
-    delete_memory(&store, &memory.id).await?;
+    delete_memory(&store, &memory.id, engramdb::ops::Surface::Cli).await?;
 
     formatter.print_success(&format!("Deleted memory {}", memory.id));
     Ok(())

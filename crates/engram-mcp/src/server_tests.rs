@@ -1457,6 +1457,9 @@ async fn stats_empty() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -1474,12 +1477,78 @@ async fn stats_populated() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
     assert_eq!(val["total"], 3);
     assert_eq!(val["by_type"]["decision"], 2);
     assert_eq!(val["by_type"]["hazard"], 1);
+}
+
+/// The MCP surface records `created`, `returned` and `fetched` with the
+/// server's session, and `stats` reads them back per memory and as a top-N.
+#[tokio::test]
+async fn stats_reports_per_memory_usage_and_top_used() {
+    let (_dir, server) = setup().await;
+    let id = create_and_get_id(&server, "decision", "Usage target", "Tracked content").await;
+    let _other = create_and_get_id(&server, "decision", "Bystander", "Other").await;
+    server
+        .memory_get(Parameters(GetInput {
+            id: id.clone(),
+            project: None,
+        }))
+        .await
+        .unwrap();
+    let mut q = query_input("filter");
+    q.query = Some("Tracked".to_string());
+    server.memory_query(Parameters(q)).await.unwrap();
+
+    let result = server
+        .memory_stats(Parameters(StatsInput {
+            project: None,
+            all_projects: None,
+            memory_id: Some(id[..24].to_string()),
+            top: Some(5),
+            by: Some("fetched".to_string()),
+        }))
+        .await;
+    let val = parse_ok(&result);
+    let usage = &val["memory_usage"];
+    assert_eq!(usage["memory_id"], id.as_str());
+    assert_eq!(usage["fetched"], 1);
+    assert_eq!(usage["returned"], 1);
+    assert_eq!(usage["returned_sessions"], 1);
+    assert_eq!(usage["injected"], 0);
+    assert!(usage["last_written_at"].is_string(), "created is a write");
+    assert_eq!(usage["daily"].as_array().unwrap().len(), 30);
+    let top = val["top_used"]["memories"].as_array().unwrap();
+    assert_eq!(top.len(), 1, "the bystander was never read");
+    assert_eq!(top[0]["memory_id"], id.as_str());
+    assert_eq!(val["top_used"]["by"], "fetched");
+
+    let bad = server
+        .memory_stats(Parameters(StatsInput {
+            project: None,
+            all_projects: None,
+            memory_id: None,
+            top: Some(1),
+            by: Some("summed".to_string()),
+        }))
+        .await;
+    assert!(bad.is_err());
+    let missing = server
+        .memory_stats(Parameters(StatsInput {
+            project: None,
+            all_projects: None,
+            memory_id: Some("nonexistent".to_string()),
+            top: None,
+            by: None,
+        }))
+        .await;
+    assert!(missing.unwrap_err().contains("MEMORY_NOT_FOUND"));
 }
 
 // -----------------------------------------------------------------------
@@ -2193,6 +2262,9 @@ async fn cross_project_stats() {
         .memory_stats(Parameters(StatsInput {
             project: Some(project_b),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -2223,6 +2295,9 @@ async fn cross_project_uninitialized_store_errors() {
         .memory_stats(Parameters(StatsInput {
             project: Some(project_b),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     assert!(result.is_err());
@@ -2321,6 +2396,9 @@ async fn cross_project_write_isolation() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let count_a_before = parse_ok(&stats_a_before)["total"].as_u64().unwrap();
@@ -2349,6 +2427,9 @@ async fn cross_project_write_isolation() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let count_a_after = parse_ok(&stats_a_after)["total"].as_u64().unwrap();
@@ -3381,6 +3462,9 @@ async fn global_stats() {
         .memory_stats(Parameters(StatsInput {
             project: global_project(),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -3578,6 +3662,9 @@ async fn global_all_memory_types() {
         .memory_stats(Parameters(StatsInput {
             project: global_project(),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4071,6 +4158,9 @@ async fn stats_includes_runtime_fields_after_calls() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4120,6 +4210,9 @@ async fn stats_all_projects_returns_breakdown() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: Some(true),
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4155,6 +4248,9 @@ async fn stats_records_zero_results_and_quality() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4185,6 +4281,9 @@ async fn stats_reports_session_id_and_unique_sessions() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4218,6 +4317,9 @@ async fn stats_reports_followups_for_same_session_queries() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4245,6 +4347,9 @@ async fn stats_records_tool_errors() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4268,6 +4373,9 @@ async fn stats_buckets_projects_list_under_system() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: Some(true),
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);

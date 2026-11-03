@@ -125,7 +125,27 @@ pub fn validate_summary(summary: &str, max_chars: usize) -> Result<()> {
 ///
 /// If `engine` is provided and has embeddings available, the memory is
 /// automatically embedded into the vector store after creation.
+///
+/// Records a `created` usage event from `surface` (see [`super::usage`]).
 pub async fn create_memory(
+    store: &MemoryStore,
+    params: CreateParams,
+    engine: Option<&RetrievalEngine>,
+    surface: super::usage::Surface,
+) -> Result<CreateResult> {
+    let result = create_memory_unrecorded(store, params, engine).await?;
+    super::usage::record_write(
+        store,
+        &result.id,
+        super::usage::UsageKind::Created,
+        surface,
+        None,
+    )
+    .await;
+    Ok(result)
+}
+
+async fn create_memory_unrecorded(
     store: &MemoryStore,
     params: CreateParams,
     engine: Option<&RetrievalEngine>,
@@ -410,24 +430,35 @@ mod tests {
         let (_t, store) = setup_test_store().await;
 
         // POSITIVE: valid scores succeed.
-        assert!(create_memory(&store, minimal_create_params(), None)
-            .await
-            .is_ok());
+        assert!(create_memory(
+            &store,
+            minimal_create_params(),
+            None,
+            crate::ops::Surface::Cli
+        )
+        .await
+        .is_ok());
 
         // NEGATIVE (red before fix): criticality > 1.0 is rejected.
         let mut p = minimal_create_params();
         p.criticality = 5.0;
-        assert!(create_memory(&store, p, None).await.is_err());
+        assert!(create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .is_err());
 
         // NEGATIVE: confidence < 0.0 is rejected.
         let mut p = minimal_create_params();
         p.confidence = -0.5;
-        assert!(create_memory(&store, p, None).await.is_err());
+        assert!(create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .is_err());
 
         // NEGATIVE: NaN criticality is rejected.
         let mut p = minimal_create_params();
         p.criticality = f64::NAN;
-        assert!(create_memory(&store, p, None).await.is_err());
+        assert!(create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .is_err());
     }
 
     // Scope hygiene: a memory created into a group (or everyone/global) store
@@ -443,7 +474,9 @@ mod tests {
         params.physical = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
         params.logical = vec!["backend.api".to_string()];
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         // Physical scope stripped despite being supplied.
@@ -467,7 +500,9 @@ mod tests {
         let mut params = minimal_create_params();
         params.audience = Some(vec!["projA".to_string(), "__g_x".to_string()]);
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
         assert_eq!(
             memory.audience,
@@ -484,7 +519,9 @@ mod tests {
         let mut params = minimal_create_params();
         params.audience = Some(vec![]);
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
         assert_eq!(memory.audience, None);
     }
@@ -545,7 +582,9 @@ mod tests {
         params.decay_half_life = Some(604800); // 7 days in seconds
         params.decay_floor = Some(0.3);
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
@@ -562,7 +601,9 @@ mod tests {
         let mut params = minimal_create_params();
         params.decay_strategy = Some("linear".to_string());
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
@@ -579,7 +620,9 @@ mod tests {
         let mut params = minimal_create_params();
         params.decay_floor = Some(0.5);
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
@@ -596,7 +639,7 @@ mod tests {
         let mut params = minimal_create_params();
         params.decay_strategy = Some("invalid_strategy".to_string());
 
-        let result = create_memory(&store, params, None).await;
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -613,7 +656,9 @@ mod tests {
         params.decay_ttl = Some(2592000); // 30 days in seconds
         params.decay_floor = Some(0.2);
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         // Reload from disk
         let memory = store.get(&result.id).await.unwrap();
@@ -631,7 +676,9 @@ mod tests {
 
         let params = minimal_create_params();
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         // Decision type has default decay of None
@@ -648,7 +695,9 @@ mod tests {
         params.decay_strategy = Some("linear".to_string());
         params.decay_ttl = Some(86400); // 1 day in seconds
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         assert!(memory.decay.is_some());
@@ -666,7 +715,9 @@ mod tests {
         params.decay_strategy = Some("linear".to_string());
         params.decay_ttl = Some(3600); // 1 hour
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         assert!(
@@ -689,7 +740,9 @@ mod tests {
         params.decay_strategy = Some("exponential".to_string());
         params.decay_half_life = Some(604800); // 7 days, no TTL
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
 
         assert!(
@@ -732,7 +785,7 @@ mod tests {
         let (_temp, store) = setup_test_store().await;
         let mut params = minimal_create_params();
         params.summary = "".to_string();
-        let result = create_memory(&store, params, None).await;
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -744,7 +797,7 @@ mod tests {
         let (_temp, store) = setup_test_store().await;
         let mut params = minimal_create_params();
         params.summary = "a".repeat(150);
-        let result = create_memory(&store, params, None).await;
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli).await;
         assert!(result.is_ok(), "150-char summary should be accepted now");
     }
 
@@ -754,7 +807,7 @@ mod tests {
         let mut params = minimal_create_params();
         // Past the raised default (200) — still rejected.
         params.summary = "a".repeat(crate::types::DEFAULT_SUMMARY_MAX_CHARS + 1);
-        let result = create_memory(&store, params, None).await;
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("200"));
     }
@@ -764,7 +817,9 @@ mod tests {
         let (_temp, store) = setup_test_store().await;
         let mut params = minimal_create_params();
         params.title = Some("My Custom Title".to_string());
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
         assert_eq!(memory.title, Some("My Custom Title".to_string()));
     }
@@ -773,7 +828,9 @@ mod tests {
     async fn test_create_memory_without_title() {
         let (_temp, store) = setup_test_store().await;
         let params = minimal_create_params();
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let memory = store.get(&result.id).await.unwrap();
         assert_eq!(memory.title, None);
     }
@@ -783,7 +840,9 @@ mod tests {
         let (_temp, store) = setup_test_store().await;
         let mut params = minimal_create_params();
         params.title = Some("Database Choice".to_string());
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         // Verify the file on disk has the slug in its name
         let memories_dir = _temp.path().join(".engramdb").join("memories");
@@ -848,9 +907,14 @@ mod epistemic_create_tests {
     #[tokio::test]
     async fn epistemic_defaults_from_type_and_diagonal_decay_unchanged() {
         let (_t, store) = setup().await;
-        let result = create_memory(&store, params(MemoryType::Debug), None)
-            .await
-            .unwrap();
+        let result = create_memory(
+            &store,
+            params(MemoryType::Debug),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
         let m = store.get(&result.id).await.unwrap();
         assert_eq!(m.epistemic, Epistemic::Observation);
         // Diagonal ⇒ the type default decay (Debug: exponential 30d).
@@ -867,7 +931,9 @@ mod epistemic_create_tests {
         // (built-in constants; no engine ⇒ no config override).
         let mut p = params(MemoryType::Hazard);
         p.epistemic = Some(Epistemic::Observation);
-        let result = create_memory(&store, p, None).await.unwrap();
+        let result = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let m = store.get(&result.id).await.unwrap();
         assert_eq!(m.epistemic, Epistemic::Observation);
         let decay = m.decay.unwrap();
@@ -881,7 +947,9 @@ mod epistemic_create_tests {
         // Debug (Observation default) declared a Fact → Decay::none().
         let mut p = params(MemoryType::Debug);
         p.epistemic = Some(Epistemic::Fact);
-        let result = create_memory(&store, p, None).await.unwrap();
+        let result = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let m = store.get(&result.id).await.unwrap();
         let decay = m.decay.unwrap();
         assert_eq!(decay.strategy, DecayStrategy::None);
@@ -892,7 +960,9 @@ mod epistemic_create_tests {
         p.epistemic = Some(Epistemic::Fact);
         p.decay_strategy = Some("linear".into());
         p.decay_ttl = Some(86400);
-        let result = create_memory(&store, p, None).await.unwrap();
+        let result = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let m = store.get(&result.id).await.unwrap();
         assert_eq!(m.decay.unwrap().strategy, DecayStrategy::Linear);
     }
@@ -906,7 +976,9 @@ mod epistemic_create_tests {
         p.origin_task = Some("epistemic".into());
         p.generality = Some(Generality::Task);
         p.valid_from = Some("2026-01-01T00:00:00Z".parse().unwrap());
-        let result = create_memory(&store, p, None).await.unwrap();
+        let result = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let m = store.get(&result.id).await.unwrap();
         let v = m.valid_while.unwrap();
         assert_eq!(v.premise.as_deref(), Some("while ort is pinned"));
@@ -916,22 +988,34 @@ mod epistemic_create_tests {
         assert_eq!(m.valid_from, Some("2026-01-01T00:00:00Z".parse().unwrap()));
 
         // All-empty validity params ⇒ valid_while stays None.
-        let result = create_memory(&store, params(MemoryType::Decision), None)
-            .await
-            .unwrap();
+        let result = create_memory(
+            &store,
+            params(MemoryType::Decision),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
         assert_eq!(store.get(&result.id).await.unwrap().valid_while, None);
     }
 
     #[tokio::test]
     async fn create_with_supersedes_closes_old_window() {
         let (_t, store) = setup().await;
-        let old = create_memory(&store, params(MemoryType::Decision), None)
-            .await
-            .unwrap();
+        let old = create_memory(
+            &store,
+            params(MemoryType::Decision),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
 
         let mut p = params(MemoryType::Decision);
         p.supersedes = vec![old.id.clone(), "missing-id".into()];
-        let new = create_memory(&store, p, None).await.unwrap();
+        let new = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let old_mem = store.get(&old.id).await.unwrap();
         assert!(old_mem.invalidated_at.is_some(), "window closed");

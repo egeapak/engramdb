@@ -249,6 +249,9 @@ async fn run_maintenance(store: &MemoryStore, config: &EngramConfig) -> Option<G
     }
     // Hook stats: drain the in-process hooks' JSONL, prune, compact.
     super::maintenance::maintain_hook_events(store).await;
+    // Usage events: drain this store's (and its shared stores') JSONL, fold
+    // and prune past retention, compact.
+    super::usage::maintain_memory_events(store).await;
 
     // Memories + chunks tables: compaction plus version pruning is where
     // monotonic disk growth from create/update/delete is actually reclaimed.

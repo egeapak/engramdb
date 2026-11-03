@@ -182,6 +182,11 @@ pub struct ExtraStoresResult {
     /// Labels (group ids / `"global"`) of extra stores whose query failed.
     /// Empty on the happy path.
     pub unreadable: Vec<String>,
+    /// The owning store of every memory in `result` that came from an extra
+    /// store; any id not listed belongs to the primary engine's store. Usage
+    /// events are written to the owner's log
+    /// ([`crate::ops::usage::record_returned`]).
+    pub owners: std::collections::HashMap<String, crate::ops::usage::StoreRef>,
 }
 
 /// Over-fetch multiplier for the cross-store candidate pool: each shared store
@@ -288,6 +293,7 @@ where
         return Ok(ExtraStoresResult {
             result,
             unreadable: Vec::new(),
+            owners: Default::default(),
         });
     }
     // Cross-repo: drop the repo-relative path so physical proximity isn't
@@ -306,7 +312,9 @@ where
     // the deeper visible set survives into the (optional) rerank and the final
     // cut to `max`.
     let mut unreadable = Vec::new();
-    for ((label, _), extra_result) in extras.iter().zip(extra_results) {
+    let mut owners: std::collections::HashMap<String, crate::ops::usage::StoreRef> =
+        std::collections::HashMap::new();
+    for ((label, extra_engine), extra_result) in extras.iter().zip(extra_results) {
         match extra_result {
             Ok(extra_result) => {
                 result.dropped_below_threshold += extra_result.dropped_below_threshold;
@@ -316,6 +324,22 @@ where
                     .filter(|sm| audience_allows(&sm.memory, viewer_ids))
                     .collect();
                 let visible_count = visible.len();
+                // `merge_scored_memories` keeps an entry already present, so
+                // an id is this store's exactly when it was not there yet.
+                {
+                    let present: HashSet<&str> = result
+                        .memories
+                        .iter()
+                        .map(|sm| sm.memory.id.as_str())
+                        .collect();
+                    let owner = crate::ops::usage::StoreRef::of(extra_engine.store());
+                    for sm in visible
+                        .iter()
+                        .filter(|sm| !present.contains(sm.memory.id.as_str()))
+                    {
+                        owners.insert(sm.memory.id.clone(), owner.clone());
+                    }
+                }
                 let duplicates = merge_scored_memories(&mut result.memories, visible, extra_pool);
                 result.total += visible_count.saturating_sub(duplicates);
             }
@@ -381,8 +405,18 @@ where
     if !equalized {
         result.memories.truncate(max);
     }
+    let kept: HashSet<&str> = result
+        .memories
+        .iter()
+        .map(|sm| sm.memory.id.as_str())
+        .collect();
+    owners.retain(|id, _| kept.contains(id.as_str()));
 
-    Ok(ExtraStoresResult { result, unreadable })
+    Ok(ExtraStoresResult {
+        result,
+        unreadable,
+        owners,
+    })
 }
 
 #[cfg(test)]

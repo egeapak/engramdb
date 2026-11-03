@@ -133,10 +133,13 @@ fn consolidated_audience(
     (!union.is_empty()).then_some(union)
 }
 
+/// Records `created` for the new memory and `merged` (with `related_id` =
+/// the new id) for each source still present, all from `surface`.
 pub async fn compress_apply(
     store: &MemoryStore,
     params: CompressApplyParams,
     engine: Option<&crate::retrieval::engine::RetrievalEngine>,
+    surface: super::usage::Surface,
 ) -> Result<CompressApplyResult> {
     let CompressApplyParams {
         source_ids,
@@ -238,6 +241,7 @@ pub async fn compress_apply(
             embed_async,
         },
         engine,
+        surface,
     )
     .await?;
 
@@ -282,6 +286,18 @@ pub async fn compress_apply(
             // way the window is closed.
             Some(m) if m.is_invalidated() => {}
             Some(_) => failed_sources.push(format!("{} (still active)", id)),
+        }
+    }
+
+    if super::usage::usage_enabled(store).await {
+        for id in source_ids.iter().filter(|id| verified.contains_key(*id)) {
+            super::usage::record_resolved(
+                store,
+                id,
+                super::usage::UsageKind::Merged,
+                surface,
+                Some(&result.id),
+            );
         }
     }
 
@@ -447,6 +463,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap_err();
@@ -606,6 +623,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -706,6 +724,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -766,6 +785,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -829,6 +849,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap_err();
@@ -878,6 +899,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -970,6 +992,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -997,6 +1020,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -1024,6 +1048,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -1057,6 +1082,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -1669,6 +1695,26 @@ pub async fn consolidate_cluster_apply(
         .await?;
     for (id, e) in demote_failures {
         tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
+    }
+    // Consolidation only ever runs from the lifecycle pass.
+    if super::usage::usage_enabled(store).await {
+        use super::usage::{record_resolved, Surface, UsageKind};
+        record_resolved(
+            store,
+            &new_id,
+            UsageKind::Created,
+            Surface::Maintenance,
+            None,
+        );
+        for id in source_ids {
+            record_resolved(
+                store,
+                id,
+                UsageKind::Merged,
+                Surface::Maintenance,
+                Some(&new_id),
+            );
+        }
     }
     Ok(new_id)
 }

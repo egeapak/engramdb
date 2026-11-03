@@ -1239,6 +1239,9 @@ impl OutputFormatter {
         if let Some(hooks) = &stats.hooks {
             print_hooks_pretty(self, hooks);
         }
+        if let Some(top) = &stats.top_used {
+            print_top_used_pretty(self, top);
+        }
     }
 
     fn print_stats_plain(&self, stats: &Stats) {
@@ -1273,6 +1276,125 @@ impl OutputFormatter {
                         p.errors,
                         p.p50,
                         p.p99
+                    );
+                }
+            }
+        }
+        if let Some(top) = &stats.top_used {
+            for (i, m) in top.memories.iter().enumerate() {
+                let c = &m.counts;
+                outln!(
+                    self,
+                    "Top {} {}: fetched={} injected={} injected_sessions={} returned={} returned_sessions={}",
+                    i + 1,
+                    m.memory_id,
+                    c.fetched,
+                    c.injected,
+                    c.injected_sessions,
+                    c.returned,
+                    c.returned_sessions
+                );
+            }
+        }
+    }
+
+    /// Print one memory's usage (`stats --memory`) in the configured format.
+    pub fn print_memory_usage(&self, report: &engramdb::ops::MemoryUsageReport) {
+        if self.silent {
+            return;
+        }
+        let c = &report.counts;
+        let active: Vec<&engramdb::ops::usage::DailyUsage> = report
+            .daily
+            .iter()
+            .filter(|d| d.returned + d.injected + d.fetched + d.writes > 0)
+            .collect();
+        match self.format {
+            OutputFormat::Json => {
+                outln!(self, "{}", serde_json::to_string_pretty(report).unwrap());
+            }
+            OutputFormat::Plain => {
+                outln!(
+                    self,
+                    "memory={} store={} returned={} returned_sessions={} injected={} injected_sessions={} fetched={} updated={} challenged={}",
+                    report.memory_id,
+                    report.store_id,
+                    c.returned,
+                    c.returned_sessions,
+                    c.injected,
+                    c.injected_sessions,
+                    c.fetched,
+                    c.updated_n,
+                    c.challenged_n
+                );
+                for d in active {
+                    outln!(
+                        self,
+                        "day={} returned={} injected={} fetched={} writes={}",
+                        d.day,
+                        d.returned,
+                        d.injected,
+                        d.fetched,
+                        d.writes
+                    );
+                }
+            }
+            OutputFormat::Pretty => {
+                outln!(self, "Usage of {}", report.memory_id);
+                outln!(self, "  {}", report.summary);
+                outln!(self, "  Store: {}", report.store_id);
+                outln!(
+                    self,
+                    "\nRead signals (each counted on its own, never summed):"
+                );
+                outln!(
+                    self,
+                    "  returned by a query:  {}{}",
+                    with_sessions(c.returned, c.returned_sessions),
+                    last_at(c.last_returned_at)
+                );
+                outln!(
+                    self,
+                    "  injected by a hook:   {}{}",
+                    with_sessions(c.injected, c.injected_sessions),
+                    last_at(c.last_injected_at)
+                );
+                outln!(
+                    self,
+                    "  fetched by id:        {}{}",
+                    c.fetched,
+                    last_at(c.last_fetched_at)
+                );
+                outln!(
+                    self,
+                    "\nWrites: {} {}, {} {}{}",
+                    c.updated_n,
+                    if c.updated_n == 1 {
+                        "update"
+                    } else {
+                        "updates"
+                    },
+                    c.challenged_n,
+                    if c.challenged_n == 1 {
+                        "challenge"
+                    } else {
+                        "challenges"
+                    },
+                    last_at(c.last_written_at)
+                );
+                outln!(self, "\nLast {} days:", report.daily.len());
+                if active.is_empty() {
+                    outln!(self, "  (no activity)");
+                }
+                for d in active {
+                    outln!(
+                        self,
+                        "  {}  returned {}, injected {}, fetched {}, writes {}",
+                        d.day,
+                        d.returned,
+                        d.injected,
+                        d.fetched,
+                        d.writes
                     );
                 }
             }
@@ -1616,6 +1738,53 @@ fn print_runtime_pretty(f: &OutputFormatter, rt: &engramdb::telemetry::RuntimeSn
     }
 }
 
+/// `N` or `N in M session(s)`.
+fn with_sessions(n: u64, sessions: u64) -> String {
+    if sessions == 0 {
+        return n.to_string();
+    }
+    format!(
+        "{n} in {sessions} {}",
+        if sessions == 1 { "session" } else { "sessions" }
+    )
+}
+
+/// ` (last <instant>)`, or nothing.
+fn last_at(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    ts.map(|t| format!(" (last {})", t.format("%Y-%m-%d %H:%M:%S UTC")))
+        .unwrap_or_default()
+}
+
+/// Pretty-print the most-used memories.
+fn print_top_used_pretty(f: &OutputFormatter, top: &TopUsedView) {
+    outln!(
+        f,
+        "\nMost used memories (by {}; read signals are never summed):",
+        top.by.as_str()
+    );
+    if top.memories.is_empty() {
+        outln!(f, "  (no usage recorded yet)");
+    }
+    for (i, m) in top.memories.iter().enumerate() {
+        let c = &m.counts;
+        let id: String = m.memory_id.chars().take(8).collect();
+        outln!(
+            f,
+            "  {}. {} {}",
+            i + 1,
+            id,
+            m.summary.as_deref().unwrap_or("(deleted)")
+        );
+        outln!(
+            f,
+            "     fetched {}, injected {}, returned {}",
+            c.fetched,
+            with_sessions(c.injected, c.injected_sessions),
+            with_sessions(c.returned, c.returned_sessions)
+        );
+    }
+}
+
 fn calls_word(n: u64) -> &'static str {
     if n == 1 {
         "call"
@@ -1817,6 +1986,17 @@ pub struct Stats {
     /// recorded a call (or `[stats].enabled` is false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<engramdb::telemetry::hooks::HookStatsView>,
+    /// The most-used memories (`stats --top N`), from the usage events.
+    /// `None` unless asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_used: Option<TopUsedView>,
+}
+
+/// A top-N most-used listing: which signal ordered it, and the rows.
+#[derive(Debug, serde::Serialize)]
+pub struct TopUsedView {
+    pub by: engramdb::ops::UsageSort,
+    pub memories: Vec<engramdb::ops::TopMemory>,
 }
 
 /// The JSON body for a running daemon, shared by `daemon status` and
@@ -2582,6 +2762,7 @@ mod tests {
             avg_criticality: 0.62,
             runtime: None,
             hooks: None,
+            top_used: None,
         };
         let v = serde_json::to_value(&stats).unwrap();
         assert_eq!(v["total"], 10);
@@ -2903,6 +3084,7 @@ mod tests {
             avg_criticality: 0.75,
             runtime: Some(rt),
             hooks: None,
+            top_used: None,
         }
     }
 
@@ -3363,6 +3545,118 @@ mod tests {
         }
     }
 
+    fn usage_counts(
+        fetched: u64,
+        injected: u64,
+        returned: u64,
+    ) -> engramdb::ops::usage::UsageCounts {
+        engramdb::ops::usage::UsageCounts {
+            returned,
+            injected,
+            fetched,
+            returned_sessions: returned.min(2),
+            injected_sessions: injected.min(1),
+            last_returned_at: (returned > 0).then(|| fixed(2026, 10, 30, 9, 15, 0)),
+            last_injected_at: (injected > 0).then(|| fixed(2026, 11, 1, 14, 0, 0)),
+            last_fetched_at: (fetched > 0).then(|| fixed(2026, 11, 2, 8, 30, 0)),
+            updated_n: 2,
+            challenged_n: 1,
+            last_written_at: Some(fixed(2026, 10, 20, 12, 0, 0)),
+        }
+    }
+
+    #[test]
+    fn snap_stats_with_top_used() {
+        let stats = Stats {
+            total: 3,
+            by_type: vec![(MemoryType::Decision, 3)],
+            by_status: vec![(Status::Active, 3)],
+            by_scope: vec![],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.5,
+            runtime: None,
+            hooks: None,
+            top_used: Some(TopUsedView {
+                by: engramdb::ops::UsageSort::Fetched,
+                memories: vec![
+                    engramdb::ops::TopMemory {
+                        memory_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+                        summary: Some("Blocking calls deadlock the daemon".to_string()),
+                        counts: usage_counts(4, 12, 3),
+                    },
+                    engramdb::ops::TopMemory {
+                        memory_id: "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c".to_string(),
+                        summary: None,
+                        counts: usage_counts(0, 1, 0),
+                    },
+                ],
+            }),
+        };
+        snap_formats("stats_with_top_used", |f| f.print_stats(&stats));
+    }
+
+    #[test]
+    fn snap_stats_with_top_used_empty() {
+        let stats = Stats {
+            total: 0,
+            by_type: vec![],
+            by_status: vec![],
+            by_scope: vec![],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.0,
+            runtime: None,
+            hooks: None,
+            top_used: Some(TopUsedView {
+                by: engramdb::ops::UsageSort::Injected,
+                memories: vec![],
+            }),
+        };
+        snap_formats("stats_with_top_used_empty", |f| f.print_stats(&stats));
+    }
+
+    fn memory_usage_report(active: bool) -> engramdb::ops::MemoryUsageReport {
+        let today = fixed(2026, 11, 3, 0, 0, 0).date_naive();
+        let mut daily: Vec<engramdb::ops::usage::DailyUsage> = (0..30)
+            .rev()
+            .map(|back| engramdb::ops::usage::DailyUsage {
+                day: today - chrono::Duration::days(back),
+                ..Default::default()
+            })
+            .collect();
+        let counts = if active {
+            daily[27].returned = 3;
+            daily[28].injected = 12;
+            daily[29].fetched = 4;
+            daily[29].writes = 1;
+            usage_counts(4, 12, 3)
+        } else {
+            engramdb::ops::usage::UsageCounts::default()
+        };
+        engramdb::ops::MemoryUsageReport {
+            memory_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            summary: "Blocking calls deadlock the daemon".to_string(),
+            store_id: "a1b2c3d4e5f60718".to_string(),
+            counts,
+            daily,
+        }
+    }
+
+    #[test]
+    fn snap_memory_usage() {
+        let report = memory_usage_report(true);
+        snap_formats("memory_usage", |f| f.print_memory_usage(&report));
+    }
+
+    #[test]
+    fn snap_memory_usage_unused() {
+        let report = memory_usage_report(false);
+        snap_formats("memory_usage_unused", |f| f.print_memory_usage(&report));
+    }
+
     #[test]
     fn snap_stats_with_hooks() {
         let stats = Stats {
@@ -3376,6 +3670,7 @@ mod tests {
             avg_criticality: 0.5,
             runtime: None,
             hooks: Some(hook_stats_fixture(0)),
+            top_used: None,
         };
         snap_formats("stats_with_hooks", |f| f.print_stats(&stats));
     }
@@ -3393,6 +3688,7 @@ mod tests {
             avg_criticality: 0.0,
             runtime: None,
             hooks: Some(hook_stats_fixture(3)),
+            top_used: None,
         };
         snap_formats("stats_with_hooks_skipped", |f| f.print_stats(&stats));
     }
@@ -3410,6 +3706,7 @@ mod tests {
             avg_criticality: 0.75,
             runtime: None,
             hooks: None,
+            top_used: None,
         };
         snap_formats("stats_plain_counts", |f| f.print_stats(&stats));
     }
@@ -3753,6 +4050,15 @@ mod tests {
     fn snap_color_stats_stays_plain() {
         assert_never_styled("stats_with_runtime", OutputFormat::Pretty, |f| {
             f.print_stats(&stats_with_runtime(fully_populated_runtime_snapshot()))
+        });
+    }
+
+    /// The usage views are colourless like the rest of stats.
+    #[test]
+    fn snap_color_memory_usage_stays_plain() {
+        let report = memory_usage_report(true);
+        assert_never_styled("memory_usage", OutputFormat::Pretty, |f| {
+            f.print_memory_usage(&report)
         });
     }
 

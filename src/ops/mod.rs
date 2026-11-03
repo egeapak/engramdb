@@ -29,6 +29,7 @@ pub mod review;
 pub mod stats;
 pub mod task;
 pub mod update;
+pub mod usage;
 pub mod verify;
 
 pub use challenge::{
@@ -95,6 +96,10 @@ pub use task::{
     PromotionReport, TaskCompleteResult, TaskCurrentResult,
 };
 pub use update::{update_memory, UpdateParams};
+pub use usage::{
+    maintain_memory_events, memory_usage_report, record_fetched, record_returned, top_used,
+    MemoryUsageReport, StoreRef, Surface, TopMemory, UsageKind, UsageSort,
+};
 pub use verify::{verify_memory, VerifyResult};
 
 use crate::embeddings::EmbeddingProvider;

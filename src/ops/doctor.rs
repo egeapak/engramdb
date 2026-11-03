@@ -5503,7 +5503,7 @@ mod epistemic_doctor_tests {
         assert_eq!(store.get("doc-path").await.unwrap().challenges.len(), 1);
 
         // ops::verify clears the doctor review.
-        let vr = super::super::verify::verify_memory(&store, "doc-path")
+        let vr = super::super::verify::verify_memory(&store, "doc-path", crate::ops::Surface::Cli)
             .await
             .unwrap();
         assert!(vr.review_cleared);

@@ -67,7 +67,21 @@ pub struct UpdateParams {
 ///
 /// If `engine` is provided and has embeddings available, the memory is
 /// re-embedded into the vector store after the update succeeds.
+///
+/// Records an `updated` usage event from `surface` (see [`super::usage`]).
 pub async fn update_memory(
+    store: &MemoryStore,
+    id: &str,
+    params: UpdateParams,
+    engine: Option<&RetrievalEngine>,
+    surface: super::usage::Surface,
+) -> Result<bool> {
+    let updated = update_memory_unrecorded(store, id, params, engine).await?;
+    super::usage::record_write(store, id, super::usage::UsageKind::Updated, surface, None).await;
+    Ok(updated)
+}
+
+async fn update_memory_unrecorded(
     store: &MemoryStore,
     id: &str,
     params: UpdateParams,
@@ -324,7 +338,9 @@ mod tests {
         // Set.
         let mut p = empty_update_params();
         p.audience = Some(vec!["projA".to_string(), "__g_x".to_string()]);
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert_eq!(
             store.get(&id).await.unwrap().audience,
             Some(vec!["projA".to_string(), "__g_x".to_string()])
@@ -333,7 +349,9 @@ mod tests {
         // An unrelated update (audience None ⇒ unchanged) must not wipe it.
         let mut p = empty_update_params();
         p.summary = Some("New summary".to_string());
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert_eq!(
             store.get(&id).await.unwrap().audience,
             Some(vec!["projA".to_string(), "__g_x".to_string()])
@@ -342,7 +360,9 @@ mod tests {
         // Clear (empty list ⇒ whole-group visibility).
         let mut p = empty_update_params();
         p.audience = Some(vec![]);
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert_eq!(store.get(&id).await.unwrap().audience, None);
     }
 
@@ -357,7 +377,9 @@ mod tests {
 
         let mut p = empty_update_params();
         p.physical = Some(vec!["src/secret/local.rs".to_string()]);
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         assert!(
             store.get(&id).await.unwrap().physical.is_empty(),
@@ -408,7 +430,9 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_add = Some(vec!["tag2".to_string(), "tag3".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 3);
@@ -426,7 +450,9 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["tag1".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 1);
@@ -443,7 +469,9 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["tag1".to_string(), "tag2".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 0);
@@ -459,7 +487,9 @@ mod tests {
         params.tags = Some(vec!["new1".to_string(), "new2".to_string()]);
         params.tags_add = Some(vec!["new2".to_string(), "new3".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 3);
@@ -479,7 +509,9 @@ mod tests {
         let mut params = empty_update_params();
         params.supersedes = Some(vec!["old-id-1".to_string(), "old-id-2".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.supersedes.len(), 2);
@@ -496,7 +528,9 @@ mod tests {
         let mut params = empty_update_params();
         params.supersedes = Some(vec!["prev-memory".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         // Reload from disk
         let memory = store.get(&id).await.unwrap();
@@ -523,7 +557,9 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_add = Some(vec!["first".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 1);
@@ -539,7 +575,9 @@ mod tests {
         let mut params = empty_update_params();
         params.tags_remove = Some(vec!["nonexistent".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         // Should still have original tags
@@ -560,7 +598,9 @@ mod tests {
         params.tags_add = Some(vec!["b".to_string(), "c".to_string()]);
         params.tags_remove = Some(vec!["a".to_string()]);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert_eq!(memory.tags.len(), 2);
@@ -583,7 +623,9 @@ mod tests {
         let task_a = tokio::spawn(async move {
             let mut params = empty_update_params();
             params.tags_add = Some(vec!["concurrent-a".to_string()]);
-            update_memory(&store_a, &id_a, params, None).await.unwrap();
+            update_memory(&store_a, &id_a, params, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap();
         });
 
         let store_b = store.clone();
@@ -591,7 +633,9 @@ mod tests {
         let task_b = tokio::spawn(async move {
             let mut params = empty_update_params();
             params.tags_add = Some(vec!["concurrent-b".to_string()]);
-            update_memory(&store_b, &id_b, params, None).await.unwrap();
+            update_memory(&store_b, &id_b, params, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap();
         });
 
         task_a.await.unwrap();
@@ -624,7 +668,9 @@ mod tests {
         params.decay_half_life = Some(604800); // 7 days
         params.decay_floor = Some(0.4);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
@@ -645,7 +691,9 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_floor = Some(0.25);
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
@@ -680,7 +728,7 @@ mod tests {
                 p
             }),
         ] {
-            let err = update_memory(&store, &id, params, None)
+            let err = update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
                 .await
                 .expect_err(&format!("invalid {field} must be rejected"));
             assert!(
@@ -702,7 +750,7 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_strategy = Some("invalid".to_string());
 
-        let result = update_memory(&store, &id, params, None).await;
+        let result = update_memory(&store, &id, params, None, crate::ops::Surface::Cli).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -721,7 +769,9 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_strategy = Some("linear".to_string());
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
@@ -740,7 +790,9 @@ mod tests {
         let mut params = empty_update_params();
         params.decay_strategy = Some("none".to_string());
 
-        update_memory(&store, &id, params, None).await.unwrap();
+        update_memory(&store, &id, params, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let memory = store.get(&id).await.unwrap();
         assert!(memory.decay.is_some());
@@ -806,13 +858,17 @@ mod epistemic_update_tests {
 
         let mut p = base();
         p.premise = Some("premise A".into());
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         // Second edit adds a field without erasing the first.
         let mut p = base();
         p.origin_task = Some("task-x".into());
         p.generality = Some(Generality::Task);
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let m = store.get(&id).await.unwrap();
         let v = m.valid_while.unwrap();
@@ -823,7 +879,9 @@ mod epistemic_update_tests {
         // clear_validity wipes the whole condition.
         let mut p = base();
         p.clear_validity = true;
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert_eq!(store.get(&id).await.unwrap().valid_while, None);
     }
 
@@ -832,7 +890,9 @@ mod epistemic_update_tests {
         let (_t, store, id) = setup().await;
         let mut p = base();
         p.epistemic = Some(Epistemic::Observation);
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert_eq!(
             store.get(&id).await.unwrap().epistemic,
             Epistemic::Observation
@@ -847,7 +907,9 @@ mod epistemic_update_tests {
 
         let mut p = base();
         p.supersedes = Some(vec![old_id.clone()]);
-        update_memory(&store, &id, p, None).await.unwrap();
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
 
         let old_mem = store.get(&old_id).await.unwrap();
         assert!(old_mem.invalidated_at.is_some());
@@ -856,7 +918,9 @@ mod epistemic_update_tests {
         // Reopening (§2.4): clear_invalidated restores the closed window.
         let mut p = base();
         p.clear_invalidated = true;
-        update_memory(&store, &old_id, p, None).await.unwrap();
+        update_memory(&store, &old_id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         let old_mem = store.get(&old_id).await.unwrap();
         assert_eq!(old_mem.invalidated_at, None);
         assert_eq!(old_mem.superseded_by, None);

@@ -38,7 +38,43 @@ pub struct ResolveResult {
 /// - Keep: Set status to Active, clear challenges, set verified_at to now
 /// - Update: Same as keep, plus update content/summary
 /// - Delete: Remove the memory entirely
-pub async fn resolve_memory(store: &MemoryStore, params: ResolveParams) -> Result<ResolveResult> {
+///
+/// Records a `resolved` usage event from `surface` (`related_id` = the
+/// successor of an invalidation), plus `deleted` for the delete action.
+pub async fn resolve_memory(
+    store: &MemoryStore,
+    params: ResolveParams,
+    surface: super::usage::Surface,
+) -> Result<ResolveResult> {
+    use super::usage::UsageKind;
+    let recording = super::usage::usage_enabled(store).await;
+    let full = if recording {
+        store.resolve_id(&params.id).await.ok()
+    } else {
+        None
+    };
+    let related = params.superseded_by.clone();
+    let deleting = matches!(params.action, ResolveAction::Delete);
+    let result = resolve_memory_unrecorded(store, params).await?;
+    if let Some(full) = full {
+        super::usage::record_resolved(
+            store,
+            &full,
+            UsageKind::Resolved,
+            surface,
+            related.as_deref(),
+        );
+        if deleting {
+            super::usage::record_resolved(store, &full, UsageKind::Deleted, surface, None);
+        }
+    }
+    Ok(result)
+}
+
+async fn resolve_memory_unrecorded(
+    store: &MemoryStore,
+    params: ResolveParams,
+) -> Result<ResolveResult> {
     match params.action {
         ResolveAction::Keep => {
             // Atomic update: set status, clear challenges, set verified_at
@@ -138,6 +174,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -181,6 +218,7 @@ mod tests {
                 updated_summary: Some("Updated summary".to_string()),
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -224,6 +262,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -262,6 +301,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -300,6 +340,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -336,6 +377,7 @@ mod tests {
                 updated_summary: Some("New summary only".to_string()),
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -374,6 +416,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -414,6 +457,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -444,6 +488,7 @@ mod tests {
                 updated_summary: None,
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -465,6 +510,7 @@ mod tests {
                 updated_summary: Some("New summary".to_string()),
                 superseded_by: None,
             },
+            crate::ops::Surface::Cli,
         )
         .await;
 

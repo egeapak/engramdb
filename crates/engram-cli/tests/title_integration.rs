@@ -66,7 +66,9 @@ mod title_integration {
         params.title = None;
         params.title_strategy = TitleStrategy::None;
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         // Verify the file on disk has uuid-only format
@@ -94,7 +96,9 @@ mod title_integration {
         params.title = None;
         params.title_strategy = TitleStrategy::None;
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
         let prefix = &id[..8];
 
@@ -115,7 +119,9 @@ mod title_integration {
         params.title = Some("My Database Title".to_string());
         params.title_strategy = TitleStrategy::None; // shouldn't matter, explicit title takes precedence
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         // Check filename on disk
@@ -151,7 +157,9 @@ mod title_integration {
         let mut params = test_params();
         params.title = Some("Prefix Match Test".to_string());
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
         let prefix = &id[..8];
 
@@ -174,7 +182,9 @@ mod title_integration {
         params.title_strategy = TitleStrategy::Keyword; // Auto-generate via keywords
         params.summary = "Database backend choice for production".to_string();
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         let loaded = store.get(&id).await.unwrap();
@@ -220,7 +230,9 @@ mod title_integration {
         params.title = Some("Explicit Title".to_string());
         params.title_strategy = TitleStrategy::Keyword; // Would auto-gen, but explicit takes priority
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let loaded = store.get(&result.id).await.unwrap();
 
         assert_eq!(
@@ -242,7 +254,9 @@ mod title_integration {
         params.title = None;
         params.title_strategy = TitleStrategy::None;
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         // Verify uuid-only filename
@@ -277,7 +291,9 @@ mod title_integration {
         params.title = None;
         params.title_strategy = TitleStrategy::None;
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         let memories_dir = temp_dir.path().join(".engramdb").join("memories");
@@ -322,9 +338,15 @@ mod title_integration {
             embed_async: false,
         };
 
-        engramdb::ops::update_memory(&store, &id, update_params, None)
-            .await
-            .unwrap();
+        engramdb::ops::update_memory(
+            &store,
+            &id,
+            update_params,
+            None,
+            engramdb::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
 
         // Filename should now have slug
         let updated_entries: Vec<_> = std::fs::read_dir(&memories_dir)
@@ -354,7 +376,9 @@ mod title_integration {
         let mut params = test_params();
         params.title = Some("First Title".to_string());
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         let memories_dir = temp_dir.path().join(".engramdb").join("memories");
@@ -399,9 +423,15 @@ mod title_integration {
             embed_async: false,
         };
 
-        engramdb::ops::update_memory(&store, &id, update_params, None)
-            .await
-            .unwrap();
+        engramdb::ops::update_memory(
+            &store,
+            &id,
+            update_params,
+            None,
+            engramdb::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
 
         // Filename should change to new slug
         let updated: Vec<_> = std::fs::read_dir(&memories_dir)
@@ -432,7 +462,9 @@ mod title_integration {
         let mut params = test_params();
         params.title = Some("My Important Decision".to_string());
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
 
         // Read the raw file content
@@ -490,7 +522,9 @@ mod title_integration {
             transaction guarantees match the production workload better."
             .to_string();
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let id = result.id.clone();
         let loaded = store.get(&id).await.unwrap();
 
@@ -526,7 +560,9 @@ mod title_integration {
         params.summary = "Long input handling".to_string();
         params.content = long_text;
 
-        let result = create_memory(&store, params, None).await.unwrap();
+        let result = create_memory(&store, params, None, engramdb::ops::Surface::Cli)
+            .await
+            .unwrap();
         let loaded = store.get(&result.id).await.unwrap();
         // The bug this guards: long input → encoder produced a 2D shape →
         // decode silently failed and title came back None.

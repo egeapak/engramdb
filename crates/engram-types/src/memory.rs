@@ -263,7 +263,14 @@ pub struct Memory {
     /// Last update timestamp
     pub updated_at: DateTime<Utc>,
 
-    /// Last access timestamp
+    /// Last access timestamp.
+    ///
+    /// **Deprecated: nothing writes it and nothing should.** Writing it on
+    /// every read would rewrite a committed `.md` file per query — git churn
+    /// for a value that means nothing to anyone reading the file. Per-memory
+    /// usage lives in the store's `memory_events` / `memory_usage` tables
+    /// (`engram_storage::telemetry::usage`) instead. Kept so existing files
+    /// still parse.
     pub accessed_at: DateTime<Utc>,
 
     /// Optional expiration timestamp
@@ -330,7 +337,8 @@ impl Memory {
         true
     }
 
-    /// Update the accessed_at timestamp
+    /// Update the accessed_at timestamp. Deprecated with the field (see
+    /// [`Memory::accessed_at`]): do not call it on a read path.
     pub fn touch(&mut self) {
         self.accessed_at = Utc::now();
     }

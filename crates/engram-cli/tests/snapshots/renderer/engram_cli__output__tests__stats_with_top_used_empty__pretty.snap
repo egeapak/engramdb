@@ -1,0 +1,18 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total Memories: 0
+
+By Type:
+
+By Status:
+
+Expired: 0
+
+Average Criticality: 0.00
+
+Most used memories (by injected; read signals are never summed):
+  (no usage recorded yet)
+--- stderr ---

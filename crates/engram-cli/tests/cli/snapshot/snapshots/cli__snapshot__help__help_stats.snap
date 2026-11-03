@@ -19,6 +19,22 @@ Options:
       --daemon
           Show the shared embedding daemon's metrics instead of memory-store stats
 
+      --memory <ID>
+          Show one memory's usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix
+
+      --top <N>
+          Append the N most-used memories
+
+      --by <BY>
+          Which read signal orders --top; the others break ties (they are never summed)
+
+          Possible values:
+          - fetched:  Opened explicitly by id (`get`)
+          - injected: Rendered into an agent's context by a hook
+          - returned: Returned by a `query`
+          
+          [default: fetched]
+
       --format <FORMAT>
           Output format
 

@@ -38,6 +38,7 @@ pub async fn run_get(
         formatter.print_warning(&warning);
     }
     let memory = get_memory(&store, id).await?;
+    engramdb::ops::record_fetched(&store, &memory.id, engramdb::ops::Surface::Cli, None).await;
 
     // Resolve the memory's on-disk path. Shared memories live under the
     // *store's* project directory — which differs from the `dir` parameter

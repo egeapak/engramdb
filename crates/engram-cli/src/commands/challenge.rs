@@ -30,6 +30,7 @@ pub async fn run_challenge(
         &params.id,
         &params.evidence,
         params.source_file.as_deref(),
+        engramdb::ops::Surface::Cli,
     )
     .await?;
 

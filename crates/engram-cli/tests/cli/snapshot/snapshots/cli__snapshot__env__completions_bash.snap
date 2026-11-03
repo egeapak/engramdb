@@ -4464,12 +4464,24 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__stats)
-            opts="-q -v -h --all-projects --global --daemon --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            opts="-q -v -h --all-projects --global --daemon --memory --top --by --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --memory)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --top)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --by)
+                    COMPREPLY=($(compgen -W "fetched injected returned" -- "${cur}"))
+                    return 0
+                    ;;
                 --format)
                     COMPREPLY=($(compgen -W "pretty json plain" -- "${cur}"))
                     return 0

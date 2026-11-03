@@ -23,6 +23,8 @@ use std::path::Path;
 /// * `dir` - The directory containing the EngramDB store
 /// * `embedding_backend` - Optional embedding backend selection
 /// * `all_projects` - When true, include the cross-project telemetry breakdown
+/// * `usage` - `--memory` (one memory's usage instead of store stats) and
+///   `--top`/`--by` (a most-used listing)
 /// * `formatter` - Output formatter for displaying statistics
 pub async fn run_stats(
     dir: &Path,
@@ -30,6 +32,7 @@ pub async fn run_stats(
     daemon: bool,
     embedding_backend: Option<EmbeddingBackend>,
     all_projects: bool,
+    usage: UsageArgs,
     formatter: &OutputFormatter,
 ) -> Result<()> {
     if daemon {
@@ -41,6 +44,10 @@ pub async fn run_stats(
     } else {
         MemoryStore::open(dir).await?
     };
+
+    if let Some(id) = usage.memory.as_deref() {
+        return run_memory_usage(&store, id, formatter).await;
+    }
     let store_stats = compute_stats(&store).await?;
 
     // Extract health warning counts before moving data into Stats
@@ -99,6 +106,13 @@ pub async fn run_stats(
         avg_criticality: store_stats.avg_criticality,
         runtime: if runtime_present { Some(runtime) } else { None },
         hooks: (cfg.stats.enabled && !hooks.is_empty()).then_some(hooks),
+        top_used: match usage.top {
+            Some(n) => Some(crate::output::TopUsedView {
+                by: usage.by,
+                memories: engramdb::ops::top_used(&store, n, usage.by).await,
+            }),
+            None => None,
+        },
     };
 
     formatter.print_stats(&stats);
@@ -151,6 +165,33 @@ pub async fn run_stats(
         }
     }
 
+    Ok(())
+}
+
+/// The usage flags of `stats`.
+#[derive(Debug, Default)]
+pub struct UsageArgs {
+    /// Show this memory's usage instead of the store's stats.
+    pub memory: Option<String>,
+    /// Append the N most-used memories.
+    pub top: Option<usize>,
+    /// The read signal that orders `top`.
+    pub by: engramdb::ops::UsageSort,
+}
+
+/// `stats --memory <id>`: one memory's lifetime usage and daily series.
+async fn run_memory_usage(
+    store: &MemoryStore,
+    id: &str,
+    formatter: &OutputFormatter,
+) -> Result<()> {
+    let report = engramdb::ops::memory_usage_report(store, id).await?;
+    formatter.print_memory_usage(&report);
+    if !engramdb::ops::usage::usage_enabled(store).await {
+        formatter.print_warning(
+            "Usage recording is off ([stats].enabled = false): these counts are not growing.",
+        );
+    }
     Ok(())
 }
 
@@ -373,7 +414,151 @@ async fn drifted_memory_count(store: &MemoryStore) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{capturing_json, capturing_plain, snap_command, TempProject};
     use engramdb::daemon::metrics::MetricsSnapshot;
+    use engramdb::ops::usage::{write_events, MemoryEvent};
+    use engramdb::ops::{StoreRef, Surface, UsageKind};
+    use engramdb::types::{Memory, MemoryType, Provenance};
+
+    /// Dates and instants the events carry: real clock, so redacted.
+    fn redact_times(raw: String) -> String {
+        let instant =
+            regex::Regex::new(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
+                .unwrap();
+        let day = regex::Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap();
+        let out = instant.replace_all(&raw, "[TS]");
+        day.replace_all(&out, "[DAY]").into_owned()
+    }
+
+    /// A store with one memory read through every signal: fetched twice
+    /// (one id-prefix `get` per surface), injected once, returned once.
+    async fn used_memory(project: &TempProject) -> (MemoryStore, String) {
+        let store = project.init_store().await;
+        let id = store
+            .create(&Memory::new(
+                MemoryType::Hazard,
+                "Blocking calls deadlock the daemon",
+                "content",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        engramdb::ops::record_fetched(&store, &id, Surface::Cli, None).await;
+        engramdb::ops::record_fetched(&store, &id, Surface::Mcp, Some("s1")).await;
+        let ev = |kind| MemoryEvent::new(&id, &store.project_id, kind, Surface::HookPrompt);
+        write_events(
+            &StoreRef::of(&store),
+            &[
+                ev(UsageKind::Injected).with_session(Some("s1")),
+                ev(UsageKind::Returned).with_session(Some("s2")),
+            ],
+        );
+        (store, id)
+    }
+
+    #[tokio::test]
+    async fn stats_memory_usage_plain() {
+        let project = TempProject::new();
+        let (_store, id) = used_memory(&project).await;
+        let (f, cap) = capturing_plain();
+        let usage = UsageArgs {
+            memory: Some(id[..13].to_string()),
+            ..Default::default()
+        };
+        run_stats(project.path(), false, false, None, false, usage, &f)
+            .await
+            .unwrap();
+        snap_command(
+            "stats_memory_usage_plain",
+            project.path(),
+            redact_times(cap.transcript()),
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_memory_usage_json() {
+        let project = TempProject::new();
+        let (_store, id) = used_memory(&project).await;
+        let (f, cap) = capturing_json();
+        let usage = UsageArgs {
+            memory: Some(id),
+            ..Default::default()
+        };
+        run_stats(project.path(), false, false, None, false, usage, &f)
+            .await
+            .unwrap();
+        let body = cap.stdout();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["fetched"], 2);
+        assert_eq!(v["daily"].as_array().unwrap().len(), 30);
+        snap_command(
+            "stats_memory_usage_json",
+            project.path(),
+            redact_times(cap.transcript()),
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_memory_usage_unknown_id_errors() {
+        let project = TempProject::new();
+        let _ = used_memory(&project).await;
+        let (f, _cap) = capturing_plain();
+        let usage = UsageArgs {
+            memory: Some("ffffffff".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            run_stats(project.path(), false, false, None, false, usage, &f)
+                .await
+                .is_err()
+        );
+    }
+
+    /// `--top` in JSON (the human formats also print environment-dependent
+    /// embedding status, which tier 1 covers instead).
+    #[tokio::test]
+    async fn stats_top_used_json() {
+        let project = TempProject::new();
+        let (store, id) = used_memory(&project).await;
+        store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "Never read",
+                "content",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        let (f, cap) = capturing_json();
+        let usage = UsageArgs {
+            memory: None,
+            top: Some(5),
+            by: engramdb::ops::UsageSort::Injected,
+        };
+        run_stats(project.path(), false, false, None, false, usage, &f)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cap.stdout()).unwrap();
+        let top = &v["top_used"];
+        assert_eq!(top["by"], "injected");
+        let rows = top["memories"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "an unread memory is not listed");
+        assert_eq!(rows[0]["memory_id"], id.as_str());
+        assert_eq!(rows[0]["summary"], "Blocking calls deadlock the daemon");
+        assert_eq!(
+            (
+                &rows[0]["fetched"],
+                &rows[0]["injected"],
+                &rows[0]["returned"]
+            ),
+            (
+                &serde_json::json!(2),
+                &serde_json::json!(1),
+                &serde_json::json!(1)
+            )
+        );
+        assert!(v.get("memory_usage").is_none());
+    }
 
     /// The `stats --daemon` fallback (persisted-snapshot) view must render
     /// every counter — including `title`, which it used to omit — and the
