@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"--format\", \"plain\", \"query\", \"--mode\", \"filter\", \"--query\", \"rust\",\n\"--show-scores\", \"--expand-links\", \"3\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain query --mode filter --query rust --show-scores --expand-links 3
+exit: 0
+--- stdout ---
+Found 2 memories (out of 2 total):
+
+  [0.92] [SHORT_ID] Decision  Use Rust for the backend
+  [0.46] [SHORT_ID] Hazard  Never unwrap in production paths
+      via [SHORT_ID] (supports)
+--- stderr ---

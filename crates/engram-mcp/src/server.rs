@@ -196,6 +196,11 @@ struct QueryInput {
     include_global: Option<bool>,
 
     #[schemars(
+        description = "Add up to N one-hop neighbours of the top results, reached over confirmed supports / derived_from / related_to edges (0 = off, max 20; default from [retrieval].expand_links, normally 0). Each added result carries `via` {from, kind}; it is scored at its hit's score times expand_links_decay and passes every filter a direct result would."
+    )]
+    expand_links: Option<u32>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
@@ -1035,6 +1040,18 @@ struct ScoreBreakdownOutput {
     situation_multiplier: f64,
     decay: f64,
     criticality: f64,
+    // Phase-5 graph/usage components: present only when their knob is on and
+    // they changed the score, so a default config's output is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contradicts_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contradicted_by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supports_multiplier: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    supported_by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_multiplier: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -1046,6 +1063,10 @@ struct ScoredMemoryOutput {
     /// relevance threshold. Present only when true.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     below_threshold: bool,
+    /// Set when the result was added by `expand_links`: the direct hit it was
+    /// reached from and the edge kind followed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<engramdb::scoring::LinkVia>,
     score_breakdown: ScoreBreakdownOutput,
 }
 
@@ -2542,6 +2563,19 @@ impl EngramDbServer {
             .transpose()
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        let expand_links = match input.expand_links {
+            Some(n) if n as usize > engramdb::types::MAX_EXPAND_LINKS => {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    &format!(
+                        "expand_links must be at most {}, got {n}",
+                        engramdb::types::MAX_EXPAND_LINKS
+                    ),
+                ));
+            }
+            other => other.map(|n| n as usize),
+        };
+
         let query = RetrievalQuery {
             mode,
             path: input.path,
@@ -2559,6 +2593,7 @@ impl EngramDbServer {
             // `[retrieval].rank_fallback` from config: an agent browsing by
             // rank gets marked weak matches rather than an empty answer.
             rank_fallback: None,
+            expand_links,
         };
 
         // Cross-store read fan-in (ops::query_memories_with_extra_stores). When
@@ -2661,7 +2696,13 @@ impl EngramDbServer {
                     situation_multiplier: sm.score_breakdown.situation_multiplier,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
+                    contradicts_penalty: sm.score_breakdown.contradicts_penalty,
+                    contradicted_by: sm.score_breakdown.contradicted_by.clone(),
+                    supports_multiplier: sm.score_breakdown.supports_multiplier,
+                    supported_by: sm.score_breakdown.supported_by.clone(),
+                    usage_multiplier: sm.score_breakdown.usage_multiplier,
                 },
+                via: sm.score_breakdown.via.clone(),
             })
             .collect();
 
@@ -4951,6 +4992,8 @@ impl ServerHandler for EngramDbServer {
                     max_results: Some(10),
                     // Presented as the file's relevant memories: no weak fallback.
                     rank_fallback: Some(0),
+                    // Injected context, like a hook: no link expansion.
+                    expand_links: Some(0),
                     ..RetrievalQuery::default()
                 };
                 let result = ops::query_memories(&engine, &query)
@@ -5046,6 +5089,8 @@ impl ServerHandler for EngramDbServer {
                         max_results: Some(10),
                         // Presented as the file's relevant memories: no weak fallback.
                         rank_fallback: Some(0),
+                        // Injected context, like a hook: no link expansion.
+                        expand_links: Some(0),
                         ..RetrievalQuery::default()
                     };
                     if let Ok(result) = ops::query_memories(&engine, &query).await {

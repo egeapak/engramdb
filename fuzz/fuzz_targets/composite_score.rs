@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use chrono::{DateTime, Utc};
 use libfuzzer_sys::fuzz_target;
 
-use engramdb::scoring::{composite_score, ScoringContext};
+use engramdb::scoring::{composite_score, ScoreSignals, ScoringContext, UsageSignal};
 use engramdb::types::{
     ChallengePenalty, EngramConfig, Epistemic, Memory, MemoryType, Provenance, ProvenanceSource,
     Situation, Status,
@@ -35,6 +35,14 @@ struct ScoreInput {
     verified_ts: Option<i64>,
     /// Per-class challenge penalties: (fact, observation, decision).
     penalties: (f64, f64, f64),
+    /// Phase-5 knobs straight from the fuzzer: (contradicts_penalty,
+    /// supports_boost, usage_weight), NaN/inf/out-of-range included.
+    graph_knobs: (f64, f64, f64),
+    /// Graph evidence: (contradicting count, supporter count); `None` = no
+    /// signals attached (the default-config path).
+    graph_counts: Option<(u8, u8)>,
+    /// Usage counts: (fetched, injected, injected_sessions).
+    usage: Option<(u64, u64, u64)>,
 }
 
 // `composite_score` is the heart of ranking: it folds criticality, decay,
@@ -45,6 +53,8 @@ struct ScoreInput {
 // carry `NaN`/`inf`), plus the scope vectors, timestamps, the epistemic class
 // and `verified_at` (the fact freshness anchor). Per-class challenge-penalty
 // config values are fuzzed too (the fuzzer ignores config validation). A
+// The phase-5 graph/usage terms (contradicts penalty, supports and usage
+// boosts) and their knobs are fuzzed the same way. A
 // non-finite `final_score` is dangerous: ranking sorts with
 // `partial_cmp(..).unwrap()`, which panics on NaN. This target asserts the
 // score is always finite no matter how hostile the memory is.
@@ -65,6 +75,9 @@ fuzz_target!(|input: ScoreInput| {
         situation_sel,
         verified_ts,
         penalties,
+        graph_knobs,
+        graph_counts,
+        usage,
     } = input;
 
     let (Some(created_at), Some(now)) = (
@@ -119,7 +132,20 @@ fuzz_target!(|input: ScoreInput| {
         semantic_score,
         embeddings_available: semantic_score.is_some(),
         situation,
+        signals: None,
     };
+    // Graph/usage evidence (phase 5): arbitrary counts, including usage
+    // counts at u64::MAX, which the log1p/ratio math must survive.
+    let signals = graph_counts.map(|(contra, sup)| ScoreSignals {
+        contradicted_by: (0..contra).map(|i| i.to_string()).collect(),
+        supported_by: (0..sup).map(|i| i.to_string()).collect(),
+        usage: usage.map(|(fetched, injected, injected_sessions)| UsageSignal {
+            fetched,
+            injected,
+            injected_sessions,
+        }),
+    });
+    let context = context.with_signals(signals.as_ref());
 
     let mut config = EngramConfig::default();
     // Per-class penalties straight from the fuzzer (NaN/inf included) — the
@@ -134,6 +160,10 @@ fuzz_target!(|input: ScoreInput| {
             decision,
         }
     };
+    let (contradicts_penalty, supports_boost, usage_weight) = graph_knobs;
+    config.retrieval.scoring.contradicts_penalty = contradicts_penalty;
+    config.retrieval.scoring.supports_boost = supports_boost;
+    config.retrieval.scoring.usage_weight = usage_weight;
 
     let breakdown = composite_score(&memory, &context, &config, now);
     assert!(

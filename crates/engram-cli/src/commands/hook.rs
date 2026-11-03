@@ -680,6 +680,8 @@ async fn process_hook_input_in(
         mode: RetrievalMode::Rank,
         // Hooks inject "relevant memories": never a weak fallback match.
         rank_fallback: Some(0),
+        // Never expand links in a hook: an edges query per tool call.
+        expand_links: Some(0),
         path: Some(relative_path.clone()),
         logical: vec![],
         query: None,
@@ -801,6 +803,8 @@ async fn process_session_start_in(
         mode: RetrievalMode::Rank,
         // Hooks inject "relevant memories": never a weak fallback match.
         rank_fallback: Some(0),
+        // Never expand links in a hook: an edges query per tool call.
+        expand_links: Some(0),
         path: None,
         logical: vec![],
         query: None,
@@ -1190,6 +1194,8 @@ async fn process_user_prompt_submit_in(
         // the body preview below then rendered as an empty line.
         detail_level: DetailLevel::Content,
         situation,
+        // Never expand links in a hook (latency budget is per prompt).
+        expand_links: Some(0),
         ..Default::default()
     };
 

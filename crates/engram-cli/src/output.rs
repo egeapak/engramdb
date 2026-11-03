@@ -200,6 +200,37 @@ fn edge_plain_line(e: &EdgeView) -> String {
     line
 }
 
+/// The indented lines under a retrieval result: how a link-expanded result
+/// was reached (always), and the graph/usage score components that changed
+/// its score (with `--show-scores`). Empty for every result of a default
+/// config, so the output is unchanged unless a phase-5 knob is on.
+fn retrieval_annotations(b: &engramdb::scoring::ScoreBreakdown, show_scores: bool) -> Vec<String> {
+    let ids = |v: &[String]| v.iter().map(|i| short_id(i)).collect::<Vec<_>>().join(", ");
+    let mut lines = Vec::new();
+    if let Some(via) = &b.via {
+        lines.push(format!(
+            "via {} ({})",
+            short_id(&via.from),
+            via.kind.as_str()
+        ));
+    }
+    if show_scores {
+        if let Some(p) = b.contradicts_penalty {
+            lines.push(format!(
+                "contradicts -{p:.2} from {}",
+                ids(&b.contradicted_by)
+            ));
+        }
+        if let Some(m) = b.supports_multiplier {
+            lines.push(format!("supports x{m:.2} from {}", ids(&b.supported_by)));
+        }
+        if let Some(m) = b.usage_multiplier {
+            lines.push(format!("usage x{m:.2}"));
+        }
+    }
+    lines
+}
+
 /// Helper function to truncate IDs to 13 characters.
 ///
 /// Counts `char`s and slices on a char boundary: a byte slice (`&id[..13]`)
@@ -1031,6 +1062,11 @@ impl OutputFormatter {
                         if sm.score_breakdown.below_threshold {
                             obj["below_threshold"] = serde_json::Value::Bool(true);
                         }
+                        // Link expansion: shown with or without scores, since
+                        // it says why the result is there at all.
+                        if let Some(via) = &sm.score_breakdown.via {
+                            obj["via"] = serde_json::json!(via);
+                        }
                         obj
                     }).collect::<Vec<_>>(),
                     "total": result.total,
@@ -1121,6 +1157,9 @@ impl OutputFormatter {
                     sm.memory.summary
                 );
             }
+            for line in retrieval_annotations(&sm.score_breakdown, show_scores) {
+                outln!(self, "      {}", line);
+            }
         }
     }
 
@@ -1168,6 +1207,9 @@ impl OutputFormatter {
                     tags,
                     sm.memory.summary
                 );
+            }
+            for line in retrieval_annotations(&sm.score_breakdown, show_scores) {
+                outln!(self, "      {}", line);
             }
         }
     }
@@ -2572,6 +2614,7 @@ mod tests {
             situation_multiplier: 1.0,
             decay: 1.0,
             criticality: 0.8,
+            ..Default::default()
         }
     }
 
@@ -3705,6 +3748,54 @@ mod tests {
     fn snap_retrieval_result_without_scores() {
         snap_formats("retrieval_without_scores", |f| {
             f.print_retrieval_result(&retrieval_result(), false)
+        });
+    }
+
+    /// Phase-5 graph/usage components and a link-expanded result: the `via`
+    /// line shows with or without scores, the components only with them.
+    fn graph_retrieval_result() -> RetrievalResult {
+        let mut hit = test_score_breakdown();
+        hit.contradicts_penalty = Some(0.1);
+        hit.contradicted_by = vec!["018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string()];
+        hit.supports_multiplier = Some(1.05);
+        hit.supported_by = vec!["0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000".to_string()];
+        hit.usage_multiplier = Some(1.18);
+        let mut nb = test_score_breakdown();
+        nb.final_score = 0.375;
+        nb.via = Some(engramdb::scoring::LinkVia {
+            from: test_memory().id,
+            kind: engramdb::types::LinkKind::Supports,
+        });
+        RetrievalResult {
+            memories: vec![
+                ScoredMemory {
+                    memory: test_memory(),
+                    score: 0.75,
+                    score_breakdown: hit,
+                },
+                ScoredMemory {
+                    memory: rich_memory(),
+                    score: 0.375,
+                    score_breakdown: nb,
+                },
+            ],
+            total: 2,
+            retrieval_quality: "keyword_only".to_string(),
+            dropped_below_threshold: 0,
+        }
+    }
+
+    #[test]
+    fn snap_retrieval_result_graph_with_scores() {
+        snap_formats("retrieval_graph_with_scores", |f| {
+            f.print_retrieval_result(&graph_retrieval_result(), true)
+        });
+    }
+
+    #[test]
+    fn snap_retrieval_result_graph_without_scores() {
+        snap_formats("retrieval_graph_without_scores", |f| {
+            f.print_retrieval_result(&graph_retrieval_result(), false)
         });
     }
 

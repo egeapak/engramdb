@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 
 use crate::types::{
-    Decay, EngramConfig, Epistemic, Memory, ProvenanceSource, ScoringWeights, Situation, Status,
+    Decay, EngramConfig, Epistemic, LinkKind, Memory, ProvenanceSource, ScoringWeights, Situation,
+    Status, MAX_SUPPORTS_BOOST, MAX_USAGE_WEIGHT,
 };
 
 use super::trust::trust_weight_from_config;
@@ -45,6 +46,92 @@ impl<'a> From<&'a Memory> for ScoreTarget<'a> {
             verified_at: m.verified_at,
         }
     }
+}
+
+/// Most incoming `supports` edges that count toward the supports boost. A
+/// fourth supporter is real evidence too, but an uncapped count would let a
+/// hub (or an automatic linker gone wrong) dominate ranking by edge volume.
+pub const SUPPORTS_COUNTED_MAX: usize = 3;
+
+/// Weight of one injected session against one explicit fetch in the usage
+/// signal. Injection is the engine's own choice, a fetch is the agent's, so
+/// injection counts for less.
+pub const INJECTED_SESSION_WEIGHT: f64 = 0.3;
+
+/// Ceiling on the usage term `ρ · ln(1 + u)` (reached at `u ≈ 19` with full
+/// exposure ratio), so `usage_multiplier ≤ 1 + 3 · usage_weight`.
+pub const USAGE_TERM_CAP: f64 = 3.0;
+
+/// One memory's usage counts, as the usage boost reads them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageSignal {
+    /// Explicit opens by id (`get`).
+    pub fetched: u64,
+    /// Times rendered into an agent's context by a hook.
+    pub injected: u64,
+    /// Distinct sessions it was injected into.
+    pub injected_sessions: u64,
+}
+
+/// Graph and usage evidence about one memory, gathered by the retrieval
+/// engine in one batched lookup per query (`retrieval::signals`). Absent
+/// (`ScoringContext::signals == None`) whenever every phase-5 knob is off, so
+/// the default formula never sees it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScoreSignals {
+    /// Live memories on the other end of a **confirmed** `contradicts` edge.
+    pub contradicted_by: Vec<String>,
+    /// Live memories with a **confirmed** `supports` edge into this one.
+    pub supported_by: Vec<String>,
+    /// Usage counts, when the usage boost is on and the read succeeded.
+    pub usage: Option<UsageSignal>,
+}
+
+/// How an expanded result was reached: one hop along a confirmed edge from
+/// a direct hit (`RetrievalQuery::expand_links`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LinkVia {
+    /// The direct hit the edge starts from.
+    pub from: String,
+    /// The edge kind followed.
+    pub kind: LinkKind,
+}
+
+/// A knob value as the formula uses it: finite and inside `[0, max]`. Config
+/// validation enforces the range, but a fuzzed or hand-built config skips
+/// validation, and a NaN knob must not reach the score.
+fn knob(v: f64, max: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(0.0, max)
+    } else {
+        0.0
+    }
+}
+
+/// `1 + boost · min(n, SUPPORTS_COUNTED_MAX)`.
+pub fn supports_multiplier(boost: f64, supporters: usize) -> f64 {
+    1.0 + knob(boost, MAX_SUPPORTS_BOOST) * supporters.min(SUPPORTS_COUNTED_MAX) as f64
+}
+
+/// The usage term `min(USAGE_TERM_CAP, ρ · ln(1 + fetched + 0.3 · injected_sessions))`.
+///
+/// `ρ = min(1, (fetched + 1) / (injected + 1))` is the exposure ratio: how
+/// often being put in front of an agent led it to open the memory. It is what
+/// breaks the feedback loop — a memory is injected *because* it already ranks
+/// well, so counting injections alone would let it reward itself. With no
+/// fetch at all the term is `ln(1 + 0.3·s) / (i + 1)` with `s ≤ i`, which never
+/// exceeds about 0.17 however often the memory is injected; a memory that
+/// agents actually open keeps `ρ = 1` and earns the full logarithm.
+pub fn usage_term(usage: &UsageSignal) -> f64 {
+    let fetched = usage.fetched as f64;
+    let rho = ((fetched + 1.0) / (usage.injected as f64 + 1.0)).min(1.0);
+    let raw = fetched + INJECTED_SESSION_WEIGHT * usage.injected_sessions as f64;
+    (rho * raw.ln_1p()).clamp(0.0, USAGE_TERM_CAP)
+}
+
+/// `1 + weight · usage_term(usage)`.
+pub fn usage_multiplier(weight: f64, usage: &UsageSignal) -> f64 {
+    1.0 + knob(weight, MAX_USAGE_WEIGHT) * usage_term(usage)
 }
 
 /// Breakdown of composite score components.
@@ -105,6 +192,28 @@ pub struct ScoreBreakdown {
     pub decay: f64,
     /// Raw criticality value
     pub criticality: f64,
+
+    /// `contradicts` penalty subtracted, when `[retrieval.scoring]
+    /// .contradicts_penalty` is on and a live confirmed contradiction exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contradicts_penalty: Option<f64>,
+    /// The live memories that contradiction is with.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contradicted_by: Vec<String>,
+    /// Supports boost applied (> 1.0), when on and a live supporter exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports_multiplier: Option<f64>,
+    /// The live memories supporting this one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub supported_by: Vec<String>,
+    /// Usage boost applied (> 1.0), when on and the memory has usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_multiplier: Option<f64>,
+    /// Set on a result added by link expansion: the hit and edge it was
+    /// reached through. Its `final_score` is the hit's score times
+    /// `retrieval.expand_links_decay`; the other fields are its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<LinkVia>,
 }
 
 /// Context for scoring a memory during retrieval.
@@ -135,6 +244,11 @@ pub struct ScoringContext<'a> {
     /// every constructor starts here; thread a value in via
     /// [`ScoringContext::with_situation`].
     pub situation: Option<Situation>,
+
+    /// Graph/usage evidence for this memory (phase 5). `None` ⇒ every
+    /// graph/usage term is neutral — the engine attaches it only when a knob
+    /// is on. Thread a value in via [`ScoringContext::with_signals`].
+    pub signals: Option<&'a ScoreSignals>,
 }
 
 impl<'a> ScoringContext<'a> {
@@ -148,6 +262,7 @@ impl<'a> ScoringContext<'a> {
             semantic_score: None,
             embeddings_available: false,
             situation: None,
+            signals: None,
         }
     }
 
@@ -165,6 +280,7 @@ impl<'a> ScoringContext<'a> {
             semantic_score: None,
             embeddings_available: false,
             situation: None,
+            signals: None,
         }
     }
 
@@ -183,6 +299,7 @@ impl<'a> ScoringContext<'a> {
             semantic_score: Some(semantic_score),
             embeddings_available: true,
             situation: None,
+            signals: None,
         }
     }
 
@@ -202,12 +319,19 @@ impl<'a> ScoringContext<'a> {
             semantic_score,
             embeddings_available: semantic_score.is_some(),
             situation: None,
+            signals: None,
         }
     }
 
     /// Attach the querying agent's situation (builder-style; `None` clears).
     pub fn with_situation(mut self, situation: Option<Situation>) -> Self {
         self.situation = situation;
+        self
+    }
+
+    /// Attach graph/usage evidence (builder-style; `None` clears).
+    pub fn with_signals(mut self, signals: Option<&'a ScoreSignals>) -> Self {
+        self.signals = signals;
         self
     }
 }
@@ -292,7 +416,9 @@ fn weighted_base(
 ///    - Uses `config.retrieval.scoring.scope_only` weights
 ///    - base = 1.0*(criticality*decay)
 ///
-/// Then: `score = base * scope_multiplier * trust_multiplier`
+/// Then: `score = base * scope_multiplier * trust_multiplier *
+/// situation_multiplier * supports_multiplier * usage_multiplier`
+/// (the last two neutral unless their knobs are on; see the module docs).
 ///
 /// Scope multiplier: when scope context is provided,
 /// `scope_multiplier = scope_score`. With a `path`, depth decay provides the
@@ -306,6 +432,9 @@ fn weighted_base(
 /// Trust multiplier: `trust_floor + (1 - trust_floor) * trust_weight` (default floor=0.5).
 ///
 /// Challenge penalty: if memory.status == Status::Challenged, `score -= challenge_penalty` (default 0.10)
+///
+/// Contradicts penalty: with `context.signals` naming a live confirmed
+/// contradiction and `contradicts_penalty > 0`, `score -= contradicts_penalty`.
 ///
 /// # Arguments
 /// * `memory` - The memory to score
@@ -467,6 +596,43 @@ fn composite_score_inner(
     };
     score *= situation_multiplier;
 
+    // Graph and usage terms (phase 5), each neutral unless its knob is on AND
+    // the engine attached evidence. Multiplying by exactly 1.0 and
+    // subtracting exactly 0.0 leave the bits unchanged, so a default config
+    // scores identically to the formula before these terms existed
+    // (`default_config_ranking_is_unchanged_on_graph_fixture`).
+    let scoring = &config.retrieval.scoring;
+    let mut supports_mult = None;
+    let mut supported_by = Vec::new();
+    let mut usage_mult = None;
+    let mut contradicts = None;
+    let mut contradicted_by = Vec::new();
+    if let Some(signals) = context.signals {
+        if !signals.supported_by.is_empty() {
+            let m = supports_multiplier(scoring.supports_boost, signals.supported_by.len());
+            if m > 1.0 {
+                score *= m;
+                supports_mult = Some(m);
+                supported_by = signals.supported_by.clone();
+            }
+        }
+        if let Some(usage) = &signals.usage {
+            let m = usage_multiplier(scoring.usage_weight, usage);
+            if m > 1.0 {
+                score *= m;
+                usage_mult = Some(m);
+            }
+        }
+        if !signals.contradicted_by.is_empty() {
+            let p = knob(scoring.contradicts_penalty, 1.0);
+            if p > 0.0 {
+                contradicts = Some(p);
+                contradicted_by = signals.contradicted_by.clone();
+            }
+        }
+    }
+    let contradicts_penalty = contradicts.unwrap_or(0.0);
+
     // Apply challenge penalty as flat subtraction, sized per epistemic class
     // (§7.2): observation 0.20 / fact 0.15 / decision 0.05 by default; a
     // legacy `Flat` config value applies to all classes.
@@ -480,6 +646,10 @@ fn composite_score_inner(
         0.0
     };
     score -= challenge_penalty;
+    // Beside the challenge penalty and on the same flat scale: a confirmed
+    // contradiction with a live memory is the stronger form of the same
+    // doubt. Subtracted once, however many such edges exist.
+    score -= contradicts_penalty;
 
     // Safety clamp to [0, 1]. `f64::clamp` propagates NaN, and `criticality`
     // is parsed from untrusted files with `f64::parse` (which accepts "NaN" /
@@ -523,7 +693,7 @@ fn composite_score_inner(
         } else {
             scope_score > 0.0 && !target.logical.is_empty()
         };
-        let own = relevance - challenge_penalty;
+        let own = relevance - challenge_penalty - contradicts_penalty;
         if matched && own.is_finite() {
             own.clamp(0.0, 1.0).max(score)
         } else {
@@ -546,6 +716,12 @@ fn composite_score_inner(
         situation_multiplier,
         decay: 1.0 - decay_factor_value,
         criticality: target.criticality,
+        contradicts_penalty: contradicts,
+        contradicted_by,
+        supports_multiplier: supports_mult,
+        supported_by,
+        usage_multiplier: usage_mult,
+        via: None,
     }
 }
 
@@ -1969,5 +2145,219 @@ mod epistemic_tests {
         );
         assert_eq!(from_memory.trust_multiplier, from_target.trust_multiplier);
         assert_eq!(from_memory.scope_multiplier, from_target.scope_multiplier);
+    }
+
+    // ---- Phase 5: graph and usage terms -------------------------------------
+
+    fn graph_memory() -> Memory {
+        let mut m = test_memory();
+        m.decay = None;
+        m.criticality = 0.6;
+        m
+    }
+
+    fn signals(contra: &[&str], sup: &[&str], usage: Option<UsageSignal>) -> ScoreSignals {
+        ScoreSignals {
+            contradicted_by: contra.iter().map(|s| s.to_string()).collect(),
+            supported_by: sup.iter().map(|s| s.to_string()).collect(),
+            usage,
+        }
+    }
+
+    #[test]
+    fn signals_are_inert_when_knobs_are_off() {
+        let m = graph_memory();
+        let config = EngramConfig::default();
+        let now = Utc::now();
+        let sig = signals(
+            &["x"],
+            &["y", "z"],
+            Some(UsageSignal {
+                fetched: 50,
+                injected: 2,
+                injected_sessions: 2,
+            }),
+        );
+        let plain = composite_score(&m, &ScoringContext::scope_only(None, &[]), &config, now);
+        let with = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &[]).with_signals(Some(&sig)),
+            &config,
+            now,
+        );
+        assert_eq!(plain.final_score.to_bits(), with.final_score.to_bits());
+        assert!(with.contradicts_penalty.is_none());
+        assert!(with.contradicted_by.is_empty());
+        assert!(with.supports_multiplier.is_none());
+        assert!(with.usage_multiplier.is_none());
+    }
+
+    #[test]
+    fn contradicts_penalty_is_flat_and_applied_once() {
+        let m = graph_memory();
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.contradicts_penalty = 0.1;
+        let now = Utc::now();
+        let base = composite_score(&m, &ScoringContext::scope_only(None, &[]), &config, now);
+        for contra in [&["a"][..], &["a", "b", "c"][..]] {
+            let sig = signals(contra, &[], None);
+            let b = composite_score(
+                &m,
+                &ScoringContext::scope_only(None, &[]).with_signals(Some(&sig)),
+                &config,
+                now,
+            );
+            assert!((base.final_score - 0.1 - b.final_score).abs() < 1e-12);
+            assert_eq!(b.contradicts_penalty, Some(0.1));
+            assert_eq!(b.contradicted_by.len(), contra.len());
+        }
+    }
+
+    #[test]
+    fn contradicts_penalty_stacks_with_challenge_and_clamps_at_zero() {
+        let mut m = graph_memory();
+        m.criticality = 0.1;
+        m.status = Status::Challenged;
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.contradicts_penalty = 1.0;
+        let sig = signals(&["a"], &[], None);
+        let b = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &[]).with_signals(Some(&sig)),
+            &config,
+            Utc::now(),
+        );
+        assert_eq!(b.final_score, 0.0);
+    }
+
+    /// The scope-only gate (own relevance) pays the contradicts penalty like
+    /// the challenge penalty, so a contradicted file-scoped memory cannot
+    /// clear the threshold on criticality alone.
+    #[test]
+    fn contradicts_penalty_lowers_the_scope_gate() {
+        let mut m = graph_memory();
+        m.physical = vec!["src/auth.rs".to_string()];
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.contradicts_penalty = 0.2;
+        let sig = signals(&["a"], &[], None);
+        let ctx = ScoringContext::scope_only(Some("src/auth.rs"), &[]);
+        let plain = composite_score(&m, &ctx, &config, Utc::now());
+        let b = composite_score(
+            &m,
+            &ctx.clone().with_signals(Some(&sig)),
+            &config,
+            Utc::now(),
+        );
+        let (g0, g1) = (plain.gate_score.unwrap(), b.gate_score.unwrap());
+        assert!((g0 - 0.2 - g1).abs() < 1e-12, "{g0} vs {g1}");
+    }
+
+    #[test]
+    fn supports_multiplier_is_capped() {
+        assert_eq!(supports_multiplier(0.05, 0), 1.0);
+        assert!((supports_multiplier(0.05, 1) - 1.05).abs() < 1e-12);
+        assert!((supports_multiplier(0.05, 3) - 1.15).abs() < 1e-12);
+        assert!((supports_multiplier(0.05, 100) - 1.15).abs() < 1e-12);
+        // Knob clamped on read: out-of-range and non-finite.
+        assert!((supports_multiplier(5.0, 1) - 1.1).abs() < 1e-12);
+        assert_eq!(supports_multiplier(f64::NAN, 3), 1.0);
+        assert_eq!(supports_multiplier(-1.0, 3), 1.0);
+    }
+
+    #[test]
+    fn usage_term_normalizes_by_exposure() {
+        let u = |f, i, s| UsageSignal {
+            fetched: f,
+            injected: i,
+            injected_sessions: s,
+        };
+        assert_eq!(usage_term(&u(0, 0, 0)), 0.0);
+        // Fetched, never injected: full logarithm.
+        assert!((usage_term(&u(5, 0, 0)) - 6f64.ln()).abs() < 1e-12);
+        // Injected only: bounded however large, and shrinking with exposure.
+        let mut worst = 0.0f64;
+        for i in [1u64, 2, 3, 4, 5, 10, 100, 10_000, 1_000_000] {
+            worst = worst.max(usage_term(&u(0, i, i)));
+        }
+        assert!(worst < 0.17, "self-reward bound: {worst}");
+        assert!(usage_term(&u(0, 10_000, 10_000)) < usage_term(&u(0, 10, 10)));
+        // Fetched in proportion to exposure keeps ρ = 1.
+        assert!((usage_term(&u(10, 9, 9)) - (10.0 + 2.7f64).ln_1p()).abs() < 1e-12);
+        // Capped.
+        assert_eq!(usage_term(&u(u64::MAX, 0, 0)), USAGE_TERM_CAP);
+        assert!(usage_multiplier(0.2, &u(u64::MAX, 0, 0)) <= 1.0 + 0.2 * USAGE_TERM_CAP);
+        assert_eq!(usage_multiplier(f64::INFINITY, &u(5, 0, 0)), 1.0);
+    }
+
+    #[test]
+    fn boosts_multiply_and_stay_clamped() {
+        let mut m = graph_memory();
+        m.criticality = 1.0;
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.supports_boost = 0.1;
+        config.retrieval.scoring.usage_weight = 0.2;
+        let sig = signals(
+            &[],
+            &["a", "b", "c"],
+            Some(UsageSignal {
+                fetched: 100,
+                injected: 0,
+                injected_sessions: 0,
+            }),
+        );
+        let b = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &[]).with_signals(Some(&sig)),
+            &config,
+            Utc::now(),
+        );
+        assert_eq!(b.final_score, 1.0);
+        assert!(b.supports_multiplier.unwrap() > 1.0);
+        assert!(b.usage_multiplier.unwrap() > 1.0);
+
+        m.criticality = 0.5;
+        let plain = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &[]),
+            &config,
+            Utc::now(),
+        );
+        let b = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &[]).with_signals(Some(&sig)),
+            &config,
+            Utc::now(),
+        );
+        let want =
+            (plain.final_score * b.supports_multiplier.unwrap() * b.usage_multiplier.unwrap())
+                .min(1.0);
+        assert!((b.final_score - want).abs() < 1e-12);
+    }
+
+    #[test]
+    fn non_finite_knobs_never_reach_the_score() {
+        let m = graph_memory();
+        let mut config = EngramConfig::default();
+        config.retrieval.scoring.contradicts_penalty = f64::NAN;
+        config.retrieval.scoring.supports_boost = f64::INFINITY;
+        config.retrieval.scoring.usage_weight = f64::NEG_INFINITY;
+        let sig = signals(
+            &["a"],
+            &["b"],
+            Some(UsageSignal {
+                fetched: 3,
+                injected: 1,
+                injected_sessions: 1,
+            }),
+        );
+        let b = composite_score(
+            &m,
+            &ScoringContext::scope_only(None, &[]).with_signals(Some(&sig)),
+            &config,
+            Utc::now(),
+        );
+        assert!(b.final_score.is_finite());
+        assert!(b.contradicts_penalty.is_none());
+        assert!(b.usage_multiplier.is_none());
     }
 }

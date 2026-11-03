@@ -1340,6 +1340,33 @@ impl MemoryStore {
             .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
     }
 
+    /// The edges touching any of `ids` (full ids), deduplicated, in one
+    /// query (`edge_index::load_touching_any`). Read-only.
+    pub async fn edges_touching_any(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_touching_any(self.lance_index.connection(), ids)
+            .await
+            .map(crate::edge_index::dedupe)
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+    }
+
+    /// Index rows for exactly `ids` (full ids; unknown ids are simply
+    /// absent), in `IN` lists of at most 500. Read-only.
+    pub async fn list_for_filtering_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<IndexForFiltering>> {
+        use lancedb::expr::{col, is_in, lit};
+        let mut out = Vec::new();
+        for chunk in ids.chunks(500) {
+            let expr = is_in(col("id"), chunk.iter().map(lit).collect());
+            out.extend(self.list_for_filtering_where_expr(expr).await?);
+        }
+        Ok(out)
+    }
+
     /// The edges with `id` (a full id) at either end, deduplicated.
     pub async fn edges_touching(&self, id: &str) -> Result<Vec<crate::edge_index::EdgeRow>> {
         crate::edge_index::load_touching(self.lance_index.connection(), id)

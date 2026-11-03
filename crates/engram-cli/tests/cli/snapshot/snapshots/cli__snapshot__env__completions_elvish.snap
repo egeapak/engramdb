@@ -181,6 +181,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand --detail-level 'Detail level: summary, content, full'
             cand --epistemic 'Filter by epistemic class: fact, observation, decision (repeatable)'
             cand --situation 'Your situation, to reweight classes: session_start, file_edit, debugging, design_choice'
+            cand --expand-links 'Add up to N one-hop neighbours of the top results, over confirmed `supports`, `derived_from` and `related_to` edges (bare flag: 5; 0 = off; max 20). Defaults to `[retrieval].expand_links` (0). Added results are marked with the hit and edge they came through'
             cand --group 'Query a named group store directly (instead of the current project). Subscribed groups already fan into a normal project query; use this to inspect one group''s memories in isolation'
             cand --format 'Output format'
             cand --dir 'Working directory (default: current directory)'

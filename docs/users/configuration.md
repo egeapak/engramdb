@@ -26,6 +26,8 @@ relevance_threshold = 0.45     # minimum score to return (rank mode: after the r
 rank_fallback = 3              # rank mode: weak matches returned, marked, when nothing clears it
 max_results = 10
 include_expired = false        # set true to surface decayed memories
+expand_links = 0               # default for query --expand-links: one-hop neighbours added (0 = off, max 20)
+expand_links_decay = 0.5       # an added neighbour scores hit score x this, in (0, 1]
 
 [retrieval.scoring.with_query]
 semantic = 0.55
@@ -51,6 +53,9 @@ challenge_penalty = { fact = 0.15, observation = 0.20, decision = 0.05 }
 depth_decay_base = 0.82        # base for exponential scope-depth decay
 depth_decay_floor = 0.3        # minimum scope score regardless of depth
 scope_multiplier_floor = 0.5   # neutral base for logical-only scope context
+contradicts_penalty = 0.0      # subtracted for a confirmed contradiction with a live memory (0 = off)
+supports_boost = 0.0           # x(1 + b*min(n,3)) for n live confirmed supporters (0 = off, max 0.1)
+usage_weight = 0.0             # usage boost weight (0 = off, max 0.2); see below
 
 [retrieval.scoring.situation]
 floor = 0.6                    # multiplier floor; 1.0 disables situation weighting
@@ -279,3 +284,49 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 | `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |
 
+## Links and usage in scoring
+
+Four settings let [links](./links.md#links-in-retrieval-opt-in) and recorded
+usage take part in retrieval. All are off by default, and off means exactly
+off: no extra lookup runs and every score is bit-for-bit what it was without
+them. The full formula is
+
+```text
+score = base × scope × trust × situation × supports_multiplier × usage_multiplier
+        − challenge_penalty − contradicts_penalty        (clamped to [0, 1])
+```
+
+**`usage_weight`** (α) boosts memories agents actually open:
+
+```text
+usage_multiplier = 1 + α × min(3, ρ × ln(1 + fetched + 0.3 × injected_sessions))
+ρ                = min(1, (fetched + 1) / (injected + 1))
+```
+
+`fetched` counts explicit opens by id (`get`), `injected` the times a hook put
+the memory into an agent's context, `injected_sessions` the distinct sessions
+it was injected into. The exposure ratio ρ is what stops a feedback loop: a
+memory is injected *because* it already ranks well, so counting injections on
+their own would let it reward itself. A memory that is injected but never
+opened keeps ρ = 1/(injected + 1), and its term stays below about 0.17 however
+often it is injected; one that agents open as often as they see it keeps
+ρ = 1. Usage is read from the store's usage tables and log (see
+`engramdb stats --memory`), at most every 30 seconds per process; a failed read
+means no boost, never a failed query. Usage is recorded only when
+`[stats].enabled` is on.
+
+With any of these on, `query --show-scores` lists what moved each score
+(`contradicts -0.10 from <id>`, `supports x1.05 from <id>`, `usage x1.12`),
+and the JSON breakdown (CLI `--show-scores`, MCP `score_breakdown`) carries
+`contradicts_penalty` / `contradicted_by`, `supports_multiplier` /
+`supported_by` and `usage_multiplier`, present only when they changed the
+score.
+
+Cost: each edge knob adds one `edges` query per query (plus one index lookup
+for linked memories outside the candidate set), usage one read cached for 30
+seconds, and expansion one `edges` query when the scoring knobs did not
+already load it. Measured with `examples/graph_scoring_eval.rs` (`--profile
+eval`, 1,000 memories, ~400 edges, no embedding model, p50): the no-query rank
+shape the hooks use goes from 11.0 ms to 13.9 ms with the edge knobs, 12.0 ms
+with usage, 15.3 ms with everything plus `expand_links 5`; keyword queries
+(~30 ms) gain 1–4 ms. With every knob off nothing is looked up.

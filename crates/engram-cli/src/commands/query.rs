@@ -28,6 +28,8 @@ pub struct QueryParams {
     pub situation: Option<String>,
     pub include_invalidated: bool,
     pub show_scores: bool,
+    /// `--expand-links [N]`: `None` defers to `[retrieval].expand_links`.
+    pub expand_links: Option<usize>,
     /// Also merge global-store memories into the project results.
     pub include_global: bool,
 }
@@ -150,6 +152,14 @@ async fn compute_query_result(
     if let Some(mc) = params.min_criticality {
         validate_score(mc, "min_criticality")?;
     }
+    if let Some(n) = params.expand_links {
+        if n > engramdb::types::MAX_EXPAND_LINKS {
+            anyhow::bail!(
+                "--expand-links must be at most {}, got {n}",
+                engramdb::types::MAX_EXPAND_LINKS
+            );
+        }
+    }
 
     let query = RetrievalQuery {
         mode: params.mode,
@@ -170,6 +180,7 @@ async fn compute_query_result(
             .transpose()?,
         include_invalidated: Some(params.include_invalidated),
         rank_fallback: None,
+        expand_links: params.expand_links,
     };
 
     // When querying a shared store directly (`--global`/`--group`), there is no
@@ -350,6 +361,7 @@ mod tests {
             detail_level: None,
             include_expired: false,
             show_scores: false,
+            expand_links: None,
             include_global: false,
         }
     }

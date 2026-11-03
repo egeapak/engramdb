@@ -35,11 +35,16 @@ Every tool exposed by `engramdb serve`. For when to use which tool, see [workflo
 | `situation?` | `string` | `session_start` \| `file_edit` \| `debugging` \| `design_choice`. Reweights epistemic classes for what you're doing (see [query-modes.md](./query-modes.md#situation-aware-queries)). Declare `debugging` when investigating a failure, `design_choice` when weighing alternatives. |
 | `include_invalidated?` | `bool` | Default false. Include memories whose validity window was closed (superseded / invalidated). |
 | `include_global?` | `bool` | Also merge global-store hits. Default false. |
+| `expand_links?` | `u32` | Add up to N one-hop neighbours of the results, over confirmed `supports` / `derived_from` / `related_to` edges (0 = off, max 20; default `[retrieval].expand_links`, normally 0). Use it when the direct hits are a decision or rule and you also want its evidence or what was derived from it. |
 | `project?` | `string` | See conventions. |
 
 In `mode: "filter"`, **at least one** of `query`, `path`, `logical`, or `tags` must be present.
 
 Every returned memory carries `epistemic` (always) plus `valid_while`, `valid_from`, `invalidated_at`, `superseded_by`, and `verified_at` when present. Each result's `score_breakdown` includes `situation_multiplier` (1.0 when no `situation` was passed).
+
+When the project turns on the link and usage scoring settings (all off by default; see [configuration](../users/configuration.md#links-and-usage-in-scoring)), `score_breakdown` also carries whichever of these changed the score: `contradicts_penalty` with `contradicted_by` (ids of live memories it has a confirmed contradiction with — treat the result as disputed), `supports_multiplier` with `supported_by`, and `usage_multiplier`.
+
+A result added by `expand_links` carries `via: {from, kind}` — the direct result it was reached from and the edge kind. It was **not** matched by your query: read it as context for `from`, not as an answer on its own. It passed every filter a direct result must (types, tags, class, criticality, expiry, validity, audience), and is scored at that result's score × `expand_links_decay` (or its own score when higher), so it always ranks below the result it came from.
 
 ### `get` (read-only)
 

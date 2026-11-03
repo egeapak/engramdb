@@ -4410,7 +4410,7 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__query)
-            opts="-p -l -t -n -q -v -h --mode --query --path --logical --type --tags --min-criticality --max-results --detail-level --include-expired --epistemic --situation --include-invalidated --show-scores --include-global --global --group --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            opts="-p -l -t -n -q -v -h --mode --query --path --logical --type --tags --min-criticality --max-results --detail-level --include-expired --epistemic --situation --include-invalidated --show-scores --expand-links --include-global --global --group --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4473,6 +4473,10 @@ _engramdb() {
                     return 0
                     ;;
                 --situation)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --expand-links)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

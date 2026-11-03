@@ -530,6 +530,47 @@ pub async fn load_touching(conn: &Connection, id: &str) -> Result<Vec<EdgeRow>> 
     .await
 }
 
+/// The rows touching any of `ids` from either end (not deduped), in **one**
+/// query: an `src_id IN (…) OR dst_id IN (…)` filter when the set fits one
+/// `IN` list ([`IN_LIST_CHUNK`]), otherwise a full scan filtered here. A
+/// candidate set that large is most of a store anyway, and one scan beats
+/// `n / 500` round trips. What retrieval's graph signals read for a whole
+/// candidate set. Empty when the table is missing.
+pub async fn load_touching_any(conn: &Connection, ids: &[String]) -> Result<Vec<EdgeRow>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(table) = open(conn).await? else {
+        return Ok(Vec::new());
+    };
+    if ids.len() > IN_LIST_CHUNK {
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let rows = read(
+            table
+                .query()
+                .execute()
+                .await
+                .context("Failed to query edges")?,
+        )
+        .await?;
+        return Ok(rows
+            .into_iter()
+            .filter(|r| wanted.contains(r.src_id.as_str()) || wanted.contains(r.dst_id.as_str()))
+            .collect());
+    }
+    let list = || ids.iter().map(lit).collect::<Vec<_>>();
+    let filter = is_in(col("src_id"), list()).or(is_in(col("dst_id"), list()));
+    read(
+        table
+            .query()
+            .only_if_expr(filter)
+            .execute()
+            .await
+            .context("Failed to query edges")?,
+    )
+    .await
+}
+
 async fn read(mut stream: lancedb::arrow::SendableRecordBatchStream) -> Result<Vec<EdgeRow>> {
     let mut out = Vec::new();
     while let Some(batch) = stream.next().await {
@@ -765,5 +806,53 @@ mod tests {
         );
         replace_owned(&conn, &["b".into()], &[]).await.unwrap();
         assert!(load_all(&conn).await.unwrap().is_empty());
+    }
+
+    /// One query for a whole candidate set, by either strategy: an `IN` list
+    /// up to `IN_LIST_CHUNK` ids, a filtered full scan above it. Both must
+    /// return exactly the rows touching the set, from either end.
+    #[tokio::test]
+    async fn load_touching_any_matches_per_id_reads_by_either_strategy() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = lancedb::connect(tmp.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        assert!(load_touching_any(&conn, &["a".into()])
+            .await
+            .unwrap()
+            .is_empty());
+
+        let mut rows = Vec::new();
+        for i in 0..20 {
+            let mut m = mem(&format!("m{i}"));
+            m.links.push(Link::new(
+                format!("m{}", (i + 1) % 20),
+                LinkKind::Supports,
+                LinkOrigin::Human,
+            ));
+            rows.extend(edges_of(&m));
+        }
+        rebuild(&conn, &rows).await.unwrap();
+        let keys = |v: Vec<EdgeRow>| {
+            let mut k: Vec<String> = v.iter().map(EdgeRow::row_key).collect();
+            k.sort();
+            k
+        };
+        let small: Vec<String> = vec!["m3".into(), "m10".into()];
+        let got = keys(load_touching_any(&conn, &small).await.unwrap());
+        let mut want = Vec::new();
+        for id in &small {
+            want.extend(load_touching(&conn, id).await.unwrap());
+        }
+        let mut want = keys(want);
+        want.dedup();
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 4, "m2→m3, m3→m4, m9→m10, m10→m11");
+
+        // Above the IN-list bound: same answer through the scan.
+        let mut big: Vec<String> = (0..IN_LIST_CHUNK + 1).map(|i| format!("pad{i}")).collect();
+        big.extend(small.iter().cloned());
+        assert_eq!(keys(load_touching_any(&conn, &big).await.unwrap()), want);
     }
 }

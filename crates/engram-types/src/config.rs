@@ -189,7 +189,40 @@ pub struct ScoringConfig {
     /// Situation-conditioned epistemic-class weighting (post-multiplier).
     #[serde(default)]
     pub situation: SituationConfig,
+
+    /// Flat subtraction for a memory with a **confirmed** `contradicts` edge
+    /// to a live memory (default 0.0 = off). Applied beside
+    /// `challenge_penalty`, once however many such edges it has. Both ends of
+    /// an undirected contradiction are penalized: without a reviewer's
+    /// direction neither side is known to be right. A proposed edge never
+    /// counts, and a reviewer who picks a direction turns the edge into
+    /// `supersedes`, whose target is invalidated (hidden) instead.
+    #[serde(default)]
+    pub contradicts_penalty: f64,
+
+    /// Per-supporter boost from confirmed incoming `supports` edges from live
+    /// memories (default 0.0 = off): multiplier
+    /// `1 + supports_boost * min(n, 3)`. At most 0.1, so three supporters
+    /// lift a score by 30% at the very most.
+    #[serde(default)]
+    pub supports_boost: f64,
+
+    /// Weight of the usage boost (default 0.0 = off):
+    /// `1 + usage_weight * min(3, ρ * ln(1 + fetched + 0.3 * injected_sessions))`
+    /// with the exposure ratio `ρ = min(1, (fetched + 1) / (injected + 1))`,
+    /// so a memory that is only ever injected — and is injected *because*
+    /// it already ranks well — cannot reward itself (see
+    /// `scoring::usage_multiplier`). At most 0.2.
+    #[serde(default)]
+    pub usage_weight: f64,
 }
+
+/// Upper bound of `retrieval.scoring.supports_boost`.
+pub const MAX_SUPPORTS_BOOST: f64 = 0.1;
+/// Upper bound of `retrieval.scoring.usage_weight`.
+pub const MAX_USAGE_WEIGHT: f64 = 0.2;
+/// Upper bound of `retrieval.expand_links` (and of a query's own value).
+pub const MAX_EXPAND_LINKS: usize = 20;
 
 /// Challenge penalty: legacy flat value or per-epistemic-class values.
 ///
@@ -497,7 +530,23 @@ impl Default for ScoringConfig {
             depth_decay_base: 0.82,
             depth_decay_floor: 0.3,
             situation: SituationConfig::default(),
+            contradicts_penalty: 0.0,
+            supports_boost: 0.0,
+            usage_weight: 0.0,
         }
+    }
+}
+
+impl ScoringConfig {
+    /// Whether any knob that reads the `edges` table is on. Off ⇒ the engine
+    /// performs no edge lookup at all.
+    pub fn edge_signals_enabled(&self) -> bool {
+        self.contradicts_penalty > 0.0 || self.supports_boost > 0.0
+    }
+
+    /// Whether the usage boost is on. Off ⇒ no usage read.
+    pub fn usage_signal_enabled(&self) -> bool {
+        self.usage_weight > 0.0
     }
 }
 
@@ -716,6 +765,17 @@ pub struct RetrievalConfig {
 
     /// Scoring configuration
     pub scoring: ScoringConfig,
+
+    /// Default for a query's `expand_links`: how many one-hop neighbours of
+    /// the top hits to add, following confirmed `supports`, `derived_from`
+    /// and `related_to` edges (default 0 = off; at most
+    /// [`MAX_EXPAND_LINKS`]). A query's own value overrides it; hooks always
+    /// pass 0.
+    pub expand_links: usize,
+
+    /// Score of an expanded neighbour as a fraction of the hit it was reached
+    /// from (default 0.5, in `(0, 1]`).
+    pub expand_links_decay: f64,
 }
 
 impl Default for RetrievalConfig {
@@ -726,6 +786,8 @@ impl Default for RetrievalConfig {
             max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
+            expand_links: 0,
+            expand_links_decay: 0.5,
         }
     }
 }
@@ -2329,6 +2391,26 @@ impl EngramConfig {
         if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_floor) {
             anyhow::bail!("scoring.depth_decay_floor must be in [0.0, 1.0]");
         }
+        let scoring = &self.retrieval.scoring;
+        if !(0.0..=1.0).contains(&scoring.contradicts_penalty) {
+            anyhow::bail!("scoring.contradicts_penalty must be in [0.0, 1.0]");
+        }
+        if !(0.0..=MAX_SUPPORTS_BOOST).contains(&scoring.supports_boost) {
+            anyhow::bail!("scoring.supports_boost must be in [0.0, {MAX_SUPPORTS_BOOST}]");
+        }
+        if !(0.0..=MAX_USAGE_WEIGHT).contains(&scoring.usage_weight) {
+            anyhow::bail!("scoring.usage_weight must be in [0.0, {MAX_USAGE_WEIGHT}]");
+        }
+        if self.retrieval.expand_links > MAX_EXPAND_LINKS {
+            anyhow::bail!(
+                "retrieval.expand_links ({}) must be at most {MAX_EXPAND_LINKS}",
+                self.retrieval.expand_links
+            );
+        }
+        let decay = self.retrieval.expand_links_decay;
+        if !(decay > 0.0 && decay <= 1.0) {
+            anyhow::bail!("retrieval.expand_links_decay ({decay}) must be in (0.0, 1.0]");
+        }
 
         if self.embeddings.dimensions == 0 || self.embeddings.dimensions > 4096 {
             anyhow::bail!(
@@ -3430,6 +3512,42 @@ weight = 0.7
             relevance: 0.25,
         };
         assert!(sw.validate("test").is_ok());
+    }
+
+    #[test]
+    fn graph_and_usage_knobs_default_off_and_validate() {
+        let c = EngramConfig::default();
+        assert_eq!(c.retrieval.scoring.contradicts_penalty, 0.0);
+        assert_eq!(c.retrieval.scoring.supports_boost, 0.0);
+        assert_eq!(c.retrieval.scoring.usage_weight, 0.0);
+        assert_eq!(c.retrieval.expand_links, 0);
+        assert!(!c.retrieval.scoring.edge_signals_enabled());
+        assert!(!c.retrieval.scoring.usage_signal_enabled());
+        assert!(c.validate().is_ok());
+
+        // A partial section names only the knob it sets.
+        let parsed: EngramConfig = toml::from_str(
+            "[retrieval]\nexpand_links = 3\n[retrieval.scoring]\ncontradicts_penalty = 0.1\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.retrieval.expand_links, 3);
+        assert_eq!(parsed.retrieval.scoring.contradicts_penalty, 0.1);
+        assert!(parsed.retrieval.scoring.edge_signals_enabled());
+        assert!(parsed.validate().is_ok());
+
+        let bad = |f: fn(&mut EngramConfig)| {
+            let mut c = EngramConfig::default();
+            f(&mut c);
+            c.validate().is_err()
+        };
+        assert!(bad(|c| c.retrieval.scoring.contradicts_penalty = 1.5));
+        assert!(bad(|c| c.retrieval.scoring.contradicts_penalty = f64::NAN));
+        assert!(bad(|c| c.retrieval.scoring.supports_boost = 0.2));
+        assert!(bad(|c| c.retrieval.scoring.usage_weight = -0.1));
+        assert!(bad(|c| c.retrieval.scoring.usage_weight = 0.5));
+        assert!(bad(|c| c.retrieval.expand_links = MAX_EXPAND_LINKS + 1));
+        assert!(bad(|c| c.retrieval.expand_links_decay = 0.0));
+        assert!(bad(|c| c.retrieval.expand_links_decay = 1.5));
     }
 
     #[test]

@@ -31,6 +31,7 @@
 pub mod engine;
 pub mod filters;
 pub mod reranker;
+pub mod signals;
 
 // Re-export main types and functions
 pub use engine::{

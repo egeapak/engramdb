@@ -51,6 +51,7 @@ fn query_input(mode: &str) -> QueryInput {
         detail_level: None,
         include_expired: None,
         include_global: None,
+        expand_links: None,
         project: None,
     }
 }
@@ -7433,4 +7434,85 @@ async fn challenge_against_is_validated_first_and_winner_needs_confirmed() {
         }))
         .await;
     assert!(res.is_err(), "{res:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: `expand_links` and the graph score components on `query`.
+// ---------------------------------------------------------------------------
+
+async fn link_confirmed(server: &EngramDbServer, src: &str, kind: &str, dst: &str) {
+    let r = server
+        .memory_link(Parameters(LinkInput {
+            src: src.to_string(),
+            kind: kind.to_string(),
+            dst: dst.to_string(),
+            dst_store: None,
+            confidence: None,
+            note: None,
+            status: Some("confirmed".to_string()),
+            project: None,
+        }))
+        .await;
+    parse_ok(&r);
+}
+
+#[tokio::test]
+async fn query_expand_links_adds_marked_neighbour() {
+    let (_dir, server) = setup().await;
+    let hit = create_and_get_id(&server, "decision", "Quokka rotation", "quokka body").await;
+    let nb = create_and_get_id(&server, "context", "Unrelated wording", "other body").await;
+    link_confirmed(&server, &nb, "supports", &hit).await;
+
+    // Off by default: only the keyword hit.
+    let plain = parse_ok(
+        &server
+            .memory_query(Parameters(QueryInput {
+                query: Some("quokka".to_string()),
+                ..query_input("filter")
+            }))
+            .await,
+    );
+    let ids: Vec<&str> = plain["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&nb.as_str()));
+    assert!(plain["memories"][0].get("via").is_none());
+
+    let expanded = parse_ok(
+        &server
+            .memory_query(Parameters(QueryInput {
+                query: Some("quokka".to_string()),
+                expand_links: Some(3),
+                ..query_input("filter")
+            }))
+            .await,
+    );
+    let m = expanded["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == nb.as_str())
+        .expect("the supporter is reached through the edge");
+    assert_eq!(m["via"]["from"], hit.as_str());
+    assert_eq!(m["via"]["kind"], "supports");
+}
+
+#[tokio::test]
+async fn query_expand_links_rejects_more_than_the_cap() {
+    let (_dir, server) = setup().await;
+    let result = server
+        .memory_query(Parameters(QueryInput {
+            query: Some("x".to_string()),
+            expand_links: Some(engramdb::types::MAX_EXPAND_LINKS as u32 + 1),
+            ..query_input("filter")
+        }))
+        .await;
+    let err = parse_err(&result);
+    assert!(
+        err.to_string().contains("expand_links must be at most"),
+        "{err}"
+    );
 }

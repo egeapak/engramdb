@@ -86,7 +86,8 @@ Proposed links can also be reviewed in the
 When a memory is created (and when an MCP `update` re-embeds it), EngramDB
 compares it with its nearest neighbours by embedding and may *propose* links.
 Nothing it proposes is trusted until someone reviews it: a proposed link
-changes no score and no retrieval result.
+changes no score and no retrieval result, even with the
+[retrieval settings](#links-in-retrieval-opt-in) on.
 
 - **Contradictions** — when `[nli].enabled` is on, the same NLI check that
   auto-challenges a contradiction also proposes a `contradicts` link to the
@@ -131,6 +132,53 @@ stored on the personal side. Each proposal records a `linked` usage event
 from the `maintenance` surface. Switch them off with
 `[links].propose_contradictions = false` / `propose_similar = false`; see
 [configuration](./configuration.md).
+
+## Links in retrieval (opt-in)
+
+By default links change no score and no query result. Four settings, all
+off, let confirmed links take part in retrieval. None of them reads a
+*proposed* or *rejected* link, and none follows a link into another store
+(whether that end is live cannot be checked from here, and an unknown end is
+not evidence).
+
+| Setting | Default | Effect |
+|---|---|---|
+| `[retrieval.scoring] contradicts_penalty` | `0.0` | Subtracted once from a memory with a confirmed `contradicts` link to a **live** memory (it exists and is neither invalidated nor expired). Both ends pay it: without a reviewer's verdict neither side is known to be right. |
+| `[retrieval.scoring] supports_boost` | `0.0` (max `0.1`) | Multiplier `1 + boost × min(n, 3)` for `n` live memories with a confirmed `supports` link **into** this one. Supporting something is not evidence for yourself, so outgoing links do not count. |
+| `[retrieval.scoring] usage_weight` | `0.0` (max `0.2`) | Usage boost; see [configuration](./configuration.md#links-and-usage-in-scoring). Not a link setting, listed here because it rides the same path. |
+| `[retrieval] expand_links` | `0` (max `20`) | Default for `query --expand-links`: add up to N one-hop neighbours of the top results. |
+
+A contradiction you resolve with `--winner` is no longer a `contradicts`
+link: it becomes `<winner> supersedes <loser>`, the loser is invalidated and
+so hidden from queries by default, and only the loser is affected. A
+contradiction whose other side was superseded, expired or deleted stops
+penalizing at once.
+
+### Following links from results
+
+```bash
+engramdb query "deploy freeze" --mode filter --expand-links 3
+engramdb query "deploy freeze" --mode filter --expand-links      # bare flag: 5
+```
+
+MCP: `query` with `"expand_links": 3`. From each direct result (not from a
+weak fallback match), confirmed `supports`, `derived_from` and `related_to`
+links are followed one hop in either direction. `contradicts` is never
+followed (its effect is the penalty), nor `duplicates` (the same content
+again) or `supersedes` (one end is invalidated).
+
+An added result is marked with the hit and link it came through (`via
+<id> (supports)` in text output, `"via": {"from", "kind"}` in JSON) and is
+scored at the hit's score × `[retrieval] expand_links_decay` (0.5), or its
+own score when that is higher. It is added on top of `--max-results`.
+
+**Expansion never shows you a memory the query would not have been allowed to
+return.** A neighbour must pass every filter the query applies — type, tags,
+epistemic class, minimum criticality, expiry, validity (invalidated memories
+stay hidden unless `--include-invalidated`), and in filter mode the path and
+logical scope filters. For group and global memories the `audience` filter
+applies to neighbours like to any result, and a neighbour reached only through
+a memory you cannot see is dropped too. Hooks never expand.
 
 ## Rules worth knowing
 

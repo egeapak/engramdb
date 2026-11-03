@@ -6,11 +6,13 @@
 
 use super::filters::{apply_index_filters, build_filter_predicate, SearchFilters};
 use super::reranker::Reranker;
+use super::signals::{GraphSnapshot, UsageCache};
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::scoring::{
     composite_score, composite_score_ignore_decay, composite_score_target,
-    composite_score_target_ignore_decay, ScoreBreakdown, ScoreTarget, ScoringContext,
+    composite_score_target_ignore_decay, LinkVia, ScoreBreakdown, ScoreSignals, ScoreTarget,
+    ScoringContext,
 };
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Epistemic, KeywordStems, Memory, MemoryType, Situation};
@@ -143,6 +145,21 @@ pub struct RetrievalQuery {
     /// threshold). Hooks pass `Some(0)`: they inject "relevant memories" and
     /// must never present a weak match as one.
     pub rank_fallback: Option<usize>,
+
+    /// One-hop link expansion: add up to this many neighbours of the direct
+    /// hits, reached over confirmed `supports` / `derived_from` /
+    /// `related_to` edges (see `retrieval::signals::expansion_follows`).
+    /// `None` ⇒ `retrieval.expand_links` (default 0 = off); capped at
+    /// [`crate::types::MAX_EXPAND_LINKS`]. Hooks pass `Some(0)`: expansion
+    /// costs an edges query, and the hooks' latency budget is per tool call.
+    ///
+    /// A neighbour is added only if this query would have been allowed to
+    /// return it: it must be in the candidate set that every hard filter
+    /// (type, tags, epistemic class, criticality, expiry, validity, the
+    /// filter-mode scope filters) already narrowed. It skips the relevance
+    /// signal and threshold — that is the point — and is marked with
+    /// `ScoreBreakdown::via`.
+    pub expand_links: Option<usize>,
 }
 
 /// A memory with its computed relevance score.
@@ -217,6 +234,9 @@ pub struct RetrievalEngine {
     /// Optional session ID — recorded with every event, used to compute
     /// followup rate and unique-session count.
     session_id: Option<String>,
+    /// The usage view the usage boost reads, refreshed at most every
+    /// `signals::USAGE_CACHE_TTL` (read only when `usage_weight > 0`).
+    usage_cache: UsageCache,
 }
 
 impl RetrievalEngine {
@@ -236,6 +256,7 @@ impl RetrievalEngine {
             stats: None,
             project_id: None,
             session_id: None,
+            usage_cache: UsageCache::default(),
         }
     }
 
@@ -1224,6 +1245,11 @@ impl RetrievalEngine {
         // scoring the loaded `Memory` (asserted by
         // `tests::rank_from_index_matches_file_load`). Query / Filter / keyword
         // / semantic paths still load candidates below (they need content).
+        // Step 2.6: graph and usage evidence (phase 5), in one batched lookup
+        // for the whole candidate set — and no lookup at all when every knob
+        // is off, which is the default.
+        let (graph, signals) = self.load_score_signals(&filtered_entries).await;
+
         if query.query.is_none() && query.mode == RetrievalMode::Rank {
             return self
                 .rank_scope_only_from_index(
@@ -1231,6 +1257,8 @@ impl RetrievalEngine {
                     query_path.as_deref(),
                     &filtered_entries,
                     query_started,
+                    graph,
+                    signals.as_ref(),
                 )
                 .await;
         }
@@ -1470,7 +1498,8 @@ impl RetrievalEngine {
             } else {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
             }
-            .with_situation(query.situation);
+            .with_situation(query.situation)
+            .with_signals(signals.as_ref().and_then(|m| m.get(&memory.id)));
 
             // Expired memories (only present when `include_expired` is set —
             // otherwise Step 2.5b already dropped them) are scored ignoring
@@ -1590,7 +1619,20 @@ impl RetrievalEngine {
         let max_results = query
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
-        candidates.truncate(max_results);
+        let tail = candidates.split_off(max_results.min(candidates.len()));
+
+        // Step 9.5: one-hop link expansion (opt-in). Neighbours come from the
+        // filtered candidate set only, so `memory_map` already holds them.
+        let expanded = self
+            .expand_candidates(query, &candidates, tail, &filtered_entries, graph)
+            .await;
+        // Expanded neighbours are results the caller sees, so `total` counts
+        // them ("Found 3 memories (out of 2 total)" would read as a bug).
+        let total = total + expanded.len();
+        if !expanded.is_empty() {
+            candidates.extend(expanded);
+            sort_candidates(&mut candidates);
+        }
 
         let mut scored_memories: Vec<ScoredMemory> = candidates
             .into_iter()
@@ -1684,6 +1726,8 @@ impl RetrievalEngine {
         ctx_path: Option<&str>,
         filtered_entries: &[crate::storage::IndexForFiltering],
         query_started: std::time::Instant,
+        graph: Option<GraphSnapshot>,
+        signals: Option<&HashMap<String, ScoreSignals>>,
     ) -> Result<RetrievalResult> {
         let now = Utc::now();
 
@@ -1701,7 +1745,8 @@ impl RetrievalEngine {
                 verified_at: e.verified_at,
             };
             let context = ScoringContext::scope_only(ctx_path, &query.logical)
-                .with_situation(query.situation);
+                .with_situation(query.situation)
+                .with_signals(signals.and_then(|m| m.get(&e.id)));
             // Mirror the main loop: expired entries (present only under
             // include_expired) score ignoring decay.
             let breakdown = if e.expires_at.is_some_and(|exp| now > exp) {
@@ -1743,9 +1788,18 @@ impl RetrievalEngine {
         let max_results = query
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
-        candidates.truncate(max_results);
+        let tail = candidates.split_off(max_results.min(candidates.len()));
+        let expanded = self
+            .expand_candidates(query, &candidates, tail, filtered_entries, graph)
+            .await;
+        let total = total + expanded.len();
+        if !expanded.is_empty() {
+            candidates.extend(expanded);
+            sort_candidates(&mut candidates);
+        }
 
-        // Materialize ONLY the survivors — the whole point of this path.
+        // Materialize ONLY the survivors (and any expanded neighbours) — the
+        // whole point of this path.
         let survivor_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
         let loaded: HashMap<String, Memory> = self
             .store
@@ -1790,6 +1844,168 @@ impl RetrievalEngine {
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
         Ok(result)
     }
+
+    /// The phase-5 evidence for `entries`: the edge snapshot (kept for link
+    /// expansion to reuse) and per-memory [`ScoreSignals`]. `(None, None)`
+    /// without any I/O when `contradicts_penalty`, `supports_boost` and
+    /// `usage_weight` are all 0 — the default. See `retrieval::signals`.
+    async fn load_score_signals(
+        &self,
+        entries: &[crate::storage::IndexForFiltering],
+    ) -> (Option<GraphSnapshot>, Option<HashMap<String, ScoreSignals>>) {
+        let scoring = &self.config.retrieval.scoring;
+        let edges_on = scoring.edge_signals_enabled();
+        let usage_on = scoring.usage_signal_enabled();
+        if (!edges_on && !usage_on) || entries.is_empty() {
+            return (None, None);
+        }
+        let ids: std::collections::HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        let mut map: HashMap<String, ScoreSignals> = HashMap::new();
+        let mut graph = None;
+        if edges_on {
+            let refs: Vec<&crate::storage::IndexForFiltering> = entries.iter().collect();
+            let g = GraphSnapshot::load(&self.store, &refs, true, Utc::now()).await;
+            map = g.score_signals(&ids);
+            graph = Some(g);
+        }
+        if usage_on {
+            let usage = self.usage_cache.get(&self.store).await;
+            for id in &ids {
+                if let Some(u) = usage.get(*id) {
+                    map.entry(id.to_string()).or_default().usage = Some(*u);
+                }
+            }
+        }
+        (graph, Some(map))
+    }
+
+    /// One-hop link expansion from `hits` (the truncated, sorted result).
+    ///
+    /// Returns at most `expand_links` neighbours, best first, each scored at
+    /// its best parent's score times `expand_links_decay` (or its own score
+    /// when that is higher — a candidate cut only by `max_results`) and
+    /// marked with [`LinkVia`]. A neighbour must be in `entries` — the
+    /// candidate set after every hard filter — so expansion can never return
+    /// a memory the query itself was not allowed to return. Weak fallback
+    /// hits (`below_threshold`) expand nothing: a lead is not a hit.
+    async fn expand_candidates(
+        &self,
+        query: &RetrievalQuery,
+        hits: &[ScoredCandidate],
+        tail: Vec<ScoredCandidate>,
+        entries: &[crate::storage::IndexForFiltering],
+        graph: Option<GraphSnapshot>,
+    ) -> Vec<ScoredCandidate> {
+        let n = query
+            .expand_links
+            .unwrap_or(self.config.retrieval.expand_links)
+            .min(crate::types::MAX_EXPAND_LINKS);
+        let parents: Vec<&ScoredCandidate> = hits
+            .iter()
+            .filter(|c| !c.breakdown.below_threshold)
+            .collect();
+        if n == 0 || parents.is_empty() {
+            return Vec::new();
+        }
+        let visible: HashMap<&str, &crate::storage::IndexForFiltering> =
+            entries.iter().map(|e| (e.id.as_str(), e)).collect();
+        let graph = match graph {
+            Some(g) => g,
+            None => {
+                let refs: Vec<&crate::storage::IndexForFiltering> = parents
+                    .iter()
+                    .filter_map(|c| visible.get(c.id.as_str()).copied())
+                    .collect();
+                GraphSnapshot::load(&self.store, &refs, false, Utc::now()).await
+            }
+        };
+        let decay = {
+            let d = self.config.retrieval.expand_links_decay;
+            if d.is_finite() {
+                d.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+        let present: std::collections::HashSet<&str> = hits.iter().map(|c| c.id.as_str()).collect();
+        let tail: HashMap<String, ScoreBreakdown> =
+            tail.into_iter().map(|c| (c.id, c.breakdown)).collect();
+        let now = Utc::now();
+
+        let mut best: HashMap<&str, ScoredCandidate> = HashMap::new();
+        for parent in parents {
+            for (nid, kind) in graph.neighbours(&parent.id) {
+                if present.contains(nid) {
+                    continue;
+                }
+                let Some(entry) = visible.get(nid) else {
+                    continue;
+                };
+                let decayed = parent.score * decay;
+                let mut breakdown = match tail.get(nid) {
+                    Some(b) => b.clone(),
+                    None => {
+                        // Not scored by this query (it failed filter mode's
+                        // relevance test, or the rank threshold dropped it):
+                        // its own query-independent components, so the
+                        // breakdown still explains the memory.
+                        let target = ScoreTarget {
+                            created_at: entry.created_at,
+                            decay: &entry.decay,
+                            criticality: entry.criticality,
+                            physical: &entry.physical,
+                            logical: &entry.logical,
+                            provenance_source: entry.provenance_source,
+                            status: entry.status,
+                            epistemic: entry.epistemic,
+                            verified_at: entry.verified_at,
+                        };
+                        let ctx = ScoringContext::scope_only(None, &[]);
+                        composite_score_target(target, &ctx, &self.config, now)
+                    }
+                };
+                let own = tail.get(nid).map(|b| b.final_score).unwrap_or(0.0);
+                let score = decayed.max(own);
+                if best.get(nid).is_some_and(|b| b.score >= score) {
+                    continue;
+                }
+                breakdown.final_score = score;
+                breakdown.gate_score = None;
+                breakdown.below_threshold = false;
+                breakdown.via = Some(LinkVia {
+                    from: parent.id.clone(),
+                    kind: kind.clone(),
+                });
+                best.insert(
+                    nid,
+                    ScoredCandidate {
+                        id: nid.to_string(),
+                        score,
+                        breakdown,
+                    },
+                );
+            }
+        }
+        let mut out: Vec<ScoredCandidate> = best.into_values().collect();
+        out.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out.truncate(n);
+        out
+    }
+}
+
+/// Sort by score descending, stably (ties keep their order, so a direct hit
+/// stays ahead of an expanded neighbour with the same score).
+fn sort_candidates(candidates: &mut [ScoredCandidate]) {
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 /// Chunk, embed, and upsert a memory's vectors into the store.
@@ -6411,5 +6627,569 @@ mod epistemic_retrieval_tests {
             .await
             .unwrap();
         assert_eq!(result.memories[0].memory.id, "mem-obs");
+    }
+}
+
+#[cfg(test)]
+mod graph_signal_tests {
+    use super::*;
+    use crate::storage::InMemoryRegistry;
+
+    // -----------------------------------------------------------------------
+    // Graph/usage scoring fixture (phase 5). Every knob is off by default; the
+    // golden test below pins the default-config ranking of this fixture to the
+    // exact bits the formula produced before the knobs existed.
+    // -----------------------------------------------------------------------
+
+    pub(crate) const GA: &str = "0000000a-0000-4000-8000-000000000000";
+    pub(crate) const GB: &str = "0000000b-0000-4000-8000-000000000000";
+    pub(crate) const GC: &str = "0000000c-0000-4000-8000-000000000000";
+    pub(crate) const GD: &str = "0000000d-0000-4000-8000-000000000000";
+    pub(crate) const GE: &str = "0000000e-0000-4000-8000-000000000000";
+    pub(crate) const GF: &str = "0000000f-0000-4000-8000-000000000000";
+    pub(crate) const GG: &str = "00000001-0000-4000-8000-000000000000";
+
+    /// Seven memories wired with every edge shape phase 5 reads, plus usage
+    /// events. Decay is off everywhere so scores do not depend on the clock.
+    pub(crate) async fn graph_fixture() -> (tempfile::TempDir, MemoryStore) {
+        use crate::types::{
+            Link, LinkKind, LinkOrigin, LinkStatus, Memory, MemoryType, Provenance, Visibility,
+        };
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mk = |id: &str, t: MemoryType, summary: &str, crit: f64, logical: &[&str]| {
+            let mut m = Memory::new(t, summary, format!("{summary} body"), Provenance::human());
+            m.id = id.to_string();
+            m.visibility = Visibility::Shared;
+            m.criticality = crit;
+            m.decay = None;
+            m.logical = logical.iter().map(|s| s.to_string()).collect();
+            m
+        };
+        let link = |to: &str, kind: LinkKind, status: LinkStatus| {
+            let mut l = Link::new(to, kind, LinkOrigin::Human);
+            l.status = status;
+            l
+        };
+        let mut a = mk(
+            GA,
+            MemoryType::Decision,
+            "token refresh uses rotation",
+            0.8,
+            &["auth.oauth"],
+        );
+        a.supersedes = vec![GF.to_string()];
+        let mut b = mk(
+            GB,
+            MemoryType::Context,
+            "token refresh is disabled in prod",
+            0.7,
+            &["auth.oauth"],
+        );
+        b.links = vec![link(GA, LinkKind::Contradicts, LinkStatus::Confirmed)];
+        let mut c = mk(
+            GC,
+            MemoryType::Convention,
+            "token refresh tests cover rotation",
+            0.6,
+            &["auth"],
+        );
+        c.links = vec![link(GA, LinkKind::Supports, LinkStatus::Confirmed)];
+        let mut d = mk(
+            GD,
+            MemoryType::Context,
+            "session cookie lifetime",
+            0.5,
+            &["auth.session"],
+        );
+        d.links = vec![link(GA, LinkKind::RelatedTo, LinkStatus::Confirmed)];
+        let mut e = mk(
+            GE,
+            MemoryType::Context,
+            "token refresh might race",
+            0.65,
+            &["auth"],
+        );
+        e.links = vec![link(GC, LinkKind::Contradicts, LinkStatus::Proposed)];
+        let mut f = mk(
+            GF,
+            MemoryType::Decision,
+            "token refresh disabled entirely",
+            0.9,
+            &["auth.oauth"],
+        );
+        f.superseded_by = Some(GA.to_string());
+        f.invalidated_at = Some(Utc::now() - chrono::Duration::days(1));
+        let mut g = mk(
+            GG,
+            MemoryType::Context,
+            "cookie logging format",
+            0.4,
+            &["logging"],
+        );
+        g.links = vec![link(GD, LinkKind::DerivedFrom, LinkStatus::Confirmed)];
+        for m in [&a, &b, &c, &d, &e, &f, &g] {
+            store.create(m).await.unwrap();
+        }
+        // Usage: A is fetched often; D is injected often and never fetched.
+        use crate::telemetry::usage::{MemoryEvent, Surface, UsageKind};
+        let mut events = Vec::new();
+        for i in 0..5 {
+            let mut ev = MemoryEvent::new(GA, &store.project_id, UsageKind::Fetched, Surface::Cli);
+            ev.session_id = Some(format!("s{i}"));
+            events.push(ev);
+        }
+        for i in 0..3 {
+            let mut ev = MemoryEvent::new(
+                GA,
+                &store.project_id,
+                UsageKind::Injected,
+                Surface::HookPrompt,
+            );
+            ev.session_id = Some(format!("s{i}"));
+            events.push(ev);
+        }
+        for i in 0..20 {
+            let mut ev = MemoryEvent::new(
+                GD,
+                &store.project_id,
+                UsageKind::Injected,
+                Surface::HookPrompt,
+            );
+            ev.session_id = Some(format!("s{i}"));
+            events.push(ev);
+        }
+        crate::telemetry::usage::record_memory_events(&store.project_dir, &events).unwrap();
+        (temp_dir, store)
+    }
+
+    /// The three query shapes the golden test pins: the no-query Rank fast
+    /// path, Filter with keywords, and Rank with query text (degraded, no
+    /// embedding provider in unit tests).
+    pub(crate) fn graph_fixture_queries() -> Vec<RetrievalQuery> {
+        vec![
+            RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                logical: vec!["auth".to_string()],
+                ..Default::default()
+            },
+            RetrievalQuery {
+                mode: RetrievalMode::Filter,
+                query: Some("token refresh".to_string()),
+                ..Default::default()
+            },
+            RetrievalQuery {
+                mode: RetrievalMode::Rank,
+                query: Some("token refresh".to_string()),
+                ..Default::default()
+            },
+        ]
+    }
+
+    pub(crate) fn ranking_bits(result: &RetrievalResult) -> Vec<(String, u64)> {
+        result
+            .memories
+            .iter()
+            .map(|sm| (sm.memory.id.clone(), sm.score.to_bits()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn default_config_ranking_is_unchanged_on_graph_fixture() {
+        let (_tmp, store) = graph_fixture().await;
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        // Captured from the formula before `contradicts_penalty`,
+        // `supports_boost`, `usage_weight` and `expand_links` existed (commit
+        // aa1b267). A default config must keep producing these exact bits:
+        // the knobs are off, so nothing may be looked up or multiplied in.
+        let golden: [&[(&str, u64)]; 3] = [
+            &[
+                (GA, 4603219251127931371),
+                (GE, 4602858963157741732),
+                (GB, 4602498675187552091),
+                (GC, 4602318531202457272),
+                (GD, 4599976659396224614),
+            ],
+            &[
+                (GA, 4605313306968567911),
+                (GB, 4604991621280898591),
+                (GE, 4604830778437063929),
+                (GC, 4604569215416587202),
+            ],
+            &[
+                (GA, 4605313306968567911),
+                (GB, 4604991621280898591),
+                (GE, 4604830778437063929),
+                (GC, 4604569215416587202),
+                (GD, 4602678819172646912),
+            ],
+        ];
+        for (q, want) in graph_fixture_queries().iter().zip(golden) {
+            let r = engine.query(q).await.unwrap();
+            let want: Vec<(String, u64)> = want.iter().map(|(i, b)| (i.to_string(), *b)).collect();
+            assert_eq!(ranking_bits(&r), want, "query {q:?}");
+            assert!(
+                r.memories.iter().all(|sm| sm.score_breakdown.via.is_none()
+                    && sm.score_breakdown.contradicted_by.is_empty()
+                    && sm.score_breakdown.supports_multiplier.is_none()
+                    && sm.score_breakdown.usage_multiplier.is_none()),
+                "no graph/usage component may appear with the knobs off"
+            );
+        }
+    }
+
+    fn knobs(f: impl FnOnce(&mut EngramConfig)) -> EngramConfig {
+        let mut c = EngramConfig::default();
+        f(&mut c);
+        c
+    }
+
+    fn find<'a>(r: &'a RetrievalResult, id: &str) -> Option<&'a ScoredMemory> {
+        r.memories.iter().find(|sm| sm.memory.id == id)
+    }
+
+    /// Knobs explicitly at zero are the default: same bits, and the engine
+    /// attaches no signals at all.
+    #[tokio::test]
+    async fn explicit_zero_knobs_match_default() {
+        let (_tmp, store) = graph_fixture().await;
+        let base = RetrievalEngine::new(store.clone(), EngramConfig::default());
+        let zero = RetrievalEngine::new(
+            store,
+            knobs(|c| {
+                c.retrieval.scoring.contradicts_penalty = 0.0;
+                c.retrieval.scoring.supports_boost = 0.0;
+                c.retrieval.scoring.usage_weight = 0.0;
+                c.retrieval.expand_links = 0;
+            }),
+        );
+        for q in graph_fixture_queries() {
+            let a = base.query(&q).await.unwrap();
+            let b = zero.query(&q).await.unwrap();
+            assert_eq!(ranking_bits(&a), ranking_bits(&b));
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_contradiction_penalizes_both_live_ends() {
+        let (_tmp, store) = graph_fixture().await;
+        let base = RetrievalEngine::new(store.clone(), EngramConfig::default());
+        let on = RetrievalEngine::new(
+            store,
+            knobs(|c| c.retrieval.scoring.contradicts_penalty = 0.1),
+        );
+        for q in graph_fixture_queries() {
+            let a = base.query(&q).await.unwrap();
+            let b = on.query(&q).await.unwrap();
+            for id in [GA, GB] {
+                let (Some(x), Some(y)) = (find(&a, id), find(&b, id)) else {
+                    continue;
+                };
+                assert!(
+                    (x.score - 0.1 - y.score).abs() < 1e-12,
+                    "{id}: {} -> {} for {q:?}",
+                    x.score,
+                    y.score
+                );
+                assert_eq!(y.score_breakdown.contradicts_penalty, Some(0.1));
+            }
+            let a_on = find(&b, GA).unwrap();
+            assert_eq!(a_on.score_breakdown.contradicted_by, vec![GB.to_string()]);
+            let b_on = find(&b, GB).unwrap();
+            assert_eq!(b_on.score_breakdown.contradicted_by, vec![GA.to_string()]);
+            // E's contradiction with C is only proposed: no effect on either.
+            for id in [GC, GE] {
+                if let (Some(x), Some(y)) = (find(&a, id), find(&b, id)) {
+                    assert_eq!(x.score.to_bits(), y.score.to_bits(), "{id} must not move");
+                    assert!(y.score_breakdown.contradicts_penalty.is_none());
+                }
+            }
+        }
+    }
+
+    /// A contradiction whose other side has been invalidated (or deleted) no
+    /// longer penalizes: only a live memory is a standing objection.
+    #[tokio::test]
+    async fn contradiction_with_invalidated_or_missing_side_has_no_effect() {
+        let (_tmp, store) = graph_fixture().await;
+        store
+            .update_with(GB, |m| {
+                m.invalidated_at = Some(Utc::now() - chrono::Duration::hours(1));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let on = RetrievalEngine::new(
+            store.clone(),
+            knobs(|c| c.retrieval.scoring.contradicts_penalty = 0.1),
+        );
+        let q = &graph_fixture_queries()[1];
+        let r = on.query(q).await.unwrap();
+        let a = find(&r, GA).unwrap();
+        assert!(a.score_breakdown.contradicts_penalty.is_none());
+        assert!(find(&r, GB).is_none(), "invalidated B is hidden by default");
+
+        // With B included, B (the invalidated side) still pays: A is live.
+        let mut q2 = q.clone();
+        q2.include_invalidated = Some(true);
+        let r2 = on.query(&q2).await.unwrap();
+        assert_eq!(
+            find(&r2, GB).unwrap().score_breakdown.contradicts_penalty,
+            Some(0.1)
+        );
+        assert!(find(&r2, GA)
+            .unwrap()
+            .score_breakdown
+            .contradicts_penalty
+            .is_none());
+
+        // Missing: delete B entirely; the edge on B's side goes with it, and
+        // an edge *into* a deleted memory is dangling — no signal either way.
+        store.delete(GB).await.unwrap();
+        let r3 = on.query(q).await.unwrap();
+        assert!(find(&r3, GA)
+            .unwrap()
+            .score_breakdown
+            .contradicts_penalty
+            .is_none());
+    }
+
+    /// `supersedes` needs nothing extra: the target is invalidated, so it is
+    /// hidden by default, and the successor is not penalized.
+    #[tokio::test]
+    async fn supersedes_demotes_only_the_target() {
+        let (_tmp, store) = graph_fixture().await;
+        let on = RetrievalEngine::new(
+            store,
+            knobs(|c| {
+                c.retrieval.scoring.contradicts_penalty = 0.1;
+                c.retrieval.scoring.supports_boost = 0.05;
+            }),
+        );
+        let mut q = graph_fixture_queries()[1].clone();
+        let r = on.query(&q).await.unwrap();
+        assert!(find(&r, GF).is_none(), "superseded F is hidden");
+        q.include_invalidated = Some(true);
+        let r = on.query(&q).await.unwrap();
+        let f = find(&r, GF).expect("visible when asked for");
+        assert!(f.score_breakdown.contradicts_penalty.is_none());
+        let a = find(&r, GA).unwrap();
+        assert!(!a.score_breakdown.contradicted_by.contains(&GF.to_string()));
+    }
+
+    #[tokio::test]
+    async fn supports_boost_counts_live_incoming_supporters() {
+        let (_tmp, store) = graph_fixture().await;
+        let base = RetrievalEngine::new(store.clone(), EngramConfig::default());
+        let on = RetrievalEngine::new(store, knobs(|c| c.retrieval.scoring.supports_boost = 0.05));
+        for q in graph_fixture_queries() {
+            let a = base.query(&q).await.unwrap();
+            let b = on.query(&q).await.unwrap();
+            let (x, y) = (find(&a, GA).unwrap(), find(&b, GA).unwrap());
+            assert_eq!(y.score_breakdown.supports_multiplier, Some(1.05));
+            assert_eq!(y.score_breakdown.supported_by, vec![GC.to_string()]);
+            assert!(y.score > x.score || y.score == 1.0, "{q:?}");
+            // C supports A; C itself gets nothing from its own outgoing edge.
+            if let Some(c) = find(&b, GC) {
+                assert!(c.score_breakdown.supports_multiplier.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn usage_boost_rewards_fetches_not_injection() {
+        let (_tmp, store) = graph_fixture().await;
+        let base = RetrievalEngine::new(store.clone(), EngramConfig::default());
+        let on = RetrievalEngine::new(store, knobs(|c| c.retrieval.scoring.usage_weight = 0.1));
+        let q = &graph_fixture_queries()[0];
+        let a = base.query(q).await.unwrap();
+        let b = on.query(q).await.unwrap();
+        let ga = find(&b, GA).unwrap();
+        // fetched 5, injected 3 (3 sessions): ρ = 1, term = ln(1 + 5.9).
+        let want = 1.0 + 0.1 * (5.0f64 + 0.9).ln_1p();
+        assert!((ga.score_breakdown.usage_multiplier.unwrap() - want).abs() < 1e-12);
+        assert!(ga.score > find(&a, GA).unwrap().score);
+        // D: injected 20 times in 20 sessions, never fetched: ρ = 1/21.
+        let gd = find(&b, GD).unwrap();
+        let m = gd.score_breakdown.usage_multiplier.unwrap();
+        assert!(m < 1.0 + 0.1 * 0.17, "injection alone stays tiny: {m}");
+    }
+
+    #[tokio::test]
+    async fn expansion_adds_marked_neighbours_bounded() {
+        let (_tmp, store) = graph_fixture().await;
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        // Filter for a term only A matches.
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("rotation".to_string()),
+            max_results: Some(1),
+            expand_links: Some(5),
+            ..Default::default()
+        };
+        let r = engine.query(&q).await.unwrap();
+        assert_eq!(r.memories[0].memory.id, GA);
+        let hit = r.memories[0].score;
+        let expanded: Vec<(&str, &str)> = r
+            .memories
+            .iter()
+            .filter_map(|sm| {
+                sm.score_breakdown
+                    .via
+                    .as_ref()
+                    .map(|v| (sm.memory.id.as_str(), v.kind.as_str()))
+            })
+            .collect();
+        // C supports A, D related_to A; B contradicts A (never followed),
+        // F is superseded (hidden), G is two hops away.
+        let mut ids: Vec<&str> = expanded.iter().map(|(i, _)| *i).collect();
+        ids.sort();
+        assert_eq!(ids, vec![GC, GD], "got {expanded:?}");
+        for sm in r
+            .memories
+            .iter()
+            .filter(|sm| sm.score_breakdown.via.is_some())
+        {
+            assert_eq!(sm.score_breakdown.via.as_ref().unwrap().from, GA);
+            // Its hit's score times the decay, or its own score when that is
+            // higher (it was only cut by max_results) — never above the hit.
+            assert!(sm.score >= hit * 0.5 - 1e-12 && sm.score <= hit);
+        }
+        // Sorted by score, direct hit first.
+        assert!(r.memories.windows(2).all(|w| w[0].score >= w[1].score));
+
+        // Bounded.
+        let q1 = RetrievalQuery {
+            expand_links: Some(1),
+            ..q.clone()
+        };
+        let r1 = engine.query(&q1).await.unwrap();
+        assert_eq!(
+            r1.memories
+                .iter()
+                .filter(|sm| sm.score_breakdown.via.is_some())
+                .count(),
+            1
+        );
+        // Off.
+        let r0 = engine
+            .query(&RetrievalQuery {
+                expand_links: Some(0),
+                ..q.clone()
+            })
+            .await
+            .unwrap();
+        assert_eq!(r0.memories.len(), 1);
+    }
+
+    /// Rank mode, no query (the index fast path), expands too, and the
+    /// config default turns it on.
+    #[tokio::test]
+    async fn expansion_works_in_rank_fast_path_from_config_default() {
+        let (_tmp, store) = graph_fixture().await;
+        // G (criticality 0.4) is below the default 0.45 threshold, and a weak
+        // fallback hit expands nothing; lower the threshold so G is a hit.
+        let engine = RetrievalEngine::new(
+            store.clone(),
+            knobs(|c| {
+                c.retrieval.expand_links = 3;
+                c.retrieval.relevance_threshold = 0.3;
+            }),
+        );
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            logical: vec!["logging".to_string()],
+            max_results: Some(1),
+            ..Default::default()
+        };
+        let r = engine.query(&q).await.unwrap();
+        assert_eq!(r.memories[0].memory.id, GG);
+        let d = find(&r, GD).expect("G derived_from D");
+        let via = d.score_breakdown.via.as_ref().unwrap();
+        assert_eq!(via.from, GG);
+        assert_eq!(via.kind, crate::types::LinkKind::DerivedFrom);
+        assert!(!d.memory.content.is_empty(), "neighbour is materialized");
+
+        // At the default threshold G is only a weak fallback lead: no expansion.
+        let weak = RetrievalEngine::new(store, knobs(|c| c.retrieval.expand_links = 3));
+        let r = weak.query(&q).await.unwrap();
+        assert!(r.memories[0].score_breakdown.below_threshold);
+        assert!(r.memories.iter().all(|sm| sm.score_breakdown.via.is_none()));
+    }
+
+    /// The visibility rule: a neighbour the query's own filters exclude is
+    /// never reached through an edge.
+    #[tokio::test]
+    async fn expansion_respects_every_hard_filter() {
+        let (_tmp, store) = graph_fixture().await;
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        let base = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("rotation".to_string()),
+            max_results: Some(1),
+            expand_links: Some(5),
+            ..Default::default()
+        };
+        // Type filter: only decisions and conventions; D (context) is out.
+        let r = engine
+            .query(&RetrievalQuery {
+                types: Some(vec![MemoryType::Decision, MemoryType::Convention]),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert!(find(&r, GD).is_none());
+        assert!(find(&r, GC).is_some());
+        // Logical hard filter in filter mode: D is auth.session, A auth.oauth.
+        let r = engine
+            .query(&RetrievalQuery {
+                logical: vec!["auth.oauth".to_string()],
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert!(find(&r, GD).is_none(), "auth.session is a sibling");
+        // Minimum criticality.
+        let r = engine
+            .query(&RetrievalQuery {
+                min_criticality: Some(0.55),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        assert!(find(&r, GD).is_none());
+        assert!(find(&r, GC).is_some());
+    }
+
+    #[tokio::test]
+    async fn invalidated_neighbour_is_hidden_unless_asked_for() {
+        let (_tmp, store) = graph_fixture().await;
+        store
+            .update_with(GC, |m| {
+                m.invalidated_at = Some(Utc::now() - chrono::Duration::hours(1));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("rotation".to_string()),
+            max_results: Some(1),
+            expand_links: Some(5),
+            ..Default::default()
+        };
+        let r = engine.query(&q).await.unwrap();
+        assert!(find(&r, GC).is_none());
+        let r = engine
+            .query(&RetrievalQuery {
+                include_invalidated: Some(true),
+                ..q
+            })
+            .await
+            .unwrap();
+        assert!(find(&r, GC).is_some());
     }
 }

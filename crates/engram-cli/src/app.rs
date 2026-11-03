@@ -854,6 +854,13 @@ pub enum Command {
         #[arg(long)]
         show_scores: bool,
 
+        /// Add up to N one-hop neighbours of the top results, over confirmed
+        /// `supports`, `derived_from` and `related_to` edges (bare flag: 5;
+        /// 0 = off; max 20). Defaults to `[retrieval].expand_links` (0).
+        /// Added results are marked with the hit and edge they came through.
+        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "5")]
+        expand_links: Option<usize>,
+
         /// Also merge global (cross-project) memories into the results.
         ///
         /// Runs the same query against the global store and folds its hits
@@ -1645,6 +1652,21 @@ mod tests {
                 assert!(include_invalidated);
             }
             _ => panic!("expected Query"),
+        }
+
+        // query --expand-links: bare flag = 5, a value, absent = None.
+        for (args, want) in [
+            (&["--expand-links"][..], Some(5)),
+            (&["--expand-links", "2"][..], Some(2)),
+            (&[][..], None),
+        ] {
+            let mut argv = vec!["engramdb", "query", "--mode", "filter", "x"];
+            argv.extend_from_slice(args);
+            let cli = Cli::try_parse_from(argv).expect("--expand-links must parse");
+            match cli.command {
+                Command::Query { expand_links, .. } => assert_eq!(expand_links, want, "{args:?}"),
+                _ => panic!("expected Query"),
+            }
         }
 
         // list: epistemic filter + include-invalidated.

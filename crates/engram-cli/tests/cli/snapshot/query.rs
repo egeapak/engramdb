@@ -243,3 +243,111 @@ fn query_missing_mode_fails() {
         f.run(&["query", "--query", "rust"])
     );
 }
+
+// =====================================================================
+// link expansion (`--expand-links`)
+// =====================================================================
+
+/// The full id of the memory whose summary is `summary`, read off `list
+/// --format json` directly (the snapshot transcript redacts ids).
+fn id_of(f: &Fixture, summary: &str) -> String {
+    let out = f
+        .base()
+        .args([
+            "--no-maintenance",
+            "--dir",
+            f.path().to_str().unwrap(),
+            "--format",
+            "json",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v.as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["summary"] == summary)
+        .unwrap_or_else(|| panic!("no memory {summary:?} in {v}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// `seeded()` plus a confirmed `supports` edge from the hazard into the Rust
+/// decision. The hazard shares no word with "rust", so only expansion can
+/// bring it into a filter-mode answer.
+fn linked() -> Fixture {
+    let f = seeded();
+    let rust = id_of(&f, "Use Rust for the backend");
+    let hazard = id_of(&f, "Never unwrap in production paths");
+    f.run(&["link", &hazard, "supports", &rust]);
+    f
+}
+
+#[test]
+fn query_filter_expand_links_marks_neighbour() {
+    let f = linked();
+    insta::assert_snapshot!(
+        "query_filter_expand_links",
+        f.run(&[
+            "--format",
+            "plain",
+            "query",
+            "--mode",
+            "filter",
+            "--query",
+            "rust",
+            "--show-scores",
+            "--expand-links",
+            "3"
+        ])
+    );
+}
+
+/// A bare `--expand-links` means 5. Plain rather than JSON: a halved score
+/// has a 16-digit fraction, which the project-id redaction would eat.
+#[test]
+fn query_filter_expand_links_bare_flag() {
+    let f = linked();
+    insta::assert_snapshot!(
+        "query_filter_expand_links_bare",
+        f.run(&[
+            "--format",
+            "plain",
+            "query",
+            "--mode",
+            "filter",
+            "--query",
+            "rust",
+            "--expand-links"
+        ])
+    );
+}
+
+/// Off by default: the same query without the flag is unchanged.
+#[test]
+fn query_filter_without_expand_links_is_unchanged() {
+    let f = linked();
+    insta::assert_snapshot!(
+        "query_filter_without_expand_links",
+        f.run(&["--format", "plain", "query", "--mode", "filter", "--query", "rust"])
+    );
+}
+
+#[test]
+fn query_expand_links_over_cap_fails() {
+    let f = seeded();
+    insta::assert_snapshot!(
+        "query_expand_links_over_cap_fails",
+        f.run(&[
+            "query",
+            "--mode",
+            "filter",
+            "--query",
+            "rust",
+            "--expand-links",
+            "21"
+        ])
+    );
+}

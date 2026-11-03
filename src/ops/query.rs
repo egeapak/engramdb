@@ -85,8 +85,61 @@ pub fn merge_scored_memories(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    project.truncate(max);
+    truncate_keeping_expansions(project, max);
     duplicates
+}
+
+/// Keep the first `max` **direct** results, plus every link-expanded result
+/// (`score_breakdown.via`) whose hit survived; order is kept.
+///
+/// An engine adds expanded neighbours *on top of* its `max_results` (at most
+/// `expand_links` of them), so cutting a merged list to `max` with a plain
+/// `truncate` would drop exactly the neighbours the caller asked for. And a
+/// neighbour whose hit was cut must go too: its `via.from` would name a
+/// memory the caller cannot see. With no expanded result in the list this is
+/// exactly `truncate(max)`.
+pub fn truncate_keeping_expansions(memories: &mut Vec<ScoredMemory>, max: usize) {
+    if memories.iter().all(|sm| sm.score_breakdown.via.is_none()) {
+        memories.truncate(max);
+        return;
+    }
+    let mut direct = 0usize;
+    let mut kept_direct: HashSet<String> = HashSet::new();
+    let mut keep = vec![false; memories.len()];
+    for (i, sm) in memories.iter().enumerate() {
+        if sm.score_breakdown.via.is_none() && direct < max {
+            direct += 1;
+            kept_direct.insert(sm.memory.id.clone());
+            keep[i] = true;
+        }
+    }
+    for (i, sm) in memories.iter().enumerate() {
+        if let Some(via) = &sm.score_breakdown.via {
+            keep[i] = kept_direct.contains(&via.from);
+        }
+    }
+    let mut flags = keep.into_iter();
+    memories.retain(|_| flags.next().unwrap_or(false));
+}
+
+/// Drop link-expanded results whose hit is not in `memories` — after an
+/// audience filter removed the hit, the neighbour's `via.from` would reveal
+/// a memory hidden from the viewer.
+pub fn drop_orphaned_expansions(memories: &mut Vec<ScoredMemory>) {
+    if memories.iter().all(|sm| sm.score_breakdown.via.is_none()) {
+        return;
+    }
+    let direct: HashSet<String> = memories
+        .iter()
+        .filter(|sm| sm.score_breakdown.via.is_none())
+        .map(|sm| sm.memory.id.clone())
+        .collect();
+    memories.retain(|sm| {
+        sm.score_breakdown
+            .via
+            .as_ref()
+            .is_none_or(|via| direct.contains(&via.from))
+    });
 }
 
 /// What to tell the caller when a query found nothing it is confident in.
@@ -289,7 +342,7 @@ where
     if extras.is_empty() {
         // Nothing to fan in. If we over-fetched a deeper primary pool, trim it
         // back to `max` (no extras ⇒ no cross-store equalization to run).
-        result.memories.truncate(max);
+        truncate_keeping_expansions(&mut result.memories, max);
         return Ok(ExtraStoresResult {
             result,
             unreadable: Vec::new(),
@@ -318,11 +371,14 @@ where
         match extra_result {
             Ok(extra_result) => {
                 result.dropped_below_threshold += extra_result.dropped_below_threshold;
-                let visible: Vec<ScoredMemory> = extra_result
+                let mut visible: Vec<ScoredMemory> = extra_result
                     .memories
                     .into_iter()
                     .filter(|sm| audience_allows(&sm.memory, viewer_ids))
                     .collect();
+                // The audience filter applies to expanded neighbours like any
+                // result; a neighbour whose *hit* was hidden goes too.
+                drop_orphaned_expansions(&mut visible);
                 let visible_count = visible.len();
                 // `merge_scored_memories` keeps an entry already present, so
                 // an id is this store's exactly when it was not there yet.
@@ -403,7 +459,11 @@ where
     // `max`. When equalization ran, `rerank_merged` already truncated; otherwise
     // trim back to the caller's `max` here.
     if !equalized {
-        result.memories.truncate(max);
+        truncate_keeping_expansions(&mut result.memories, max);
+    } else {
+        // `rerank_merged` cut to `max` by blended score, hits and neighbours
+        // alike; a neighbour must not outlive its hit.
+        drop_orphaned_expansions(&mut result.memories);
     }
     let kept: HashSet<&str> = result
         .memories
@@ -675,6 +735,143 @@ mod tests {
                 .any(|m| m.memory.summary.contains("restricted")),
             "audience-restricted memory must surface for a listed viewer"
         );
+    }
+
+    /// Link expansion in a shared store goes through the same audience filter
+    /// as every result: a hidden neighbour never appears, and a visible
+    /// neighbour reached only through a *hidden* hit is dropped too (its
+    /// `via.from` would name the hidden memory).
+    #[tokio::test]
+    async fn expansion_in_shared_store_respects_audience() {
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
+        use crate::storage::{InMemoryRegistry, MemoryStore};
+        use crate::types::{
+            EngramConfig, Link, LinkKind, LinkOrigin, Memory, MemoryType, Provenance,
+        };
+        use tempfile::TempDir;
+
+        let proj_dir = TempDir::new().unwrap();
+        let proj_store = MemoryStore::init(proj_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let proj_id = proj_store.project_id.clone();
+        let gid = crate::storage::paths::compute_group_id("expand-audience-test");
+        let group_store = MemoryStore::init_group(&gid).await.unwrap();
+
+        let mk = |summary: &str, audience: Option<&str>| {
+            let mut m = Memory::new(
+                MemoryType::Convention,
+                summary,
+                format!("{summary} body"),
+                Provenance::human(),
+            );
+            m.audience = audience.map(|a| vec![a.to_string()]);
+            m
+        };
+        // Visible hit, with a visible and a hidden neighbour.
+        let open_nb = mk("open neighbour note", None);
+        let hidden_nb = mk("hidden neighbour note", Some("someone-else"));
+        // Hidden hit whose only neighbour is visible.
+        let orphan_nb = mk("orphan neighbour note", None);
+        let mut hit = mk("gadget visible hit", None);
+        hit.links = vec![
+            Link::new(&open_nb.id, LinkKind::RelatedTo, LinkOrigin::Human),
+            Link::new(&hidden_nb.id, LinkKind::Supports, LinkOrigin::Human),
+        ];
+        let mut hidden_hit = mk("gadget hidden hit", Some("someone-else"));
+        hidden_hit.criticality = 0.9;
+        hidden_hit.links = vec![Link::new(
+            &orphan_nb.id,
+            LinkKind::RelatedTo,
+            LinkOrigin::Human,
+        )];
+        for m in [&open_nb, &hidden_nb, &orphan_nb, &hit, &hidden_hit] {
+            group_store.create(m).await.unwrap();
+        }
+        drop(group_store);
+
+        let config = EngramConfig::default();
+        let proj_engine = RetrievalEngine::new(proj_store, config.clone());
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("gadget".to_string()),
+            max_results: Some(10),
+            expand_links: Some(5),
+            ..Default::default()
+        };
+        let viewer: HashSet<String> = [proj_id].into_iter().collect();
+        let gid1 = gid.clone();
+        let result =
+            query_memories_with_extra_stores(&proj_engine, &query, &viewer, false, || async move {
+                vec![(
+                    gid1.clone(),
+                    RetrievalEngine::new(MemoryStore::open_group(&gid1).await.unwrap(), config),
+                )]
+            })
+            .await
+            .unwrap()
+            .result;
+        let ids: Vec<&str> = result
+            .memories
+            .iter()
+            .map(|m| m.memory.id.as_str())
+            .collect();
+        assert!(ids.contains(&hit.id.as_str()));
+        assert!(
+            ids.contains(&open_nb.id.as_str()),
+            "visible neighbour is expanded: {ids:?}"
+        );
+        let open = result
+            .memories
+            .iter()
+            .find(|m| m.memory.id == open_nb.id)
+            .unwrap();
+        assert_eq!(open.score_breakdown.via.as_ref().unwrap().from, hit.id);
+        assert!(!ids.contains(&hidden_nb.id.as_str()), "hidden neighbour");
+        assert!(!ids.contains(&hidden_hit.id.as_str()), "hidden hit");
+        assert!(
+            !ids.contains(&orphan_nb.id.as_str()),
+            "a neighbour reached only through a hidden hit must not appear"
+        );
+    }
+
+    fn via(id: &str, from: &str, score: f64) -> ScoredMemory {
+        let mut sm = scored(id, score);
+        sm.score_breakdown.via = Some(crate::scoring::LinkVia {
+            from: from.to_string(),
+            kind: crate::types::LinkKind::RelatedTo,
+        });
+        sm
+    }
+
+    #[test]
+    fn truncate_keeps_expansions_of_surviving_hits() {
+        let mut v = vec![
+            scored("a", 0.9),
+            via("na", "a", 0.45),
+            scored("b", 0.8),
+            via("nb", "b", 0.40),
+            scored("c", 0.3),
+        ];
+        truncate_keeping_expansions(&mut v, 1);
+        let ids: Vec<&str> = v.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "na"]);
+    }
+
+    #[test]
+    fn truncate_without_expansions_is_plain_truncate() {
+        let mut v = vec![scored("a", 0.9), scored("b", 0.8), scored("c", 0.3)];
+        truncate_keeping_expansions(&mut v, 2);
+        let ids: Vec<&str> = v.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn orphaned_expansions_are_dropped() {
+        let mut v = vec![scored("a", 0.9), via("na", "a", 0.4), via("nx", "x", 0.4)];
+        drop_orphaned_expansions(&mut v);
+        let ids: Vec<&str> = v.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "na"]);
     }
 
     // A corrupt/unreadable extra store must be *reported* (its label in

@@ -106,7 +106,8 @@ engramdb query --mode <rank|filter> [query] [flags...]
 | `--epistemic <fact\|observation\|decision>` | Filter by epistemic class. Repeatable. |
 | `--situation <session_start\|file_edit\|debugging\|design_choice>` | Your situation — reweights classes via `[retrieval.scoring.situation]` (see [configuration.md](./configuration.md)). |
 | `--include-invalidated` | Include invalidated memories (closed validity windows). |
-| `--show-scores` | Print composite score per result. |
+| `--show-scores` | Print composite score per result, plus any link/usage component that moved it (`contradicts -0.10 from <id>`, `supports x1.05 from <id>`, `usage x1.12`; only when those [settings](./configuration.md#links-and-usage-in-scoring) are on). |
+| `--expand-links [N]` | Add up to N one-hop neighbours of the results over confirmed `supports` / `derived_from` / `related_to` links (bare flag: 5; `0` = off; max 20; default `[retrieval].expand_links`, 0). Each is marked `via <id> (<kind>)`. A neighbour passes every filter a direct result would. See [links.md](./links.md#following-links-from-results). |
 | `--include-global` | Merge global-store memories into results. |
 | `--global` | Search the global store instead of the current project. |
 
