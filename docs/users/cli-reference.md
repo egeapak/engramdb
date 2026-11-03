@@ -424,7 +424,7 @@ Serves a read-only web view of every store on this machine and prints its URL; w
 | `--assets-dir <dir>` | Serve the web files from `<dir>` (e.g. `crates/engram-dashboard/web`) instead of the copy built into the binary, uncached, so a frontend edit needs only a reload. |
 | `--allow-writes` | Reserved for the review actions (confirming or rejecting edges between memories) that arrive with the route map. Today it only shows a "Writes enabled" badge: there is no write action yet. |
 
-The URL carries a token that is new on every run. Opening it swaps the token for a browser cookie and removes it from the address bar; a request without the cookie or token is refused with `401`. With `--format json` the command prints `{"url", "address", "current_project", "allow_writes"}` once and keeps serving.
+The URL carries a token that is new on every run, after `#` (`http://127.0.0.1:7341/#token=…`), so it is never sent to a server. The page keeps it for its tab, removes it from the address bar, and sends it as `Authorization: Bearer` on every `/api` request; one without it is refused with `401`. The page's own static files need no token. Unless `--no-open` is given, the browser is opened through a private temporary file, so the token never appears on a command line. With `--format json` the command prints `{"url", "address", "current_project", "allow_writes"}` once and keeps serving.
 
 ## `daemon` — shared embedding daemon
 

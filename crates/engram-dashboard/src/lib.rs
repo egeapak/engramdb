@@ -8,13 +8,16 @@
 //! and tie its lifetime to a browser tab. Nothing here loads a model.
 //!
 //! **Security model** (see [`security`]): bound to 127.0.0.1 by default; a
-//! random 32-byte token per run, printed in the URL and swapped on first use
-//! for an `HttpOnly; SameSite=Strict` cookie by a redirect that strips it
-//! from the address bar; every request needs the cookie (or the token);
-//! `Host` must be a loopback name (or the explicit `--bind` address) with
-//! the right port, which defeats DNS rebinding; any non-GET needs a matching
-//! `Origin` and the per-run CSRF header; a strict CSP with no inline script
-//! or style.
+//! random 32-byte token per run, handed to the page in the URL fragment
+//! (`/#token=…`, never sent to a server), kept in `sessionStorage` and sent
+//! as `Authorization: Bearer` on every `/api` call — no cookie, because
+//! cookies are shared by every port on 127.0.0.1; the static files are
+//! public (they hold no data); `Host` must be a loopback name (or the
+//! explicit `--bind` address) with the right port, which defeats DNS
+//! rebinding; any non-GET needs a matching `Origin` and the per-run CSRF
+//! header; a strict CSP with no inline script or style. The browser is
+//! opened through a 0600 launch file, so the token never sits in a
+//! process's argv.
 //!
 //! **No writes on GET.** Every store is opened with
 //! [`engramdb::storage::MemoryStore::open_read_only`] and held behind
@@ -203,7 +206,12 @@ impl Dashboard {
 
     pub async fn serve(self) -> anyhow::Result<()> {
         self.serve_until(async {
-            let _ = tokio::signal::ctrl_c().await;
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                // Without a signal handler the server must not stop on its
+                // own: keep serving until the process is killed.
+                tracing::warn!("cannot listen for Ctrl-C ({e}); stop the dashboard by killing it");
+                std::future::pending::<()>().await;
+            }
         })
         .await
     }
@@ -215,28 +223,91 @@ pub fn is_loopback(ip: IpAddr) -> bool {
     ip.is_loopback()
 }
 
-/// Try to open `url` in the user's browser, silently. A failure (no display,
-/// no opener installed, a headless box over SSH) is not an error: the URL
-/// has been printed. The opener is detached with its output discarded, so a
-/// chatty `xdg-open` cannot scribble over the terminal.
-pub fn open_browser(url: &str) {
+/// The launch file [`open_browser`] wrote. Dropping it deletes the file and
+/// its directory, so keep it alive until the dashboard stops.
+#[derive(Debug)]
+pub struct LaunchPage {
+    dir: tempfile::TempDir,
+}
+
+impl LaunchPage {
+    /// Write `url` into a fresh 0700 directory as a 0600 HTML file that
+    /// redirects to it. The token never appears in a command line: argv is
+    /// world-readable through `/proc/<pid>/cmdline` and a browser keeps its
+    /// own argv for its whole life, while this file is readable by us alone.
+    pub fn write(url: &str) -> std::io::Result<Self> {
+        let dir = tempfile::Builder::new()
+            .prefix("engramdb-dashboard-")
+            .tempdir()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // `tempfile` honours the umask; tighten it before the file exists.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+        }
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let attr = html_attr_escape(url);
+        let page = format!(
+            "<!doctype html>\n<meta charset=\"utf-8\">\n\
+             <meta http-equiv=\"refresh\" content=\"0;url={attr}\">\n\
+             <title>EngramDB dashboard</title>\n\
+             <p><a href=\"{attr}\">Open the EngramDB dashboard</a></p>\n"
+        );
+        use std::io::Write as _;
+        opts.open(dir.path().join("open.html"))?
+            .write_all(page.as_bytes())?;
+        Ok(Self { dir })
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.dir.path().join("open.html")
+    }
+}
+
+fn html_attr_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Try to open `url` in the user's browser, silently, through a
+/// [`LaunchPage`]; returns it so the caller can keep it until exit. A failure
+/// (no display, no opener installed, a headless box over SSH) is not an
+/// error: the URL has been printed. The opener is detached with its output
+/// discarded, so a chatty `xdg-open` cannot scribble over the terminal.
+pub fn open_browser(url: &str) -> Option<LaunchPage> {
+    let page = match LaunchPage::write(url) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!("cannot write the dashboard launch file: {e}");
+            return None;
+        }
+    };
+    let target = page.path();
     #[cfg(target_os = "macos")]
     let mut cmd = {
         let mut c = std::process::Command::new("open");
-        c.arg(url);
+        c.arg(&target);
         c
     };
     #[cfg(target_os = "windows")]
     let mut cmd = {
         // `start` treats the first quoted argument as a window title.
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", "start", ""]).arg(url);
+        c.args(["/C", "start", ""]).arg(&target);
         c
     };
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut cmd = {
         let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
+        c.arg(&target);
         c
     };
     #[cfg(any(unix, target_os = "windows"))]
@@ -248,6 +319,9 @@ pub fn open_browser(url: &str) {
             .stderr(Stdio::null())
             .spawn();
     }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    let _ = target;
+    Some(page)
 }
 
 // Test isolation: see `engram-test-support`. The API tests open real stores

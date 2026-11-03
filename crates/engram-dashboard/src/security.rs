@@ -1,31 +1,39 @@
 //! The dashboard's request guard and response headers.
 //!
-//! Five checks, all in [`guard`], in this order:
+//! Four checks, all in [`guard`], in this order:
 //!
-//! 1. **Host.** A DNS-rebinding page gets the browser to send requests to
-//!    127.0.0.1 under the *attacker's* host name, which makes them
-//!    same-origin to that page. Accepting only loopback names (or the
-//!    explicit `--bind` address) with the right port refuses every such
-//!    request, cookie or not. An IP-literal host cannot be rebound, so a
-//!    `--bind 0.0.0.0` dashboard accepts any IP literal and still no name.
-//! 2. **Token.** A random 32-byte token per run. `?token=` on a page request
-//!    is swapped for an `HttpOnly; SameSite=Strict` cookie and a redirect
-//!    that strips it from the address bar (and from history); the cookie, an
-//!    `Authorization: Bearer` header or `?token=` on an API call then
-//!    authorize every request. Another local user can connect to the port but
-//!    cannot read the token, which was only printed to our terminal.
+//! 1. **Host**, on every request. A DNS-rebinding page gets the browser to
+//!    send requests to 127.0.0.1 under the *attacker's* host name, which
+//!    makes them same-origin to that page. Accepting only loopback names (or
+//!    the explicit `--bind` address) with the right port refuses every such
+//!    request. An IP-literal host cannot be rebound, so a `--bind 0.0.0.0`
+//!    dashboard accepts any IP literal and still no name.
+//! 2. **Token, on `/api` only**, as `Authorization: Bearer`. A random
+//!    32-byte token per run reaches the page in the URL *fragment*
+//!    (`/#token=…`), which a browser never sends to a server, never puts in a
+//!    `Referer`, and which the page strips with `history.replaceState` after
+//!    moving it to `sessionStorage`. **No cookie**: cookies are not isolated
+//!    by port, so every other server on 127.0.0.1 would receive one (and
+//!    could plant a shadowing one), and `SameSite` does not help — all of
+//!    127.0.0.1 is one site. A query-string token is not accepted either; it
+//!    would land in history and logs. The static files (`index.html`, CSS,
+//!    JS) are served without the token: they are the same for every user and
+//!    hold no secret, and the page needs them before it can read the
+//!    fragment. Every byte of store data is behind `/api`.
 //! 3. **Origin + CSRF** on anything but GET/HEAD: the `Origin` must be this
 //!    server's own and `X-EngramDB-CSRF` must carry the per-run value from
-//!    `/api/session`. `SameSite=Strict` already keeps the cookie off
-//!    cross-site requests; this is the second lock, and it is what keeps a
-//!    future write endpoint (phase 4) safe against a same-site attacker.
+//!    `/api/session`. A bearer header is never attached by a browser on its
+//!    own, so this is the second lock, kept for the phase-4 write endpoint.
 //!
 //! [`headers`] then stamps every response: a strict CSP (`'self'` only, no
 //! inline script or style, so an injected `<script>` in memory text would
 //! not run even if a renderer slipped), `X-Frame-Options: DENY` and
-//! `frame-ancestors 'none'` (no clickjacking), `Referrer-Policy: no-referrer`
-//! (the token never leaves in a `Referer`), `nosniff`, and `no-store` on
-//! everything but the ETag'd static files.
+//! `frame-ancestors 'none'` (no clickjacking), `Referrer-Policy: no-referrer`,
+//! `nosniff`, and `no-store` on everything but the ETag'd static files.
+//!
+//! Another local user can connect to the port but cannot read the token: it
+//! is printed to our terminal only, and the browser is opened through a
+//! 0600 file (see [`crate::open_browser`]), never with the token in argv.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -49,7 +57,6 @@ pub const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; 
 pub struct Security {
     token: String,
     csrf: String,
-    cookie_name: String,
     addr: SocketAddr,
 }
 
@@ -75,38 +82,29 @@ impl Security {
 
     /// Fixed secrets, for tests.
     pub fn with_secrets(addr: SocketAddr, token: String, csrf: String) -> Self {
-        Self {
-            token,
-            csrf,
-            // Cookies are not isolated by port: two dashboards on one machine
-            // would overwrite each other's cookie under a shared name.
-            cookie_name: format!("engramdb_dashboard_{}", addr.port()),
-            addr,
-        }
+        Self { token, csrf, addr }
     }
 
     pub fn csrf(&self) -> &str {
         &self.csrf
     }
 
-    pub fn cookie_name(&self) -> &str {
-        &self.cookie_name
-    }
-
     /// The host part a browser on this machine should use.
     fn url_host(&self) -> String {
         match self.addr.ip() {
             IpAddr::V4(ip) if ip.is_unspecified() || ip.is_loopback() => "127.0.0.1".into(),
-            IpAddr::V6(ip) if ip.is_unspecified() => "127.0.0.1".into(),
+            // `::` may be a v6-only socket, where 127.0.0.1 would not connect.
+            IpAddr::V6(ip) if ip.is_unspecified() => "[::1]".into(),
             IpAddr::V6(ip) => format!("[{ip}]"),
             IpAddr::V4(ip) => ip.to_string(),
         }
     }
 
-    /// `http://HOST:PORT/?token=…`, the URL that is printed and opened.
+    /// `http://HOST:PORT/#token=…`, the URL that is printed and opened. The
+    /// token rides the fragment, which never reaches a server or a `Referer`.
     pub fn launch_url(&self) -> String {
         format!(
-            "http://{}:{}/?token={}",
+            "http://{}:{}/#token={}",
             self.url_host(),
             self.addr.port(),
             self.token
@@ -138,25 +136,6 @@ impl Security {
 
     fn token_matches(&self, candidate: &str) -> bool {
         constant_time_eq(candidate.as_bytes(), self.token.as_bytes())
-    }
-
-    fn cookie_token<'a>(&self, headers: &'a HeaderMap) -> Option<&'a str> {
-        headers
-            .get_all(header::COOKIE)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|v| v.split(';'))
-            .filter_map(|kv| kv.trim().split_once('='))
-            .find(|(k, _)| *k == self.cookie_name)
-            .map(|(_, v)| v)
-    }
-
-    fn set_cookie(&self) -> HeaderValue {
-        HeaderValue::from_str(&format!(
-            "{}={}; HttpOnly; SameSite=Strict; Path=/",
-            self.cookie_name, self.token
-        ))
-        .expect("cookie is ASCII")
     }
 }
 
@@ -202,7 +181,8 @@ fn refuse(path: &str, status: StatusCode, code: &'static str, message: &str) -> 
     }
 }
 
-/// The request guard: Host, token, then Origin + CSRF for unsafe methods.
+/// The request guard: Host, then the token on `/api`, then Origin + CSRF for
+/// unsafe methods.
 pub async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     let sec = &state.security;
     let path = req.uri().path().to_string();
@@ -221,60 +201,23 @@ pub async fn guard(State(state): State<Arc<AppState>>, req: Request, next: Next)
         );
     };
 
-    // Authentication.
-    let query_token = req.uri().query().and_then(|q| {
-        form_urlencoded::parse(q.as_bytes())
-            .find(|(k, _)| k == "token")
-            .map(|(_, v)| v.into_owned())
-    });
-    let bearer = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
-    let by_cookie = sec
-        .cookie_token(req.headers())
-        .is_some_and(|t| sec.token_matches(t));
-    let by_header = bearer.is_some_and(|t| sec.token_matches(t));
-    let by_query = query_token.as_deref().is_some_and(|t| sec.token_matches(t));
-    if !(by_cookie || by_header || by_query) {
-        return refuse(
-            &path,
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Missing or wrong dashboard token. Open the URL `engramdb dashboard` printed \
-             (each run has a new token).",
-        );
-    }
-
-    // First page load with `?token=`: trade it for the cookie and strip it.
-    if by_query && !is_api(&path) && matches!(*req.method(), Method::GET | Method::HEAD) {
-        let rest: Vec<(String, String)> = req
-            .uri()
-            .query()
-            .map(|q| {
-                form_urlencoded::parse(q.as_bytes())
-                    .filter(|(k, _)| k != "token")
-                    .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut location = path.clone();
-        if !rest.is_empty() {
-            location.push('?');
-            location.push_str(
-                &form_urlencoded::Serializer::new(String::new())
-                    .extend_pairs(rest)
-                    .finish(),
+    // Authentication: the API only, by bearer header only.
+    if is_api(&path) {
+        let authorized = req
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .is_some_and(|t| sec.token_matches(t));
+        if !authorized {
+            return refuse(
+                &path,
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Missing or wrong dashboard token. Open the URL `engramdb dashboard` printed \
+                 (each run has a new token).",
             );
         }
-        let mut r = StatusCode::SEE_OTHER.into_response();
-        let h = r.headers_mut();
-        h.insert(header::SET_COOKIE, sec.set_cookie());
-        if let Ok(v) = HeaderValue::from_str(&location) {
-            h.insert(header::LOCATION, v);
-        }
-        return r;
     }
 
     if !matches!(*req.method(), Method::GET | Method::HEAD) {
@@ -388,15 +331,10 @@ mod unit {
 
     #[test]
     fn launch_url_uses_a_loopback_host_for_unspecified_binds() {
-        assert!(sec("0.0.0.0:5")
-            .launch_url()
-            .starts_with("http://127.0.0.1:5/?token="));
-        assert!(sec("[::1]:5")
-            .launch_url()
-            .starts_with("http://[::1]:5/?token="));
-        assert!(sec("10.1.2.3:5")
-            .launch_url()
-            .starts_with("http://10.1.2.3:5/?token="));
+        assert_eq!(sec("0.0.0.0:5").launch_url(), "http://127.0.0.1:5/#token=t");
+        assert_eq!(sec("[::]:5").launch_url(), "http://[::1]:5/#token=t");
+        assert_eq!(sec("[::1]:5").launch_url(), "http://[::1]:5/#token=t");
+        assert_eq!(sec("10.1.2.3:5").launch_url(), "http://10.1.2.3:5/#token=t");
     }
 
     #[test]
@@ -407,7 +345,9 @@ mod unit {
             "CSRF".into(),
         );
         let d = format!("{s:?}");
-        assert!(!d.contains("SECRET") && !d.contains("CSRF"), "{d}");
+        // Never echo `d` in the message: it is built from secrets.
+        assert!(!d.contains("SECRET"), "Debug output contains the token");
+        assert!(!d.contains("CSRF"), "Debug output contains the CSRF value");
     }
 
     #[test]

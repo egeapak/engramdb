@@ -3,7 +3,7 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, daysSince, shortId } from '../format.js';
-import { badge, setLines, kindIcon, lineName, TYPE_LABEL } from '../lines.js';
+import { badge, kindIcon, lineName, TYPE_LABEL } from '../lines.js';
 import { projHead, statusPill, errorBox } from './common.js';
 
 const COLS = [
@@ -50,10 +50,12 @@ export async function renderMemories(main, ctx) {
       ['all', 'Everything'],
     ].map(([v, t]) => h('option', { value: v, selected: v === f.status }, t)),
   );
-  const count = h('span', { class: 'cnt num' });
+  // Announced politely: the one change a filter makes that a screen-reader
+  // user cannot see.
+  const count = h('span', { class: 'cnt num', role: 'status', 'aria-live': 'polite' });
   const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by line' });
   const thead = h('thead');
-  const tbody = h('tbody');
+  const tbody = h('tbody', null, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'Loading memories…')));
   const more = h('div', { class: 'more' });
   const err = h('div');
 
@@ -67,10 +69,13 @@ export async function renderMemories(main, ctx) {
     more,
   );
 
-  let allLines = null; // facet names, once known
+  let facetsShown = false; // chips and kinds, redrawn when the status filter changes
   let seq = 0;
 
   const writeUrl = () => {
+    // A debounce timer can fire after the user navigated away: rewriting the
+    // hash then would drag them back.
+    if (ctx.isStale()) return;
     const u = new URLSearchParams();
     for (const [k, v] of Object.entries(f)) if (v) u.set(k, v);
     if (f.sort === 'criticality') u.delete('sort');
@@ -136,7 +141,7 @@ export async function renderMemories(main, ctx) {
               load(false);
             },
           },
-          badge(l.name),
+          badge(l.name, l.slot),
           lineName(l.name),
           h('span', { class: 'c' }, fmt(l.count)),
         ),
@@ -156,9 +161,9 @@ export async function renderMemories(main, ctx) {
           location.hash = open;
         },
       },
-      h('td', null, badge(m.line)),
+      h('td', null, badge(m.line, m.line_slot)),
       h('td', { class: 't' }, h('a', { href: open }, m.summary), h('span', { class: 'mid mono' }, `${shortId(m.id)}${m.logical.length ? ' · ' + m.logical.join(', ') : ''}`)),
-      h('td', null, h('span', { class: 'kind' }, kindIcon(m.type, m.line), TYPE_LABEL[m.type] || m.type), ' ', statusPill(m) || h('span', { class: 'ep' }, m.epistemic)),
+      h('td', null, h('span', { class: 'kind' }, kindIcon(m.type, m.line_slot), TYPE_LABEL[m.type] || m.type), ' ', statusPill(m) || h('span', { class: 'ep' }, m.epistemic)),
       h('td', { class: 'n' }, fmt(m.usage.returned)),
       h('td', { class: 'n' }, fmt(m.usage.injected)),
       h('td', { class: 'n' }, fmt(m.usage.fetched)),
@@ -171,6 +176,7 @@ export async function renderMemories(main, ctx) {
   let cursor = null;
   let shown = 0;
   const load = async (append) => {
+    if (ctx.isStale()) return;
     const mine = ++seq;
     const params = { q: f.q, kind: f.kind, status: f.status, sort: f.sort, dir: f.dir, limit: PAGE };
     if (f.line) params.line = f.line;
@@ -184,10 +190,9 @@ export async function renderMemories(main, ctx) {
     }
     if (mine !== seq || ctx.isStale()) return;
     mount(err);
-    if (!allLines) {
-      allLines = page.facets.lines;
-      setLines(allLines);
-      renderChips(allLines);
+    if (!facetsShown) {
+      facetsShown = true;
+      renderChips(page.facets.lines);
       const types = page.facets.types;
       mount(
         kindSel,
@@ -199,6 +204,7 @@ export async function renderMemories(main, ctx) {
     shown = (append ? shown : 0) + rows.length;
     if (append) tbody.append(...rows);
     else if (rows.length) mount(tbody, rows);
+    else if (!page.total) mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, page.rebuilding ? 'The index is being rebuilt (a reindex is running); reload in a moment.' : 'This store has no memories yet.')));
     else mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'No memories match. Clear the filter or turn a line back on.')));
     cursor = page.next_cursor || null;
     count.textContent = `${fmt(shown)} of ${fmt(page.matched)} shown · ${fmt(page.total)} in store`;
@@ -213,6 +219,7 @@ export async function renderMemories(main, ctx) {
   search.addEventListener('input', () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
+      if (ctx.isStale()) return;
       f.q = search.value.trim();
       writeUrl();
       load(false);
@@ -225,6 +232,8 @@ export async function renderMemories(main, ctx) {
   });
   statusSel.addEventListener('change', () => {
     f.status = statusSel.value;
+    // Facets count what the status admits, so they change with it.
+    facetsShown = false;
     writeUrl();
     load(false);
   });

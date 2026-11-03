@@ -39,8 +39,8 @@ fn app_with(
     crate::router(AppState::new(security(), assets, writes, current))
 }
 
-fn cookie() -> String {
-    format!("{}={TOKEN}", security().cookie_name())
+fn bearer() -> String {
+    format!("Bearer {TOKEN}")
 }
 
 fn req(method: Method, uri: &str) -> axum::http::request::Builder {
@@ -52,7 +52,7 @@ fn req(method: Method, uri: &str) -> axum::http::request::Builder {
 
 fn authed(uri: &str) -> Request<Body> {
     req(Method::GET, uri)
-        .header(header::COOKIE, cookie())
+        .header(header::AUTHORIZATION, bearer())
         .body(Body::empty())
         .unwrap()
 }
@@ -189,87 +189,75 @@ async fn fixture() -> Fixture {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn requests_without_the_token_are_refused() {
+async fn api_requests_without_the_bearer_token_are_refused() {
     let app = app(None);
-    for uri in ["/", "/api/projects", "/js/app.js"] {
+    for uri in ["/api/session", "/api/projects", "/api/nope"] {
         let r = send(&app, req(Method::GET, uri).body(Body::empty()).unwrap()).await;
         assert_eq!(r.status, StatusCode::UNAUTHORIZED, "{uri}");
+        assert_eq!(r.json()["error"]["code"], "unauthorized");
     }
-    let r = send(
-        &app,
-        req(Method::GET, "/api/session")
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(r.json()["error"]["code"], "unauthorized");
-    // A wrong token, by every carrier.
-    let wrong = format!("{}=nope", security().cookie_name());
+    // A wrong token, and the right one by every carrier but the header: a
+    // query string lands in history and logs, and a cookie is shared with
+    // every other server on 127.0.0.1, so neither is accepted.
     for r in [
-        req(Method::GET, "/?token=nope")
-            .body(Body::empty())
-            .unwrap(),
-        req(Method::GET, "/api/session")
-            .header(header::COOKIE, wrong)
-            .body(Body::empty())
-            .unwrap(),
         req(Method::GET, "/api/session")
             .header(header::AUTHORIZATION, "Bearer nope")
+            .body(Body::empty())
+            .unwrap(),
+        req(Method::GET, &format!("/api/session?token={TOKEN}"))
+            .body(Body::empty())
+            .unwrap(),
+        req(Method::GET, "/api/session")
+            .header(header::COOKIE, format!("engramdb_dashboard_7341={TOKEN}"))
+            .body(Body::empty())
+            .unwrap(),
+        req(Method::GET, "/api/session")
+            .header(header::AUTHORIZATION, TOKEN)
             .body(Body::empty())
             .unwrap(),
     ] {
         assert_eq!(send(&app, r).await.status, StatusCode::UNAUTHORIZED);
     }
-}
-
-#[tokio::test]
-async fn the_url_token_is_swapped_for_a_strict_cookie_and_stripped() {
-    let app = app(None);
-    let r = send(
-        &app,
-        req(Method::GET, &format!("/?token={TOKEN}&x=1"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::SEE_OTHER);
-    assert_eq!(r.header(header::LOCATION), "/?x=1");
-    let c = r.header(header::SET_COOKIE);
-    assert!(c.starts_with(&cookie()), "{c}");
-    assert!(
-        c.contains("HttpOnly") && c.contains("SameSite=Strict"),
-        "{c}"
-    );
-    assert_eq!(r.header(header::REFERRER_POLICY), "no-referrer");
-
-    // The cookie then authorizes pages and the API.
-    let r = send(&app, authed("/")).await;
-    assert_eq!(r.status, StatusCode::OK);
-    assert!(String::from_utf8_lossy(&r.body).contains("<title>"));
-
-    // The token also works directly on the API (curl), with no redirect.
-    let r = send(
-        &app,
-        req(Method::GET, &format!("/api/session?token={TOKEN}"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(r.status, StatusCode::OK);
-    let r = send(
-        &app,
-        req(Method::GET, "/api/session")
-            .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
+    let r = send(&app, authed("/api/session")).await;
     assert_eq!(r.status, StatusCode::OK);
     assert_eq!(r.json()["csrf"], CSRF);
 }
 
 #[tokio::test]
-async fn foreign_hosts_are_refused_even_with_the_cookie() {
+async fn static_files_are_public_and_never_set_a_cookie_or_redirect() {
+    let app = app(None);
+    // The page must load before it can read the fragment, so the files are
+    // served without the token; they are the same for everyone.
+    for uri in ["/", "/index.html", "/js/app.js", "/css/app.css"] {
+        let r = send(&app, req(Method::GET, uri).body(Body::empty()).unwrap()).await;
+        assert_eq!(r.status, StatusCode::OK, "{uri}");
+        assert!(r.headers.get(header::SET_COOKIE).is_none(), "{uri}");
+    }
+    // A stray `?token=` on a page is neither honoured nor traded for a
+    // cookie: no redirect, so no `Location` to abuse as an open redirect.
+    for uri in [
+        format!("/?token={TOKEN}"),
+        format!("//evil.example/?token={TOKEN}"),
+    ] {
+        let r = send(&app, req(Method::GET, &uri).body(Body::empty()).unwrap()).await;
+        assert!(r.headers.get(header::LOCATION).is_none(), "{uri}");
+        assert!(r.headers.get(header::SET_COOKIE).is_none(), "{uri}");
+    }
+    let page = send(&app, req(Method::GET, "/").body(Body::empty()).unwrap()).await;
+    assert!(!String::from_utf8_lossy(&page.body).contains(TOKEN));
+    assert_eq!(page.header(header::REFERRER_POLICY), "no-referrer");
+}
+
+#[test]
+fn the_launch_url_carries_the_token_in_the_fragment_only() {
+    let url = security().launch_url();
+    let (before, frag) = url.split_once('#').expect("a fragment");
+    assert_eq!(before, format!("http://{HOST}/"));
+    assert_eq!(frag, format!("token={TOKEN}"));
+}
+
+#[tokio::test]
+async fn foreign_hosts_are_refused_even_with_the_token() {
     let app = app(None);
     for host in [
         Some("evil.example:7341"),
@@ -283,7 +271,7 @@ async fn foreign_hosts_are_refused_even_with_the_cookie() {
         }
         let r = send(
             &app,
-            b.header(header::COOKIE, cookie())
+            b.header(header::AUTHORIZATION, bearer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -301,7 +289,7 @@ async fn foreign_hosts_are_refused_even_with_the_cookie() {
             Request::builder()
                 .uri("/api/session")
                 .header(header::HOST, host)
-                .header(header::COOKIE, cookie())
+                .header(header::AUTHORIZATION, bearer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -314,7 +302,7 @@ async fn foreign_hosts_are_refused_even_with_the_cookie() {
 async fn non_get_requests_need_origin_and_csrf() {
     let app = app(None);
     let post = |origin: Option<&str>, csrf: Option<&str>| {
-        let mut b = req(Method::POST, "/api/projects").header(header::COOKIE, cookie());
+        let mut b = req(Method::POST, "/api/projects").header(header::AUTHORIZATION, bearer());
         if let Some(o) = origin {
             b = b.header(header::ORIGIN, o);
         }
@@ -342,7 +330,7 @@ async fn non_get_requests_need_origin_and_csrf() {
     let r = send(
         &app,
         req(Method::DELETE, "/")
-            .header(header::COOKIE, cookie())
+            .header(header::AUTHORIZATION, bearer())
             .body(Body::empty())
             .unwrap(),
     )
@@ -386,7 +374,6 @@ async fn embedded_assets_have_types_and_etags() {
     let r = send(
         &app,
         req(Method::GET, "/js/app.js")
-            .header(header::COOKIE, cookie())
             .header(header::IF_NONE_MATCH, &etag)
             .body(Body::empty())
             .unwrap(),
@@ -546,7 +533,16 @@ async fn stats_has_counts_usage_series_and_attention() {
     assert_eq!(v["usage"]["returned"], 1);
     assert_eq!(v["usage"]["injected"], 1);
     assert_eq!(v["usage"]["used_memories"], 2);
-    assert_eq!(v["usage"]["reads_last_7_days"], 4);
+    // Per signal, never one summed "reads" number.
+    assert_eq!(
+        v["usage"]["last_7_days"],
+        serde_json::json!({"returned": 1, "injected": 1, "fetched": 2})
+    );
+    assert_eq!(
+        v["usage"]["previous_7_days"],
+        serde_json::json!({"returned": 0, "injected": 0, "fetched": 0})
+    );
+    assert!(v["usage"].get("reads_last_7_days").is_none());
     assert_eq!(v["series"].as_array().unwrap().len(), 30);
     assert_eq!(v["project"]["id"], fx.id.as_str());
     let att = v["attention"].as_array().unwrap();
@@ -568,6 +564,175 @@ async fn stats_has_counts_usage_series_and_attention() {
         .map(|l| l["name"].as_str().unwrap())
         .collect();
     assert_eq!(lines, ["storage", "", "hooks"]);
+    // Slots rank lines over the whole store (the invalidated `build` line
+    // included): storage 2, then build and hooks 1 each, by name.
+    let slots: Vec<serde_json::Value> = v["by_line"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["slot"].clone())
+        .collect();
+    assert_eq!(
+        slots,
+        [
+            serde_json::json!(0),
+            serde_json::Value::Null,
+            serde_json::json!(2)
+        ]
+    );
+    assert_eq!(ch["line_slot"], 2);
+    assert!(v.get("rebuilding").is_none());
+}
+
+#[tokio::test]
+async fn a_line_has_one_slot_on_every_endpoint() {
+    let fx = fixture().await;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}", fx.id);
+    let (_, list) = get_json(&app, &format!("{base}/memories?status=all")).await;
+    let (_, stats) = get_json(&app, &format!("{base}/stats")).await;
+    let facet = |name: &str| {
+        list["facets"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["name"] == name)
+            .map(|l| l["slot"].clone())
+    };
+    for m in list["items"].as_array().unwrap() {
+        let id = m["id"].as_str().unwrap();
+        let (_, d) = get_json(&app, &format!("{base}/memories/{id}")).await;
+        assert_eq!(m["line_slot"], d["line_slot"], "{id}: list vs detail");
+        if let Some(line) = m["line"].as_str() {
+            assert_eq!(
+                Some(m["line_slot"].clone()),
+                facet(line),
+                "{line}: list vs facet"
+            );
+            if let Some(b) = stats["by_line"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|l| l["name"] == line)
+            {
+                assert_eq!(m["line_slot"], b["slot"], "{line}: list vs stats");
+            }
+        } else {
+            assert!(m.get("line_slot").is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn facets_count_what_the_status_filter_admits() {
+    let fx = fixture().await;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/memories", fx.id);
+    let (_, v) = get_json(&app, &format!("{base}?status=invalidated")).await;
+    assert_eq!(
+        v["facets"]["types"],
+        serde_json::json!([{"name": "context", "count": 1}])
+    );
+    let (_, v) = get_json(&app, &format!("{base}?status=challenged")).await;
+    assert_eq!(
+        v["facets"]["types"],
+        serde_json::json!([{"name": "convention", "count": 1}])
+    );
+}
+
+#[tokio::test]
+async fn paging_is_keyed_so_a_new_row_never_repeats_one() {
+    let fx = fixture().await;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/memories?sort=criticality&limit=2", fx.id);
+    let (_, p1) = get_json(&app, &base).await;
+    let first: Vec<String> = p1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    let cursor = p1["next_cursor"].as_str().unwrap().to_string();
+
+    // A row that sorts first lands between the two page loads. An offset
+    // cursor would now hand back page 1's last row again.
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let mut top = memory(MemoryType::Decision, "Now the most critical", &[], &[]);
+    top.criticality = 1.0;
+    store.create(&top).await.unwrap();
+
+    let (s, p2) = get_json(&app, &format!("{base}&cursor={cursor}")).await;
+    assert_eq!(s, StatusCode::OK, "{p2}");
+    let second: Vec<String> = p2["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(second.len(), 2);
+    for id in &second {
+        assert!(!first.contains(id), "{id} repeated across pages");
+        assert_ne!(id, &top.id, "a row before the cursor is not on page 2");
+    }
+    // A cursor is bound to its sort.
+    let (s, _) = get_json(
+        &app,
+        &format!(
+            "/api/projects/{}/memories?sort=created&cursor={cursor}",
+            fx.id
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_store_with_a_genuinely_old_table_answers_409_not_400() {
+    let fx = fixture().await;
+    // The pre-0.3.0 shape: the epistemic columns are not in the table.
+    engramdb::storage::test_support::downgrade_dropping(
+        &fx.dir,
+        &[
+            "epistemic",
+            "verified_at",
+            "generality",
+            "origin_task",
+            "valid_from",
+            "invalidated_at",
+            "watch_paths",
+        ],
+        "0.2.0",
+    )
+    .await;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}", fx.id);
+    for path in ["stats", "memories", "doctor"] {
+        let (s, v) = get_json(&app, &format!("{base}/{path}")).await;
+        match s {
+            StatusCode::CONFLICT => {
+                assert_eq!(v["error"]["code"], "schema_behind", "{path}: {v}");
+                assert!(
+                    v["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("engramdb reindex"),
+                    "{path}: {v}"
+                );
+            }
+            // A read that does not touch the missing columns still works,
+            // and says the schema is behind.
+            StatusCode::OK => assert_eq!(v["schema"]["needs_migration"], true, "{path}: {v}"),
+            other => panic!("{path}: {other} {v}"),
+        }
+    }
+    let (s, v) = get_json(&app, &format!("{base}/memories")).await;
+    assert_eq!(s, StatusCode::CONFLICT, "listing needs the columns: {v}");
+    // Still not migrated.
+    let m =
+        engramdb::storage::manifest::load_manifest(&fx.dir.join(".engramdb").join("manifest.toml"))
+            .await
+            .unwrap();
+    assert_eq!(m.schema_version, "0.2.0");
 }
 
 #[tokio::test]
@@ -602,9 +767,25 @@ async fn memories_filter_sort_and_page() {
     };
     let (_, v) = get_json(&app, &format!("{base}?sort=fetched&limit=1")).await;
     assert_eq!(ids(&v), [fx.ids[0].clone()]);
-    assert_eq!(v["next_cursor"], "1");
-    let (_, v2) = get_json(&app, &format!("{base}?sort=fetched&limit=1&cursor=1")).await;
+    let cursor = v["next_cursor"].as_str().unwrap().to_string();
+    let (_, v2) = get_json(
+        &app,
+        &format!("{base}?sort=fetched&limit=1&cursor={cursor}"),
+    )
+    .await;
     assert_eq!(ids(&v2), [fx.ids[1].clone()], "ties break by id");
+    // Walk to the end: every live row once, then no cursor.
+    let mut seen = ids(&v);
+    let mut next = Some(cursor);
+    while let Some(c) = next {
+        let (_, p) = get_json(&app, &format!("{base}?sort=fetched&limit=1&cursor={c}")).await;
+        seen.extend(ids(&p));
+        next = p["next_cursor"].as_str().map(str::to_string);
+    }
+    assert_eq!(seen.len(), 4);
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 4);
 
     let (_, v) = get_json(&app, &format!("{base}?kind=hazard")).await;
     assert_eq!(ids(&v), [fx.ids[1].clone()]);
@@ -718,6 +899,136 @@ async fn stores_are_cached_and_a_stale_schema_is_reported_not_fixed() {
         .await
         .unwrap();
     assert_eq!(m.schema_version, "0.1.0", "the dashboard never migrates");
+}
+
+#[tokio::test]
+async fn the_cache_evicts_at_capacity_and_never_caches_a_failure() {
+    use crate::projects::{Location, StoreKind};
+    use crate::stores::StoreCache;
+    let fx = fixture().await;
+    let loc = |id: &str, root: &Path| Location {
+        id: id.to_string(),
+        kind: StoreKind::Project,
+        root: root.to_path_buf(),
+    };
+    let other = TempDir::new().unwrap();
+    let other_dir = std::fs::canonicalize(other.path()).unwrap();
+    let cache = StoreCache::new(1);
+
+    // Not a store yet: refused, and the refusal is not remembered...
+    let b = loc("b", &other_dir);
+    assert!(cache.get(&b).await.is_err());
+    assert_eq!(cache.open_count().await, 0);
+    // ...so once it becomes one, the next request opens it.
+    MemoryStore::init(&other_dir, &FileRegistry::global().unwrap())
+        .await
+        .unwrap();
+    let opened_b = cache.get(&b).await.unwrap();
+    assert_eq!(opened_b.root(), other_dir.as_path());
+
+    // Capacity 1: opening the fixture evicts `b`, and `b` reopens fine.
+    let a = loc(&fx.id, &fx.dir);
+    let opened_a = cache.get(&a).await.unwrap();
+    assert_eq!(cache.open_count().await, 1);
+    assert_eq!(opened_a.root(), fx.dir.as_path());
+    assert!(!std::sync::Arc::ptr_eq(
+        &opened_b,
+        &cache.get(&b).await.unwrap()
+    ));
+    assert_eq!(cache.open_count().await, 1);
+}
+
+#[tokio::test]
+async fn group_and_global_stores_with_memories_are_listed_and_readable() {
+    let fx = fixture().await;
+    let registry = FileRegistry::global().unwrap();
+    let group = registry.create_group("team").await.unwrap();
+    let gs = MemoryStore::init_group(&group).await.unwrap();
+    gs.create(&memory(MemoryType::Convention, "Team rule", &["team"], &[]))
+        .await
+        .unwrap();
+    let global = MemoryStore::init_global().await.unwrap();
+    for n in ["Global one", "Global two"] {
+        global
+            .create(&memory(MemoryType::Context, n, &[], &[]))
+            .await
+            .unwrap();
+    }
+
+    let app = app(Some(fx.current.clone()));
+    let (_, v) = get_json(&app, "/api/projects").await;
+    let g = find(&v, &group);
+    assert_eq!(g["available"], true, "{g}");
+    assert_eq!(g["memory_count"], 1);
+    let gl = find(&v, paths::GLOBAL_PROJECT_ID);
+    assert_eq!(gl["available"], true, "{gl}");
+    assert_eq!(gl["memory_count"], 2);
+
+    for (id, n) in [(group.as_str(), 1), (paths::GLOBAL_PROJECT_ID, 2)] {
+        let (s, v) = get_json(&app, &format!("/api/projects/{id}/stats")).await;
+        assert_eq!(s, StatusCode::OK, "{id}: {v}");
+        assert_eq!(v["total"], n, "{id}");
+        assert_eq!(v["project"]["id"], id);
+        let (s, v) = get_json(&app, &format!("/api/projects/{id}/memories")).await;
+        assert_eq!(s, StatusCode::OK, "{id}: {v}");
+        assert_eq!(v["matched"], n, "{id}");
+    }
+}
+
+#[tokio::test]
+async fn the_current_project_of_a_linked_worktree_is_its_main_checkout() {
+    let tmp = TempDir::new().unwrap();
+    let base = std::fs::canonicalize(tmp.path()).unwrap();
+    let main = base.join("main");
+    std::fs::create_dir_all(&main).unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&main, &["init", "-q"]);
+    git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let wt = base.join("wt");
+    git(&main, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    MemoryStore::init(&main, &FileRegistry::global().unwrap())
+        .await
+        .unwrap();
+
+    let cur = CurrentProject::resolve(&wt).expect("the worktree routes to main");
+    assert_eq!(cur.root, main);
+    assert_eq!(
+        cur.id,
+        engramdb::storage::project_id::compute_project_id(&main)
+    );
+    // And nothing was created in the worktree.
+    assert!(!wt.join(".engramdb").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_launch_page_is_private_and_removed_on_drop() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let url = security().launch_url();
+    let page = crate::LaunchPage::write(&url).unwrap();
+    let path = page.path();
+    let dir = path.parent().unwrap().to_path_buf();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&dir), 0o700);
+    assert_eq!(mode(&path), 0o600);
+    let html = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        html.contains(&format!("content=\"0;url={url}\"")),
+        "the redirect target"
+    );
+    drop(page);
+    assert!(!dir.exists(), "deleted with the guard");
 }
 
 // ---------------------------------------------------------------------------

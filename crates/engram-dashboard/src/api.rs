@@ -26,9 +26,6 @@ use crate::{ApiError, AppState};
 
 type ApiResult = Result<Response, ApiError>;
 
-/// A row comparator for the memories table's sort.
-type RowCmp<'a> = Box<dyn Fn(&&IndexFilterable, &&IndexFilterable) -> std::cmp::Ordering + 'a>;
-
 /// Serialize `body` as a JSON response with `no-store`.
 pub fn json_response<T: Serialize + ?Sized>(status: StatusCode, body: &T) -> Response {
     match serde_json::to_vec(body) {
@@ -152,6 +149,34 @@ fn line_of(logical: &[String]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Each line's colour slot: its rank in the whole store (invalidated
+/// memories included, so a status filter never recolours a line), by memory
+/// count, most first, then by name. The frontend paints `slot % 7` from its
+/// palette and varies the pattern by `slot / 7`, so the seven biggest lines
+/// get seven distinct solid colours and an eighth never repeats one exactly.
+///
+/// **The one place a slot is decided**: the list, its facets, the overview
+/// and the detail page all call this over the same rows, so one line has one
+/// colour on every page. A slot can move when line sizes change rank.
+pub(crate) fn line_slots(all: &[IndexFilterable]) -> HashMap<String, u32> {
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for e in all {
+        if let Some(l) = line_of(&e.logical) {
+            *n.entry(l).or_insert(0) += 1;
+        }
+    }
+    let mut v: Vec<(String, usize)> = n.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v.into_iter()
+        .enumerate()
+        .map(|(i, (l, _))| (l, i as u32))
+        .collect()
+}
+
+fn slot_of(slots: &HashMap<String, u32>, line: Option<&String>) -> Option<u32> {
+    line.and_then(|l| slots.get(l).copied())
+}
+
 fn status_str(s: Status) -> &'static str {
     match s {
         Status::Active => "active",
@@ -172,6 +197,9 @@ struct MemoryRow {
     criticality: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     line: Option<String>,
+    /// See [`line_slots`]; absent with `line`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_slot: Option<u32>,
     logical: Vec<String>,
     physical: Vec<String>,
     tags: Vec<String>,
@@ -193,8 +221,14 @@ fn wire<T: Serialize>(v: &T) -> String {
     }
 }
 
-fn row(e: &IndexFilterable, usage: Option<&UsageCounts>) -> MemoryRow {
+fn row(
+    e: &IndexFilterable,
+    usage: Option<&UsageCounts>,
+    slots: &HashMap<String, u32>,
+) -> MemoryRow {
+    let line = line_of(&e.logical);
     MemoryRow {
+        line_slot: slot_of(slots, line.as_ref()),
         id: e.id.clone(),
         summary: e.summary.clone(),
         type_: wire(&e.type_),
@@ -202,7 +236,7 @@ fn row(e: &IndexFilterable, usage: Option<&UsageCounts>) -> MemoryRow {
         status: status_str(e.status),
         visibility: wire(&e.visibility).to_lowercase(),
         criticality: e.criticality,
-        line: line_of(&e.logical),
+        line,
         logical: e.logical.clone(),
         physical: e.physical.clone(),
         tags: e.tags.clone(),
@@ -226,14 +260,30 @@ fn is_invalidated(e: &IndexFilterable, now: DateTime<Utc>) -> bool {
 struct Count {
     name: String,
     count: usize,
+    /// Line counts only: see [`line_slots`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<u32>,
 }
 
 fn counts(map: BTreeMap<String, usize>) -> Vec<Count> {
     let mut v: Vec<Count> = map
         .into_iter()
-        .map(|(name, count)| Count { name, count })
+        .map(|(name, count)| Count {
+            name,
+            count,
+            slot: None,
+        })
         .collect();
     v.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+    v
+}
+
+/// [`counts`] for lines (`""` is "no logical scope"), with their slots.
+fn line_counts(map: BTreeMap<String, usize>, slots: &HashMap<String, u32>) -> Vec<Count> {
+    let mut v = counts(map);
+    for c in &mut v {
+        c.slot = slots.get(&c.name).copied();
+    }
     v
 }
 
@@ -251,9 +301,15 @@ struct MemoryPage {
     /// Memories matching the filters.
     matched: usize,
     items: Vec<MemoryRow>,
+    /// Opaque; pass back as `cursor` with the same sort and dir.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_cursor: Option<String>,
+    /// Over the memories the status filter admits, before the other filters.
     facets: Facets,
+    /// The index is empty while the manifest records memories: a reindex is
+    /// rebuilding it elsewhere, and the page should say so, not "no memories".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rebuilding: bool,
     /// Usage log lines that could not be read (torn or from a newer binary).
     #[serde(skip_serializing_if = "is_zero")]
     usage_lines_skipped: u64,
@@ -307,10 +363,19 @@ async fn list_memories(
     let text = q.get("q").map(|s| s.to_lowercase());
 
     let total = all.len();
+    let slots = line_slots(&all);
+    let admitted = |e: &&IndexFilterable| -> bool {
+        let by_validity = match status {
+            Some("invalidated") => is_invalidated(e, now),
+            Some("all") => true,
+            _ => !is_invalidated(e, now),
+        };
+        by_validity && status_filter.is_none_or(|s| e.status == s)
+    };
     let mut facet_types = BTreeMap::new();
     let mut facet_lines = BTreeMap::new();
     let mut facet_tags = BTreeMap::new();
-    for e in all.iter().filter(|e| !is_invalidated(e, now)) {
+    for e in all.iter().filter(admitted) {
         *facet_types.entry(wire(&e.type_)).or_insert(0) += 1;
         *facet_lines
             .entry(line_of(&e.logical).unwrap_or_default())
@@ -322,14 +387,9 @@ async fn list_memories(
     let mut tags = counts(facet_tags);
     tags.truncate(30);
 
-    let mut matched: Vec<&IndexFilterable> = all
+    let matched: Vec<&IndexFilterable> = all
         .iter()
-        .filter(|e| match status {
-            Some("invalidated") => is_invalidated(e, now),
-            Some("all") => true,
-            _ => !is_invalidated(e, now),
-        })
-        .filter(|e| status_filter.is_none_or(|s| e.status == s))
+        .filter(admitted)
         .filter(|e| kinds.as_ref().is_none_or(|k| k.contains(&e.type_)))
         .filter(|e| epistemic.as_ref().is_none_or(|k| k.contains(&e.epistemic)))
         .filter(|e| {
@@ -359,28 +419,50 @@ async fn list_memories(
 
     let sort = q.get("sort").map(String::as_str).unwrap_or("criticality");
     let u = |e: &IndexFilterable| usage.by_memory.get(&e.id).map(|m| &m.counts);
-    let num = |e: &IndexFilterable, f: fn(&UsageCounts) -> u64| u(e).map(f).unwrap_or(0);
-    let cmp: RowCmp = match sort {
-        "criticality" => Box::new(|a, b| a.criticality.total_cmp(&b.criticality)),
-        "created" => Box::new(|a, b| a.created_at.cmp(&b.created_at)),
-        "updated" => Box::new(|a, b| a.updated_at.cmp(&b.updated_at)),
-        "summary" => Box::new(|a, b| a.summary.to_lowercase().cmp(&b.summary.to_lowercase())),
-        "type" => Box::new(|a, b| wire(&a.type_).cmp(&wire(&b.type_))),
-        "line" => Box::new(|a, b| line_of(&a.logical).cmp(&line_of(&b.logical))),
-        "returned" => Box::new(move |a, b| num(a, |c| c.returned).cmp(&num(b, |c| c.returned))),
-        "injected" => Box::new(move |a, b| num(a, |c| c.injected).cmp(&num(b, |c| c.injected))),
-        "fetched" => Box::new(move |a, b| num(a, |c| c.fetched).cmp(&num(b, |c| c.fetched))),
-        "updated_n" => Box::new(move |a, b| num(a, |c| c.updated).cmp(&num(b, |c| c.updated))),
-        "last_read" => {
-            Box::new(move |a, b| u(a).and_then(last_read).cmp(&u(b).and_then(last_read)))
-        }
-        other => {
-            return Err(ApiError::bad_request(format!(
-                "unknown sort {other:?}: use criticality, created, updated, summary, type, \
-                 line, returned, injected, fetched, updated_n or last_read"
-            )))
-        }
+    let num = |e: &IndexFilterable, f: fn(&UsageCounts) -> u64| {
+        SortKey::Num(u(e).map(f).unwrap_or(0) as f64)
     };
+    let micros = |t: DateTime<Utc>| SortKey::Num(t.timestamp_micros() as f64);
+    let key = |e: &IndexFilterable| -> Option<SortKey> {
+        Some(match sort {
+            "criticality" => SortKey::Num(e.criticality),
+            "created" => micros(e.created_at),
+            "updated" => micros(e.updated_at),
+            "summary" => SortKey::Text(e.summary.to_lowercase()),
+            "type" => SortKey::Text(wire(&e.type_)),
+            "line" => SortKey::Text(line_of(&e.logical).unwrap_or_default()),
+            "returned" => num(e, |c| c.returned),
+            "injected" => num(e, |c| c.injected),
+            "fetched" => num(e, |c| c.fetched),
+            "updated_n" => num(e, |c| c.updated),
+            // Never read sorts below every real time (all are after 1970).
+            "last_read" => SortKey::Num(
+                u(e).and_then(last_read)
+                    .map(|t| t.timestamp_micros() as f64)
+                    .unwrap_or(-1.0),
+            ),
+            _ => return None,
+        })
+    };
+    if !matches!(
+        sort,
+        "criticality"
+            | "created"
+            | "updated"
+            | "summary"
+            | "type"
+            | "line"
+            | "returned"
+            | "injected"
+            | "fetched"
+            | "updated_n"
+            | "last_read"
+    ) {
+        return Err(ApiError::bad_request(format!(
+            "unknown sort {sort:?}: use criticality, created, updated, summary, type, \
+             line, returned, injected, fetched, updated_n or last_read"
+        )));
+    }
     let text_sort = matches!(sort, "summary" | "type" | "line");
     let desc = match q.get("dir").map(String::as_str) {
         Some("asc") => false,
@@ -392,16 +474,29 @@ async fn list_memories(
             )))
         }
     };
-    matched.sort_by(|a, b| {
-        let o = cmp(a, b);
-        let o = if desc { o.reverse() } else { o };
-        o.then_with(|| a.id.cmp(&b.id))
-    });
+    let mut keyed: Vec<(SortKey, &IndexFilterable)> = matched
+        .into_iter()
+        .filter_map(|e| key(e).map(|k| (k, e)))
+        .collect();
+    keyed.sort_by(|a, b| order(&a.0, &a.1.id, &b.0, &b.1.id, desc));
 
-    let offset: usize = match q.get("cursor") {
-        Some(c) => c
-            .parse()
-            .map_err(|_| ApiError::bad_request("cursor must come from next_cursor"))?,
+    // Keyset paging: the cursor is the last row's (sort key, id), and the
+    // next page starts strictly after it. An offset would skip or repeat
+    // rows whenever an earlier row moved (a usage sort moves with every
+    // read); a key does not depend on what came before.
+    let start = match q.get("cursor") {
+        Some(c) => {
+            let cur = Cursor::decode(c)
+                .ok_or_else(|| ApiError::bad_request("cursor must come from next_cursor"))?;
+            if cur.sort != sort || cur.desc != desc {
+                return Err(ApiError::bad_request(
+                    "cursor belongs to another sort; start again without it",
+                ));
+            }
+            keyed.partition_point(|(k, e)| {
+                order(k, &e.id, &cur.key, &cur.id, desc) != std::cmp::Ordering::Greater
+            })
+        }
         None => 0,
     };
     let limit: usize = match q.get("limit") {
@@ -411,26 +506,91 @@ async fn list_memories(
             .clamp(1, MAX_LIMIT),
         None => DEFAULT_LIMIT,
     };
-    let matched_n = matched.len();
-    let items: Vec<MemoryRow> = matched
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(|e| row(e, u(e)))
-        .collect();
-    let next = offset + items.len();
+    let matched_n = keyed.len();
+    let page = &keyed[start.min(matched_n)..(start + limit).min(matched_n)];
+    let next_cursor = (start + page.len() < matched_n)
+        .then(|| page.last())
+        .flatten()
+        .map(|(k, e)| {
+            Cursor {
+                sort: sort.to_string(),
+                desc,
+                key: k.clone(),
+                id: e.id.clone(),
+            }
+            .encode()
+        });
+    let items: Vec<MemoryRow> = page.iter().map(|(_, e)| row(e, u(e), &slots)).collect();
+    let rebuilding = total == 0 && store.manifest_memory_count().await.unwrap_or(0) > 0;
     ok(&MemoryPage {
         total,
         matched: matched_n,
         items,
-        next_cursor: (next < matched_n).then(|| next.to_string()),
+        next_cursor,
         facets: Facets {
             types: counts(facet_types),
-            lines: counts(facet_lines),
+            lines: line_counts(facet_lines, &slots),
             tags,
         },
+        rebuilding,
         usage_lines_skipped: usage.skipped_lines + usage.unknown_lines,
     })
+}
+
+/// A memories-table sort value.
+#[derive(Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum SortKey {
+    Num(f64),
+    Text(String),
+}
+
+fn cmp_key(a: &SortKey, b: &SortKey) -> std::cmp::Ordering {
+    match (a, b) {
+        (SortKey::Num(x), SortKey::Num(y)) => x.total_cmp(y),
+        (SortKey::Text(x), SortKey::Text(y)) => x.cmp(y),
+        (SortKey::Num(_), SortKey::Text(_)) => std::cmp::Ordering::Less,
+        (SortKey::Text(_), SortKey::Num(_)) => std::cmp::Ordering::Greater,
+    }
+}
+
+/// The table order: the key in the asked direction, then the id ascending,
+/// so equal keys still have one total order for the cursor to point into.
+fn order(ka: &SortKey, ida: &str, kb: &SortKey, idb: &str, desc: bool) -> std::cmp::Ordering {
+    let o = cmp_key(ka, kb);
+    let o = if desc { o.reverse() } else { o };
+    o.then_with(|| ida.cmp(idb))
+}
+
+/// `next_cursor`: the last row's position, hex-encoded JSON (URL-safe, and
+/// opaque to the frontend).
+#[derive(Serialize, serde::Deserialize)]
+struct Cursor {
+    sort: String,
+    desc: bool,
+    key: SortKey,
+    id: String,
+}
+
+impl Cursor {
+    fn encode(&self) -> String {
+        serde_json::to_vec(self)
+            .unwrap_or_default()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    fn decode(s: &str) -> Option<Self> {
+        if !s.len().is_multiple_of(2) || s.len() > 4096 {
+            return None;
+        }
+        let bytes: Option<Vec<u8>> = (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+            .collect();
+        serde_json::from_slice(&bytes?).ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +603,8 @@ struct AttentionItem {
     summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     line: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_slot: Option<u32>,
     /// Why it is listed, as data for the frontend to word.
     reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,10 +624,31 @@ struct UsageTotals {
     challenged: u64,
     /// Memories with at least one read of any kind.
     used_memories: usize,
-    reads_last_7_days: u64,
-    reads_previous_7_days: u64,
+    /// Per signal, never summed: a retrieval, a hook injection and a fetch
+    /// by id are three different things (see `stats` in the CLI reference).
+    last_7_days: Signals,
+    previous_7_days: Signals,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_read_at: Option<DateTime<Utc>>,
+}
+
+/// The three read signals over a window, side by side.
+#[derive(Serialize, Default, Debug, PartialEq, Eq)]
+struct Signals {
+    returned: u64,
+    injected: u64,
+    fetched: u64,
+}
+
+impl Signals {
+    fn of(days: &[DailyUsage]) -> Self {
+        days.iter().fold(Self::default(), |mut a, d| {
+            a.returned += d.returned;
+            a.injected += d.injected;
+            a.fetched += d.fetched;
+            a
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -488,6 +671,9 @@ struct StatsPage {
     /// Oldest first; the last 30 days, today included.
     series: Vec<DailyUsage>,
     attention: Vec<AttentionItem>,
+    /// See `MemoryPage::rebuilding`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    rebuilding: bool,
     schema: engramdb::storage::SchemaState,
     #[serde(skip_serializing_if = "Option::is_none")]
     staleness: Option<String>,
@@ -505,6 +691,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
     let series = store.series(None).await?;
     let now = Utc::now();
 
+    let slots = line_slots(&all);
     let live: Vec<&IndexFilterable> = all.iter().filter(|e| !is_invalidated(e, now)).collect();
     let mut by_epistemic = BTreeMap::new();
     let mut by_line = BTreeMap::new();
@@ -524,8 +711,8 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         updated: 0,
         challenged: 0,
         used_memories: 0,
-        reads_last_7_days: 0,
-        reads_previous_7_days: 0,
+        last_7_days: Signals::default(),
+        previous_7_days: Signals::default(),
         last_read_at: None,
     };
     for m in usage.by_memory.values() {
@@ -540,15 +727,9 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         }
         totals.last_read_at = totals.last_read_at.max(last_read(c));
     }
-    let reads = |d: &DailyUsage| d.returned + d.injected + d.fetched;
     let n = series.len();
-    totals.reads_last_7_days = series.iter().skip(n.saturating_sub(7)).map(reads).sum();
-    totals.reads_previous_7_days = series
-        .iter()
-        .skip(n.saturating_sub(14))
-        .take(7.min(n.saturating_sub(7)))
-        .map(reads)
-        .sum();
+    totals.last_7_days = Signals::of(&series[n.saturating_sub(7)..]);
+    totals.previous_7_days = Signals::of(&series[n.saturating_sub(14)..n.saturating_sub(7)]);
 
     // Needs attention: challenged (with the newest evidence), needs review,
     // then stale.
@@ -573,6 +754,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             id: e.id.clone(),
             summary: e.summary.clone(),
             line: line_of(&e.logical),
+            line_slot: slot_of(&slots, line_of(&e.logical).as_ref()),
             reason: "challenged",
             at: newest.map(|c| c.timestamp),
             detail: newest.map(|c| c.evidence.clone()),
@@ -588,6 +770,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             id: e.id.clone(),
             summary: e.summary.clone(),
             line: line_of(&e.logical),
+            line_slot: slot_of(&slots, line_of(&e.logical).as_ref()),
             reason: "needs_review",
             at: Some(e.updated_at),
             detail: None,
@@ -619,6 +802,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             id: e.id.clone(),
             summary: e.summary.clone(),
             line: line_of(&e.logical),
+            line_slot: slot_of(&slots, line_of(&e.logical).as_ref()),
             reason: if lr.is_some() { "stale" } else { "never_read" },
             at: Some(lr.unwrap_or(e.created_at)),
             detail: None,
@@ -626,10 +810,13 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         });
     }
 
-    let project = projects::catalog(state.current.as_ref())
+    // This store's row only: probing every registered project per page
+    // load would put the slowest mount on the machine in front of it.
+    let project = projects::view(&id, state.current.as_ref())
         .await
         .ok()
-        .and_then(|c| c.projects.into_iter().find(|p| p.id == id));
+        .flatten();
+    let rebuilding = all.is_empty() && store.manifest_memory_count().await.unwrap_or(0) > 0;
     ok(&StatsPage {
         project,
         total: stats.total,
@@ -645,13 +832,14 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
                 .collect(),
         ),
         by_epistemic: counts(by_epistemic),
-        by_line: counts(by_line),
+        by_line: line_counts(by_line, &slots),
         oldest: stats.oldest,
         newest: stats.newest,
         avg_criticality: stats.avg_criticality,
         usage: totals,
         series,
         attention,
+        rebuilding,
         schema: store.schema_state().await,
         staleness: store.staleness().await,
     })
@@ -684,7 +872,12 @@ struct MemoryDetail {
     store_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     line: Option<String>,
+    /// See [`line_slots`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line_slot: Option<u32>,
     memory: Memory,
+    /// Exact (a raw scan of this memory's events); the list's counts come
+    /// from the rollup and can lag these until its next refresh.
     usage: UsageCounts,
     series: Vec<DailyUsage>,
     /// Newest first. Built from the memory's own lifecycle fields and the
@@ -768,6 +961,8 @@ async fn memory_detail(
         .map(|u| u.counts)
         .unwrap_or_default();
     let series = store.series(Some(&memory.id)).await?;
+    let slots = line_slots(&store.list().await?);
+    let line = line_of(&memory.logical);
 
     let mut wanted: Vec<String> = memory.supersedes.clone();
     if let Some(s) = &memory.superseded_by {
@@ -788,7 +983,8 @@ async fn memory_detail(
     let superseded_by = memory.superseded_by.as_ref().map(link);
     ok(&MemoryDetail {
         store_id: store.store_id().to_string(),
-        line: line_of(&memory.logical),
+        line_slot: slot_of(&slots, line.as_ref()),
+        line,
         timeline: timeline(&memory, &usage),
         usage,
         series,

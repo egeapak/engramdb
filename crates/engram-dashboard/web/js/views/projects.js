@@ -12,23 +12,20 @@ function card(p, ctx) {
   if (p.worktree) tags.push(h('span', { class: 'kind-tag' }, 'worktree'));
   else if (p.parent_id) tags.push(h('span', { class: 'kind-tag' }, 'sub-project'));
   if (p.kind !== 'project') tags.push(h('span', { class: 'kind-tag' }, p.kind));
-  const open = () => {
-    if (!p.available && p.parent_id) location.hash = ctx.href('overview', p.parent_id);
-    else if (p.available) location.hash = ctx.href('overview', p.id);
+  // Navigation is a link: middle-click, copy-link and the browser's own
+  // focus order all work. A sub-project's memories live in its parent.
+  const target = p.available ? p.id : p.parent_id || null;
+  const attrs = {
+    class: ['card', selected && 'cur', !p.available && 'off'],
+    'aria-current': selected ? 'true' : null,
+    title: !p.available && p.parent_id ? 'Open the parent project, which holds these memories' : null,
   };
-  const disabled = !p.available && !p.parent_id;
   return h(
     'li',
     { class: p.parent_id ? 'child' : null },
     h(
-      'button',
-      {
-        type: 'button',
-        'aria-pressed': String(selected),
-        'aria-disabled': disabled ? 'true' : null,
-        onclick: disabled ? null : open,
-        title: !p.available && p.parent_id ? 'Open the parent project, which holds these memories' : null,
-      },
+      target ? 'a' : 'div',
+      target ? { ...attrs, href: ctx.href('overview', target) } : attrs,
       h('div', { class: 'pn' }, p.name, tags),
       h('div', { class: 'pp mono' }, p.path),
       p.available
@@ -39,7 +36,7 @@ function card(p, ctx) {
             p.children && p.children.length ? h('span', null, h('b', null, fmt(p.children.length)), p.children.length === 1 ? 'sub-project' : 'sub-projects') : null,
             p.subscribers && p.subscribers.length ? h('span', null, h('b', null, fmt(p.subscribers.length)), 'subscribers') : null,
           )
-        : h('div', { class: p.kind === 'global' ? ['why', 'empty'] : 'why' }, p.unavailable_reason || 'unavailable'),
+        : h('div', { class: p.kind === 'project' ? 'why' : ['why', 'empty'] }, p.unavailable_reason || 'unavailable'),
       h('div', { class: 'pid mono' }, `${shortId(p.id)}${p.last_write_at ? ' · last write ' + ago(p.last_write_at) : ''}${p.schema && p.schema.needs_migration ? ' · schema ' + (p.schema.stored || '?') + ' (behind)' : ''}`),
     ),
   );

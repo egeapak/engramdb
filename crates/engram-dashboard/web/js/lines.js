@@ -4,27 +4,21 @@
 import { h, s } from './dom.js';
 
 const SLOTS = 7;
-let palette = new Map();
 
 /**
- * Assign colour slots from a project's line counts (largest line first, as
- * the API orders them), so the same project always gets the same colours.
+ * The colour class of a line slot: "0".."6", or "none" for no line.
+ *
+ * Slots are decided by the server (`line_slot` on rows, `slot` on line
+ * counts): one rank per line over the whole store, so a line has the same
+ * colour on every page. Nothing here keeps state.
  */
-export function setLines(lines) {
-  palette = new Map();
-  let i = 0;
-  for (const l of lines || []) {
-    if (!l.name) continue;
-    palette.set(l.name, i % SLOTS);
-    i += 1;
-  }
+export function slot(n) {
+  return n === null || n === undefined ? 'none' : String(n % SLOTS);
 }
 
-/** The colour slot of a line: "0".."6", or "none". */
-export function slot(line) {
-  if (!line) return 'none';
-  if (!palette.has(line)) palette.set(line, palette.size % SLOTS);
-  return String(palette.get(line));
+/** 0 for the first seven lines, then 1 (ringed) and 2 (striped), so an eighth line never repeats a badge exactly. */
+export function variant(n) {
+  return n === null || n === undefined ? 0 : Math.min(2, Math.floor(n / SLOTS));
 }
 
 export function code(line) {
@@ -37,11 +31,13 @@ export function lineName(line) {
   return line || 'No scope';
 }
 
-export function badge(line, large) {
+/** A line's two-letter badge. `n` is its server-assigned slot. */
+export function badge(line, n, large) {
   const name = lineName(line);
+  const v = variant(n);
   return h(
     'span',
-    { class: ['badge', 'b-' + slot(line), large && 'lg'], title: `${name} line`, role: 'img', 'aria-label': `${name} line` },
+    { class: ['badge', 'b-' + slot(n), v && 'v-' + v, large && 'lg'], title: `${name} line`, role: 'img', 'aria-label': `${name} line` },
     code(line),
   );
 }
@@ -70,11 +66,11 @@ function shape(type, r) {
   }
 }
 
-/** A 16px station glyph for a memory type, stroked in its line's colour. */
-export function kindIcon(type, line) {
+/** A 16px station glyph for a memory type, stroked in its line's colour (`n`: the line's slot). */
+export function kindIcon(type, n) {
   return s(
     'svg',
-    { width: 16, height: 16, viewBox: '-8 -8 16 16', 'aria-hidden': 'true', class: 'stroke-' + slot(line) },
+    { width: 16, height: 16, viewBox: '-8 -8 16 16', 'aria-hidden': 'true', class: 'stroke-' + slot(n) },
     shape(type, 4.6),
   );
 }

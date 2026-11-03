@@ -149,6 +149,17 @@ pub fn load_memory_events(store_root: &Path) -> Result<LoadedMemoryEvents> {
     Ok(out)
 }
 
+/// [`load_memory_events`] on the blocking pool. The log can be megabytes
+/// and sits on whatever filesystem the project does (a network mount
+/// included); the async readers below are called from request handlers, so
+/// they must not read it on a runtime worker.
+async fn load_memory_events_async(store_root: &Path) -> Result<LoadedMemoryEvents> {
+    let root = store_root.to_path_buf();
+    tokio::task::spawn_blocking(move || load_memory_events(&root))
+        .await
+        .map_err(|e| std::io::Error::other(format!("usage log reader panicked: {e}")))?
+}
+
 /// What one [`drain_to_table`] call moved.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DrainReport {
@@ -243,7 +254,7 @@ pub async fn load_usage(
     memory: Option<&str>,
 ) -> anyhow::Result<UsageView> {
     let mut table = load_table_usage(store_id, memory).await?;
-    let loaded = load_memory_events(store_root)?;
+    let loaded = load_memory_events_async(store_root).await?;
     for e in &loaded.rows {
         if memory.is_none_or(|m| m == e.memory_id) {
             if let Some(kind) = e.known_kind() {
@@ -267,7 +278,7 @@ pub async fn load_usage(
 /// `memory_events`) reads as it is until the next refresh or reconcile.
 pub async fn load_current_usage(store_root: &Path, store_id: &str) -> anyhow::Result<UsageView> {
     let entries = load_rollup_entries(store_id).await?;
-    let loaded = load_memory_events(store_root)?;
+    let loaded = load_memory_events_async(store_root).await?;
     let mut by_memory: BTreeMap<String, MemoryUsage> = BTreeMap::new();
     let mut watermarks = BTreeMap::new();
     for (id, entry) in entries {
@@ -330,7 +341,7 @@ async fn load_daily_series_at(
 ) -> anyhow::Result<Vec<DailyUsage>> {
     let mut series = DailySeries::empty(days, now.date_naive());
     load_series_table(store_id, memory, &mut series).await?;
-    for e in &load_memory_events(store_root)?.rows {
+    for e in &load_memory_events_async(store_root).await?.rows {
         if memory.is_none_or(|m| m == e.memory_id) {
             if let Some(kind) = e.known_kind() {
                 series.add(kind, e.ts);
@@ -351,7 +362,7 @@ pub async fn returned_sessions(
     since: Option<DateTime<Utc>>,
 ) -> anyhow::Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
     let mut out = returned_sessions_table(store_id, since).await?;
-    for e in load_memory_events(store_root)?.rows {
+    for e in load_memory_events_async(store_root).await?.rows {
         if e.known_kind() != Some(UsageKind::Returned) || since.is_some_and(|s| e.ts < s) {
             continue;
         }

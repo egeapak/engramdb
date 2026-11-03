@@ -4372,69 +4372,8 @@ mod tests {
         downgrade_dropping(dir, &["content_sha256", "content_len"], "0.7.0").await
     }
 
-    /// Rewrite a store's `memories` table with `drop_cols` removed from the
-    /// Arrow schema, and stamp the manifest at `version`.
-    ///
-    /// The other migration tests here downgrade only the manifest stamp, which
-    /// exercises the backfill but never the case that actually breaks: a table
-    /// whose Arrow schema is genuinely missing the new column. This builds that
-    /// table by reading the current one, dropping the fields and their arrays,
-    /// and recreating the table from the reduced batches — so the fixture is the
-    /// previous version's on-disk shape rather than a stand-in for it, and it
-    /// stays honest if a later version adds another column.
     async fn downgrade_dropping(dir: &Path, drop_cols: &[&str], version: &str) {
-        use arrow_array::RecordBatchIterator;
-        use futures_util::stream::StreamExt;
-        use lancedb::query::ExecutableQuery;
-        use std::sync::Arc;
-
-        let project_id = project_id::compute_project_id(dir);
-        let lance_path = paths::lancedb_dir(&project_id).unwrap();
-        let conn = lancedb::connect(lance_path.to_str().unwrap())
-            .execute()
-            .await
-            .unwrap();
-        let table = conn.open_table("memories").execute().await.unwrap();
-
-        let mut stream = table.query().execute().await.unwrap();
-        let mut reduced = Vec::new();
-        let mut reduced_schema = None;
-        while let Some(batch) = stream.next().await {
-            let batch = batch.unwrap();
-            let schema = batch.schema();
-            let keep: Vec<usize> = (0..schema.fields().len())
-                .filter(|i| !drop_cols.contains(&schema.field(*i).name().as_str()))
-                .collect();
-            assert_eq!(
-                keep.len() + drop_cols.len(),
-                schema.fields().len(),
-                "fixture must actually remove every named column"
-            );
-            let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
-            let new_schema = Arc::new(arrow_schema::Schema::new(fields));
-            let columns: Vec<_> = keep.iter().map(|i| batch.column(*i).clone()).collect();
-            reduced.push(arrow_array::RecordBatch::try_new(new_schema.clone(), columns).unwrap());
-            reduced_schema = Some(new_schema);
-        }
-        let schema = reduced_schema.expect("fixture needs at least one memory");
-
-        conn.drop_table("memories", &[]).await.unwrap();
-        let batches: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
-            RecordBatchIterator::new(reduced.into_iter().map(Ok), schema),
-        );
-        conn.create_table("memories", batches)
-            .execute()
-            .await
-            .unwrap();
-
-        let manifest_path = paths::project_dir(dir).join("manifest.toml");
-        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
-        m.schema_version = version.to_string();
-        // Only the schema axis may trigger: leaving the normalizer stale would
-        // migrate for the wrong reason and the test would pass with the version
-        // gate broken.
-        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
-        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+        crate::test_support::downgrade_dropping(dir, drop_cols, version).await
     }
 
     /// The 0.7.0 schema migration (harvest provenance), against a store whose

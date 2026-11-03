@@ -6,14 +6,28 @@
 //! small file reads, not fifty LanceDB connections. A project whose path is
 //! gone, or that never had a store of its own (a worktree), is listed as
 //! unavailable with the reason; it never fails the whole list.
+//!
+//! Every filesystem probe runs on the blocking pool (`spawn_blocking`, or
+//! `tokio::fs`, which does the same), all rows at once, each under
+//! [`ROW_TIMEOUT`]: a registered project on a hung network mount reads as
+//! "timed out", and neither stalls a runtime worker nor the other rows. The
+//! stuck probe thread itself is not cancellable and finishes (or not) on its
+//! own — that is the declared cost.
+//!
+//! A project's store is keyed by the id computed from its path *now*
+//! (`compute_project_id`, which prefers the git remote), exactly as
+//! `MemoryStore::open_read_only` keys it — not by the id the registry
+//! recorded, which differs once a remote is added after registration. The
+//! registry id stays the row's API id (an alias `locate` resolves).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use engramdb::storage::{
-    detect_worktree_main, manifest, paths, FileRegistry, MemoryStore, Registry, RegistryBackend,
-    SchemaState,
+    detect_worktree_main, manifest, paths, project_id::compute_project_id, FileRegistry,
+    MemoryStore, Registry, RegistryBackend, SchemaState,
 };
 use serde::Serialize;
 
@@ -87,8 +101,11 @@ async fn load_registry() -> Result<Registry, ApiError> {
         .map_err(|e| ApiError::internal(format!("cannot read the project registry: {e}")))
 }
 
-/// `try_exists` with an error counted as present-but-unreadable, so a hung
-/// mount reads as "unavailable: cannot read", not "gone".
+/// How long one store's probes may take before its row reads as timed out.
+pub const ROW_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// `try_exists` with an error counted as present-but-unreadable, so an
+/// unreadable mount reads as "cannot read", not "gone".
 fn probe(path: &Path) -> Result<bool, String> {
     path.try_exists().map_err(|e| e.to_string())
 }
@@ -101,7 +118,25 @@ fn dir_mtime(path: &Path) -> Option<DateTime<Utc>> {
         .map(DateTime::<Utc>::from)
 }
 
+/// Where a store's LanceDB index is.
+#[derive(Clone)]
+enum IndexDir {
+    /// A fixed directory (groups, the global store).
+    At(Option<PathBuf>),
+    /// A project's: keyed by the id computed from its path.
+    OfProject,
+}
+
+#[derive(Default)]
 struct StoreFacts {
+    /// The root directory exists.
+    exists: bool,
+    /// It has a `.engramdb/` of its own.
+    has_store_dir: bool,
+    /// It is a linked git worktree.
+    worktree: bool,
+    /// The id its store is keyed by (projects only).
+    store_id: Option<String>,
     available: bool,
     reason: Option<String>,
     name: Option<String>,
@@ -110,20 +145,11 @@ struct StoreFacts {
     schema: Option<SchemaState>,
 }
 
-/// What the manifest and the directory say about a store rooted at `root`,
-/// read without opening it.
-async fn facts(root: &Path, lancedb: Option<PathBuf>) -> StoreFacts {
-    let engramdb_dir = paths::project_dir(root);
-    let mut f = StoreFacts {
-        available: false,
-        reason: None,
-        name: None,
-        memory_count: None,
-        last_write_at: None,
-        schema: None,
-    };
+/// The synchronous half of [`facts`], for the blocking pool.
+fn probe_blocking(root: &Path, index: &IndexDir) -> StoreFacts {
+    let mut f = StoreFacts::default();
     match probe(root) {
-        Ok(true) => {}
+        Ok(true) => f.exists = true,
         Ok(false) => {
             f.reason = Some("the project directory no longer exists".into());
             return f;
@@ -133,8 +159,9 @@ async fn facts(root: &Path, lancedb: Option<PathBuf>) -> StoreFacts {
             return f;
         }
     }
-    match probe(&engramdb_dir) {
-        Ok(true) => {}
+    f.worktree = detect_worktree_main(root).is_some();
+    match probe(&paths::project_dir(root)) {
+        Ok(true) => f.has_store_dir = true,
         Ok(false) => {
             f.reason = Some("no EngramDB store in this directory".into());
             return f;
@@ -144,23 +171,79 @@ async fn facts(root: &Path, lancedb: Option<PathBuf>) -> StoreFacts {
             return f;
         }
     }
-    if let Ok(m) = manifest::load_manifest(&engramdb_dir.join("manifest.toml")).await {
-        f.name = Some(m.project);
-        f.memory_count = Some(m.stats.memory_count);
-    }
     f.last_write_at = dir_mtime(&paths::memories_dir(root));
-    f.schema = Some(MemoryStore::schema_state_at(root).await);
-    if let Some(lance) = lancedb {
-        if !lance.is_dir() {
-            f.reason = Some(
-                "not indexed on this machine yet: run any engramdb command there to build it"
-                    .into(),
-            );
-            return f;
+    let lance = match index {
+        IndexDir::At(dir) => dir.clone(),
+        IndexDir::OfProject => {
+            let id = compute_project_id(root);
+            let dir = paths::lancedb_dir(&id).ok();
+            f.store_id = Some(id);
+            dir
         }
+    };
+    if lance.is_some_and(|d| !d.is_dir()) {
+        f.reason = Some(
+            "not indexed on this machine yet: run any engramdb command there to build it".into(),
+        );
+        return f;
     }
     f.available = true;
     f
+}
+
+/// What the directory and the manifest say about a store rooted at `root`,
+/// read without opening it, off the runtime workers, within [`ROW_TIMEOUT`].
+async fn facts(root: PathBuf, index: IndexDir) -> StoreFacts {
+    let work = async move {
+        let r = root.clone();
+        let mut f = tokio::task::spawn_blocking(move || probe_blocking(&r, &index))
+            .await
+            .unwrap_or_else(|e| StoreFacts {
+                reason: Some(format!("probe failed: {e}")),
+                ..StoreFacts::default()
+            });
+        if f.has_store_dir {
+            let engramdb_dir = paths::project_dir(&root);
+            if let Ok(m) = manifest::load_manifest(&engramdb_dir.join("manifest.toml")).await {
+                f.name = Some(m.project);
+                f.memory_count = Some(m.stats.memory_count);
+            }
+            f.schema = Some(MemoryStore::schema_state_at(&root).await);
+        }
+        f
+    };
+    match tokio::time::timeout(ROW_TIMEOUT, work).await {
+        Ok(f) => f,
+        Err(_) => StoreFacts {
+            reason: Some(format!(
+                "timed out after {}s reading the directory (an unreachable mount?)",
+                ROW_TIMEOUT.as_secs()
+            )),
+            ..StoreFacts::default()
+        },
+    }
+}
+
+/// [`facts`] for many stores at once.
+async fn facts_all(jobs: Vec<(PathBuf, IndexDir)>) -> Vec<StoreFacts> {
+    let mut set = tokio::task::JoinSet::new();
+    for (i, (root, index)) in jobs.into_iter().enumerate() {
+        set.spawn(async move { (i, facts(root, index).await) });
+    }
+    let mut out: Vec<Option<StoreFacts>> = (0..set.len()).map(|_| None).collect();
+    while let Some(r) = set.join_next().await {
+        if let Ok((i, f)) = r {
+            out[i] = Some(f);
+        }
+    }
+    out.into_iter()
+        .map(|f| {
+            f.unwrap_or_else(|| StoreFacts {
+                reason: Some("probe failed".into()),
+                ..StoreFacts::default()
+            })
+        })
+        .collect()
 }
 
 fn basename(path: &Path) -> String {
@@ -169,11 +252,59 @@ fn basename(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Which rows to build.
+enum Want<'a> {
+    All,
+    One(&'a str),
+}
+
+impl Want<'_> {
+    fn has(&self, id: &str) -> bool {
+        match self {
+            Want::All => true,
+            Want::One(w) => *w == id,
+        }
+    }
+}
+
+fn empty_reason(kind: StoreKind, r: String) -> String {
+    let empty = r.starts_with("the project directory") || r.starts_with("no EngramDB");
+    match kind {
+        StoreKind::Group if empty => "no memories written to this group yet".into(),
+        StoreKind::Global if empty => "no global memories yet".into(),
+        _ => r,
+    }
+}
+
 /// Every store on the machine, current project first, each root followed by
 /// its children, then groups, then the global store.
 pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiError> {
+    let rows = build(current, Want::All).await?;
+    Ok(Catalog {
+        current: rows
+            .iter()
+            .find(|r| r.current)
+            .map(|r| r.id.clone())
+            .or_else(|| current.map(|c| c.id.clone())),
+        projects: rows,
+    })
+}
+
+/// One row of the catalog, probing only that store.
+pub async fn view(
+    id: &str,
+    current: Option<&CurrentProject>,
+) -> Result<Option<ProjectView>, ApiError> {
+    Ok(build(current, Want::One(id)).await?.into_iter().next())
+}
+
+async fn build(
+    current: Option<&CurrentProject>,
+    want: Want<'_>,
+) -> Result<Vec<ProjectView>, ApiError> {
     let registry = load_registry().await?;
     let mut children: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut subscribers: HashMap<&str, Vec<String>> = HashMap::new();
     for e in &registry.projects {
         if let Some(p) = &e.parent_project_id {
             children
@@ -181,9 +312,6 @@ pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiErr
                 .or_default()
                 .push(e.project_id.clone());
         }
-    }
-    let mut subscribers: HashMap<&str, Vec<String>> = HashMap::new();
-    for e in &registry.projects {
         for g in &e.subscriptions {
             subscribers
                 .entry(g.as_str())
@@ -192,27 +320,41 @@ pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiErr
         }
     }
 
-    let mut rows: BTreeMap<String, ProjectView> = BTreeMap::new();
-    for e in &registry.projects {
-        let is_current = current.is_some_and(|c| c.id == e.project_id);
-        // The registry holds one row per id, and two checkouts of one remote
-        // share an id; the one the dashboard started in is the one to show.
-        let root = match current {
-            Some(c) if is_current => c.root.clone(),
+    // Projects. The registry holds one row per id, and two checkouts of one
+    // remote share an id; the one the dashboard started in is the one shown.
+    let entries: Vec<_> = registry
+        .projects
+        .iter()
+        .filter(|e| want.has(&e.project_id))
+        .collect();
+    let roots: Vec<PathBuf> = entries
+        .iter()
+        .map(|e| match current {
+            Some(c) if c.id == e.project_id => c.root.clone(),
             _ => PathBuf::from(&e.project_path),
-        };
-        let lance = paths::lancedb_dir(&e.project_id).ok();
-        let mut f = facts(&root, lance).await;
-        let exists = probe(&root).unwrap_or(false);
-        let worktree = exists && detect_worktree_main(&root).is_some();
+        })
+        .collect();
+    let probed = facts_all(
+        roots
+            .iter()
+            .map(|r| (r.clone(), IndexDir::OfProject))
+            .collect(),
+    )
+    .await;
+
+    let mut rows: BTreeMap<String, ProjectView> = BTreeMap::new();
+    for ((e, root), f) in entries.iter().zip(roots).zip(probed) {
+        // Current by either id: the recorded one, or the one computed from
+        // the path now (they differ once a remote was added later).
+        let is_current = current
+            .is_some_and(|c| c.id == e.project_id || f.store_id.as_deref() == Some(c.id.as_str()));
+        let mut reason = f.reason;
         if let Some(p) = e
             .parent_project_id
             .as_ref()
-            .filter(|_| exists && !f.available)
+            .filter(|_| f.exists && !f.has_store_dir)
         {
-            if !paths::project_dir(&root).is_dir() {
-                f.reason = Some(format!("sub-project: its memories live in {p}"));
-            }
+            reason = Some(format!("sub-project: its memories live in {p}"));
         }
         rows.insert(
             e.project_id.clone(),
@@ -223,13 +365,13 @@ pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiErr
                 path: root.display().to_string(),
                 current: is_current,
                 available: f.available,
-                unavailable_reason: f.reason,
+                unavailable_reason: reason,
                 parent_id: e.parent_project_id.clone(),
                 children: children
                     .get(e.project_id.as_str())
                     .cloned()
                     .unwrap_or_default(),
-                worktree,
+                worktree: f.worktree,
                 subscriptions: e.subscriptions.clone(),
                 subscribers: Vec::new(),
                 memory_count: f.memory_count,
@@ -241,8 +383,8 @@ pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiErr
     // A current project missing from the registry (registered under another
     // machine's data dir, or a registry that was reset) is still shown.
     if let Some(c) = current {
-        if !rows.contains_key(&c.id) {
-            let f = facts(&c.root, paths::lancedb_dir(&c.id).ok()).await;
+        if want.has(&c.id) && !rows.values().any(|r| r.current) {
+            let f = facts(c.root.clone(), IndexDir::OfProject).await;
             rows.insert(
                 c.id.clone(),
                 ProjectView {
@@ -287,8 +429,8 @@ pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiErr
             place(&k.id, rows, placed, out);
         }
     }
-    if let Some(c) = current {
-        place(&c.id, &rows, &mut placed, &mut ordered);
+    if let Some(cur) = rows.values().find(|r| r.current).map(|r| r.id.clone()) {
+        place(&cur, &rows, &mut placed, &mut ordered);
     }
     let mut roots: Vec<&ProjectView> = rows
         .values()
@@ -304,67 +446,53 @@ pub async fn catalog(current: Option<&CurrentProject>) -> Result<Catalog, ApiErr
         place(&id, &rows, &mut placed, &mut ordered);
     }
 
-    for g in &registry.groups {
-        let root = paths::group_store_dir(&g.group_id).map_err(ApiError::internal)?;
-        let f = facts(&root, paths::group_lancedb_dir(&g.group_id).ok()).await;
+    // Groups, then the global store.
+    let mut others: Vec<(String, String, StoreKind, PathBuf, IndexDir)> = Vec::new();
+    for g in registry.groups.iter().filter(|g| want.has(&g.group_id)) {
+        others.push((
+            g.group_id.clone(),
+            g.name.clone(),
+            StoreKind::Group,
+            paths::group_store_dir(&g.group_id).map_err(ApiError::internal)?,
+            IndexDir::At(paths::group_lancedb_dir(&g.group_id).ok()),
+        ));
+    }
+    if want.has(paths::GLOBAL_PROJECT_ID) {
+        others.push((
+            paths::GLOBAL_PROJECT_ID.to_string(),
+            "Global store".to_string(),
+            StoreKind::Global,
+            paths::global_store_dir().map_err(ApiError::internal)?,
+            IndexDir::At(paths::global_lancedb_dir().ok()),
+        ));
+    }
+    let probed = facts_all(
+        others
+            .iter()
+            .map(|(_, _, _, root, index)| (root.clone(), index.clone()))
+            .collect(),
+    )
+    .await;
+    for ((id, name, kind, root, _), f) in others.into_iter().zip(probed) {
         ordered.push(ProjectView {
-            id: g.group_id.clone(),
-            name: g.name.clone(),
-            kind: StoreKind::Group,
+            subscribers: subscribers.get(id.as_str()).cloned().unwrap_or_default(),
+            id,
+            name,
+            kind,
             path: root.display().to_string(),
             current: false,
             available: f.available,
-            unavailable_reason: f.reason.map(|r| {
-                if r.starts_with("the project directory") || r.starts_with("no EngramDB") {
-                    "no memories written to this group yet".to_string()
-                } else {
-                    r
-                }
-            }),
+            unavailable_reason: f.reason.map(|r| empty_reason(kind, r)),
             parent_id: None,
             children: Vec::new(),
             worktree: false,
             subscriptions: Vec::new(),
-            subscribers: subscribers
-                .get(g.group_id.as_str())
-                .cloned()
-                .unwrap_or_default(),
             memory_count: f.memory_count,
             last_write_at: f.last_write_at,
             schema: f.schema,
         });
     }
-
-    let global_root = paths::global_store_dir().map_err(ApiError::internal)?;
-    let f = facts(&global_root, paths::global_lancedb_dir().ok()).await;
-    ordered.push(ProjectView {
-        id: paths::GLOBAL_PROJECT_ID.to_string(),
-        name: "Global store".to_string(),
-        kind: StoreKind::Global,
-        path: global_root.display().to_string(),
-        current: false,
-        available: f.available,
-        unavailable_reason: f.reason.map(|r| {
-            if r.starts_with("the project directory") || r.starts_with("no EngramDB") {
-                "no global memories yet".to_string()
-            } else {
-                r
-            }
-        }),
-        parent_id: None,
-        children: Vec::new(),
-        worktree: false,
-        subscriptions: Vec::new(),
-        subscribers: Vec::new(),
-        memory_count: f.memory_count,
-        last_write_at: f.last_write_at,
-        schema: f.schema,
-    });
-
-    Ok(Catalog {
-        current: current.map(|c| c.id.clone()),
-        projects: ordered,
-    })
+    Ok(ordered)
 }
 
 /// Resolve an API project id to its store. 404 for an id the machine does
@@ -400,10 +528,34 @@ pub async fn locate(id: &str, current: Option<&CurrentProject>) -> Result<Locati
         ));
     };
     let root = PathBuf::from(&entry.project_path);
-    if !paths::project_dir(&root).is_dir() {
-        let reason = match &entry.parent_project_id {
-            Some(p) if root.is_dir() => format!("sub-project: its memories live in {p}"),
-            _ if !root.is_dir() => "the project directory no longer exists".into(),
+    let has_parent = entry.parent_project_id.clone();
+    // Off the runtime workers, bounded like a catalog row.
+    let probe_root = root.clone();
+    let probed = tokio::time::timeout(
+        ROW_TIMEOUT,
+        tokio::task::spawn_blocking(move || {
+            (
+                paths::project_dir(&probe_root).is_dir(),
+                probe_root.is_dir(),
+            )
+        }),
+    )
+    .await;
+    let (has_store, root_is_dir) = match probed {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(ApiError::internal(format!("probe failed: {e}"))),
+        Err(_) => {
+            return Err(ApiError::unavailable(format!(
+                "timed out after {}s reading {} (an unreachable mount?)",
+                ROW_TIMEOUT.as_secs(),
+                root.display()
+            )))
+        }
+    };
+    if !has_store {
+        let reason = match &has_parent {
+            Some(p) if root_is_dir => format!("sub-project: its memories live in {p}"),
+            _ if !root_is_dir => "the project directory no longer exists".into(),
             _ => "no EngramDB store in this directory".into(),
         };
         return Err(ApiError::unavailable(reason));

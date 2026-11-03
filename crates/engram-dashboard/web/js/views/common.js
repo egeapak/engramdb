@@ -1,7 +1,6 @@
 // Pieces shared by several views.
 
 import { h } from '../dom.js';
-import { ago, label } from '../format.js';
 import { warnGlyph } from '../lines.js';
 
 export function errorBox(e) {
@@ -67,9 +66,3 @@ export function schemaNote(schema, staleness) {
   if (staleness) notes.push(h('div', { class: 'note warn' }, staleness));
   return notes;
 }
-
-export function lastSeen(iso) {
-  return iso ? ago(iso) : 'never';
-}
-
-export { label };

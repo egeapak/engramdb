@@ -4,7 +4,7 @@ import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, stamp, plural, label } from '../format.js';
 import { badge, slot, lineName, kindIcon, TYPE_LABEL } from '../lines.js';
-import { barChart } from '../chart.js';
+import { smallMultiples } from '../chart.js';
 import { renderMarkdown } from '../markdown.js';
 import { secHead, pill, statusPill, disruption, errorBox } from './common.js';
 
@@ -19,6 +19,11 @@ const TIMELINE = {
   last_injected: 'Last injected by a hook',
   last_fetched: 'Last fetched by id',
 };
+
+/** The API's status words, from the memory file's `Active` / `NeedsReview` / `Challenged`. */
+function statusKey(status) {
+  return { Challenged: 'challenged', NeedsReview: 'needs_review' }[status] || 'active';
+}
 
 function relGlyph() {
   return s(
@@ -65,7 +70,7 @@ function meta(m) {
     ['Id', h('span', { class: 'mono' }, m.id)],
     ['Kind', TYPE_LABEL[m.type] || m.type],
     ['Epistemic', m.epistemic],
-    ['Status', label(m.status === 'NeedsReview' ? 'needs_review' : String(m.status).toLowerCase())],
+    ['Status', label(statusKey(m.status))],
     ['Visibility', String(m.visibility).toLowerCase()],
     ['Criticality', Number(m.criticality).toFixed(2)],
     ['Confidence', Number(m.confidence).toFixed(2)],
@@ -90,14 +95,16 @@ function meta(m) {
 function timeline(d) {
   return h(
     'ul',
-    { class: ['tl', 'l-' + slot(d.line)] },
+    { class: ['tl', 'l-' + slot(d.line_slot)] },
     d.timeline.map((e) =>
       h(
         'li',
         { class: e.kind === 'challenged' || e.kind === 'invalidated' ? 'warn' : null },
         h('div', { class: 'e' }, TIMELINE[e.kind] || label(e.kind)),
         h('div', { class: 'w' }, `${stamp(e.at)} · ${ago(e.at)}`),
-        e.detail ? h('div', { class: 'ev' }, e.detail) : null,
+        // Clamped: challenge evidence can run to paragraphs, and the
+        // Challenges section has it in full.
+        e.detail ? h('div', { class: 'ev clamp' }, e.detail) : null,
       ),
     ),
   );
@@ -122,17 +129,17 @@ export async function renderDetail(main, ctx) {
   const status = String(m.status);
   const challenged = status === 'Challenged' || (m.challenges && m.challenges.length && status !== 'Active');
   const newest = (m.challenges || []).slice().sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0];
-  const row = { status: status === 'Challenged' ? 'challenged' : status === 'NeedsReview' ? 'needs_review' : 'active', invalidated_at: m.invalidated_at };
+  const row = { status: statusKey(status), invalidated_at: m.invalidated_at };
 
   mount(
     main,
     h('a', { class: 'crumb', href: ctx.href('memories', p.id) }, '← All memories'),
-    h('div', { class: 'sign' }, badge(d.line, true), h('div', null, h('div', { class: 'sc' }, `${lineName(d.line)} line`), h('div', { class: 'sid mono' }, `${(m.logical || []).join(', ') || 'no logical scope'} · ${m.id}`))),
+    h('div', { class: 'sign' }, badge(d.line, d.line_slot, true), h('div', null, h('div', { class: 'sc' }, `${lineName(d.line)} line`), h('div', { class: 'sid mono' }, `${(m.logical || []).join(', ') || 'no logical scope'} · ${m.id}`))),
     h('h1', { class: 'd-title', id: 'view-title' }, title),
     h(
       'div',
       { class: 'd-pills' },
-      h('span', { class: 'kind' }, kindIcon(m.type, d.line), TYPE_LABEL[m.type] || m.type),
+      h('span', { class: 'kind' }, kindIcon(m.type, d.line_slot), TYPE_LABEL[m.type] || m.type),
       pill(m.epistemic),
       statusPill(row),
       m.title && m.title !== m.summary ? h('span', { class: 'muted' }, m.summary) : null,
@@ -140,7 +147,7 @@ export async function renderDetail(main, ctx) {
     challenged && newest
       ? disruption(
           `challenged ${plural(m.challenges.length, 'time')}, newest ${ago(newest.timestamp)}.`,
-          newest.evidence,
+          h('span', { class: 'clamp' }, newest.evidence),
         )
       : null,
     h(
@@ -151,7 +158,7 @@ export async function renderDetail(main, ctx) {
         null,
         h('div', { class: 'd-body' }, renderMarkdown(m.content)),
         m.details ? h('details', { class: 'd-details' }, h('summary', null, 'Details'), h('div', { class: 'd-body' }, renderMarkdown(m.details))) : null,
-        secHead('Usage', h('div', { class: 'legend-inline' }, h('span', null, h('i', { class: 'sw sw-' + slot(d.line) }), 'Retrieved'), h('span', null, h('i', { class: 'sw sw-ink' }), 'Injected'), h('span', null, h('i', { class: 'sw sw-write' }), 'Fetched'))),
+        secHead('Usage', h('span', { class: 'faint' }, 'exact, lifetime')),
         h(
           'div',
           { class: 'usage' },
@@ -172,12 +179,11 @@ export async function renderDetail(main, ctx) {
               secHead('Challenges', h('span', { class: 'faint num' }, fmt(m.challenges.length))),
               h(
                 'ul',
-                { class: 'att' },
+                { class: ['att', 'plain'] },
                 m.challenges.map((c) =>
                   h(
                     'li',
                     null,
-                    h('span', { class: 'ico' }),
                     h('div', { class: 'ttl' }, c.evidence),
                     h('div', { class: 'sub' }, [stamp(c.timestamp), c.agent_id ? ` · ${c.agent_id}` : '', c.source_file ? ` · ${c.source_file}` : ''].join('')),
                   ),
@@ -189,15 +195,14 @@ export async function renderDetail(main, ctx) {
       h('div', null, secHead('Metadata'), meta(m), secHead('Timeline', h('span', { class: 'faint' }, 'newest first')), timeline(d)),
     ),
   );
-  barChart(chartBox, {
+  smallMultiples(chartBox, {
     days: d.series.map((x) => x.day),
-    mode: 'grouped',
-    series: [
-      { v: d.series.map((x) => x.returned), cls: 'fill-' + slot(d.line), name: 'Retrieved' },
-      { v: d.series.map((x) => x.injected), cls: 'bar-ink', name: 'Injected' },
-      { v: d.series.map((x) => x.fetched), cls: 'bar-write', name: 'Fetched' },
+    rows: [
+      { name: 'Retrieved', v: d.series.map((x) => x.returned), cls: 'bar-ret' },
+      { name: 'Injected', v: d.series.map((x) => x.injected), cls: 'bar-inj' },
+      { name: 'Fetched', v: d.series.map((x) => x.fetched), cls: 'bar-fet' },
     ],
-    height: 170,
-    aria: `Retrievals, injections and fetches per day for ${m.id}, last 30 days.`,
+    rowHeight: 40,
+    aria: `Retrievals, injections and fetches per day for this memory, last 30 days.`,
   });
 }

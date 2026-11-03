@@ -70,8 +70,58 @@ impl ReadStore {
         .await
     }
 
+    /// Map a failed *index* read. The storage layer reports every LanceDB
+    /// failure as `Validation`, which would read as the caller's fault (400).
+    /// A store whose schema is behind this binary is the usual cause — the
+    /// dashboard does not migrate (it opens read-only), so a pre-0.3.0 table
+    /// is missing columns this binary selects — and that is a 409 naming the
+    /// fix; anything else is a 500. A 404 passes through.
+    async fn index_error(&self, e: ApiError) -> ApiError {
+        if e.status == axum::http::StatusCode::NOT_FOUND {
+            return e;
+        }
+        let schema = self.schema_state().await;
+        if schema.needs_migration {
+            return ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "schema_behind",
+                format!(
+                    "this store's index is on schema {}, older than this binary's {}; the \
+                     dashboard does not upgrade stores. Run `engramdb reindex` (or any \
+                     engramdb command) in {} to upgrade it. ({})",
+                    schema.stored.as_deref().unwrap_or("unknown"),
+                    schema.current,
+                    self.root().display(),
+                    e.message
+                ),
+            );
+        }
+        if e.status == axum::http::StatusCode::BAD_REQUEST {
+            return ApiError::internal(format!("cannot read the index: {}", e.message));
+        }
+        e
+    }
+
+    /// The memory count the manifest records (kept current by every write),
+    /// to tell an empty store from one whose index is being rebuilt.
+    pub async fn manifest_memory_count(&self) -> Option<usize> {
+        engramdb::storage::manifest::load_manifest(
+            &engramdb::storage::paths::project_dir(self.root()).join("manifest.toml"),
+        )
+        .await
+        .ok()
+        .map(|m| m.stats.memory_count)
+    }
+
     /// Every indexed memory, invalidated ones included (the caller filters).
     pub async fn list(&self) -> Result<Vec<IndexFilterable>, ApiError> {
+        match self.list_raw().await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(e).await),
+        }
+    }
+
+    async fn list_raw(&self) -> Result<Vec<IndexFilterable>, ApiError> {
         let params = ops::ListParams {
             types: None,
             epistemic: None,
@@ -88,28 +138,38 @@ impl ReadStore {
             .map_err(ApiError::from_anyhow)
     }
 
+    /// One memory by id or unique prefix. An ambiguous prefix is the one
+    /// `Validation` here that is the caller's (400); see [`Self::index_error`].
     pub async fn get(&self, id: &str) -> Result<Memory, ApiError> {
-        self.inner.get(id).await.map_err(ApiError::from_storage)
+        match self.inner.get(id).await {
+            Ok(m) => Ok(m),
+            Err(StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix") => Err(
+                ApiError::new(axum::http::StatusCode::BAD_REQUEST, "ambiguous_id", msg),
+            ),
+            Err(e) => Err(self.index_error(ApiError::from_storage(e)).await),
+        }
     }
 
     /// The memories among `ids` that exist; the rest are left out.
     pub async fn get_batch(&self, ids: &[String]) -> Result<Vec<(String, Memory)>, ApiError> {
-        self.inner
-            .get_batch(ids)
-            .await
-            .map_err(ApiError::from_storage)
+        match self.inner.get_batch(ids).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(ApiError::from_storage(e)).await),
+        }
     }
 
     pub async fn stats(&self) -> Result<ops::StoreStats, ApiError> {
-        ops::compute_stats(&self.inner)
-            .await
-            .map_err(ApiError::from_anyhow)
+        match ops::compute_stats(&self.inner).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+        }
     }
 
     pub async fn doctor(&self) -> Result<ops::DoctorResult, ApiError> {
-        ops::doctor(&self.inner)
-            .await
-            .map_err(ApiError::from_anyhow)
+        match ops::doctor(&self.inner).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+        }
     }
 
     /// The tiered drift check every `query` runs, as a warning string.
@@ -133,7 +193,10 @@ impl ReadStore {
             .map_err(ApiError::internal)
     }
 
-    /// Exact usage of one memory (a full id).
+    /// Exact usage of one memory (a full id): a raw scan of its events. The
+    /// list uses [`Self::usage_all`] (the rollup plus the log), which can lag
+    /// this by the events a rollup refresh has not folded in yet, and whose
+    /// session counts are an upper bound; the detail page is the exact one.
     pub async fn usage_of(&self, memory_id: &str) -> Result<UsageView, ApiError> {
         ops::usage::load_usage(self.root(), self.store_id(), Some(memory_id))
             .await

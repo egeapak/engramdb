@@ -38,11 +38,12 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
 tracing = "0.1"
 anyhow = "1"
+# The 0600 launch file `open_browser` hands the browser (already in the tree).
+tempfile = "3"
 
 [dev-dependencies]
 engramdb = { path = "../..", default-features = false, features = ["test-support"] }
 engram-test-support = { path = "../engram-test-support" }
 ctor = "1"
-tempfile = "3"
 # `ServiceExt::oneshot` drives the router in-process in the tests.
 tower = { version = "0.5", default-features = false, features = ["util"] }

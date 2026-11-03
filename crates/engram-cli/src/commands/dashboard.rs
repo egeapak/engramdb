@@ -81,8 +81,11 @@ pub async fn run_dashboard(
         }
         outln!(formatter, "Read-only view. Press Ctrl-C to stop.");
     }
-    if !params.no_open {
-        engram_dashboard::open_browser(&url);
-    }
+    // Held until the server stops: dropping it deletes the launch file.
+    let _launch = if params.no_open {
+        None
+    } else {
+        engram_dashboard::open_browser(&url)
+    };
     dashboard.serve().await
 }

@@ -4,10 +4,29 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, plural, shortId } from '../format.js';
-import { badge, setLines, warnGlyph, kindIcon } from '../lines.js';
-import { barChart } from '../chart.js';
+import { badge, warnGlyph, kindIcon, TYPE_LABEL } from '../lines.js';
+import { smallMultiples } from '../chart.js';
 import { projHead, secHead, disruption, schemaNote } from './common.js';
 import { projectCards } from './projects.js';
+
+/** "+12%" / "−40%" against the previous window, or why there is none. */
+function delta(now, before) {
+  if (!before) return now ? 'new this week' : 'none either week';
+  const d = Math.round(((now - before) / before) * 100);
+  return `${d >= 0 ? '+' : '−'}${Math.abs(d)}% vs. week before`;
+}
+
+/** The read tile: three signals side by side, never one summed number. */
+function readsStat(u) {
+  const cell = (name, k) =>
+    h('div', { class: 'trio-c' }, h('div', { class: 'tv' }, fmt(u.last_7_days[k])), h('div', { class: 'tn' }, name), h('div', { class: 'td' }, delta(u.last_7_days[k], u.previous_7_days[k])));
+  return h(
+    'div',
+    { class: ['stat', 'wide'] },
+    h('div', { class: 'eyebrow' }, 'Reads, last 7 days'),
+    h('div', { class: 'trio' }, cell('Retrieved', 'returned'), cell('Injected', 'injected'), cell('Fetched', 'fetched')),
+  );
+}
 
 function stat(eyebrow, value, sub, alert) {
   return h(
@@ -43,10 +62,9 @@ function attention(items, ctx) {
         list.map((it) => {
           let sub;
           if (reason === 'challenged') {
-            sub = [
-              `${plural(it.count || 1, 'challenge')} · ${ago(it.at)}`,
-              it.detail ? ` · “${it.detail}”` : '',
-            ];
+            sub = [`${plural(it.count || 1, 'challenge')} · ${ago(it.at)}`];
+            // Clamped to two lines; the memory's page has the full text.
+            if (it.detail) sub.push(h('span', { class: 'clamp' }, `“${it.detail}”`));
           } else if (reason === 'needs_review') sub = [`Updated ${ago(it.at)}`];
           else if (reason === 'never_read') sub = [`Never read · created ${ago(it.at)}`];
           else sub = [`Last read ${ago(it.at)}`];
@@ -54,7 +72,7 @@ function attention(items, ctx) {
           return h(
             'li',
             null,
-            reason === 'challenged' ? h('span', { class: 'ico' }, warnGlyph(22)) : badge(it.line),
+            reason === 'challenged' ? h('span', { class: 'ico' }, warnGlyph(22)) : badge(it.line, it.line_slot),
             h('div', { class: 'ttl' }, h('a', { href: ctx.href('detail', ctx.project.id, it.id) }, it.summary)),
             h('div', { class: 'sub' }, sub),
           );
@@ -74,13 +92,9 @@ export async function renderOverview(main, ctx) {
   mount(main, h('p', { class: 'loading' }, 'Loading overview…'));
   const st = await api.stats(p.id);
   if (ctx.isStale()) return;
-  setLines(st.by_line);
 
   const days = st.series.map((d) => d.day);
-  const reads = st.series.map((d) => d.returned + d.injected + d.fetched);
-  const writes = st.series.map((d) => d.writes);
-  const r7 = st.usage.reads_last_7_days, p7 = st.usage.reads_previous_7_days;
-  const delta = p7 ? Math.round(((r7 - p7) / p7) * 100) : null;
+  const col = (k) => st.series.map((d) => d[k]);
   const challenged = st.attention.filter((a) => a.reason === 'challenged');
   const lines = st.by_line.filter((l) => l.name).length;
 
@@ -92,6 +106,7 @@ export async function renderOverview(main, ctx) {
     main,
     projHead(p.kind === 'project' ? 'Project' : p.kind === 'group' ? 'Group store' : 'Global store', p.name, meta),
     schemaNote(st.schema, st.staleness),
+    st.rebuilding ? h('div', { class: 'note warn' }, 'The index is empty but the store records memories: it is being rebuilt (a reindex is running). Reload in a moment.') : null,
     challenged.length
       ? disruption(
           `${plural(challenged.length, 'memory is', 'memories are')} challenged and awaiting review.`,
@@ -102,8 +117,8 @@ export async function renderOverview(main, ctx) {
     h(
       'div',
       { class: 'stats' },
-      stat('Memories', fmt(st.live), `${plural(lines, 'line')}${st.invalidated ? ` · ${fmt(st.invalidated)} invalidated` : ''}`),
-      stat('Reads, last 7 days', fmt(r7), delta === null ? 'No reads in the previous 7 days' : `${delta >= 0 ? '+' : '−'}${Math.abs(delta)}% vs. the previous 7 days`),
+      stat('Memories', fmt(st.live), `${lines ? plural(lines, 'line') : 'No lines yet'}${st.invalidated ? ` · ${fmt(st.invalidated)} invalidated` : ''}`),
+      readsStat(st.usage),
       stat('Memories in use', fmt(st.usage.used_memories), `of ${fmt(st.live)} read at least once`),
       stat('Challenged', fmt(challenged.length), challenged.length ? 'Contested, awaiting review' : 'Nothing to review', challenged.length > 0),
     ),
@@ -113,40 +128,37 @@ export async function renderOverview(main, ctx) {
       h(
         'div',
         null,
-        secHead(
-          'Activity, last 30 days',
-          h('div', { class: 'legend-inline' }, h('span', null, h('i', { class: 'sw sw-read' }), 'Reads'), h('span', null, h('i', { class: 'sw sw-write' }), 'Writes')),
-        ),
+        secHead('Activity, last 30 days', h('span', { class: 'faint' }, 'per day, each row on its own scale')),
         chartBox,
         h(
           'p',
           { class: 'faint' },
-          `Reads are retrieved + injected + fetched, kept apart everywhere else. Lifetime: ${fmt(st.usage.returned)} retrieved, ${fmt(st.usage.injected)} injected, ${fmt(st.usage.fetched)} fetched.`,
+          `Lifetime: ${fmt(st.usage.returned)} retrieved, ${fmt(st.usage.injected)} injected, ${fmt(st.usage.fetched)} fetched. Writes count every change to a memory.`,
         ),
         secHead('By kind'),
-        h(
-          'ul',
-          { class: 'att' },
-          st.by_type.map((t) =>
-            h('li', null, h('span', { class: 'ico kind' }, kindIcon(t.name, null)), h('div', { class: 'ttl' }, `${t.name.charAt(0).toUpperCase()}${t.name.slice(1)}`), h('div', { class: 'sub' }, plural(t.count, 'memory', 'memories'))),
-          ),
-        ),
+        st.by_type.length
+          ? h(
+              'ul',
+              { class: 'att' },
+              st.by_type.map((t) =>
+                h('li', null, h('span', { class: 'ico kind' }, kindIcon(t.name, null)), h('div', { class: 'ttl' }, TYPE_LABEL[t.name] || t.name), h('div', { class: 'sub' }, plural(t.count, 'memory', 'memories'))),
+              ),
+            )
+          : h('p', { class: 'muted' }, 'No memories yet. Agents add them with the create tool, or run engramdb add.'),
       ),
       h('div', null, secHead('Needs attention', h('span', { class: 'faint num' }, plural(st.attention.length, 'item'))), attention(st.attention, ctx)),
     ),
     secHead('Projects on this machine', h('a', { href: ctx.href('projects') }, 'All stores →')),
     projectCards(ctx.state.catalog.projects.filter((q) => q.kind === 'project' && !q.parent_id).slice(0, 8), ctx),
   );
-  barChart(chartBox, {
+  smallMultiples(chartBox, {
     days,
-    a: reads,
-    b: writes,
-    mode: 'mirror',
-    classA: 'bar-read',
-    classB: 'bar-write',
-    nameA: 'Reads',
-    nameB: 'Writes',
-    height: 230,
-    aria: `Reads and writes per day for ${p.name}, last 30 days. ${fmt(reads.reduce((a, b) => a + b, 0))} reads, ${fmt(writes.reduce((a, b) => a + b, 0))} writes.`,
+    rows: [
+      { name: 'Retrieved', v: col('returned'), cls: 'bar-ret' },
+      { name: 'Injected', v: col('injected'), cls: 'bar-inj' },
+      { name: 'Fetched', v: col('fetched'), cls: 'bar-fet' },
+      { name: 'Writes', v: col('writes'), cls: 'bar-write' },
+    ],
+    aria: `Retrievals, injections, fetches and writes per day for ${p.name}, last 30 days.`,
   });
 }

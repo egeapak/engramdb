@@ -10,7 +10,7 @@
 //   #/projects              every store on the machine
 
 import { $, $$, h, mount } from './dom.js';
-import { api } from './api.js';
+import { api, takeToken } from './api.js';
 import { renderOverview } from './views/overview.js';
 import { renderMemories } from './views/memories.js';
 import { renderDetail } from './views/detail.js';
@@ -148,6 +148,7 @@ function renderNav(route) {
 }
 
 let renderSeq = 0;
+let firstRender = true;
 
 async function route() {
   const seq = ++renderSeq;
@@ -177,9 +178,18 @@ async function route() {
   } catch (e) {
     if (seq === renderSeq) mount(main, errorBox(e));
   }
+  // Move focus to the new view's heading on navigation (not on the first
+  // load), so keyboard and screen-reader users land where the page changed.
+  if (seq === renderSeq && !firstRender) {
+    const title = document.getElementById('view-title') || main;
+    if (!title.hasAttribute('tabindex')) title.setAttribute('tabindex', '-1');
+    title.focus({ preventScroll: false });
+  }
+  firstRender = false;
 }
 
 async function boot() {
+  takeToken();
   applyTheme(storedTheme());
   $('#theme-btn').addEventListener('click', toggleTheme);
   $('#proj-select').addEventListener('change', (ev) => {

@@ -5,19 +5,22 @@ import { api } from '../api.js';
 import { fmt, shortId } from '../format.js';
 import { projHead, secHead, schemaNote, errorBox } from './common.js';
 
-function check(state, title, detail, ids, ctx) {
+function check(state, title, detail, ids) {
   const mark = state === 'ok' ? '✓' : state === 'bad' ? '✕' : '–';
+  const said = state === 'ok' ? 'Passed: ' : state === 'bad' ? 'Failed: ' : 'Not checked: ';
   return h(
     'li',
     null,
-    h('span', { class: state, 'aria-label': state === 'ok' ? 'passed' : state === 'bad' ? 'failed' : 'not checked' }, mark),
-    h('div', null, h('b', null, title), detail ? h('div', { class: 'muted' }, detail) : null),
+    h('span', { class: state, 'aria-hidden': 'true' }, mark),
+    h('div', null, h('b', null, h('span', { class: 'sr-only' }, said), title), detail ? h('div', { class: 'muted' }, detail) : null),
     h('span', { class: 'mono faint' }, ids ? fmt(ids.length) : ''),
     ids && ids.length
       ? h(
           'div',
           { class: 'ids mono' },
-          ids.slice(0, 40).flatMap((id, i) => [i ? ', ' : '', h('a', { href: ctx.href('detail', ctx.project.id, id) }, shortId(id))]),
+          // Plain text: a stale row's memory has no file, and an orphan has
+          // no index row, so neither has a page to link to.
+          ids.slice(0, 40).map((id) => shortId(id)).join(', '),
           ids.length > 40 ? ` … and ${fmt(ids.length - 40)} more` : '',
         )
       : null,
@@ -44,12 +47,12 @@ export async function renderDoctor(main, ctx) {
     h(
       'ul',
       { class: 'checks' },
-      check(r.stale_entries.length ? 'bad' : 'ok', 'Index rows with a file', 'Rows whose .md file is gone are stale.', r.stale_entries, ctx),
-      check(r.orphaned_files.length ? 'bad' : 'ok', 'Files with an index row', 'Files the index does not know are orphans.', r.orphaned_files, ctx),
+      check(r.stale_entries.length ? 'bad' : 'ok', 'Index rows with a file', 'Rows whose .md file is gone are stale.', r.stale_entries),
+      check(r.orphaned_files.length ? 'bad' : 'ok', 'Files with an index row', 'Files the index does not know are orphans.', r.orphaned_files),
       drift === null || drift === undefined
-        ? check('na', 'Content drift', 'Not checked: no digests to compare, or a shared project id.', null, ctx)
-        : check(drift.length ? 'bad' : 'ok', 'Content drift', 'Files edited (or restored by git) without the index noticing.', drift, ctx),
-      check(r.undetermined.length ? 'bad' : 'ok', 'Readable files', 'Files that could not be read or hashed.', r.undetermined, ctx),
+        ? check('na', 'Content drift', 'Not checked: no digests to compare, or a shared project id.', null)
+        : check(drift.length ? 'bad' : 'ok', 'Content drift', 'Files edited (or restored by git) without the index noticing.', drift),
+      check(r.undetermined.length ? 'bad' : 'ok', 'Readable files', 'Files that could not be read or hashed.', r.undetermined),
     ),
     h('p', { class: 'faint' }, 'The dashboard never repairs. `engramdb doctor --fix` in the project does.'),
   );

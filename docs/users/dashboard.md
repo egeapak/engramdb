@@ -8,7 +8,7 @@ changes a store, and looking at a memory there does not count as using it.
 ```bash
 cd ~/code/my-project
 engramdb dashboard
-# EngramDB dashboard: http://127.0.0.1:7341/?token=3f9c…
+# EngramDB dashboard: http://127.0.0.1:7341/#token=3f9c…
 # Current project: /home/me/code/my-project (a1b2c3d4e5f60718)
 # Read-only view. Press Ctrl-C to stop.
 ```
@@ -19,11 +19,13 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
 
 ## Views
 
-- **Overview** — memory count, reads in the last 7 days against the 7 before,
-  how many memories have been read at all, and how many are challenged. A
-  30-day chart of reads (up) and writes (down). A *needs attention* list:
-  challenged memories (shown as a red "service disruption"), memories that
-  need review, and memories nobody has read in 30 days.
+- **Overview** — memory count; reads in the last 7 days as three numbers
+  (retrieved, injected, fetched), each against the 7 days before; how many
+  memories have been read at all; and how many are challenged. A 30-day
+  chart with one row per signal — retrieved, injected, fetched and writes —
+  each on its own scale. A *needs attention* list: challenged memories
+  (shown as a red "service disruption"), memories that need review, and
+  memories nobody has read in 30 days.
 - **Memories** — every memory in a sortable table, filterable by text, kind,
   status and line. *Retrieved*, *injected* and *fetched* are separate
   columns and are never added up: a memory retrieved by a query, put into an
@@ -33,7 +35,8 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   status.
 - **Memory** — the body (a small, safe subset of Markdown), usage counts and
   a 30-day chart, supersedes links, challenges with their evidence, all
-  metadata, and a timeline.
+  metadata, and a timeline. Its counts are exact; the Memories table reads a
+  cheaper summary that can trail them briefly until the next refresh.
 - **Health** — the index-against-files part of `engramdb doctor` for the
   selected store: stale rows, orphaned files, content drift, unreadable
   files. The dashboard never repairs; run `engramdb doctor --fix`.
@@ -44,7 +47,9 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
 
 The look follows a transit map: each top-level logical scope (`storage` in
 `storage.paths`) is a *line* with its own colour and two-letter badge, and
-each memory is a *station* whose shape follows its kind. The header button
+each memory is a *station* whose shape follows its kind. The biggest seven
+lines get seven colours; further lines reuse a colour with a round, then a
+ringed, badge. A line keeps its colour on every page. The header button
 switches between the light and dark map; by default it follows your system.
 
 ## What it reads, and what it never does
@@ -70,11 +75,19 @@ The dashboard is a web server on your machine, so it is locked down:
 - It listens on `127.0.0.1` only, unless you pass `--bind`. Any other
   address prints a warning: the page is then reachable from the network,
   unencrypted, and only the token protects it.
-- Each run makes a new random token. The URL carries it once; the page then
-  swaps it for a cookie that scripts cannot read and that the browser never
-  sends from another site, and removes it from the address bar and history.
-  Without the cookie or the token every request is refused. Another user on
-  the same machine can reach the port but not your token.
+- Each run makes a new random token. The URL carries it after `#`, a part
+  of the address the browser never sends to any server. The page keeps it
+  for this tab only, removes it from the address bar and history, and sends
+  it with every request for data; a request without it is refused. There is
+  no cookie: cookies are shared by every program listening on your
+  machine's `127.0.0.1`, whatever its port. The page's own files (its HTML,
+  CSS and scripts) are served without the token, since they hold nothing
+  of yours. To open the dashboard in another browser or tab, use the
+  printed URL again.
+- The browser is opened through a private file only you can read, so the
+  token never appears in a process list. It is printed in your terminal so
+  `--no-open` works; another user on the machine can reach the port but
+  cannot see your terminal.
 - It only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`
   (or the `--bind` address) on its own port. That stops *DNS rebinding*,
   where a web page you visit points its own domain at your machine.
