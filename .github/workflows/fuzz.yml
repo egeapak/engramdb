@@ -22,9 +22,9 @@ jobs:
   # Build every target once and hand the binaries to the run legs. Each leg
   # used to compile the whole crate graph (LanceDB, DataFusion, Arrow, ORT)
   # itself, ASan-instrumented: 26 min per leg when it worked (run #18), and
-  # nine legs racing to run out of memory when it did not (#19 on). The
-  # binaries are ~all the same dependency graph, so one build costs about what
-  # one leg's did.
+  # nine legs racing to run out of memory when it did not (#19 on). The nine
+  # binaries share one dependency graph, so one build costs about what one
+  # leg's did.
   build:
     name: Build fuzz targets
     runs-on: ubuntu-latest
@@ -55,8 +55,8 @@ jobs:
         # A runner that runs out of memory (or disk) is shut down mid-step
         # with exit 143 and no error from the build itself, so print both
         # once a minute: the last sample before a kill names the resource.
-        # Measured peak with fuzz/Cargo.toml's profile is 13 GB at 4 jobs;
-        # 3 leaves headroom on a 16 GB runner for a few minutes' cost.
+        # Measured peak with fuzz/Cargo.toml's profile is 13 GB at 4 jobs
+        # (4-core/15 GB box); 3 jobs leaves headroom on a 16 GB runner.
         env:
           CARGO_BUILD_JOBS: 3
         run: |
