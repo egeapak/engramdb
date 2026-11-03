@@ -341,7 +341,7 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand config" -l spawn-daemo
 complete -c engramdb -n "__fish_engramdb_using_subcommand config" -l no-maintenance -d 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
 complete -c engramdb -n "__fish_engramdb_using_subcommand config" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c engramdb -n "__fish_engramdb_using_subcommand stats" -l memory -d 'Show one memory\'s usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix' -r
-complete -c engramdb -n "__fish_engramdb_using_subcommand stats" -l top -d 'Append the N most-used memories' -r
+complete -c engramdb -n "__fish_engramdb_using_subcommand stats" -l top -d 'Append the N most-used memories (N >= 1)' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand stats" -l by -d 'Which read signal orders --top; the others break ties (they are never summed)' -r -f -a "fetched\t'Opened explicitly by id (`get`)'
 injected\t'Rendered into an agent\'s context by a hook'
 returned\t'Returned by a `query`'"

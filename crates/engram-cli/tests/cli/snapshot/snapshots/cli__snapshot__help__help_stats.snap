@@ -23,7 +23,7 @@ Options:
           Show one memory's usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix
 
       --top <N>
-          Append the N most-used memories
+          Append the N most-used memories (N >= 1)
 
       --by <BY>
           Which read signal orders --top; the others break ties (they are never summed)

@@ -15,8 +15,8 @@ expression: body
   "last_returned_at": "[TS]",
   "last_injected_at": "[TS]",
   "last_fetched_at": "[TS]",
-  "updated_n": 0,
-  "challenged_n": 0,
+  "updated": 0,
+  "challenged": 0,
   "daily": [
     {
       "day": "[DAY]",

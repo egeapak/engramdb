@@ -139,6 +139,41 @@ pub(crate) async fn connect_for(project_id: &str) -> Result<Arc<Connection>> {
     Ok(cache.entry(project_id.to_string()).or_insert(conn).clone())
 }
 
+/// The LanceDB connection for a store whose `lancedb/` directory already
+/// exists, or `None` when it does not. Unlike [`connect_for`] it never
+/// creates a directory: the read paths a read-only consumer (the dashboard)
+/// drives must leave a store exactly as they found it.
+pub(crate) async fn connect_existing(project_id: &str) -> Result<Option<Arc<Connection>>> {
+    {
+        let cache = CONN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(conn) = cache.get(project_id) {
+            return Ok(Some(conn.clone()));
+        }
+    }
+    let dir = lancedb_root(project_id)?;
+    if !tokio::fs::metadata(&dir)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+    {
+        return Ok(None);
+    }
+    let path_str = dir
+        .to_str()
+        .context("lancedb path is not valid UTF-8")?
+        .to_string();
+    let conn = Arc::new(
+        connect(&path_str)
+            .execute()
+            .await
+            .context("opening LanceDB connection for usage reads")?,
+    );
+    let mut cache = CONN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(Some(
+        cache.entry(project_id.to_string()).or_insert(conn).clone(),
+    ))
+}
+
 fn events_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         // `ts` is a real timestamp column so that `prune_older_than` can use

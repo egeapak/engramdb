@@ -5,9 +5,12 @@
 //! `update`, `delete`, `challenge`, `resolve`, `verify`, `compress`,
 //! consolidation, promotion) takes a [`Surface`] and records its own event, so
 //! the CLI and the MCP server — which both pass through here — never repeat
-//! it. The three read signals are recorded where only a front end knows what
-//! the caller saw: `returned` after a CLI or MCP `query` (never inside the
-//! engine, which hooks and maintenance also drive), `fetched` after a CLI or
+//! it; `gc`'s deletions, consolidation and auto-promotion record under
+//! [`Surface::Maintenance`]. The three read signals are recorded where only a
+//! front end knows what the caller saw: `returned` after a CLI or MCP `query`
+//! and the MCP `memory://context` resource and `memory-session-start` prompt
+//! (never inside the engine, which hooks and maintenance also drive),
+//! `fetched` after a CLI or
 //! MCP `get` (never in `MemoryStore::get`, which `update` uses internally),
 //! and `injected` by the hooks, for exactly the memories that fit the
 //! budget. `reindex` and `migrate` record nothing: they change no meaning.
@@ -26,8 +29,9 @@ use crate::types::EngramConfig;
 
 pub use crate::telemetry::memory_events::MemoryUsage;
 pub use crate::telemetry::usage::{
-    load_daily_series, load_rollup, load_usage, top_memories, DailyUsage, MemoryEvent, Surface,
-    UsageCounts, UsageKind, UsageSort, UsageView, DEFAULT_SERIES_DAYS,
+    load_current_usage, load_daily_series, load_rollup, load_usage, returned_sessions,
+    top_memories, DailyUsage, MemoryEvent, Surface, UsageCounts, UsageKind, UsageSort, UsageView,
+    DEFAULT_SERIES_DAYS,
 };
 
 /// A store a memory may belong to: its id (the event's `store_id`) and the
@@ -48,10 +52,24 @@ impl StoreRef {
 }
 
 async fn store_config(store: &MemoryStore) -> EngramConfig {
-    crate::storage::config::load_config_or_default(
-        &store.project_dir.join(".engramdb").join("config.toml"),
-    )
-    .await
+    config_at(&store.project_dir).await
+}
+
+async fn config_at(root: &std::path::Path) -> EngramConfig {
+    crate::storage::config::load_config_or_default(&root.join(".engramdb").join("config.toml"))
+        .await
+}
+
+/// The session id a CLI invocation runs under, when it knows one: the
+/// variables `task current` and the MCP server already honor. A query run
+/// from a plain terminal has none, and its `returned` events then never
+/// count toward promotion (which counts distinct sessions).
+pub fn cli_session_id() -> Option<String> {
+    ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"]
+        .into_iter()
+        .filter_map(|v| std::env::var(v).ok())
+        .map(|v| v.trim().to_string())
+        .find(|v| !v.is_empty())
 }
 
 /// Whether `store` records usage (`[stats].enabled`).
@@ -79,11 +97,16 @@ pub(crate) async fn record_write(
         return;
     }
     // Ops accept prefixes; events always carry the full id. Resolved only
-    // here, behind the gate, so a disabled store pays nothing.
-    let full = store
-        .resolve_id(id)
-        .await
-        .unwrap_or_else(|_| id.to_string());
+    // here, behind the gate, so a disabled store pays nothing, and only for
+    // a prefix: a full id needs no index query.
+    let full = if uuid::Uuid::parse_str(id).is_ok() {
+        id.to_string()
+    } else {
+        store
+            .resolve_id(id)
+            .await
+            .unwrap_or_else(|_| id.to_string())
+    };
     record_resolved(store, &full, kind, surface, related_id);
 }
 
@@ -156,20 +179,25 @@ pub fn record_returned(
 }
 
 /// Drain one store's usage log into its tables, prune raw events past
-/// `retention_days` (folding them into the rollup first) and compact.
-/// Best-effort: failures are logged.
+/// `retention_days` (folding them into the rollup first), reconcile rollup
+/// rows a failed refresh left behind, and compact. Best-effort: failures
+/// are logged.
 pub async fn maintain_store_usage(store: &StoreRef, enabled: bool, retention_days: Option<u64>) {
+    use crate::telemetry::usage as u;
     if enabled {
-        if let Err(e) = crate::telemetry::usage::drain_to_table(&store.root, &store.id).await {
+        if let Err(e) = u::drain_to_table(&store.root, &store.id).await {
             tracing::debug!(store = %store.id, "usage stats: drain failed (non-fatal): {e}");
         }
     }
     if let Some(days) = retention_days {
-        if let Err(e) = crate::telemetry::usage::prune_memory_events(&store.id, days).await {
+        if let Err(e) = u::prune_memory_events(&store.id, days).await {
             tracing::debug!(store = %store.id, "usage stats: prune failed (non-fatal): {e}");
         }
     }
-    if let Err(e) = crate::telemetry::usage::optimize_memory_events(&store.id).await {
+    if let Err(e) = u::reconcile_rollup(&store.id).await {
+        tracing::debug!(store = %store.id, "usage stats: reconcile failed (non-fatal): {e}");
+    }
+    if let Err(e) = u::optimize_memory_events(&store.id).await {
         tracing::debug!(store = %store.id, "usage stats: optimize failed (non-fatal): {e}");
     }
 }
@@ -178,9 +206,10 @@ pub async fn maintain_store_usage(store: &StoreRef, enabled: bool, retention_day
 /// shared store its queries fan into (subscribed groups and the global
 /// store). A `returned` event for a group memory is written to the group's
 /// log, and nothing else drains a group store, so the subscribers do it.
-/// Shared stores use the project's `[stats]` settings: the project is the one
-/// running the pass. `gc` and the throttled CLI maintenance pass call this;
-/// the daemon calls [`maintain_project_usage`] as it serves hooks.
+/// Each shared store is maintained under its *own* `[stats]` settings: two
+/// subscribers with different retention would otherwise prune the same
+/// store to whichever ran last. `gc` and the throttled CLI maintenance pass
+/// call this; the daemon calls [`maintain_project_usage`] as it serves hooks.
 pub async fn maintain_memory_events(store: &MemoryStore) {
     let config = store_config(store).await;
     maintain_project_usage(
@@ -205,7 +234,8 @@ pub async fn maintain_project_usage(
         return;
     }
     for other in shared_stores_of(&store.id).await {
-        maintain_store_usage(&other, enabled, retention_days).await;
+        let own = config_at(&other.root).await;
+        maintain_store_usage(&other, own.stats.enabled, own.stats.retention_days).await;
     }
 }
 
@@ -255,34 +285,65 @@ pub struct MemoryUsageReport {
 /// Usage of the memory `id` (a full id or unique prefix) in `store`, or, if
 /// `store` has no such memory, in the first shared store (subscribed group,
 /// then global) that does: a group memory's events are in the group's log.
+///
+/// The fallback opens those shared stores (an open may migrate one). A
+/// read-only consumer that already holds its stores calls
+/// [`memory_usage_report_in`] instead, which opens and creates nothing.
 pub async fn memory_usage_report(
     store: &MemoryStore,
     id: &str,
 ) -> anyhow::Result<MemoryUsageReport> {
-    let (owner, memory) = match store.get(id).await {
-        Ok(m) => (StoreRef::of(store), m),
-        Err(crate::storage::StorageError::NotFound(_))
-            if !(store.is_group() || store.is_global()) =>
+    match memory_usage_report_in(&[store], id).await {
+        Err(e)
+            if matches!(
+                e.downcast_ref::<crate::storage::StorageError>(),
+                Some(crate::storage::StorageError::NotFound(_))
+            ) && !(store.is_group() || store.is_global()) =>
         {
-            let mut found = None;
-            for shared in shared_stores_of(&store.project_id).await {
-                let opened = if shared.id == crate::storage::paths::GLOBAL_PROJECT_ID {
+            let mut shared = Vec::new();
+            for s in shared_stores_of(&store.project_id).await {
+                let opened = if s.id == crate::storage::paths::GLOBAL_PROJECT_ID {
                     MemoryStore::open_global().await
                 } else {
-                    MemoryStore::open_group(&shared.id).await
+                    MemoryStore::open_group(&s.id).await
                 };
-                if let Ok(s) = opened {
-                    if let Ok(m) = s.get(id).await {
-                        found = Some((shared, m));
-                        break;
-                    }
+                if let Ok(opened) = opened {
+                    shared.push(opened);
                 }
             }
-            found.ok_or_else(|| crate::storage::StorageError::NotFound(id.to_string()))?
+            let refs: Vec<&MemoryStore> = shared.iter().collect();
+            if refs.is_empty() {
+                return Err(e);
+            }
+            memory_usage_report_in(&refs, id).await
         }
-        Err(e) => return Err(e.into()),
-    };
-    let view = load_usage(&owner.root, &owner.id, Some(&memory.id)).await;
+        other => other,
+    }
+}
+
+/// [`memory_usage_report`] over stores the caller already opened, tried in
+/// order: the first that holds `id` owns it. Opens, creates and migrates
+/// nothing. `StorageError::NotFound` when none holds it; an ambiguous
+/// prefix is the store's own `Validation` error, and a failed usage read is
+/// an error rather than a zero.
+pub async fn memory_usage_report_in(
+    stores: &[&MemoryStore],
+    id: &str,
+) -> anyhow::Result<MemoryUsageReport> {
+    let mut found = None;
+    for store in stores {
+        match store.get(id).await {
+            Ok(m) => {
+                found = Some((StoreRef::of(store), m));
+                break;
+            }
+            Err(crate::storage::StorageError::NotFound(_)) => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let (owner, memory) =
+        found.ok_or_else(|| crate::storage::StorageError::NotFound(id.to_string()))?;
+    let view = load_usage(&owner.root, &owner.id, Some(&memory.id)).await?;
     let counts = view
         .by_memory
         .get(&memory.id)
@@ -294,7 +355,7 @@ pub async fn memory_usage_report(
         Some(&memory.id),
         DEFAULT_SERIES_DAYS,
     )
-    .await;
+    .await?;
     Ok(MemoryUsageReport {
         memory_id: memory.id,
         summary: memory.summary,
@@ -315,22 +376,30 @@ pub struct TopMemory {
     pub counts: UsageCounts,
 }
 
-/// The store's `n` most-used memories by `sort`, with their summaries.
-pub async fn top_used(store: &MemoryStore, n: usize, sort: UsageSort) -> Vec<TopMemory> {
-    let view = load_usage(&store.project_dir, &store.project_id, None).await;
+/// The store's `n` most-used memories by `sort`, with their summaries. Reads
+/// [`load_current_usage`] (the rollup plus the undrained log): one row per
+/// memory, no raw scan, nothing created. Distinct-session counts there are
+/// an upper bound; the per-memory report is exact.
+pub async fn top_used(
+    store: &MemoryStore,
+    n: usize,
+    sort: UsageSort,
+) -> anyhow::Result<Vec<TopMemory>> {
+    let view = load_current_usage(&store.project_dir, &store.project_id).await?;
     let top = top_memories(&view, n, sort);
     let ids: Vec<&str> = top.iter().map(|u| u.memory_id.as_str()).collect();
     let summaries: HashMap<String, String> = match store.get_batch(&ids).await {
         Ok(found) => found.into_iter().map(|(id, m)| (id, m.summary)).collect(),
         Err(_) => HashMap::new(),
     };
-    top.into_iter()
+    Ok(top
+        .into_iter()
         .map(|u| TopMemory {
             summary: summaries.get(&u.memory_id).cloned(),
             memory_id: u.memory_id,
             counts: u.counts,
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -455,7 +524,7 @@ mod tests {
         assert_eq!(report.daily.len(), DEFAULT_SERIES_DAYS as usize);
         assert_eq!(report.daily.last().unwrap().fetched, 2);
 
-        let top = top_used(&store, 5, UsageSort::Fetched).await;
+        let top = top_used(&store, 5, UsageSort::Fetched).await.unwrap();
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].summary.as_deref(), Some("the summary"));
         assert!(memory_usage_report(&store, "nope").await.is_err());
@@ -705,5 +774,112 @@ mod tests {
         assert!(logged(&store).is_empty(), "drained");
         let rollup = load_rollup(&store.project_id).await.unwrap();
         assert_eq!(rollup["m1"].counts.fetched, 1);
+    }
+
+    /// A group memory's events end-to-end: the fan-in names the group as
+    /// owner, `returned` lands in the group's log (not the project's), the
+    /// subscriber's maintenance drains it into the group's own `lancedb/`,
+    /// and the report finds the memory through the subscription.
+    #[tokio::test]
+    async fn group_memory_usage_lands_in_the_group_and_a_subscriber_drains_it() {
+        use crate::retrieval::engine::RetrievalQuery;
+        use crate::storage::{FileRegistry, RegistryBackend};
+        let tmp = TempDir::new().unwrap();
+        let registry = FileRegistry::global().unwrap();
+        let project = MemoryStore::init(tmp.path(), &registry).await.unwrap();
+        let gid = crate::storage::paths::compute_group_id("usage-e2e");
+        let group = MemoryStore::init_group(&gid).await.unwrap();
+        registry.subscribe(&project.project_id, &gid).await.unwrap();
+        let gm = group
+            .create(&Memory::new(
+                MemoryType::Convention,
+                "group widget convention",
+                "the widget content is shared",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+
+        let mut config = EngramConfig::default();
+        config.retrieval.relevance_threshold = 0.0;
+        let engine = RetrievalEngine::new(project.clone(), config.clone());
+        let query = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("widget".to_string()),
+            max_results: Some(10),
+            ..Default::default()
+        };
+        let viewers: std::collections::HashSet<String> =
+            [project.project_id.clone()].into_iter().collect();
+        let g = gid.clone();
+        let out = crate::ops::query_memories_with_extra_stores(
+            &engine,
+            &query,
+            &viewers,
+            false,
+            || async move {
+                vec![(
+                    g.clone(),
+                    RetrievalEngine::new(MemoryStore::open_group(&g).await.unwrap(), config),
+                )]
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.owners.get(&gm).map(|o| o.id.as_str()),
+            Some(gid.as_str())
+        );
+        record_returned(
+            &engine,
+            &out.result,
+            &out.owners,
+            RetrievalMode::Filter,
+            Surface::Mcp,
+            Some("s1"),
+        );
+        assert!(logged(&project).is_empty(), "not the asker's log");
+        assert_eq!(logged(&group).len(), 1);
+
+        maintain_memory_events(&project).await;
+        assert!(logged(&group).is_empty(), "the subscriber drained it");
+        assert_eq!(load_rollup(&gid).await.unwrap()[&gm].counts.returned, 1);
+        assert!(crate::storage::paths::group_lancedb_dir(&gid)
+            .unwrap()
+            .join("memory_events.lance")
+            .exists());
+
+        let report = memory_usage_report(&project, &gm).await.unwrap();
+        assert_eq!(
+            (report.store_id.as_str(), report.counts.returned),
+            (gid.as_str(), 1)
+        );
+        let missing = memory_usage_report_in(&[&project], &gm).await.unwrap_err();
+        assert!(matches!(
+            missing.downcast_ref::<crate::storage::StorageError>(),
+            Some(crate::storage::StorageError::NotFound(_))
+        ));
+        let top = top_used(&group, 3, UsageSort::Returned).await.unwrap();
+        assert_eq!(top[0].memory_id, gm);
+    }
+
+    /// A deleted memory still ranks in top-N, without a summary.
+    #[tokio::test]
+    async fn top_used_keeps_a_deleted_memory_without_its_summary() {
+        let (_t, store) = store().await;
+        let id = crate::ops::create_memory(&store, create_params("gone"), None, Surface::Cli)
+            .await
+            .unwrap()
+            .id;
+        record_fetched(&store, &id, Surface::Cli, None).await;
+        crate::ops::delete_memory(&store, &id, Surface::Cli)
+            .await
+            .unwrap();
+        let top = top_used(&store, 3, UsageSort::Fetched).await.unwrap();
+        assert_eq!(top.len(), 1);
+        assert_eq!(
+            (top[0].memory_id.as_str(), top[0].summary.as_deref()),
+            (id.as_str(), None)
+        );
     }
 }

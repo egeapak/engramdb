@@ -427,7 +427,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
         }
         'engramdb;stats' {
             [CompletionResult]::new('--memory', '--memory', [CompletionResultType]::ParameterName, 'Show one memory''s usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix')
-            [CompletionResult]::new('--top', '--top', [CompletionResultType]::ParameterName, 'Append the N most-used memories')
+            [CompletionResult]::new('--top', '--top', [CompletionResultType]::ParameterName, 'Append the N most-used memories (N >= 1)')
             [CompletionResult]::new('--by', '--by', [CompletionResultType]::ParameterName, 'Which read signal orders --top; the others break ties (they are never summed)')
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')

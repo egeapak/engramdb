@@ -290,7 +290,12 @@ pub async fn compress_apply(
     }
 
     if super::usage::usage_enabled(store).await {
-        for id in source_ids.iter().filter(|id| verified.contains_key(*id)) {
+        // Only sources this compress actually closed: one whose
+        // invalidation failed is still active and was not merged.
+        for id in source_ids
+            .iter()
+            .filter(|id| verified.get(*id).is_some_and(|m| m.is_invalidated()))
+        {
             super::usage::record_resolved(
                 store,
                 id,

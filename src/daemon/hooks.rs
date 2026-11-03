@@ -47,7 +47,8 @@ use crate::telemetry::hook_events::{
     append_hook_events, optimize_hook_events, prune_hook_events, HookEvent, HookPath,
 };
 use crate::telemetry::memory_events::{
-    ingest_memory_events, optimize_memory_events, prune_memory_events, MemoryEvent,
+    ingest_memory_events, optimize_memory_events, prune_memory_events, reconcile_rollup,
+    MemoryEvent,
 };
 
 /// How often buffered hook events are written to `hook_events`.
@@ -296,6 +297,9 @@ impl HookTelemetry {
                 if let Err(e) = prune_memory_events(&sid, days).await {
                     tracing::warn!("memory_events prune for {sid}: {e}");
                 }
+            }
+            if let Err(e) = reconcile_rollup(&sid).await {
+                tracing::debug!("memory_usage reconcile for {sid}: {e}");
             }
             if let Err(e) = optimize_memory_events(&sid).await {
                 tracing::debug!("memory_events optimize for {sid}: {e}");

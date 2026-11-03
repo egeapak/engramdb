@@ -256,7 +256,9 @@ async fn compute_query_result(
 }
 
 /// Record `returned` for what this query answered (each memory in its
-/// owning store's log). The CLI has no session id.
+/// owning store's log), under the session id the CLI runs in when it knows
+/// one ([`engramdb::ops::usage::cli_session_id`]); sessionless events never
+/// count toward promotion.
 fn record_returned(
     engine: &engramdb::retrieval::engine::RetrievalEngine,
     result: &RetrievalResult,
@@ -269,7 +271,7 @@ fn record_returned(
         owners,
         mode,
         engramdb::ops::Surface::Cli,
-        None,
+        engramdb::ops::usage::cli_session_id().as_deref(),
     );
 }
 
@@ -549,5 +551,42 @@ mod tests {
             "expected validation message, got: {}",
             msg
         );
+    }
+
+    /// The CLI front end records `returned` for every memory it answered,
+    /// ranked, under the session id it runs in (here `CLAUDE_SESSION_ID`).
+    #[tokio::test]
+    async fn query_records_returned_with_rank_and_the_cli_session() {
+        use engramdb::ops::{Surface, UsageKind};
+        let (temp_dir, store) = setup_test_store().await;
+        std::env::set_var("CLAUDE_SESSION_ID", "cli-sess");
+        let formatter = OutputFormatter::new(None, false, true);
+        let params = QueryParams {
+            path: Some("src/main.rs".to_string()),
+            ..base_params()
+        };
+        run_query(
+            temp_dir.path(),
+            false,
+            None,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await
+        .unwrap();
+        let events = engramdb::telemetry::usage::load_memory_events(temp_dir.path())
+            .unwrap()
+            .events;
+        assert!(!events.is_empty(), "the answer was recorded");
+        for (i, e) in events.iter().enumerate() {
+            assert_eq!((e.kind, e.surface), (UsageKind::Returned, Surface::Cli));
+            assert_eq!(e.session_id.as_deref(), Some("cli-sess"));
+            assert_eq!(e.store_id, store.project_id);
+            assert_eq!(e.rank, Some(i as u32 + 1));
+            assert_eq!(e.query_mode.as_deref(), Some("rank"));
+        }
     }
 }

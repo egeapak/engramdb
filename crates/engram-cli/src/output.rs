@@ -1324,8 +1324,8 @@ impl OutputFormatter {
                     c.injected,
                     c.injected_sessions,
                     c.fetched,
-                    c.updated_n,
-                    c.challenged_n
+                    c.updated,
+                    c.challenged
                 );
                 for d in active {
                     outln!(
@@ -1368,14 +1368,10 @@ impl OutputFormatter {
                 outln!(
                     self,
                     "\nWrites: {} {}, {} {}{}",
-                    c.updated_n,
-                    if c.updated_n == 1 {
-                        "update"
-                    } else {
-                        "updates"
-                    },
-                    c.challenged_n,
-                    if c.challenged_n == 1 {
+                    c.updated,
+                    if c.updated == 1 { "update" } else { "updates" },
+                    c.challenged,
+                    if c.challenged == 1 {
                         "challenge"
                     } else {
                         "challenges"
@@ -3559,8 +3555,8 @@ mod tests {
             last_returned_at: (returned > 0).then(|| fixed(2026, 10, 30, 9, 15, 0)),
             last_injected_at: (injected > 0).then(|| fixed(2026, 11, 1, 14, 0, 0)),
             last_fetched_at: (fetched > 0).then(|| fixed(2026, 11, 2, 8, 30, 0)),
-            updated_n: 2,
-            challenged_n: 1,
+            updated: 2,
+            challenged: 1,
             last_written_at: Some(fixed(2026, 10, 20, 12, 0, 0)),
         }
     }

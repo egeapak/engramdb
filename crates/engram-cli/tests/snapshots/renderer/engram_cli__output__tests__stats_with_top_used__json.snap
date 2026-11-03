@@ -36,8 +36,8 @@ expression: rendered
         "last_returned_at": "2026-10-30T09:15:00Z",
         "last_injected_at": "2026-11-01T14:00:00Z",
         "last_fetched_at": "2026-11-02T08:30:00Z",
-        "updated_n": 2,
-        "challenged_n": 1,
+        "updated": 2,
+        "challenged": 1,
         "last_written_at": "2026-10-20T12:00:00Z"
       },
       {
@@ -48,8 +48,8 @@ expression: rendered
         "returned_sessions": 0,
         "injected_sessions": 1,
         "last_injected_at": "2026-11-01T14:00:00Z",
-        "updated_n": 2,
-        "challenged_n": 1,
+        "updated": 2,
+        "challenged": 1,
         "last_written_at": "2026-10-20T12:00:00Z"
       }
     ]

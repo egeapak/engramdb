@@ -537,6 +537,15 @@ pub enum OutputFormat {
     Plain,
 }
 
+/// `--top N`: a listing of zero memories is a mistake, not a request.
+fn parse_top_n(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(0) => Err("must be at least 1".to_string()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// The read signal that orders `stats --top`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum UsageSortArg {
@@ -1117,11 +1126,16 @@ pub enum Command {
 
         /// Show one memory's usage (returned / injected / fetched, writes, last 30 days)
         /// instead of store stats. Accepts a unique id prefix.
-        #[arg(long, value_name = "ID", conflicts_with_all = ["daemon", "top"])]
+        #[arg(long, value_name = "ID", conflicts_with_all = ["daemon", "top", "all_projects"])]
         memory: Option<String>,
 
-        /// Append the N most-used memories
-        #[arg(long, value_name = "N")]
+        /// Append the N most-used memories (N >= 1)
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = parse_top_n,
+            conflicts_with_all = ["daemon", "all_projects"]
+        )]
         top: Option<usize>,
 
         /// Which read signal orders --top; the others break ties (they are never summed)
@@ -1915,6 +1929,17 @@ mod tests {
         }
         assert!(Cli::try_parse_from(["engramdb", "stats", "--memory", "a", "--top", "3"]).is_err());
         assert!(Cli::try_parse_from(["engramdb", "stats", "--by", "returned"]).is_err());
+        for bad in [
+            &["engramdb", "stats", "--top", "0"][..],
+            &["engramdb", "stats", "--top", "3", "--daemon"][..],
+            &["engramdb", "stats", "--top", "3", "--all-projects"][..],
+            &["engramdb", "stats", "--memory", "a", "--all-projects"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     // List command parsing (6 tests)

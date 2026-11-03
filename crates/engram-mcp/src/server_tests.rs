@@ -1549,6 +1549,19 @@ async fn stats_reports_per_memory_usage_and_top_used() {
         }))
         .await;
     assert!(missing.unwrap_err().contains("MEMORY_NOT_FOUND"));
+    for (top, by) in [(None, Some("fetched")), (Some(0), None)] {
+        let err = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+                memory_id: None,
+                top,
+                by: by.map(str::to_string),
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("VALIDATION"), "{top:?}/{by:?}: {err}");
+    }
 }
 
 // -----------------------------------------------------------------------

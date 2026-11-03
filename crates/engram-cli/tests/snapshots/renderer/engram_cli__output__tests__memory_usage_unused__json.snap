@@ -12,8 +12,8 @@ expression: rendered
   "fetched": 0,
   "returned_sessions": 0,
   "injected_sessions": 0,
-  "updated_n": 0,
-  "challenged_n": 0,
+  "updated": 0,
+  "challenged": 0,
   "daily": [
     {
       "day": "2026-10-05",

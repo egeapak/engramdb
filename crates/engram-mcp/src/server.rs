@@ -3099,11 +3099,39 @@ impl EngramDbServer {
             }
         }
         // Per-memory usage, from the store's usage events (table + undrained
-        // log). Additive keys, present only when asked for.
+        // log). Additive keys, present only when asked for. Validated as the
+        // CLI validates its flags: `by` needs `top`, and `top` must be >= 1.
+        let by = match input.by.as_deref() {
+            None => ops::UsageSort::default(),
+            Some(_) if input.top.is_none() => {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    "by applies to top: pass top as well",
+                ))
+            }
+            Some(s) => ops::UsageSort::parse(s).ok_or_else(|| {
+                error_response(
+                    ErrorCode::ValidationError,
+                    &format!("by must be fetched, injected or returned, got {s:?}"),
+                )
+            })?,
+        };
+        if input.top == Some(0) {
+            return Err(error_response(
+                ErrorCode::ValidationError,
+                "top must be at least 1",
+            ));
+        }
         if let Some(id) = input.memory_id.as_deref() {
             let report = ops::memory_usage_report(&store, id).await.map_err(|e| {
                 let code = if is_not_found(&e) {
                     ErrorCode::MemoryNotFound
+                } else if matches!(
+                    e.downcast_ref::<engramdb::storage::StorageError>(),
+                    Some(engramdb::storage::StorageError::Validation(_))
+                ) {
+                    // An ambiguous prefix is the caller's to fix.
+                    ErrorCode::ValidationError
                 } else {
                     ErrorCode::InternalError
                 };
@@ -3112,18 +3140,12 @@ impl EngramDbServer {
             payload["memory_usage"] = serde_json::to_value(&report).unwrap_or_default();
         }
         if let Some(n) = input.top {
-            let by = match input.by.as_deref() {
-                None => ops::UsageSort::default(),
-                Some(s) => ops::UsageSort::parse(s).ok_or_else(|| {
-                    error_response(
-                        ErrorCode::ValidationError,
-                        &format!("by must be fetched, injected or returned, got {s:?}"),
-                    )
-                })?,
-            };
+            let memories = ops::top_used(&store, n, by)
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
             payload["top_used"] = serde_json::json!({
                 "by": by.as_str(),
-                "memories": ops::top_used(&store, n, by).await,
+                "memories": memories,
             });
         }
 
@@ -4552,6 +4574,16 @@ impl ServerHandler for EngramDbServer {
                 let result = ops::query_memories(&engine, &query)
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                // A resource read hands the agent these memories exactly as
+                // a query does: the same signal, so promotion sees it.
+                ops::record_returned(
+                    &engine,
+                    &result,
+                    &Default::default(),
+                    RetrievalMode::Rank,
+                    ops::Surface::Mcp,
+                    Some(&self.session_id),
+                );
 
                 let memories: Vec<serde_json::Value> = result
                     .memories
@@ -4635,6 +4667,14 @@ impl ServerHandler for EngramDbServer {
                         ..RetrievalQuery::default()
                     };
                     if let Ok(result) = ops::query_memories(&engine, &query).await {
+                        ops::record_returned(
+                            &engine,
+                            &result,
+                            &Default::default(),
+                            RetrievalMode::Rank,
+                            ops::Surface::Mcp,
+                            Some(&self.session_id),
+                        );
                         for sm in &result.memories {
                             let status_marker = match sm.memory.status {
                                 Status::Challenged => " ⚠️",

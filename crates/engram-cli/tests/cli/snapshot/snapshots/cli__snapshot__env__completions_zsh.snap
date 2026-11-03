@@ -468,8 +468,8 @@ plain\:"Plain text output without colors"))' \
 ;;
 (stats)
 _arguments "${_arguments_options[@]}" : \
-'(--daemon --top)--memory=[Show one memory'\''s usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix]:ID:_default' \
-'--top=[Append the N most-used memories]:N:_default' \
+'(--daemon --top --all-projects)--memory=[Show one memory'\''s usage (returned / injected / fetched, writes, last 30 days) instead of store stats. Accepts a unique id prefix]:ID:_default' \
+'(--daemon --all-projects)--top=[Append the N most-used memories (N >= 1)]:N:_default' \
 '--by=[Which read signal orders --top; the others break ties (they are never summed)]:BY:((fetched\:"Opened explicitly by id (\`get\`)"
 injected\:"Rendered into an agent'\''s context by a hook"
 returned\:"Returned by a \`query\`"))' \

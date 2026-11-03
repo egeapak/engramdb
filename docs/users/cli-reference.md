@@ -210,7 +210,7 @@ engramdb stats --top <N> [--by fetched|injected|returned]
 | `--global` | Stats for the global store. |
 | `--daemon` | Embedding-daemon request metrics (see [daemon.md](./daemon.md)). |
 | `--memory <ID>` | One memory's usage instead of store stats (a unique id prefix works). |
-| `--top <N>` | Appends the N most-used memories, ordered by `--by` (default `fetched`). |
+| `--top <N>` | Appends the N most-used memories (N ≥ 1), ordered by `--by` (default `fetched`). Not with `--daemon` or `--all-projects`. |
 
 Without `--global` or `--daemon`, the output also has a **Hook calls** section: for each `engramdb hook <event>`, how many times it ran in this project, how many returned an error, the average, and the p50 / p95 / p99 wall time in milliseconds. When a hook ran both through the daemon and in its own process, a per-path breakdown follows (`daemon` / `in-process`); with one path, the path is named on the hook's line.
 
@@ -221,15 +221,16 @@ Without `--global` or `--daemon`, the output also has a **Hook calls** section: 
 
 **Per-memory usage.** Every memory keeps three read counts, reported side by side and never added together, because they measure different things:
 
-- **returned** — it was in the answer to a `query` (CLI or MCP), with its rank and score;
+- **returned** — it was in the answer to a `query` (CLI or MCP), or handed to the agent by the MCP `memory://context/<path>` resource or the `memory-session-start` prompt, with its rank and score;
 - **injected** — a hook put it into an agent's context (only what fit the hook's character budget);
 - **fetched** — someone opened it by id (`get`, CLI or MCP).
 
-Returned and injected also count distinct sessions. Writes are counted too (updates, challenges, and the last write of any kind, including create, resolve, verify, promote, merge and delete); `reindex` and `migrate` record nothing. `--memory` shows all of this plus the active days of the last 30; `--top` sorts by one signal and breaks ties with the others. In `--json` output they are the whole document (`--memory`) and the `top_used` key; the MCP `stats` tool takes `memory_id`, `top` and `by` and answers with `memory_usage` and `top_used`.
+Returned and injected also count distinct sessions. Writes are counted too (updates, challenges, and the last write of any kind, including create, resolve, verify, promote, merge and delete); `reindex` and `migrate` record nothing. `--memory` shows all of this plus the active days of the last 30; `--top` sorts by one signal and breaks ties with the others (a memory that was never read is left out; a deleted one is listed without a summary). `--memory` counts exactly; `--top` reads the per-memory rollup plus the not-yet-drained log, so it is cheap on a large store but its *session* counts are an upper bound. The JSON field names are `returned`, `injected`, `fetched`, `returned_sessions`, `injected_sessions`, `updated`, `challenged` and the `last_*_at` instants. In `--json` output they are the whole document (`--memory`) and the `top_used` key; the MCP `stats` tool takes `memory_id`, `top` and `by` and answers with `memory_usage` and `top_used`.
 
 - **Where the data comes from.** The CLI, the MCP server and hooks in their own process append a line to `.engramdb/state/memory_events.jsonl` of the store that owns the memory — a group or global memory's events land in that store, not in the project that found it. Hooks the daemon runs are buffered and written every 60 s and when the daemon stops. The daemon, `gc` and the automatic maintenance pass move the log into the store's `memory_events` table and its `memory_usage` rollup, for the project and every group and global store it reads. `stats` reads table and log, and counts nothing twice.
 - **Window.** Raw events are kept for `[stats].retention_days`; lifetime counts survive in the rollup after the events are pruned. The 30-day series reads raw events, so a shorter retention zeroes its oldest days.
-- **What is lost.** A daemon killed with `SIGKILL` loses up to 60 s of buffered hook events; a hook whose daemon reply was lost records nothing; uninitialized directories and `[stats].enabled = false` record nothing. Counts are machine-local: they do not travel with a clone, and deleting a store's `lancedb/` directory deletes them.
+- **Sessions.** A CLI `query` or `get` records the session in `CLAUDE_SESSION_ID` (or `MCP_SESSION_ID`) when set, the variables `task current` and the MCP server already use, and no session otherwise. Only events with a session count toward promoting a task-bound memory, so a query typed in a plain terminal does not re-confirm one.
+- **What is lost.** A group store's log is drained by its subscribers' maintenance (or `gc` on the group itself); a query into a group nobody subscribed to writes a log that only rotation bounds. A line written by a newer engramdb, with a kind this version does not know, is kept and stored but not counted. A daemon killed with `SIGKILL` loses up to 60 s of buffered hook events; a hook whose daemon reply was lost records nothing; uninitialized directories and `[stats].enabled = false` record nothing. Counts are machine-local: they do not travel with a clone, and deleting a store's `lancedb/` directory deletes them.
 
 ## `doctor` — health check
 

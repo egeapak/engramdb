@@ -23,7 +23,18 @@
 //!   machine-wide, and every directory Claude Code starts in would otherwise
 //!   collect a state folder (the same test SessionEnd uses).
 //! - **A torn write** costs the torn line, which [`load_memory_events`] skips
-//!   and counts.
+//!   and counts, and a drain drops with its file (warning with the count).
+//!   A line that parses but names a kind or surface this binary does not
+//!   know (a newer binary's) is *not* torn: the drain stores it verbatim and
+//!   the counts leave it out (`unknown_lines`).
+//! - **A shared store nobody drains.** A group or global memory's events go
+//!   to that store's own log, which the maintenance pass of every
+//!   *subscribed* project drains (and `gc` run on the store itself). A query
+//!   that names a group it is not subscribed to (`project: "group:x"`) still
+//!   writes the group's log; if no subscriber ever runs maintenance, that log
+//!   is bounded by rotation like any undrained log.
+//! - **Daemon-buffered events** are invisible to every read until the
+//!   daemon's next flush (at most one interval, 60 s).
 //!
 //! **No double counting.** Reads combine the table with the unclaimed JSONL
 //! files. A drain claims (renames) a file before it inserts, and reads never
@@ -40,13 +51,13 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::telemetry::jsonl_log::{is_initialized, state_dir, JsonlLog};
 use crate::telemetry::memory_events::{
-    ingest_memory_events, load_series_table, load_table_usage, returned_sessions_table,
-    DailySeries, MemoryUsage, SERIES_DAYS,
+    ingest_rows, load_rollup_entries, load_series_table, load_table_usage, returned_sessions_table,
+    DailySeries, EventRow, MemoryUsage, SERIES_DAYS,
 };
 
 pub use crate::telemetry::memory_events::{
-    load_rollup, optimize_memory_events, prune_memory_events, DailyUsage, MemoryEvent, Surface,
-    UsageCounts, UsageKind,
+    load_rollup, optimize_memory_events, prune_memory_events, reconcile_rollup, DailyUsage,
+    MemoryEvent, Surface, UsageCounts, UsageKind,
 };
 
 /// Live log, under the owning store's `.engramdb/state/`.
@@ -100,9 +111,15 @@ fn record_at(store_root: &Path, events: &[MemoryEvent], rotate_bytes: u64) -> Re
 /// What [`load_memory_events`] read back.
 #[derive(Debug, Default)]
 pub struct LoadedMemoryEvents {
+    /// The lines this binary fully understands.
     pub events: Vec<MemoryEvent>,
-    /// Lines that did not parse (torn writes, another version's format).
+    /// Every line that parsed, unknown kinds and surfaces included: what a
+    /// drain stores and what the counts read (by kind).
+    pub rows: Vec<EventRow>,
+    /// Lines that did not parse at all (torn writes).
     pub skipped_lines: u64,
+    /// Lines that parsed but name a kind or surface this binary does not know.
+    pub unknown_lines: u64,
 }
 
 fn parse_lines(text: &str, out: &mut LoadedMemoryEvents) {
@@ -110,8 +127,14 @@ fn parse_lines(text: &str, out: &mut LoadedMemoryEvents) {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<MemoryEvent>(line) {
-            Ok(e) => out.events.push(e),
+        match serde_json::from_str::<EventRow>(line) {
+            Ok(row) => {
+                match row.to_event() {
+                    Some(e) => out.events.push(e),
+                    None => out.unknown_lines += 1,
+                }
+                out.rows.push(row);
+            }
             Err(_) => out.skipped_lines += 1,
         }
     }
@@ -124,16 +147,6 @@ pub fn load_memory_events(store_root: &Path) -> Result<LoadedMemoryEvents> {
         parse_lines(&text, &mut out);
     }
     Ok(out)
-}
-
-fn load_or_warn(store_root: &Path) -> LoadedMemoryEvents {
-    match load_memory_events(store_root) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::warn!("usage stats: could not read the usage log: {e}");
-            LoadedMemoryEvents::default()
-        }
-    }
 }
 
 /// What one [`drain_to_table`] call moved.
@@ -167,14 +180,15 @@ async fn drain_with_grace(
             }
             // A line naming another store is a writer's bug; it still belongs
             // to this file's store, which is where its count must land.
-            for e in &mut loaded.events {
+            for e in &mut loaded.rows {
                 if e.store_id != store_id {
                     e.store_id = store_id.to_string();
                 }
             }
-            ingest_memory_events(store_id, &loaded.events, true).await?;
+            // Rows, not typed events: a newer binary's kinds are kept.
+            ingest_rows(store_id, &loaded.rows, true).await?;
             Ok(DrainReport {
-                events: loaded.events.len() as u64,
+                events: loaded.rows.len() as u64,
                 skipped_lines: loaded.skipped_lines,
                 files: 0,
             })
@@ -199,8 +213,12 @@ async fn drain_with_grace(
 pub struct UsageView {
     pub store_id: String,
     pub by_memory: BTreeMap<String, MemoryUsage>,
+    /// Torn log lines left out.
     #[serde(skip_serializing_if = "is_zero")]
     pub skipped_lines: u64,
+    /// Log lines of a kind this binary does not know, left out.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub unknown_lines: u64,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -210,26 +228,86 @@ fn is_zero(v: &u64) -> bool {
 /// Exact usage for `memory` (a full id), or for every memory of the store,
 /// combining the tables with the not-yet-drained log. Nothing is counted
 /// twice (see the module docs), and distinct sessions are counted across both
-/// sources. A failure on either side is logged and that side reads empty.
-pub async fn load_usage(store_root: &Path, store_id: &str, memory: Option<&str>) -> UsageView {
-    let mut table = match load_table_usage(store_id, memory).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("usage stats: could not read memory_events: {e}");
-            Default::default()
-        }
-    };
-    let loaded = load_or_warn(store_root);
-    for e in &loaded.events {
+/// sources. Scans the raw window; for every memory at once prefer
+/// [`load_current_usage`].
+///
+/// **The read API, for every consumer** ([`load_usage`],
+/// [`load_current_usage`], [`load_daily_series`], [`returned_sessions`]):
+/// each takes the store's root and id, never opens a `MemoryStore`, and
+/// never creates a directory, a table or a lock, nor runs a migration. A
+/// store without tables reads as empty; a failure to read either source is
+/// an error, never a zero.
+pub async fn load_usage(
+    store_root: &Path,
+    store_id: &str,
+    memory: Option<&str>,
+) -> anyhow::Result<UsageView> {
+    let mut table = load_table_usage(store_id, memory).await?;
+    let loaded = load_memory_events(store_root)?;
+    for e in &loaded.rows {
         if memory.is_none_or(|m| m == e.memory_id) {
-            table.add(e);
+            if let Some(kind) = e.known_kind() {
+                table.add(&e.memory_id, kind, e.ts, e.session_id.as_deref());
+            }
         }
     }
-    UsageView {
+    Ok(UsageView {
         store_id: store_id.to_string(),
         by_memory: table.finish(store_id),
         skipped_lines: loaded.skipped_lines,
+        unknown_lines: loaded.unknown_lines,
+    })
+}
+
+/// Usage of every memory of the store, cheaply: the rollup (one row per
+/// memory, no raw scan) plus the not-yet-drained log on top. Counts are
+/// exact as of the last drain or flush plus the log; distinct-session counts
+/// are an upper bound, since a session that has both rollup events and log
+/// lines is counted in both. A rollup row that lags its raw rows (see
+/// `memory_events`) reads as it is until the next refresh or reconcile.
+pub async fn load_current_usage(store_root: &Path, store_id: &str) -> anyhow::Result<UsageView> {
+    let entries = load_rollup_entries(store_id).await?;
+    let loaded = load_memory_events(store_root)?;
+    let mut by_memory: BTreeMap<String, MemoryUsage> = BTreeMap::new();
+    let mut watermarks = BTreeMap::new();
+    for (id, entry) in entries {
+        watermarks.insert(id.clone(), entry.watermark);
+        by_memory.insert(id, entry.usage);
     }
+    let mut pending: BTreeMap<String, crate::telemetry::memory_events::UsageAccumulator> =
+        BTreeMap::new();
+    for e in &loaded.rows {
+        let Some(kind) = e.known_kind() else { continue };
+        if watermarks
+            .get(&e.memory_id)
+            .copied()
+            .flatten()
+            .is_some_and(|w| e.ts < w)
+        {
+            continue;
+        }
+        pending
+            .entry(e.memory_id.clone())
+            .or_default()
+            .add(kind, e.ts, e.session_id.as_deref());
+    }
+    for (id, acc) in pending {
+        by_memory
+            .entry(id.clone())
+            .or_insert_with(|| MemoryUsage {
+                memory_id: id,
+                store_id: store_id.to_string(),
+                counts: UsageCounts::default(),
+            })
+            .counts
+            .merge(&acc.finish());
+    }
+    Ok(UsageView {
+        store_id: store_id.to_string(),
+        by_memory,
+        skipped_lines: loaded.skipped_lines,
+        unknown_lines: loaded.unknown_lines,
+    })
 }
 
 /// A dense daily series of the last `days` days (UTC, today included), for
@@ -239,7 +317,7 @@ pub async fn load_daily_series(
     store_id: &str,
     memory: Option<&str>,
     days: u32,
-) -> Vec<DailyUsage> {
+) -> anyhow::Result<Vec<DailyUsage>> {
     load_daily_series_at(store_root, store_id, memory, days, Utc::now()).await
 }
 
@@ -249,17 +327,17 @@ async fn load_daily_series_at(
     memory: Option<&str>,
     days: u32,
     now: DateTime<Utc>,
-) -> Vec<DailyUsage> {
+) -> anyhow::Result<Vec<DailyUsage>> {
     let mut series = DailySeries::empty(days, now.date_naive());
-    if let Err(e) = load_series_table(store_id, memory, &mut series).await {
-        tracing::warn!("usage stats: could not read the daily series: {e}");
-    }
-    for e in &load_or_warn(store_root).events {
+    load_series_table(store_id, memory, &mut series).await?;
+    for e in &load_memory_events(store_root)?.rows {
         if memory.is_none_or(|m| m == e.memory_id) {
-            series.add(e.kind, e.ts);
+            if let Some(kind) = e.known_kind() {
+                series.add(kind, e.ts);
+            }
         }
     }
-    series.days
+    Ok(series.days)
 }
 
 /// The default series length.
@@ -271,23 +349,17 @@ pub async fn returned_sessions(
     store_root: &Path,
     store_id: &str,
     since: Option<DateTime<Utc>>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let mut out = match returned_sessions_table(store_id, since).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!("usage stats: could not read returned sessions: {e}");
-            Default::default()
-        }
-    };
-    for e in load_or_warn(store_root).events {
-        if e.kind != UsageKind::Returned || since.is_some_and(|s| e.ts < s) {
+) -> anyhow::Result<std::collections::HashMap<String, std::collections::HashSet<String>>> {
+    let mut out = returned_sessions_table(store_id, since).await?;
+    for e in load_memory_events(store_root)?.rows {
+        if e.known_kind() != Some(UsageKind::Returned) || since.is_some_and(|s| e.ts < s) {
             continue;
         }
         if let Some(s) = e.session_id {
             out.entry(e.memory_id).or_default().insert(s);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Which read signal orders a top-N listing. The other two break ties, in
@@ -347,6 +419,7 @@ pub fn top_memories(view: &UsageView, n: usize, sort: UsageSort) -> Vec<MemoryUs
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::telemetry::memory_events::ingest_memory_events;
     use tempfile::TempDir;
 
     fn project() -> TempDir {
@@ -455,7 +528,7 @@ mod tests {
             &[ev(&sid, "m1", UsageKind::Returned, Some("a"))],
         )
         .unwrap();
-        let view = load_usage(tmp.path(), &sid, Some("m1")).await;
+        let view = load_usage(tmp.path(), &sid, Some("m1")).await.unwrap();
         let c = &view.by_memory["m1"].counts;
         assert_eq!((c.returned, c.injected), (2, 1));
         assert_eq!(c.returned_sessions, 1, "one session across table and log");
@@ -467,7 +540,7 @@ mod tests {
             .unwrap();
         assert_eq!(again.events, 1);
         assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.returned, 2);
-        let after = load_usage(tmp.path(), &sid, Some("m1")).await;
+        let after = load_usage(tmp.path(), &sid, Some("m1")).await.unwrap();
         assert_eq!(
             after.by_memory["m1"].counts.returned, 2,
             "drained, not doubled"
@@ -489,7 +562,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load_usage(tmp.path(), &sid, None).await.by_memory["m1"]
+            load_usage(tmp.path(), &sid, None).await.unwrap().by_memory["m1"]
                 .counts
                 .fetched,
             1,
@@ -532,10 +605,12 @@ mod tests {
             ],
         )
         .unwrap();
-        let series = load_daily_series_at(tmp.path(), &sid, Some("m1"), 7, now).await;
+        let series = load_daily_series_at(tmp.path(), &sid, Some("m1"), 7, now)
+            .await
+            .unwrap();
         assert_eq!(series.len(), 7);
         assert_eq!(series.last().unwrap().returned, 2);
-        let sessions = returned_sessions(tmp.path(), &sid, None).await;
+        let sessions = returned_sessions(tmp.path(), &sid, None).await.unwrap();
         assert_eq!(sessions["m1"].len(), 2);
         assert!(
             !sessions.contains_key("m2"),
@@ -579,5 +654,85 @@ mod tests {
         assert_eq!(ids(UsageSort::Returned)[0], "a");
         assert_eq!(ids(UsageSort::Injected)[0], "c");
         assert_eq!(top_memories(&view, 1, UsageSort::Fetched).len(), 1);
+    }
+
+    /// A newer binary's line (unknown kind and surface) survives a drain
+    /// instead of being deleted as unreadable.
+    #[tokio::test]
+    async fn a_newer_binarys_line_is_kept_not_dropped() {
+        let (tmp, sid) = store_with_id();
+        record_memory_events(tmp.path(), &[ev(&sid, "m1", UsageKind::Fetched, None)]).unwrap();
+        let path = memory_events_path(tmp.path());
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str(&format!(
+            "{{\"id\":\"{}\",\"ts\":\"{}\",\"memory_id\":\"m1\",\"store_id\":\"{sid}\",\
+             \"kind\":\"linked_v9\",\"surface\":\"dashboard\",\"new_field\":1}}\n",
+            uuid::Uuid::now_v7(),
+            Utc::now().to_rfc3339()
+        ));
+        std::fs::write(&path, text).unwrap();
+        let loaded = load_memory_events(tmp.path()).unwrap();
+        assert_eq!(
+            (
+                loaded.events.len(),
+                loaded.unknown_lines,
+                loaded.skipped_lines
+            ),
+            (1, 1, 0)
+        );
+        let view = load_usage(tmp.path(), &sid, None).await.unwrap();
+        assert_eq!(view.unknown_lines, 1);
+        assert_eq!(view.by_memory["m1"].counts.fetched, 1);
+        let report = drain_with_grace(tmp.path(), &sid, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!((report.events, report.skipped_lines), (2, 0));
+        let conn = crate::telemetry::persistence::connect_for(&sid)
+            .await
+            .unwrap();
+        let table = conn
+            .open_table(crate::telemetry::memory_events::MEMORY_EVENTS_TABLE)
+            .execute()
+            .await
+            .unwrap();
+        assert_eq!(table.count_rows(None).await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn current_usage_is_the_rollup_plus_the_log() {
+        let (tmp, sid) = store_with_id();
+        ingest_rows(
+            &sid,
+            &[EventRow::from(&ev(&sid, "m1", UsageKind::Fetched, None))],
+            false,
+        )
+        .await
+        .unwrap();
+        record_memory_events(
+            tmp.path(),
+            &[
+                ev(&sid, "m1", UsageKind::Fetched, None),
+                ev(&sid, "m2", UsageKind::Injected, Some("a")),
+            ],
+        )
+        .unwrap();
+        let view = load_current_usage(tmp.path(), &sid).await.unwrap();
+        assert_eq!(view.by_memory["m1"].counts.fetched, 2);
+        assert_eq!(view.by_memory["m2"].counts.injected_sessions, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_log_that_cannot_be_read_is_an_error_not_a_zero() {
+        let (tmp, sid) = store_with_id();
+        let state = tmp.path().join(".engramdb/state");
+        std::fs::create_dir_all(&state).unwrap();
+        let victim = tmp.path().join("victim.txt");
+        std::fs::write(&victim, "x").unwrap();
+        std::os::unix::fs::symlink(&victim, state.join(MEMORY_EVENTS_FILE)).unwrap();
+        assert!(load_usage(tmp.path(), &sid, None).await.is_err());
+        assert!(load_current_usage(tmp.path(), &sid).await.is_err());
+        assert!(load_daily_series(tmp.path(), &sid, None, 3).await.is_err());
+        assert!(returned_sessions(tmp.path(), &sid, None).await.is_err());
     }
 }

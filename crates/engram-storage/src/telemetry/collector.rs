@@ -559,36 +559,6 @@ impl StatsCollector {
         );
     }
 
-    /// Record the memory ids returned (above threshold) by one retrieval.
-    /// Pure persistence — feeds the §11.3 promotion counts; no in-memory
-    /// counters change. No-op when disabled or `ids` is empty.
-    pub fn record_retrieved_memories(
-        &self,
-        project_id: &str,
-        ids: &[String],
-        session_id: Option<&str>,
-    ) {
-        if !self.config.enabled || ids.is_empty() {
-            return;
-        }
-        let memory_ids = serde_json::to_string(ids).ok();
-        self.send_event(
-            project_id,
-            EventRow {
-                ts: Utc::now(),
-                event_type: EventType::Retrieval,
-                tool: None,
-                stage: None,
-                duration_ms: None,
-                success: None,
-                hit: None,
-                retrieval_quality: None,
-                session_id: session_id.map(str::to_owned),
-                memory_ids,
-            },
-        );
-    }
-
     /// Replay a slice of events into the in-memory state, replacing any
     /// existing state for the project. Idempotent: calling twice with the
     /// same input produces the same final counters. Defensive against

@@ -24,6 +24,11 @@
 //! them simply has none until something is recorded; every reader treats a
 //! missing table as empty.
 //!
+//! **Kinds and surfaces are strings on disk.** A line or row whose kind or
+//! surface this binary does not know (a newer binary's) is kept and stored
+//! verbatim ([`EventRow`]), and only left out of the counts. Parsing strictly
+//! would make a drain delete a newer binary's events as "unreadable".
+//!
 //! **Three read signals, never summed.** `returned` means a memory survived
 //! ranking in a query answer; `injected` that a hook rendered it into an
 //! agent's context (only what fit the budget); `fetched` that someone asked
@@ -38,6 +43,23 @@
 //! crashed between writing the rollup and deleting the raw rows counts
 //! nothing twice: the leftover rows are older than the watermark and ignored.
 //!
+//! **Every write to either table holds one per-store lock**
+//! (`memory_usage.lock`, beside the store's `lancedb/`): the insert plus the
+//! refresh it triggers, the prune, and the reconcile. Each is a
+//! read-modify-write of whole rollup rows, and two of them interleaving
+//! (a refresh that read a row before a prune folded it, then wrote it back)
+//! would put the pruned events' counts back to zero — permanently, since the
+//! raw rows are gone. Under the lock a refresh copies `base` and `watermark`
+//! through from a read made inside the same critical section, so it can
+//! never overwrite a prune's. The drain takes its own claim lock first and
+//! this one inside it; nothing takes them in the other order.
+//!
+//! **Bounded memory.** Every scan streams into per-memory accumulators
+//! rather than collecting events: a prune scans only `ts < cutoff`, then the
+//! recent window of the memories it folded, in `IN (…)` chunks; a refresh of
+//! many ids runs in chunks of [`MAX_IN_LIST`]. The accumulators hold one
+//! entry per memory and its distinct session ids.
+//!
 //! Declared approximations and losses of the rollup:
 //! - **Distinct sessions across a prune are summed.** A session with events on
 //!   both sides of a watermark is counted once in `base` and once in the raw
@@ -47,13 +69,31 @@
 //!   counted.** It is inserted, ignored by every read, and deleted by the next
 //!   prune. Only a JSONL line left undrained for longer than the retention
 //!   window can arrive that late.
+//! - **A clock that jumps forward.** A prune never moves a watermark past the
+//!   newest event it folded (plus 1 µs), so a prune run under a wrong clock
+//!   cannot hide later events. Events *recorded* under a clock that was ahead
+//!   still carry their future timestamps, and a later prune may fold them
+//!   early.
+//! - **A rollup row can lag its raw rows** when a refresh fails after its
+//!   insert committed (the error is returned; the daemon only logs it). The
+//!   next event for that memory, or the next maintenance pass's
+//!   [`reconcile_rollup`], recomputes it. Exact reads never use the rollup's
+//!   totals, only its `base` and `watermark`.
 //! - **The daily series covers raw events only.** With `retention_days`
 //!   shorter than the series, its oldest days read as zero.
 //! - Metrics do not travel with a clone and are lost with `lancedb/`. Accepted:
 //!   counts are churn and never belong in the `.md` files.
+//!
+//! **Reads never create anything.** Every read connects through
+//! [`connect_existing`] and opens tables without creating them, so a
+//! read-only consumer leaves a store exactly as it found it. A missing
+//! directory or table reads as empty; any other failure is an error, never a
+//! silent zero.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+
+use crate::write_lock::{acquire_lock_file, WriteLockGuard};
 
 use anyhow::{Context, Result};
 use arrow_array::{
@@ -68,7 +108,7 @@ use lancedb::{Connection, Table};
 use serde::{Deserialize, Serialize};
 
 use super::hook_events::{retention_cutoff, str_literal, ts_literal};
-use super::persistence::{connect_for, is_in_memory_only};
+use super::persistence::{connect_existing, connect_for, is_in_memory_only, lancedb_root};
 
 /// Raw event table, in the owning store's `lancedb/` directory.
 pub const MEMORY_EVENTS_TABLE: &str = "memory_events";
@@ -79,8 +119,11 @@ pub const MEMORY_USAGE_TABLE: &str = "memory_usage";
 /// Days in the series [`load_daily_series`] returns by default.
 pub const SERIES_DAYS: u32 = 30;
 
-/// An `IN (…)` list longer than this is replaced by a full scan.
-const MAX_IN_LIST: usize = 512;
+/// The most ids one `IN (…)` filter names; longer lists run in chunks.
+pub const MAX_IN_LIST: usize = 512;
+
+/// The per-store lock every write to the two tables holds (module docs).
+const ROLLUP_LOCK_FILE: &str = "memory_usage.lock";
 
 /// What happened to a memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -272,6 +315,73 @@ impl MemoryEvent {
     }
 }
 
+/// An event as stored: a `memory_events` row, and what the drain reads off a
+/// JSONL line. Kind and surface stay strings, so a line written by a newer
+/// binary (a kind or surface this one does not know) is stored verbatim
+/// instead of being dropped as unreadable. Unknown fields are ignored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventRow {
+    pub id: String,
+    pub ts: DateTime<Utc>,
+    pub memory_id: String,
+    pub store_id: String,
+    pub kind: String,
+    pub surface: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub rank: Option<u32>,
+    #[serde(default)]
+    pub score: Option<f64>,
+    #[serde(default)]
+    pub query_mode: Option<String>,
+    #[serde(default)]
+    pub related_id: Option<String>,
+}
+
+impl From<&MemoryEvent> for EventRow {
+    fn from(e: &MemoryEvent) -> Self {
+        Self {
+            id: e.id.clone(),
+            ts: e.ts,
+            memory_id: e.memory_id.clone(),
+            store_id: e.store_id.clone(),
+            kind: e.kind.as_str().to_string(),
+            surface: e.surface.as_str().to_string(),
+            session_id: e.session_id.clone(),
+            rank: e.rank,
+            score: e.score,
+            query_mode: e.query_mode.clone(),
+            related_id: e.related_id.clone(),
+        }
+    }
+}
+
+impl EventRow {
+    /// The kind, when this binary knows it. Rows of an unknown kind are kept
+    /// in the table but left out of every count.
+    pub fn known_kind(&self) -> Option<UsageKind> {
+        UsageKind::parse(&self.kind)
+    }
+
+    /// The typed event, when both kind and surface are known.
+    pub fn to_event(&self) -> Option<MemoryEvent> {
+        Some(MemoryEvent {
+            id: self.id.clone(),
+            ts: self.ts,
+            memory_id: self.memory_id.clone(),
+            store_id: self.store_id.clone(),
+            kind: self.known_kind()?,
+            surface: Surface::parse(&self.surface)?,
+            session_id: self.session_id.clone(),
+            rank: self.rank,
+            score: self.score,
+            query_mode: self.query_mode.clone(),
+            related_id: self.related_id.clone(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Counts
 // ---------------------------------------------------------------------------
@@ -292,8 +402,10 @@ pub struct UsageCounts {
     pub last_injected_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fetched_at: Option<DateTime<Utc>>,
-    pub updated_n: u64,
-    pub challenged_n: u64,
+    /// `updated` events.
+    pub updated: u64,
+    /// `challenged` events.
+    pub challenged: u64,
     /// Newest write of any kind (created, updated, challenged, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_written_at: Option<DateTime<Utc>>,
@@ -318,8 +430,8 @@ impl UsageCounts {
         self.last_returned_at = max_ts(self.last_returned_at, other.last_returned_at);
         self.last_injected_at = max_ts(self.last_injected_at, other.last_injected_at);
         self.last_fetched_at = max_ts(self.last_fetched_at, other.last_fetched_at);
-        self.updated_n += other.updated_n;
-        self.challenged_n += other.challenged_n;
+        self.updated += other.updated;
+        self.challenged += other.challenged;
         self.last_written_at = max_ts(self.last_written_at, other.last_written_at);
     }
 
@@ -361,17 +473,13 @@ impl UsageAccumulator {
             }
             write => {
                 match write {
-                    UsageKind::Updated => c.updated_n += 1,
-                    UsageKind::Challenged => c.challenged_n += 1,
+                    UsageKind::Updated => c.updated += 1,
+                    UsageKind::Challenged => c.challenged += 1,
                     _ => {}
                 }
                 c.last_written_at = max_ts(c.last_written_at, Some(ts));
             }
         }
-    }
-
-    pub fn add_event(&mut self, e: &MemoryEvent) {
-        self.add(e.kind, e.ts, e.session_id.as_deref());
     }
 
     pub fn is_empty(&self) -> bool {
@@ -461,6 +569,13 @@ fn ts_type() -> DataType {
     DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
 }
 
+/// `ts` truncated to the column's precision. Every instant compared against
+/// stored timestamps (cutoffs, watermarks) goes through this once, so the
+/// Rust comparison and the SQL one (`ts_literal` prints microseconds) agree.
+fn trunc_us(ts: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_micros(ts.timestamp_micros()).unwrap_or(ts)
+}
+
 fn events_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("id", DataType::Utf8, false),
@@ -500,8 +615,14 @@ fn usage_schema() -> Arc<Schema> {
     ]))
 }
 
-async fn open_named(conn: &Connection, name: &str) -> Option<Table> {
-    conn.open_table(name).execute().await.ok()
+/// Open `name`, or `None` when the table does not exist. Any other failure
+/// is an error: a read that cannot open a table must not report zeros.
+async fn open_existing(conn: &Connection, name: &str) -> Result<Option<Table>> {
+    match conn.open_table(name).execute().await {
+        Ok(t) => Ok(Some(t)),
+        Err(lancedb::Error::TableNotFound { .. }) => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("opening {name}")),
+    }
 }
 
 async fn open_or_create_named(
@@ -510,13 +631,13 @@ async fn open_or_create_named(
     schema: Arc<Schema>,
     indexed: &[&str],
 ) -> Result<Table> {
-    if let Some(t) = open_named(conn, name).await {
+    if let Some(t) = open_existing(conn, name).await? {
         return Ok(t);
     }
     let table = match conn.create_empty_table(name, schema).execute().await {
         Ok(t) => t,
         // Another writer created it between our open and our create.
-        Err(e) => match open_named(conn, name).await {
+        Err(e) => match open_existing(conn, name).await? {
             Some(t) => return Ok(t),
             None => return Err(e).with_context(|| format!("creating {name} table")),
         },
@@ -549,21 +670,64 @@ async fn usage_table(conn: &Connection) -> Result<Table> {
     open_or_create_named(conn, MEMORY_USAGE_TABLE, usage_schema(), &["memory_id"]).await
 }
 
+/// Take the store's rollup lock. The store's data directory must exist (it
+/// is created by `MemoryStore::init`); the lock never creates it.
+async fn rollup_lock(store_id: &str) -> Result<WriteLockGuard> {
+    let root = lancedb_root(store_id)?;
+    let data = root
+        .parent()
+        .with_context(|| format!("{} has no parent", root.display()))?;
+    if !data.is_dir() {
+        anyhow::bail!(
+            "usage stats: store {store_id} has no data directory at {}",
+            data.display()
+        );
+    }
+    Ok(acquire_lock_file(data.join(ROLLUP_LOCK_FILE)).await?)
+}
+
+#[cfg(test)]
+pub(crate) mod test_pause {
+    //! A pause point inside a refresh, after it read the rollup rows and
+    //! before it writes them: the one window the rollup lock exists to close.
+    use std::collections::HashMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    type Pair = (Arc<Notify>, Arc<Notify>);
+    static ARMED: LazyLock<Mutex<HashMap<String, Pair>>> = LazyLock::new(Default::default);
+
+    /// Arm the pause for `store_id`: returns (reached, resume).
+    pub(crate) fn arm(store_id: &str) -> Pair {
+        let pair = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        ARMED
+            .lock()
+            .unwrap()
+            .insert(store_id.to_string(), pair.clone());
+        pair
+    }
+
+    pub(crate) async fn point(store_id: &str) {
+        let pair = ARMED.lock().unwrap().remove(store_id);
+        if let Some((reached, resume)) = pair {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+}
+
 fn ts_array(values: Vec<Option<i64>>) -> TimestampMicrosecondArray {
     TimestampMicrosecondArray::from(values).with_timezone(Arc::<str>::from("UTC"))
 }
 
-fn events_batch(events: &[MemoryEvent]) -> Result<RecordBatch> {
-    let s = |f: fn(&MemoryEvent) -> Option<&str>| -> ArrayRef {
-        Arc::new(StringArray::from(events.iter().map(f).collect::<Vec<_>>()))
+fn events_batch(rows: &[EventRow]) -> Result<RecordBatch> {
+    let s = |f: fn(&EventRow) -> Option<&str>| -> ArrayRef {
+        Arc::new(StringArray::from(rows.iter().map(f).collect::<Vec<_>>()))
     };
     let arrays: Vec<ArrayRef> = vec![
         s(|e| Some(e.id.as_str())),
         Arc::new(ts_array(
-            events
-                .iter()
-                .map(|e| Some(e.ts.timestamp_micros()))
-                .collect(),
+            rows.iter().map(|e| Some(e.ts.timestamp_micros())).collect(),
         )),
         s(|e| Some(e.memory_id.as_str())),
         s(|e| Some(e.store_id.as_str())),
@@ -571,11 +735,10 @@ fn events_batch(events: &[MemoryEvent]) -> Result<RecordBatch> {
         s(|e| Some(e.surface.as_str())),
         s(|e| e.session_id.as_deref()),
         Arc::new(UInt32Array::from(
-            events.iter().map(|e| e.rank).collect::<Vec<_>>(),
+            rows.iter().map(|e| e.rank).collect::<Vec<_>>(),
         )),
         Arc::new(Float64Array::from(
-            events
-                .iter()
+            rows.iter()
                 .map(|e| e.score.filter(|v| v.is_finite()))
                 .collect::<Vec<_>>(),
         )),
@@ -592,6 +755,15 @@ struct RollupRow {
     totals: UsageCounts,
     watermark: Option<DateTime<Utc>>,
     base: UsageCounts,
+}
+
+impl RollupRow {
+    fn new(store_id: &str) -> Self {
+        Self {
+            store_id: store_id.to_string(),
+            ..Default::default()
+        }
+    }
 }
 
 fn usage_batch(rows: &[(String, RollupRow)]) -> Result<RecordBatch> {
@@ -633,8 +805,8 @@ fn usage_batch(rows: &[(String, RollupRow)]) -> Result<RecordBatch> {
         t(|r| r.totals.last_returned_at),
         t(|r| r.totals.last_injected_at),
         t(|r| r.totals.last_fetched_at),
-        u(|c| c.updated_n),
-        u(|c| c.challenged_n),
+        u(|c| c.updated),
+        u(|c| c.challenged),
         t(|r| r.totals.last_written_at),
         t(|r| r.watermark),
         Arc::new(StringArray::from(base)),
@@ -670,16 +842,22 @@ fn opt_str(a: &StringArray, i: usize) -> Option<&str> {
     (!a.is_null(i)).then(|| a.value(i))
 }
 
-fn id_filter(column: &str, ids: Option<&[String]>) -> Option<String> {
-    let ids = ids?;
-    if ids.is_empty() || ids.len() > MAX_IN_LIST {
-        return None;
-    }
+/// `column IN (…)` for at most [`MAX_IN_LIST`] ids (callers chunk).
+fn id_filter(column: &str, ids: &[String]) -> String {
+    debug_assert!(!ids.is_empty() && ids.len() <= MAX_IN_LIST);
     let list: Vec<String> = ids.iter().map(|s| str_literal(s)).collect();
-    Some(format!("{column} IN ({})", list.join(", ")))
+    format!("{column} IN ({})", list.join(", "))
 }
 
-/// A raw event, as much of it as the reads need.
+fn and(a: Option<String>, b: Option<String>) -> Option<String> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(format!("({a}) AND ({b})")),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// A raw event, as much of it as the reads need. Only known kinds.
 #[derive(Debug, Clone)]
 pub(crate) struct RawEvent {
     pub memory_id: String,
@@ -688,7 +866,13 @@ pub(crate) struct RawEvent {
     pub session_id: Option<String>,
 }
 
-async fn scan_events(table: &Table, filter: Option<String>) -> Result<Vec<RawEvent>> {
+/// Stream every row matching `filter` into `visit`, without collecting.
+/// Rows of an unknown kind are skipped.
+async fn for_each_event(
+    table: &Table,
+    filter: Option<String>,
+    mut visit: impl FnMut(RawEvent),
+) -> Result<()> {
     let mut query = table.query().select(Select::Columns(vec![
         "memory_id".into(),
         "kind".into(),
@@ -699,7 +883,6 @@ async fn scan_events(table: &Table, filter: Option<String>) -> Result<Vec<RawEve
         query = query.only_if(f);
     }
     let mut stream = query.execute().await.context("scanning memory_events")?;
-    let mut out = Vec::new();
     while let Some(batch) = stream.next().await {
         let batch = batch.context("reading memory_events batch")?;
         let mid = col::<StringArray>(&batch, "memory_id")?;
@@ -713,7 +896,7 @@ async fn scan_events(table: &Table, filter: Option<String>) -> Result<Vec<RawEve
             ) else {
                 continue;
             };
-            out.push(RawEvent {
+            visit(RawEvent {
                 memory_id: mid.value(i).to_string(),
                 kind: k,
                 ts: t,
@@ -721,16 +904,20 @@ async fn scan_events(table: &Table, filter: Option<String>) -> Result<Vec<RawEve
             });
         }
     }
-    Ok(out)
+    Ok(())
 }
 
+/// Rollup rows for `ids` (at most [`MAX_IN_LIST`]), or every row.
 async fn load_rollup_rows(
     table: &Table,
     ids: Option<&[String]>,
 ) -> Result<HashMap<String, RollupRow>> {
     let mut query = table.query();
-    if let Some(f) = id_filter("memory_id", ids) {
-        query = query.only_if(f);
+    if let Some(ids) = ids {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        query = query.only_if(id_filter("memory_id", ids));
     }
     let mut stream = query.execute().await.context("scanning memory_usage")?;
     let mut out = HashMap::new();
@@ -758,6 +945,14 @@ async fn load_rollup_rows(
         );
         let base = col::<StringArray>(&batch, "base")?;
         for i in 0..batch.num_rows() {
+            let base = match opt_str(base, i) {
+                None => UsageCounts::default(),
+                // A base that does not parse would silently zero lifetime
+                // counts on the next write: refuse instead.
+                Some(b) => serde_json::from_str(b).with_context(|| {
+                    format!("memory_usage: unreadable base for {}", mid.value(i))
+                })?,
+            };
             let row = RollupRow {
                 store_id: sid.value(i).to_string(),
                 totals: UsageCounts {
@@ -769,14 +964,12 @@ async fn load_rollup_rows(
                     last_returned_at: opt_ts(lr, i),
                     last_injected_at: opt_ts(li, i),
                     last_fetched_at: opt_ts(lf, i),
-                    updated_n: upd.value(i),
-                    challenged_n: chl.value(i),
+                    updated: upd.value(i),
+                    challenged: chl.value(i),
                     last_written_at: opt_ts(lw, i),
                 },
                 watermark: opt_ts(wm, i),
-                base: opt_str(base, i)
-                    .and_then(|b| serde_json::from_str(b).ok())
-                    .unwrap_or_default(),
+                base,
             };
             out.insert(mid.value(i).to_string(), row);
         }
@@ -797,26 +990,19 @@ async fn write_rollup(table: &Table, rows: Vec<(String, RollupRow)>) -> Result<(
     Ok(())
 }
 
-/// Accumulate `events` per memory, keeping only those at or after each
-/// memory's watermark (and, with `before`, strictly before it).
-fn accumulate<'a>(
-    events: impl Iterator<Item = &'a RawEvent>,
-    watermark: impl Fn(&str) -> Option<DateTime<Utc>>,
-    before: Option<DateTime<Utc>>,
-) -> HashMap<String, UsageAccumulator> {
-    let mut out: HashMap<String, UsageAccumulator> = HashMap::new();
-    for e in events {
-        if watermark(&e.memory_id).is_some_and(|w| e.ts < w) {
-            continue;
-        }
-        if before.is_some_and(|b| e.ts >= b) {
-            continue;
-        }
-        out.entry(e.memory_id.clone())
-            .or_default()
-            .add(e.kind, e.ts, e.session_id.as_deref());
+/// Add `e` to its memory's accumulator unless it is older than that
+/// memory's watermark.
+fn fold(
+    accs: &mut HashMap<String, UsageAccumulator>,
+    e: RawEvent,
+    watermark: Option<DateTime<Utc>>,
+) {
+    if watermark.is_some_and(|w| e.ts < w) {
+        return;
     }
-    out
+    accs.entry(e.memory_id)
+        .or_default()
+        .add(e.kind, e.ts, e.session_id.as_deref());
 }
 
 /// Write `events` to the store's `memory_events` table, then refresh the
@@ -835,12 +1021,22 @@ pub async fn ingest_memory_events(
     events: &[MemoryEvent],
     dedupe: bool,
 ) -> Result<()> {
-    if events.is_empty() || is_in_memory_only(store_id) {
+    let rows: Vec<EventRow> = events.iter().map(EventRow::from).collect();
+    ingest_rows(store_id, &rows, dedupe).await
+}
+
+/// [`ingest_memory_events`] for rows as stored, unknown kinds included.
+pub async fn ingest_rows(store_id: &str, rows: &[EventRow], dedupe: bool) -> Result<()> {
+    if rows.is_empty() || is_in_memory_only(store_id) {
         return Ok(());
     }
     let conn = connect_for(store_id).await?;
     let table = events_table(&conn).await?;
-    let batch = reader(events_batch(events)?);
+    let usage = usage_table(&conn).await?;
+    // The insert is under the lock too: a prune between our insert and our
+    // refresh could otherwise delete an old row it never folded.
+    let _lock = rollup_lock(store_id).await?;
+    let batch = reader(events_batch(rows)?);
     if dedupe {
         let mut op = table.merge_insert(&["id"]);
         op.when_not_matched_insert_all();
@@ -852,47 +1048,100 @@ pub async fn ingest_memory_events(
             .await
             .context("appending memory_events")?;
     }
-    let mut ids: Vec<String> = events.iter().map(|e| e.memory_id.clone()).collect();
+    let mut ids: Vec<String> = rows.iter().map(|e| e.memory_id.clone()).collect();
     ids.sort();
     ids.dedup();
-    refresh_rollup(store_id, Some(&ids)).await
+    refresh_locked(&table, &usage, store_id, Some(&ids)).await
 }
 
 /// Recompute rollup rows from `base + raw events at or after the
-/// watermark`: for `ids`, or for every memory with events or a row.
-pub async fn refresh_rollup(store_id: &str, ids: Option<&[String]>) -> Result<()> {
+/// watermark`, for `ids`. Takes the rollup lock.
+pub async fn refresh_rollup(store_id: &str, ids: &[String]) -> Result<()> {
+    refresh_entry(store_id, Some(ids)).await
+}
+
+/// Recompute every rollup row of the store from its raw rows, writing only
+/// rows whose totals disagree: the repair for a refresh that failed after
+/// its insert committed. Streams the raw window into per-memory
+/// accumulators. The maintenance pass runs it after the prune.
+pub async fn reconcile_rollup(store_id: &str) -> Result<()> {
+    refresh_entry(store_id, None).await
+}
+
+async fn refresh_entry(store_id: &str, ids: Option<&[String]>) -> Result<()> {
     if is_in_memory_only(store_id) {
         return Ok(());
     }
-    let conn = connect_for(store_id).await?;
-    let Some(events) = open_named(&conn, MEMORY_EVENTS_TABLE).await else {
+    let Some(conn) = connect_existing(store_id).await? else {
+        return Ok(());
+    };
+    let Some(events) = open_existing(&conn, MEMORY_EVENTS_TABLE).await? else {
         return Ok(());
     };
     let usage = usage_table(&conn).await?;
-    let mut existing = load_rollup_rows(&usage, ids).await?;
-    let raw = scan_events(&events, id_filter("memory_id", ids)).await?;
-    let wanted: Option<HashSet<&str>> = ids.map(|ids| ids.iter().map(String::as_str).collect());
-    let accs = accumulate(
-        raw.iter().filter(|e| {
-            wanted
-                .as_ref()
-                .is_none_or(|w| w.contains(e.memory_id.as_str()))
-        }),
-        |id| existing.get(id).and_then(|r| r.watermark),
-        None,
-    );
-    let mut rows = Vec::with_capacity(accs.len());
-    for (id, acc) in accs {
-        let mut row = existing.remove(&id).unwrap_or_else(|| RollupRow {
-            store_id: store_id.to_string(),
-            ..Default::default()
-        });
+    let _lock = rollup_lock(store_id).await?;
+    refresh_locked(&events, &usage, store_id, ids).await
+}
+
+/// The refresh body. The caller holds the rollup lock.
+async fn refresh_locked(
+    events: &Table,
+    usage: &Table,
+    store_id: &str,
+    ids: Option<&[String]>,
+) -> Result<()> {
+    match ids {
+        Some(ids) => {
+            for chunk in ids.chunks(MAX_IN_LIST) {
+                refresh_chunk(events, usage, store_id, Some(chunk)).await?;
+            }
+            Ok(())
+        }
+        None => refresh_chunk(events, usage, store_id, None).await,
+    }
+}
+
+async fn refresh_chunk(
+    events: &Table,
+    usage: &Table,
+    store_id: &str,
+    ids: Option<&[String]>,
+) -> Result<()> {
+    let existing = load_rollup_rows(usage, ids).await?;
+    #[cfg(test)]
+    test_pause::point(store_id).await;
+    let mut accs: HashMap<String, UsageAccumulator> = HashMap::new();
+    let filter = ids.map(|ids| id_filter("memory_id", ids));
+    for_each_event(events, filter, |e| {
+        let wm = existing.get(&e.memory_id).and_then(|r| r.watermark);
+        fold(&mut accs, e, wm);
+    })
+    .await?;
+    let mut rows = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for (id, acc) in &accs {
+        seen.insert(id.as_str());
+        let current = existing.get(id);
+        // `base` and `watermark` are copied through from the read above,
+        // made under the same lock: a refresh never moves them.
+        let mut row = current.cloned().unwrap_or_else(|| RollupRow::new(store_id));
         let mut totals = row.base.clone();
         totals.merge(&acc.finish());
+        if current.is_some_and(|c| c.totals == totals) {
+            continue;
+        }
         row.totals = totals;
-        rows.push((id, row));
+        rows.push((id.clone(), row));
     }
-    write_rollup(&usage, rows).await
+    // A row whose raw window is empty (every event pruned) totals its base.
+    for (id, row) in &existing {
+        if !seen.contains(id.as_str()) && row.totals != row.base {
+            let mut row = row.clone();
+            row.totals = row.base.clone();
+            rows.push((id.clone(), row));
+        }
+    }
+    write_rollup(usage, rows).await
 }
 
 /// Delete raw events older than `retention_days`, after folding them into
@@ -909,45 +1158,76 @@ pub async fn prune_memory_events(store_id: &str, retention_days: u64) -> Result<
 }
 
 async fn prune_at(store_id: &str, cutoff: DateTime<Utc>) -> Result<()> {
-    let conn = connect_for(store_id).await?;
-    let Some(events) = open_named(&conn, MEMORY_EVENTS_TABLE).await else {
+    let Some(conn) = connect_existing(store_id).await? else {
         return Ok(());
     };
+    let Some(events) = open_existing(&conn, MEMORY_EVENTS_TABLE).await? else {
+        return Ok(());
+    };
+    let cutoff = trunc_us(cutoff);
+    let _lock = rollup_lock(store_id).await?;
     let old_filter = format!("ts < {}", ts_literal(cutoff));
     if events.count_rows(Some(old_filter.clone())).await? == 0 {
         return Ok(());
     }
     let usage = usage_table(&conn).await?;
-    let mut rows = load_rollup_rows(&usage, None).await?;
-    let raw = scan_events(&events, None).await?;
-    let wm = |id: &str| rows.get(id).and_then(|r| r.watermark);
-    let old = accumulate(raw.iter(), wm, Some(cutoff));
-    let mut ids: HashSet<String> = old.keys().cloned().collect();
-    ids.extend(raw.iter().map(|e| e.memory_id.clone()));
-    let recent = accumulate(raw.iter().filter(|e| e.ts >= cutoff), wm, None);
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        let mut row = rows.remove(&id).unwrap_or_else(|| RollupRow {
-            store_id: store_id.to_string(),
-            ..Default::default()
-        });
-        if let Some(acc) = old.get(&id) {
-            row.base.merge(&acc.finish());
+    // One row per memory: bounded by the store's size, not its traffic.
+    let rows = load_rollup_rows(&usage, None).await?;
+
+    // Fold the old events (those not already folded by an earlier prune).
+    let mut old: HashMap<String, UsageAccumulator> = HashMap::new();
+    let mut newest_old: Option<DateTime<Utc>> = None;
+    for_each_event(&events, Some(old_filter), |e| {
+        newest_old = max_ts(newest_old, Some(e.ts));
+        let wm = rows.get(&e.memory_id).and_then(|r| r.watermark);
+        fold(&mut old, e, wm);
+    })
+    .await?;
+    // Never past the newest event folded: a prune under a clock that jumped
+    // ahead must not hide events recorded after the clock came back.
+    let cut = match newest_old {
+        Some(n) => cutoff.min(n + chrono::Duration::microseconds(1)),
+        None => cutoff,
+    };
+
+    let mut affected: Vec<String> = old.keys().cloned().collect();
+    affected.sort();
+    let mut out = Vec::with_capacity(affected.len());
+    for chunk in affected.chunks(MAX_IN_LIST) {
+        let mut recent: HashMap<String, UsageAccumulator> = HashMap::new();
+        let filter = and(
+            Some(format!("ts >= {}", ts_literal(cut))),
+            Some(id_filter("memory_id", chunk)),
+        );
+        for_each_event(&events, filter, |e| {
+            let prev = rows.get(&e.memory_id).and_then(|r| r.watermark);
+            fold(&mut recent, e, max_ts(prev, Some(cut)));
+        })
+        .await?;
+        for id in chunk {
+            let mut row = rows
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| RollupRow::new(store_id));
+            if let Some(acc) = old.get(id) {
+                row.base.merge(&acc.finish());
+            }
+            // Never move a watermark backwards.
+            row.watermark = max_ts(row.watermark, Some(cut));
+            let mut totals = row.base.clone();
+            if let Some(acc) = recent.get(id) {
+                totals.merge(&acc.finish());
+            }
+            row.totals = totals;
+            out.push((id.clone(), row));
         }
-        // Never move a watermark backwards.
-        row.watermark = max_ts(row.watermark, Some(cutoff));
-        let mut totals = row.base.clone();
-        if let Some(acc) = recent.get(&id) {
-            totals.merge(&acc.finish());
-        }
-        row.totals = totals;
-        out.push((id, row));
     }
     // The rollup commits first. A crash before the delete leaves raw rows
-    // that are older than every watermark, which every read ignores.
+    // that are older than every watermark, which every read ignores. Nothing
+    // can insert in between: inserts hold the same lock.
     write_rollup(&usage, out).await?;
     events
-        .delete(&old_filter)
+        .delete(&format!("ts < {}", ts_literal(cut)))
         .await
         .with_context(|| format!("pruning memory_events for store {store_id}"))?;
     Ok(())
@@ -958,9 +1238,11 @@ pub async fn optimize_memory_events(store_id: &str) -> Result<()> {
     if is_in_memory_only(store_id) {
         return Ok(());
     }
-    let conn = connect_for(store_id).await?;
+    let Some(conn) = connect_existing(store_id).await? else {
+        return Ok(());
+    };
     for name in [MEMORY_EVENTS_TABLE, MEMORY_USAGE_TABLE] {
-        if let Some(t) = open_named(&conn, name).await {
+        if let Some(t) = open_existing(&conn, name).await? {
             t.optimize(lancedb::table::OptimizeAction::All)
                 .await
                 .with_context(|| format!("optimizing {name} for store {store_id}"))?;
@@ -984,12 +1266,18 @@ pub struct TableUsage {
 impl TableUsage {
     /// Add an event not yet in the table. Ignored when older than the
     /// memory's watermark, exactly as the table's own reads ignore it.
-    pub fn add(&mut self, e: &MemoryEvent) {
-        let entry = self.by_memory.entry(e.memory_id.clone()).or_default();
-        if entry.1.is_some_and(|w| e.ts < w) {
+    pub fn add(
+        &mut self,
+        memory_id: &str,
+        kind: UsageKind,
+        ts: DateTime<Utc>,
+        session_id: Option<&str>,
+    ) {
+        let entry = self.by_memory.entry(memory_id.to_string()).or_default();
+        if entry.1.is_some_and(|w| ts < w) {
             return;
         }
-        entry.2.add_event(e);
+        entry.2.add(kind, ts, session_id);
     }
 
     /// Final counts per memory.
@@ -1015,16 +1303,18 @@ impl TableUsage {
 /// Read usage from the tables: for `memory` alone, or for every memory with
 /// a row or an event. Exact (sessions are counted from the raw window, not
 /// taken from the rollup's totals). A store without the tables reads empty.
+/// The whole-store form scans the whole raw window; prefer
+/// [`load_rollup_entries`] for a view of every memory.
 pub async fn load_table_usage(store_id: &str, memory: Option<&str>) -> Result<TableUsage> {
     let mut out = TableUsage::default();
     if is_in_memory_only(store_id) {
         return Ok(out);
     }
-    let Ok(conn) = connect_for(store_id).await else {
+    let Some(conn) = connect_existing(store_id).await? else {
         return Ok(out);
     };
     let ids = memory.map(|m| vec![m.to_string()]);
-    let rows = match open_named(&conn, MEMORY_USAGE_TABLE).await {
+    let rows = match open_existing(&conn, MEMORY_USAGE_TABLE).await? {
         Some(t) => load_rollup_rows(&t, ids.as_deref()).await?,
         None => HashMap::new(),
     };
@@ -1034,29 +1324,35 @@ pub async fn load_table_usage(store_id: &str, memory: Option<&str>) -> Result<Ta
             (row.base.clone(), row.watermark, Default::default()),
         );
     }
-    if let Some(events) = open_named(&conn, MEMORY_EVENTS_TABLE).await {
-        let raw = scan_events(&events, id_filter("memory_id", ids.as_deref())).await?;
-        for e in &raw {
-            let entry = out.by_memory.entry(e.memory_id.clone()).or_default();
-            if entry.1.is_some_and(|w| e.ts < w) {
-                continue;
-            }
-            entry.2.add(e.kind, e.ts, e.session_id.as_deref());
-        }
+    if let Some(events) = open_existing(&conn, MEMORY_EVENTS_TABLE).await? {
+        let filter = ids.as_deref().map(|ids| id_filter("memory_id", ids));
+        for_each_event(&events, filter, |e| {
+            out.add(&e.memory_id, e.kind, e.ts, e.session_id.as_deref());
+        })
+        .await?;
     }
     Ok(out)
 }
 
-/// The rollup as of the last drain, without raw events or the JSONL: the
-/// cheap read for a view of every memory at once.
-pub async fn load_rollup(store_id: &str) -> Result<BTreeMap<String, MemoryUsage>> {
+/// One rollup row as a read sees it: the totals as of the last refresh,
+/// and the watermark below which an event is already counted (or ignored).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RollupEntry {
+    pub usage: MemoryUsage,
+    pub watermark: Option<DateTime<Utc>>,
+}
+
+/// Every rollup row of the store: one row per memory, no raw scan. The
+/// cheap read for a view of every memory at once; current to the last
+/// drain or flush.
+pub async fn load_rollup_entries(store_id: &str) -> Result<BTreeMap<String, RollupEntry>> {
     if is_in_memory_only(store_id) {
         return Ok(BTreeMap::new());
     }
-    let Ok(conn) = connect_for(store_id).await else {
+    let Some(conn) = connect_existing(store_id).await? else {
         return Ok(BTreeMap::new());
     };
-    let Some(table) = open_named(&conn, MEMORY_USAGE_TABLE).await else {
+    let Some(table) = open_existing(&conn, MEMORY_USAGE_TABLE).await? else {
         return Ok(BTreeMap::new());
     };
     Ok(load_rollup_rows(&table, None)
@@ -1065,18 +1361,30 @@ pub async fn load_rollup(store_id: &str) -> Result<BTreeMap<String, MemoryUsage>
         .map(|(id, row)| {
             (
                 id.clone(),
-                MemoryUsage {
-                    memory_id: id,
-                    store_id: row.store_id,
-                    counts: row.totals,
+                RollupEntry {
+                    usage: MemoryUsage {
+                        memory_id: id,
+                        store_id: row.store_id,
+                        counts: row.totals,
+                    },
+                    watermark: row.watermark,
                 },
             )
         })
         .collect())
 }
 
+/// The rollup's totals as of the last drain, without raw events or the JSONL.
+pub async fn load_rollup(store_id: &str) -> Result<BTreeMap<String, MemoryUsage>> {
+    Ok(load_rollup_entries(store_id)
+        .await?
+        .into_iter()
+        .map(|(id, e)| (id, e.usage))
+        .collect())
+}
+
 /// Raw events from the table for a daily series: for `memory`, or the whole
-/// store, from `since` on.
+/// store, from the series' first day on.
 pub async fn load_series_table(
     store_id: &str,
     memory: Option<&str>,
@@ -1085,28 +1393,21 @@ pub async fn load_series_table(
     if is_in_memory_only(store_id) {
         return Ok(());
     }
-    let Ok(conn) = connect_for(store_id).await else {
+    let Some(conn) = connect_existing(store_id).await? else {
         return Ok(());
     };
-    let Some(events) = open_named(&conn, MEMORY_EVENTS_TABLE).await else {
+    let Some(events) = open_existing(&conn, MEMORY_EVENTS_TABLE).await? else {
         return Ok(());
     };
     let Some(first) = series.days.first().map(|d| d.day) else {
         return Ok(());
     };
     let since = first.and_hms_opt(0, 0, 0).map(|t| t.and_utc());
-    let mut filter = since.map(|s| format!("ts >= {}", ts_literal(s)));
-    if let Some(m) = memory {
-        let by_id = format!("memory_id = {}", str_literal(m));
-        filter = Some(match filter {
-            Some(f) => format!("{f} AND {by_id}"),
-            None => by_id,
-        });
-    }
-    for e in scan_events(&events, filter).await? {
-        series.add(e.kind, e.ts);
-    }
-    Ok(())
+    let filter = and(
+        since.map(|s| format!("ts >= {}", ts_literal(s))),
+        memory.map(|m| format!("memory_id = {}", str_literal(m))),
+    );
+    for_each_event(&events, filter, |e| series.add(e.kind, e.ts)).await
 }
 
 /// The distinct sessions per memory with a `returned` event at or after
@@ -1119,21 +1420,25 @@ pub async fn returned_sessions_table(
     if is_in_memory_only(store_id) {
         return Ok(out);
     }
-    let Ok(conn) = connect_for(store_id).await else {
+    let Some(conn) = connect_existing(store_id).await? else {
         return Ok(out);
     };
-    let Some(events) = open_named(&conn, MEMORY_EVENTS_TABLE).await else {
+    let Some(events) = open_existing(&conn, MEMORY_EVENTS_TABLE).await? else {
         return Ok(out);
     };
-    let mut filter = format!("kind = {}", str_literal(UsageKind::Returned.as_str()));
-    if let Some(s) = since {
-        filter.push_str(&format!(" AND ts >= {}", ts_literal(s)));
-    }
-    for e in scan_events(&events, Some(filter)).await? {
+    let filter = and(
+        Some(format!(
+            "kind = {}",
+            str_literal(UsageKind::Returned.as_str())
+        )),
+        since.map(|s| format!("ts >= {}", ts_literal(s))),
+    );
+    for_each_event(&events, filter, |e| {
         if let Some(s) = e.session_id {
             out.entry(e.memory_id).or_default().insert(s);
         }
-    }
+    })
+    .await?;
     Ok(out)
 }
 
@@ -1210,7 +1515,7 @@ mod tests {
         let c = acc.finish();
         assert_eq!((c.returned, c.injected, c.fetched), (3, 1, 1));
         assert_eq!((c.returned_sessions, c.injected_sessions), (2, 1));
-        assert_eq!((c.updated_n, c.challenged_n), (1, 1));
+        assert_eq!((c.updated, c.challenged), (1, 1));
         assert_eq!(c.last_written_at, Some(now));
     }
 
@@ -1267,12 +1572,10 @@ mod tests {
         ingest_memory_events(&sid, &events, false).await.unwrap();
         prune_memory_events(&sid, 90).await.unwrap();
 
-        let conn = connect_for(&sid).await.unwrap();
-        let table = open_named(&conn, MEMORY_EVENTS_TABLE).await.unwrap();
-        assert_eq!(table.count_rows(None).await.unwrap(), 1, "old rows deleted");
+        assert_eq!(raw_rows(&sid).await, 1, "old rows deleted");
         let rollup = load_rollup(&sid).await.unwrap();
         let m1 = &rollup["m1"].counts;
-        assert_eq!((m1.injected, m1.injected_sessions, m1.updated_n), (2, 2, 1));
+        assert_eq!((m1.injected, m1.injected_sessions, m1.updated), (2, 2, 1));
         assert_eq!(
             rollup["m3"].counts.fetched, 1,
             "a fully pruned memory keeps its count"
@@ -1341,5 +1644,204 @@ mod tests {
         assert!(load_rollup(&ghost).await.unwrap().is_empty());
         let e = ev(&ghost, "m", UsageKind::Fetched, Utc::now(), None);
         assert!(ingest_memory_events(&ghost, &[e], false).await.is_err());
+    }
+
+    async fn raw_rows(sid: &str) -> usize {
+        let conn = connect_for(sid).await.unwrap();
+        let table = open_existing(&conn, MEMORY_EVENTS_TABLE)
+            .await
+            .unwrap()
+            .unwrap();
+        table.count_rows(None).await.unwrap()
+    }
+
+    /// The race the rollup lock closes: a refresh that read a row, then a
+    /// prune that folds that memory's old events and deletes them, then the
+    /// refresh writing its stale row back. Without the lock the prune's base
+    /// is overwritten and the pruned counts are gone for good.
+    #[tokio::test]
+    async fn a_prune_cannot_interleave_with_a_refresh() {
+        let sid = store().await;
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(200);
+        let events = vec![
+            ev(&sid, "m1", UsageKind::Fetched, old, None),
+            ev(&sid, "m1", UsageKind::Fetched, old, None),
+            ev(&sid, "m1", UsageKind::Fetched, now, None),
+        ];
+        ingest_memory_events(&sid, &events, false).await.unwrap();
+
+        let (reached, resume) = test_pause::arm(&sid);
+        let s1 = sid.clone();
+        let refresh = tokio::spawn(async move { refresh_rollup(&s1, &["m1".to_string()]).await });
+        reached.notified().await;
+        let s2 = sid.clone();
+        let prune = tokio::spawn(async move { prune_memory_events(&s2, 90).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!prune.is_finished(), "the prune waits for the refresh");
+        resume.notify_one();
+        refresh.await.unwrap().unwrap();
+        prune.await.unwrap().unwrap();
+
+        assert_eq!(raw_rows(&sid).await, 1);
+        assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 3);
+        let exact = load_table_usage(&sid, Some("m1"))
+            .await
+            .unwrap()
+            .finish(&sid);
+        assert_eq!(exact["m1"].counts.fetched, 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_prunes_fold_once() {
+        let sid = store().await;
+        let old = Utc::now() - chrono::Duration::days(200);
+        let events: Vec<_> = (0..5)
+            .map(|_| ev(&sid, "m1", UsageKind::Injected, old, Some("s")))
+            .collect();
+        ingest_memory_events(&sid, &events, false).await.unwrap();
+        let (a, b) = tokio::join!(prune_memory_events(&sid, 90), prune_memory_events(&sid, 90));
+        a.unwrap();
+        b.unwrap();
+        let c = &load_rollup(&sid).await.unwrap()["m1"].counts;
+        assert_eq!((c.injected, c.injected_sessions), (5, 1));
+        assert_eq!(raw_rows(&sid).await, 0);
+    }
+
+    /// A cutoff with sub-microsecond digits: the event at the truncated
+    /// instant must be either folded and deleted, or neither.
+    #[tokio::test]
+    async fn prune_cutoff_is_truncated_to_the_column_precision() {
+        let sid = store().await;
+        let at = trunc_us(Utc::now() - chrono::Duration::days(100));
+        ingest_memory_events(&sid, &[ev(&sid, "m1", UsageKind::Fetched, at, None)], false)
+            .await
+            .unwrap();
+        prune_at(&sid, at + chrono::Duration::nanoseconds(500))
+            .await
+            .unwrap();
+        let exact = load_table_usage(&sid, Some("m1"))
+            .await
+            .unwrap()
+            .finish(&sid);
+        assert_eq!(exact["m1"].counts.fetched, 1, "counted exactly once");
+        assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 1);
+    }
+
+    /// A prune run with a clock far ahead stops its watermark just past the
+    /// newest event it folded, so events recorded once the clock is right
+    /// again still count.
+    #[tokio::test]
+    async fn a_future_cutoff_does_not_hide_later_events() {
+        let sid = store().await;
+        let now = Utc::now();
+        ingest_memory_events(
+            &sid,
+            &[ev(&sid, "m1", UsageKind::Fetched, now, None)],
+            false,
+        )
+        .await
+        .unwrap();
+        prune_at(&sid, now + chrono::Duration::days(365))
+            .await
+            .unwrap();
+        let later = now + chrono::Duration::seconds(1);
+        ingest_memory_events(
+            &sid,
+            &[ev(&sid, "m1", UsageKind::Fetched, later, None)],
+            false,
+        )
+        .await
+        .unwrap();
+        let exact = load_table_usage(&sid, Some("m1"))
+            .await
+            .unwrap()
+            .finish(&sid);
+        assert_eq!(exact["m1"].counts.fetched, 2);
+        assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 2);
+    }
+
+    #[tokio::test]
+    async fn unknown_kinds_are_stored_but_not_counted() {
+        let sid = store().await;
+        let known = EventRow::from(&ev(&sid, "m1", UsageKind::Fetched, Utc::now(), None));
+        let mut unknown = known.clone();
+        unknown.id = uuid::Uuid::now_v7().to_string();
+        unknown.kind = "linked_v9".to_string();
+        unknown.surface = "dashboard".to_string();
+        assert!(unknown.to_event().is_none());
+        ingest_rows(&sid, &[known, unknown], true).await.unwrap();
+        assert_eq!(raw_rows(&sid).await, 2, "the newer binary's row is kept");
+        assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_repairs_a_row_a_failed_refresh_left_behind() {
+        let sid = store().await;
+        let now = Utc::now();
+        ingest_memory_events(
+            &sid,
+            &[ev(&sid, "m1", UsageKind::Fetched, now, None)],
+            false,
+        )
+        .await
+        .unwrap();
+        // Rows inserted without their refresh (as if it had failed).
+        let conn = connect_for(&sid).await.unwrap();
+        let table = events_table(&conn).await.unwrap();
+        let more: Vec<EventRow> = (0..2)
+            .map(|_| EventRow::from(&ev(&sid, "m1", UsageKind::Fetched, now, None)))
+            .collect();
+        table
+            .add(reader(events_batch(&more).unwrap()))
+            .execute()
+            .await
+            .unwrap();
+        assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 1);
+        reconcile_rollup(&sid).await.unwrap();
+        assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 3);
+    }
+
+    #[tokio::test]
+    async fn refresh_of_more_ids_than_one_filter_holds_runs_in_chunks() {
+        let sid = store().await;
+        let now = Utc::now();
+        let events: Vec<_> = (0..MAX_IN_LIST + 3)
+            .map(|i| ev(&sid, &format!("m{i:04}"), UsageKind::Fetched, now, None))
+            .collect();
+        ingest_memory_events(&sid, &events, false).await.unwrap();
+        let rollup = load_rollup(&sid).await.unwrap();
+        assert_eq!(rollup.len(), MAX_IN_LIST + 3);
+        assert!(rollup.values().all(|u| u.counts.fetched == 1));
+    }
+
+    #[tokio::test]
+    async fn reads_create_nothing() {
+        let ghost = unique_sid();
+        let parent = super::super::persistence::lancedb_root(&ghost)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(&parent).unwrap();
+        assert!(load_rollup_entries(&ghost).await.unwrap().is_empty());
+        assert!(load_table_usage(&ghost, None)
+            .await
+            .unwrap()
+            .by_memory
+            .is_empty());
+        let mut series = DailySeries::empty(3, Utc::now().date_naive());
+        load_series_table(&ghost, None, &mut series).await.unwrap();
+        assert!(returned_sessions_table(&ghost, None)
+            .await
+            .unwrap()
+            .is_empty());
+        reconcile_rollup(&ghost).await.unwrap();
+        prune_memory_events(&ghost, 1).await.unwrap();
+        optimize_memory_events(&ghost).await.unwrap();
+        assert!(
+            std::fs::read_dir(&parent).unwrap().next().is_none(),
+            "no lancedb/, no lock file"
+        );
     }
 }

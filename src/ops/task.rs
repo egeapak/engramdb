@@ -337,8 +337,11 @@ pub struct PromotionReport {
 /// testable without LanceDB.
 ///
 /// Those rows are no longer written (the engine recorded them only for the
-/// MCP server); promotion now reads `returned` usage events, which the CLI
-/// records too. The legacy rows are still read and unioned in, so history
+/// MCP server); promotion now reads `returned` usage events. Only events
+/// that name a session count: the MCP server always knows its session, the
+/// CLI only when `CLAUDE_SESSION_ID` / `MCP_SESSION_ID` is set (the variables
+/// `task current` and the MCP server already honor), so a plain terminal
+/// `engramdb query` does not re-confirm anything. The legacy rows are still read and unioned in, so history
 /// recorded before the upgrade keeps counting until it ages out.
 pub fn count_retrieval_sessions(
     events: &[crate::telemetry::EventRow],
@@ -383,9 +386,11 @@ pub async fn promote_reconfirmed_memories(
 
     // `returned` usage events (table + undrained log), unioned with the
     // legacy rows. A union of session sets: a session in both counts once.
+    // A read failure is an error, not "no sessions": a pass that cannot see
+    // the evidence must not report that there is none.
     let mut sessions_by_memory =
         crate::telemetry::usage::returned_sessions(&store.project_dir, &store.project_id, None)
-            .await;
+            .await?;
     let legacy = crate::telemetry::persistence::load_recent(&store.project_id, 50_000).await?;
     for (id, sessions) in count_retrieval_sessions(&legacy) {
         sessions_by_memory.entry(id).or_default().extend(sessions);
@@ -564,8 +569,9 @@ mod promotion_tests {
         );
     }
 
-    /// Promotion reads `returned` usage events (the CLI's included), and a
-    /// session seen in both those and a legacy row counts once.
+    /// Promotion reads `returned` usage events that name a session (a CLI
+    /// query's, when it runs under a session id), and a session seen in both
+    /// those and a legacy row counts once. A sessionless event never counts.
     #[tokio::test]
     async fn promotion_reads_returned_usage_events_and_unions_legacy_rows() {
         use crate::ops::usage::{MemoryEvent, StoreRef, Surface, UsageKind};
@@ -586,6 +592,12 @@ mod promotion_tests {
             &[
                 returned("s1"),
                 returned("s2"),
+                MemoryEvent::new(
+                    "promo-1",
+                    &store.project_id,
+                    UsageKind::Returned,
+                    Surface::Cli,
+                ),
                 MemoryEvent::new(
                     "promo-1",
                     &store.project_id,

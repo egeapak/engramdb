@@ -97,8 +97,9 @@ pub use task::{
 };
 pub use update::{update_memory, UpdateParams};
 pub use usage::{
-    maintain_memory_events, memory_usage_report, record_fetched, record_returned, top_used,
-    MemoryUsageReport, StoreRef, Surface, TopMemory, UsageKind, UsageSort,
+    maintain_memory_events, memory_usage_report, memory_usage_report_in, record_fetched,
+    record_returned, top_used, MemoryUsageReport, StoreRef, Surface, TopMemory, UsageKind,
+    UsageSort,
 };
 pub use verify::{verify_memory, VerifyResult};
 

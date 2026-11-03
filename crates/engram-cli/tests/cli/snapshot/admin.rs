@@ -124,6 +124,27 @@ fn stats_daemon() {
     snap_all_formats!(f, "stats_daemon", &["stats", "--daemon"]);
 }
 
+/// Exit code and stream for an unknown id: an error on stderr, nonzero.
+#[test]
+fn stats_memory_unknown_id() {
+    let f = seeded();
+    insta::assert_snapshot!(
+        "stats_memory_unknown",
+        f.run(&["--format", "plain", "stats", "--memory", "zzzzzzzz"])
+    );
+}
+
+/// The usage flags' conflicts are clap's exit-2 errors.
+#[test]
+fn stats_usage_flag_conflicts() {
+    let f = seeded();
+    insta::assert_snapshot!(
+        "stats_top_daemon",
+        f.run(&["stats", "--top", "3", "--daemon"])
+    );
+    insta::assert_snapshot!("stats_top_zero", f.run(&["stats", "--top", "0"]));
+}
+
 // =====================================================================
 // gc / compress
 // =====================================================================

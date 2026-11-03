@@ -109,7 +109,7 @@ pub async fn run_stats(
         top_used: match usage.top {
             Some(n) => Some(crate::output::TopUsedView {
                 by: usage.by,
-                memories: engramdb::ops::top_used(&store, n, usage.by).await,
+                memories: engramdb::ops::top_used(&store, n, usage.by).await?,
             }),
             None => None,
         },
