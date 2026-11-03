@@ -1635,6 +1635,31 @@ plain\:"Plain text output without colors"))' \
 '--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
+(dashboard)
+_arguments "${_arguments_options[@]}" : \
+'--port=[Port to listen on \[default\: 7341, or a free port when taken; 0\: any free port\]]:PORT:_default' \
+'--bind=[Address to listen on. Anything but loopback is reachable from the network]:BIND:_default' \
+'--assets-dir=[Serve the web files from this directory instead of the built-in copy (frontend development)]:DIR:_files' \
+'(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
+json\:"JSON output for programmatic parsing"
+plain\:"Plain text output without colors"))' \
+'--dir=[Working directory (default\: current directory)]:DIR:_files' \
+'--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
+'--no-open[Print the URL but do not open a browser]' \
+'--allow-writes[Allow the dashboard'\''s review actions (edge confirm/reject, once available)]' \
+'--json[Output as JSON]' \
+'-q[Suppress non-essential output]' \
+'--quiet[Suppress non-essential output]' \
+'-v[Verbose output]' \
+'--verbose[Verbose output]' \
+'--no-color[No colored output]' \
+'--in-process[Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1]' \
+'--spawn-daemon[Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)]' \
+'--no-maintenance[Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
 (daemon)
 _arguments "${_arguments_options[@]}" : \
 '(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
@@ -2414,6 +2439,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(dashboard)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (daemon)
 _arguments "${_arguments_options[@]}" : \
 ":: :_engramdb__subcmd__help__subcmd__daemon_commands" \
@@ -2545,6 +2574,7 @@ _engramdb_commands() {
 'gc:Run garbage collection on low-relevance memories' \
 'compress:List compression candidates (actual compression requires MCP mode)' \
 'serve:Start the MCP server' \
+'dashboard:Open a local, read-only web dashboard of every store on this machine' \
 'daemon:Run the shared embedding daemon (normally auto-spawned by MCP)' \
 'completions:Generate shell completions' \
 'migrate:Migrate memory files to the latest format version' \
@@ -2648,6 +2678,11 @@ _engramdb__subcmd__daemon__subcmd__status_commands() {
 _engramdb__subcmd__daemon__subcmd__stop_commands() {
     local commands; commands=()
     _describe -t commands 'engramdb daemon stop commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__dashboard_commands] )) ||
+_engramdb__subcmd__dashboard_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb dashboard commands' commands "$@"
 }
 (( $+functions[_engramdb__subcmd__delete_commands] )) ||
 _engramdb__subcmd__delete_commands() {
@@ -3028,6 +3063,7 @@ _engramdb__subcmd__help_commands() {
 'gc:Run garbage collection on low-relevance memories' \
 'compress:List compression candidates (actual compression requires MCP mode)' \
 'serve:Start the MCP server' \
+'dashboard:Open a local, read-only web dashboard of every store on this machine' \
 'daemon:Run the shared embedding daemon (normally auto-spawned by MCP)' \
 'completions:Generate shell completions' \
 'migrate:Migrate memory files to the latest format version' \
@@ -3094,6 +3130,11 @@ _engramdb__subcmd__help__subcmd__daemon__subcmd__status_commands() {
 _engramdb__subcmd__help__subcmd__daemon__subcmd__stop_commands() {
     local commands; commands=()
     _describe -t commands 'engramdb help daemon stop commands' commands "$@"
+}
+(( $+functions[_engramdb__subcmd__help__subcmd__dashboard_commands] )) ||
+_engramdb__subcmd__help__subcmd__dashboard_commands() {
+    local commands; commands=()
+    _describe -t commands 'engramdb help dashboard commands' commands "$@"
 }
 (( $+functions[_engramdb__subcmd__help__subcmd__delete_commands] )) ||
 _engramdb__subcmd__help__subcmd__delete_commands() {

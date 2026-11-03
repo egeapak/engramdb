@@ -60,6 +60,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand gc 'Run garbage collection on low-relevance memories'
             cand compress 'List compression candidates (actual compression requires MCP mode)'
             cand serve 'Start the MCP server'
+            cand dashboard 'Open a local, read-only web dashboard of every store on this machine'
             cand daemon 'Run the shared embedding daemon (normally auto-spawned by MCP)'
             cand completions 'Generate shell completions'
             cand migrate 'Migrate memory files to the latest format version'
@@ -1254,6 +1255,27 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand -h 'Print help (see more with ''--help'')'
             cand --help 'Print help (see more with ''--help'')'
         }
+        &'engramdb;dashboard'= {
+            cand --port 'Port to listen on [default: 7341, or a free port when taken; 0: any free port]'
+            cand --bind 'Address to listen on. Anything but loopback is reachable from the network'
+            cand --assets-dir 'Serve the web files from this directory instead of the built-in copy (frontend development)'
+            cand --format 'Output format'
+            cand --dir 'Working directory (default: current directory)'
+            cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
+            cand --no-open 'Print the URL but do not open a browser'
+            cand --allow-writes 'Allow the dashboard''s review actions (edge confirm/reject, once available)'
+            cand --json 'Output as JSON'
+            cand -q 'Suppress non-essential output'
+            cand --quiet 'Suppress non-essential output'
+            cand -v 'Verbose output'
+            cand --verbose 'Verbose output'
+            cand --no-color 'No colored output'
+            cand --in-process 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1'
+            cand --spawn-daemon 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)'
+            cand --no-maintenance 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1'
+            cand -h 'Print help (see more with ''--help'')'
+            cand --help 'Print help (see more with ''--help'')'
+        }
         &'engramdb;daemon'= {
             cand --format 'Output format'
             cand --dir 'Working directory (default: current directory)'
@@ -1644,6 +1666,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand gc 'Run garbage collection on low-relevance memories'
             cand compress 'List compression candidates (actual compression requires MCP mode)'
             cand serve 'Start the MCP server'
+            cand dashboard 'Open a local, read-only web dashboard of every store on this machine'
             cand daemon 'Run the shared embedding daemon (normally auto-spawned by MCP)'
             cand completions 'Generate shell completions'
             cand migrate 'Migrate memory files to the latest format version'
@@ -1784,6 +1807,8 @@ set edit:completion:arg-completer[engramdb] = {|@words|
         &'engramdb;help;compress'= {
         }
         &'engramdb;help;serve'= {
+        }
+        &'engramdb;help;dashboard'= {
         }
         &'engramdb;help;daemon'= {
             cand run 'Run the daemon event loop (this is what MCP auto-spawns)'

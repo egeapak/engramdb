@@ -63,6 +63,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('gc', 'gc', [CompletionResultType]::ParameterValue, 'Run garbage collection on low-relevance memories')
             [CompletionResult]::new('compress', 'compress', [CompletionResultType]::ParameterValue, 'List compression candidates (actual compression requires MCP mode)')
             [CompletionResult]::new('serve', 'serve', [CompletionResultType]::ParameterValue, 'Start the MCP server')
+            [CompletionResult]::new('dashboard', 'dashboard', [CompletionResultType]::ParameterValue, 'Open a local, read-only web dashboard of every store on this machine')
             [CompletionResult]::new('daemon', 'daemon', [CompletionResultType]::ParameterValue, 'Run the shared embedding daemon (normally auto-spawned by MCP)')
             [CompletionResult]::new('completions', 'completions', [CompletionResultType]::ParameterValue, 'Generate shell completions')
             [CompletionResult]::new('migrate', 'migrate', [CompletionResultType]::ParameterValue, 'Migrate memory files to the latest format version')
@@ -1356,6 +1357,28 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
             break
         }
+        'engramdb;dashboard' {
+            [CompletionResult]::new('--port', '--port', [CompletionResultType]::ParameterName, 'Port to listen on [default: 7341, or a free port when taken; 0: any free port]')
+            [CompletionResult]::new('--bind', '--bind', [CompletionResultType]::ParameterName, 'Address to listen on. Anything but loopback is reachable from the network')
+            [CompletionResult]::new('--assets-dir', '--assets-dir', [CompletionResultType]::ParameterName, 'Serve the web files from this directory instead of the built-in copy (frontend development)')
+            [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
+            [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
+            [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
+            [CompletionResult]::new('--no-open', '--no-open', [CompletionResultType]::ParameterName, 'Print the URL but do not open a browser')
+            [CompletionResult]::new('--allow-writes', '--allow-writes', [CompletionResultType]::ParameterName, 'Allow the dashboard''s review actions (edge confirm/reject, once available)')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
+            [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
+            [CompletionResult]::new('-v', '-v', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--verbose', '--verbose', [CompletionResultType]::ParameterName, 'Verbose output')
+            [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'No colored output')
+            [CompletionResult]::new('--in-process', '--in-process', [CompletionResultType]::ParameterName, 'Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1')
+            [CompletionResult]::new('--spawn-daemon', '--spawn-daemon', [CompletionResultType]::ParameterName, 'Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)')
+            [CompletionResult]::new('--no-maintenance', '--no-maintenance', [CompletionResultType]::ParameterName, 'Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help (see more with ''--help'')')
+            break
+        }
         'engramdb;daemon' {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
@@ -1778,6 +1801,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('gc', 'gc', [CompletionResultType]::ParameterValue, 'Run garbage collection on low-relevance memories')
             [CompletionResult]::new('compress', 'compress', [CompletionResultType]::ParameterValue, 'List compression candidates (actual compression requires MCP mode)')
             [CompletionResult]::new('serve', 'serve', [CompletionResultType]::ParameterValue, 'Start the MCP server')
+            [CompletionResult]::new('dashboard', 'dashboard', [CompletionResultType]::ParameterValue, 'Open a local, read-only web dashboard of every store on this machine')
             [CompletionResult]::new('daemon', 'daemon', [CompletionResultType]::ParameterValue, 'Run the shared embedding daemon (normally auto-spawned by MCP)')
             [CompletionResult]::new('completions', 'completions', [CompletionResultType]::ParameterValue, 'Generate shell completions')
             [CompletionResult]::new('migrate', 'migrate', [CompletionResultType]::ParameterValue, 'Migrate memory files to the latest format version')
@@ -1968,6 +1992,9 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             break
         }
         'engramdb;help;serve' {
+            break
+        }
+        'engramdb;help;dashboard' {
             break
         }
         'engramdb;help;daemon' {

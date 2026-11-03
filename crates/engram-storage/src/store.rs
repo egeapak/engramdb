@@ -93,6 +93,20 @@ fn parse_batch(read: Vec<(String, PathBuf, String)>) -> Vec<(String, Memory)> {
         .collect()
 }
 
+/// Where a store's on-disk schema stands against this binary's
+/// ([`MemoryStore::schema_state`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SchemaState {
+    /// The `schema_version` recorded in `manifest.toml`; `None` when the
+    /// manifest is missing or unreadable.
+    pub stored: Option<String>,
+    /// This binary's [`manifest::CURRENT_SCHEMA_VERSION`].
+    pub current: &'static str,
+    /// The next ordinary open would migrate (schema behind, or stems written
+    /// by another normalizer).
+    pub needs_migration: bool,
+}
+
 /// Main storage interface for EngramDB operations.
 ///
 /// Manages memory files, a unified LanceDB index, manifest, and coordinates
@@ -505,6 +519,115 @@ impl MemoryStore {
         // and writes hit a schema mismatch on an un-upgraded table.
         store.migrate_schema_if_needed().await?;
         Ok(store)
+    }
+
+    /// Open an existing project store for reading only, with no side effects.
+    ///
+    /// [`Self::open`] is not side-effect free, and must not be for its
+    /// callers: it backfills `.engramdb/.gitignore`, creates the LanceDB
+    /// directory and tables when missing, and runs the schema migration (a
+    /// full reindex under the write lock). A long-running viewer (the
+    /// dashboard) opening every store on the machine must do none of that —
+    /// looking at a store is not a reason to rewrite it, and a migration run
+    /// by a viewer would race the CLI the user is actually typing into. So
+    /// this path writes nothing, creates no directory, table or lock, and a
+    /// store behind the current schema is *reported* through
+    /// [`Self::schema_state`], never fixed: reads that project a column the
+    /// old table lacks fail on their own and say so.
+    ///
+    /// `NotInitialized` when `dir` has no `.engramdb/`; `Validation` naming
+    /// the remedy when the store has never been indexed on this machine (a
+    /// fresh clone with committed memories and no `lancedb/` yet).
+    ///
+    /// The returned value is still a full `MemoryStore`, so the type does not
+    /// stop a caller from writing through it: a read-only consumer should
+    /// wrap it in a type that exposes reads only (the dashboard does).
+    pub async fn open_read_only(dir: &Path) -> Result<Self> {
+        let engramdb_dir = paths::project_dir(dir);
+        if !engramdb_dir.is_dir() {
+            return Err(StorageError::NotInitialized);
+        }
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id)?;
+        Self::open_read_only_at(dir.to_path_buf(), project_id, &lance_path).await
+    }
+
+    /// [`Self::open_read_only`] for the global store. `NotInitialized` when
+    /// it was never created (unlike [`Self::open_global`], which creates it).
+    pub async fn open_global_read_only() -> Result<Self> {
+        let global_dir = paths::global_store_dir()?;
+        if !paths::project_dir(&global_dir).is_dir() {
+            return Err(StorageError::NotInitialized);
+        }
+        let lance_path = paths::global_lancedb_dir()?;
+        Self::open_read_only_at(
+            global_dir,
+            paths::GLOBAL_PROJECT_ID.to_string(),
+            &lance_path,
+        )
+        .await
+    }
+
+    /// [`Self::open_read_only`] for a group store. `NotInitialized` when it
+    /// was never created (unlike [`Self::open_group`], which creates it).
+    pub async fn open_group_read_only(group_id: &str) -> Result<Self> {
+        let group_dir = paths::group_store_dir(group_id)?;
+        if !paths::project_dir(&group_dir).is_dir() {
+            return Err(StorageError::NotInitialized);
+        }
+        let lance_path = paths::group_lancedb_dir(group_id)?;
+        Self::open_read_only_at(group_dir, group_id.to_string(), &lance_path).await
+    }
+
+    async fn open_read_only_at(
+        project_dir: PathBuf,
+        project_id: String,
+        lance_path: &Path,
+    ) -> Result<Self> {
+        let config_path = paths::project_dir(&project_dir).join("config.toml");
+        let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
+        let lance_index = LanceIndex::open_existing(lance_path, config.embeddings.dimensions)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?
+            .ok_or_else(|| {
+                StorageError::Validation(format!(
+                    "{} has not been indexed on this machine yet: run any engramdb \
+                     command there (or `engramdb reindex`) to build its index",
+                    project_dir.display()
+                ))
+            })?;
+        Ok(Self {
+            project_dir,
+            project_id,
+            lance_index,
+        })
+    }
+
+    /// Where this store's on-disk schema stands against this binary's, read
+    /// from `manifest.toml` without changing anything — what
+    /// [`Self::migrate_schema_if_needed`] would act on, for a caller that must
+    /// only report it ([`Self::open_read_only`]).
+    pub async fn schema_state(&self) -> SchemaState {
+        Self::schema_state_at(&self.project_dir).await
+    }
+
+    /// [`Self::schema_state`] for the store rooted at `project_dir`, without
+    /// opening it: a listing of every store on the machine reads this per row
+    /// and must not connect to each LanceDB to do so.
+    pub async fn schema_state_at(project_dir: &Path) -> SchemaState {
+        let manifest_path = paths::project_dir(project_dir).join("manifest.toml");
+        let loaded = manifest::load_manifest(&manifest_path).await.ok();
+        let stored = loaded.as_ref().map(|m| m.schema_version.clone());
+        let schema_stale = stored
+            .as_deref()
+            .is_none_or(|v| !manifest::schema_version_is_current(v));
+        let normalizer_stale = loaded.as_ref().and_then(|m| m.normalizer.as_deref())
+            != Some(engram_types::NORMALIZER_STAMP);
+        SchemaState {
+            stored,
+            current: manifest::CURRENT_SCHEMA_VERSION,
+            needs_migration: schema_stale || normalizer_stale,
+        }
     }
 
     /// Create a new memory.
@@ -7001,5 +7124,156 @@ mod tests {
             vec![good],
             "valid memory returned, corrupt one skipped"
         );
+    }
+
+    /// Every file under `root` with its length and mtime, so two snapshots
+    /// differ when anything was created, removed, resized or rewritten.
+    fn tree_snapshot(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+        fn walk(
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)>,
+        ) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                // Directories are entries too: creating an empty one is a
+                // side effect the file list alone would miss.
+                out.insert(path.clone(), (meta.len(), meta.modified().unwrap()));
+                if meta.is_dir() {
+                    walk(&path, out);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, &mut out);
+        out
+    }
+
+    /// Everything a read-only open could touch: the project tree, the global
+    /// data dir (LanceDB, personal memories, locks) and the config dir
+    /// (registry).
+    fn machine_snapshot(
+        project: &Path,
+    ) -> Vec<std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)>> {
+        vec![
+            tree_snapshot(project),
+            tree_snapshot(&paths::global_data_dir().unwrap()),
+            tree_snapshot(&paths::global_config_dir().unwrap()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn open_read_only_and_reads_write_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &registry).await.unwrap();
+            store
+                .create(&create_test_memory("ro-shared-1", Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .create(&create_test_memory("ro-personal-1", Visibility::Personal))
+                .await
+                .unwrap();
+        }
+        // `open` would backfill this; a read-only open must not.
+        std::fs::remove_file(tmp.path().join(".engramdb").join(".gitignore")).unwrap();
+        let before = machine_snapshot(tmp.path());
+
+        let store = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        assert_eq!(store.list_filterable().await.unwrap().len(), 2);
+        assert_eq!(store.list_summary().await.unwrap().len(), 2);
+        assert_eq!(store.get("ro-shared-1").await.unwrap().id, "ro-shared-1");
+        assert_eq!(store.get("ro-personal").await.unwrap().id, "ro-personal-1");
+        assert_eq!(
+            store
+                .get_batch(&["ro-shared-1", "ro-personal-1"])
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!store.schema_state().await.needs_migration);
+        let _ = store
+            .check_staleness(&IndexConfig::default())
+            .await
+            .unwrap();
+        let _ = store.index_digests().await.unwrap();
+        let _ = store.file_digests().await.unwrap();
+        drop(store);
+
+        assert_eq!(
+            before,
+            machine_snapshot(tmp.path()),
+            "a read-only open plus reads changed files on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_read_only_reports_a_stale_schema_instead_of_migrating() {
+        let tmp = TempDir::new().unwrap();
+        MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap()
+            .create(&create_test_memory("ro-stale-1", Visibility::Shared))
+            .await
+            .unwrap();
+        let manifest_path = tmp.path().join(".engramdb").join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.1.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+        let before = machine_snapshot(tmp.path());
+
+        let store = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        let state = store.schema_state().await;
+        assert!(state.needs_migration);
+        assert_eq!(state.stored.as_deref(), Some("0.1.0"));
+        assert_eq!(state.current, manifest::CURRENT_SCHEMA_VERSION);
+        drop(store);
+
+        assert_eq!(before, machine_snapshot(tmp.path()), "no migration ran");
+        let m = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(m.schema_version, "0.1.0");
+    }
+
+    #[tokio::test]
+    async fn open_read_only_creates_nothing_for_missing_stores() {
+        let tmp = TempDir::new().unwrap();
+        let before = machine_snapshot(tmp.path());
+        assert!(matches!(
+            MemoryStore::open_read_only(tmp.path()).await,
+            Err(StorageError::NotInitialized)
+        ));
+        assert!(matches!(
+            MemoryStore::open_global_read_only().await,
+            Err(StorageError::NotInitialized)
+        ));
+        assert!(matches!(
+            MemoryStore::open_group_read_only("__g_nope").await,
+            Err(StorageError::NotInitialized)
+        ));
+        assert_eq!(before, machine_snapshot(tmp.path()));
+
+        // A store whose index was never built here (a fresh clone): the
+        // `.engramdb/` exists, `lancedb/` does not, and must not appear.
+        std::fs::create_dir_all(tmp.path().join(".engramdb").join("memories")).unwrap();
+        let before = machine_snapshot(tmp.path());
+        let err = MemoryStore::open_read_only(tmp.path()).await.err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("has not been indexed on this machine"),
+            "{err}"
+        );
+        assert_eq!(before, machine_snapshot(tmp.path()));
+        let id = project_id::compute_project_id(tmp.path());
+        assert!(!paths::lancedb_dir(&id).unwrap().exists());
     }
 }

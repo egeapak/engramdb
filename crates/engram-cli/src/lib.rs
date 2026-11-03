@@ -228,6 +228,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             | Command::Completions { .. }
             | Command::Setup { .. }
             | Command::Daemon { .. }
+            | Command::Dashboard { .. }
     );
     // Hooks are dispatched below with a fail-open backstop, but that can't
     // catch errors raised BEFORE dispatch — and worktree resolution hard-
@@ -662,6 +663,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
         Command::Daemon { command } => commands::run_daemon_cmd(command, &formatter).await,
+        Command::Dashboard {
+            port,
+            bind,
+            no_open,
+            assets_dir,
+            allow_writes,
+        } => {
+            commands::run_dashboard(
+                &dir,
+                commands::DashboardParams {
+                    port,
+                    bind,
+                    no_open,
+                    assets_dir,
+                    allow_writes,
+                },
+                &formatter,
+            )
+            .await
+        }
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())

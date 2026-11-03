@@ -408,6 +408,24 @@ The HTTP server listens on `127.0.0.1` only and has no authentication. It refuse
 - a request whose `Host` header is not `localhost`, `127.0.0.1` or `::1` (this blocks DNS-rebinding attacks);
 - a request that carries an `Origin` header. Browsers always send one on a cross-site request, so a web page you visit cannot read or change your memories. MCP clients such as Claude Code send no `Origin` header and are not affected. A browser-based MCP client therefore cannot connect to this server.
 
+## `dashboard` — local web dashboard
+
+```bash
+engramdb dashboard [--port <N>] [--bind <addr>] [--no-open] [--assets-dir <dir>] [--allow-writes]
+```
+
+Serves a read-only web view of every store on this machine and prints its URL; with no `--no-open` it also tries to open your browser. The project of the directory you ran it in is selected. See [dashboard.md](./dashboard.md).
+
+| Flag | Meaning |
+|---|---|
+| `--port <N>` | Port to listen on. Default `7341`, or a free port when that one is taken; `0` asks for any free port. An explicit port that is taken is an error. |
+| `--bind <addr>` | Address to listen on (default `127.0.0.1`). Any other address prints a warning: the dashboard is then reachable from the network, unencrypted, guarded only by the URL's token. |
+| `--no-open` | Print the URL, do not launch a browser. Launch failures are silent anyway. |
+| `--assets-dir <dir>` | Serve the web files from `<dir>` (e.g. `crates/engram-dashboard/web`) instead of the copy built into the binary, uncached, so a frontend edit needs only a reload. |
+| `--allow-writes` | Reserved for the review actions (confirming or rejecting edges between memories) that arrive with the route map. Today it only shows a "Writes enabled" badge: there is no write action yet. |
+
+The URL carries a token that is new on every run. Opening it swaps the token for a browser cookie and removes it from the address bar; a request without the cookie or token is refused with `401`. With `--format json` the command prints `{"url", "address", "current_project", "allow_writes"}` once and keeps serving.
+
 ## `daemon` — shared embedding daemon
 
 ```bash

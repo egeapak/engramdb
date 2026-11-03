@@ -29,6 +29,7 @@ Commands:
   gc           Run garbage collection on low-relevance memories
   compress     List compression candidates (actual compression requires MCP mode)
   serve        Start the MCP server
+  dashboard    Open a local, read-only web dashboard of every store on this machine
   daemon       Run the shared embedding daemon (normally auto-spawned by MCP)
   completions  Generate shell completions
   migrate      Migrate memory files to the latest format version

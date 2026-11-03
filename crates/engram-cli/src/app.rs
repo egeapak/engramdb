@@ -1257,6 +1257,33 @@ pub enum Command {
         port: Option<u16>,
     },
 
+    /// Open a local, read-only web dashboard of every store on this machine
+    ///
+    /// Serves on 127.0.0.1 and prints a URL with a one-time token; open it
+    /// in a browser on this machine. Nothing in the dashboard changes a
+    /// store, and viewing a memory there does not count as using it.
+    Dashboard {
+        /// Port to listen on [default: 7341, or a free port when taken; 0: any free port]
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Address to listen on. Anything but loopback is reachable from the network
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+
+        /// Print the URL but do not open a browser
+        #[arg(long)]
+        no_open: bool,
+
+        /// Serve the web files from this directory instead of the built-in copy (frontend development)
+        #[arg(long, value_name = "DIR")]
+        assets_dir: Option<PathBuf>,
+
+        /// Allow the dashboard's review actions (edge confirm/reject, once available)
+        #[arg(long)]
+        allow_writes: bool,
+    },
+
     /// Run the shared embedding daemon (normally auto-spawned by MCP)
     Daemon {
         #[command(subcommand)]

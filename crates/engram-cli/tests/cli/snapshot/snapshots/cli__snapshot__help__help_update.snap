@@ -95,6 +95,12 @@ Options:
       --invalidate
           Close the validity window now: the memory WAS true but no longer is. Preferred over delete — history stays queryable via --include-invalidated
 
+      --superseded-by <SUPERSEDED_BY>
+          Id of the memory that supersedes this one (only with --invalidate)
+
+      --decay-strategy <DECAY_STRATEGY>
+          Decay strategy: none, linear, exponential, or step
+
       --format <FORMAT>
           Output format
 
@@ -103,29 +109,26 @@ Options:
           - json:   JSON output for programmatic parsing
           - plain:  Plain text output without colors
 
-      --superseded-by <SUPERSEDED_BY>
-          Id of the memory that supersedes this one (only with --invalidate)
-
-      --decay-strategy <DECAY_STRATEGY>
-          Decay strategy: none, linear, exponential, or step
+      --decay-half-life <DECAY_HALF_LIFE>
+          Half-life in seconds for decay
 
       --json
           Output as JSON
 
-      --decay-half-life <DECAY_HALF_LIFE>
-          Half-life in seconds for decay
+      --decay-ttl <DECAY_TTL>
+          TTL in seconds for decay
 
   -q, --quiet
           Suppress non-essential output
 
-      --decay-ttl <DECAY_TTL>
-          TTL in seconds for decay
+      --decay-floor <DECAY_FLOOR>
+          Minimum decay factor (0.0-1.0)
 
   -v, --verbose
           Verbose output
 
-      --decay-floor <DECAY_FLOOR>
-          Minimum decay factor (0.0-1.0)
+  -e, --editor
+          Open memory file in $EDITOR
 
       --no-color
           No colored output
@@ -133,14 +136,11 @@ Options:
       --dir <DIR>
           Working directory (default: current directory)
 
-  -e, --editor
-          Open memory file in $EDITOR
+      --global
+          Operate on the global (cross-project) memory store instead of the current project
 
       --embedding-backend <EMBEDDING_BACKEND>
           Embedding backend: auto, onnx, or ollama
-
-      --global
-          Operate on the global (cross-project) memory store instead of the current project
 
       --group <GROUP>
           Update a memory in a named group store (instead of the current project)

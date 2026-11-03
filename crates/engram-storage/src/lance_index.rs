@@ -457,6 +457,38 @@ impl LanceIndex {
         Ok(store)
     }
 
+    /// Open an index that already exists, creating nothing.
+    ///
+    /// [`Self::new`] creates the `memories` and `chunks` tables when they are
+    /// missing, which is right for every writer and wrong for a read-only
+    /// consumer (the dashboard): looking at a store must leave it exactly as
+    /// it was. Returns `Ok(None)` when `db_path` is not a directory or has no
+    /// `memories` table — "not indexed on this machine", which the caller
+    /// reports instead of repairing. A missing `chunks` table is tolerated:
+    /// only vector reads need it, and they fail on their own.
+    pub async fn open_existing(db_path: &Path, dimensions: usize) -> Result<Option<Self>> {
+        if !db_path.is_dir() {
+            return Ok(None);
+        }
+        let db_path_str = db_path
+            .to_str()
+            .context("Invalid database path (not valid UTF-8)")?;
+        let connection = connect(db_path_str)
+            .execute()
+            .await
+            .context("Failed to connect to LanceDB")?;
+        let store = Self {
+            connection: Arc::new(connection),
+            table_name: "memories".to_string(),
+            chunks_table_name: "chunks".to_string(),
+            dimensions,
+        };
+        if store.open_table().await.is_err() {
+            return Ok(None);
+        }
+        Ok(Some(store))
+    }
+
     /// Arrow schema for the memories table (metadata only, no vector).
     fn memories_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![

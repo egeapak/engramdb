@@ -47,7 +47,7 @@ pub use registry::{
     resolve_root_project_id, stale_registrations_for, subscriptions_of, FileRegistry, GroupEntry,
     InMemoryRegistry, Registry, RegistryBackend, RegistryEntry,
 };
-pub use store::MemoryStore;
+pub use store::{MemoryStore, SchemaState};
 pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 
 // Test isolation: link `engram-test-support` so its `#[ctor]` redirects
