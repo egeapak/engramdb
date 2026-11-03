@@ -1746,11 +1746,12 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
     //
     // `embed_memory` stamps the store's fingerprint on a first embed — when it
     // observes no fingerprint and no chunks — and `memory_create` returns
-    // before that runs. An ingest that read `None` early and completes late
-    // therefore writes the REAL model id straight over the bogus one set here,
-    // the gate below finds no mismatch, and the test fails claiming the gate is
-    // broken. Waiting until chunks exist makes `stamp_first_embed` false for
-    // anything still in flight, so the corruption sticks.
+    // before that runs. The stamp is conditional on the store still being
+    // unstamped when it lands (`stamp_embedding_fingerprint_if_unset`), so an
+    // in-flight ingest cannot write the real model id over the bogus one set
+    // here; it used to, whenever its stamp landed after the re-assert below,
+    // and the gate then found no mismatch. The wait keeps the reindex below
+    // operating on a store that actually holds vectors.
     //
     // Bounded, not asserted: when the ONNX model cannot load in this
     // environment no chunks ever appear, which the model-load-race branch below
@@ -1782,11 +1783,9 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
     .await
     .unwrap();
 
-    // Re-assert immediately before the check. If the wait above timed out —
-    // a heavily loaded machine where the embed had not landed within 5s — an
-    // ingest that computed `stamp_first_embed` before the corruption can still
-    // write the real model id over it. Once chunks exist no further stamp is
-    // possible, so this second write is the one that sticks.
+    // Re-assert immediately before the check. Redundant since the first-embed
+    // stamp became conditional (it never overwrites a fingerprint); kept as a
+    // cheap second write.
     store
         .set_embedding_fingerprint(engramdb::storage::EmbeddingFingerprint {
             model: "onnx/bogus-old-model".to_string(),

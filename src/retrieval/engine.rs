@@ -2001,7 +2001,8 @@ async fn embed_memory_with(
     // model becomes known — record it. A genuinely legacy store (unstamped
     // WITH pre-existing vectors of unknown vintage) must stay unstamped so
     // the warning keeps pointing at the real remediation. Checked before the
-    // upsert (afterwards our own chunks make the store non-empty).
+    // upsert (afterwards our own chunks make the store non-empty) — so it is
+    // only a precondition, and the stamp below re-checks "still unstamped".
     let stamp_first_embed = matches!(store.embedding_fingerprint().await, Ok(None))
         && matches!(store.has_any_chunks().await, Ok(false));
 
@@ -2037,9 +2038,17 @@ async fn embed_memory_with(
             composition: metadata_vector
                 .then(|| crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
         };
-        // Best-effort: a failed stamp only means the Untracked warning can
-        // still appear; never fail the embed over it.
-        if let Err(e) = store.set_embedding_fingerprint(fingerprint).await {
+        // Conditional, not `set_embedding_fingerprint`: `stamp_first_embed`
+        // was decided before the embed and the upsert, and the store may have
+        // been stamped since (a reindex for a new model, a concurrent first
+        // embed). Overwriting that newer stamp with this ingest's model made
+        // the manifest misdescribe the vectors; the store re-checks under its
+        // lock instead. Best-effort: a failed stamp only means the Untracked
+        // warning can still appear; never fail the embed over it.
+        if let Err(e) = store
+            .stamp_embedding_fingerprint_if_unset(fingerprint)
+            .await
+        {
             tracing::warn!("failed to stamp embedding fingerprint on first embed: {e}");
         }
     }

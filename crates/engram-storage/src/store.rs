@@ -2953,6 +2953,33 @@ impl MemoryStore {
         manifest::save_manifest(&manifest_path, &manifest).await?;
         Ok(())
     }
+
+    /// Stamp `fingerprint` only if the store has none yet; returns whether it
+    /// wrote. The unset check and the write happen under one write lock.
+    ///
+    /// This is the first-embed stamp's writer (`embed_memory_with`), and the
+    /// check has to be repeated here rather than trusted from the caller:
+    /// the caller decides "the store is unstamped" *before* its embed and its
+    /// chunk upsert, then stamps after them, and anything may stamp the store
+    /// in between — a `reindex --embeddings-only` for a newly configured
+    /// model, or a concurrent first embed. Acting on the stale answer wrote
+    /// the ingest's model over that newer stamp, so the manifest no longer
+    /// described the vectors. Lock rules as [`Self::set_embedding_fingerprint`].
+    pub async fn stamp_embedding_fingerprint_if_unset(
+        &self,
+        fingerprint: manifest::EmbeddingFingerprint,
+    ) -> Result<bool> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let mut manifest = manifest::load_manifest(&manifest_path).await?;
+        if manifest.embedding.is_some() {
+            return Ok(false);
+        }
+        manifest.embedding = Some(fingerprint);
+        manifest::save_manifest(&manifest_path, &manifest).await?;
+        Ok(true)
+    }
 }
 
 /// Write content atomically and durably using write-to-temp-then-rename.
@@ -5377,6 +5404,47 @@ mod tests {
         let got = store.get(id).await.unwrap();
         assert_eq!(got.summary, "Current summary");
         assert_eq!(store.list_ids().await.unwrap(), vec![id.to_string()]);
+    }
+
+    /// The first-embed stamp decides "unstamped" before its embed and stamps
+    /// after it; a fingerprint written in between (a reindex for a new
+    /// model) must survive. `set_embedding_fingerprint` overwrote it, which
+    /// flaked `server::tests::reindex_re_embeds_in_error_mode_despite_mismatch`.
+    #[tokio::test]
+    async fn test_stamp_embedding_fingerprint_if_unset_keeps_existing_stamp() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let fp = |model: &str| manifest::EmbeddingFingerprint {
+            model: model.to_string(),
+            dimensions: 384,
+            composition: None,
+        };
+
+        assert_eq!(store.embedding_fingerprint().await.unwrap(), None);
+        assert!(store
+            .stamp_embedding_fingerprint_if_unset(fp("onnx/first"))
+            .await
+            .unwrap());
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(fp("onnx/first"))
+        );
+
+        store
+            .set_embedding_fingerprint(fp("onnx/reindexed"))
+            .await
+            .unwrap();
+        assert!(!store
+            .stamp_embedding_fingerprint_if_unset(fp("onnx/late-ingest"))
+            .await
+            .unwrap());
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(fp("onnx/reindexed")),
+            "a late first-embed stamp must not overwrite a newer fingerprint"
+        );
     }
 
     /// Issue-3 regression: `set_embedding_fingerprint` racing concurrent
