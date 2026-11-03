@@ -21,9 +21,82 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  fuzz:
-    name: Fuzz targets
+  # Build every target once and hand the binaries to the run legs. Each leg
+  # used to compile the whole crate graph (LanceDB, DataFusion, Arrow, ORT)
+  # itself, ASan-instrumented: 26 min per leg when it worked (run #18), and
+  # nine legs racing to run out of memory when it did not (#19 on). The
+  # binaries are ~all the same dependency graph, so one build costs about what
+  # one leg's did.
+  build:
+    name: Build fuzz targets
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      # Registry and git sources only, no build output: a full `fuzz/target`
+      # (ASan-instrumented nightly deps, multiple GB) would land in the 10 GB
+      # repo quota CI's caches live in and evict them, and a weekly run on a
+      # new nightly would barely reuse it anyway. Saved from master only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Build all targets
+        # A runner that runs out of memory (or disk) is shut down mid-step
+        # with exit 143 and no error from the build itself, so print both
+        # once a minute: the last sample before a kill names the resource.
+        # Measured peak with fuzz/Cargo.toml's profile is 13 GB at 4 jobs;
+        # 3 leaves headroom on a 16 GB runner for a few minutes' cost.
+        env:
+          CARGO_BUILD_JOBS: 3
+        run: |
+          (
+            while sleep 60; do
+              echo "[resources] $(date -u +%H:%M:%S)" \
+                "mem used/total MiB: $(free -m | awk '/^Mem:/{print $3"/"$2}')" \
+                "swap used MiB: $(free -m | awk '/^Swap:/{print $3}')" \
+                "disk free /: $(df -h --output=avail / | tail -1 | tr -d ' ')"
+            done
+          ) &
+          sampler=$!
+          cargo +nightly fuzz build
+          kill "$sampler" || true
+          free -m
+          df -h /
+          du -sh fuzz/target
+
+      - name: Package binaries
+        # upload-artifact drops the executable bit, so ship a tarball.
+        run: |
+          bin=fuzz/target/x86_64-unknown-linux-gnu/release
+          targets=$(cargo +nightly fuzz list)
+          tar -C "$bin" -czf fuzz-bins.tar.gz $targets
+          ls -l fuzz-bins.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-bins
+          path: fuzz-bins.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -40,27 +113,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install nightly toolchain
-        run: rustup toolchain install nightly --profile minimal
-
-      - name: Install protobuf compiler and lld linker
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
-
-      # Registry and git sources only, no build output. Nine matrix legs share
-      # one rust-cache key (the key has the job id, not the matrix value), so
-      # the first leg to finish would save `fuzz/target` (ASan-instrumented
-      # nightly deps, multiple GB; a full one is ~14 GB) into the 10 GB repo
-      # quota CI's caches live in, and evict them. A weekly run on a new
-      # nightly would barely reuse those artifacts anyway. The root `target`
-      # was listed too, though no step here ever builds in it. As of run
-      # 41441935829 every leg dies mid-compile (runner shutdown, exit 143)
-      # before the post step, so nothing has been saved yet: this keeps it so
-      # once those runs pass.
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          workspaces: "fuzz -> target"
-          cache-targets: false
-          save-if: ${{ github.ref == 'refs/heads/master' }}
+          name: fuzz-bins
+
+      - name: Unpack ${{ matrix.target }}
+        run: mkdir -p bins && tar -C bins -xzf fuzz-bins.tar.gz ${{ matrix.target }}
 
       - name: Restore fuzz corpus
         # The corpus grows as libfuzzer discovers new coverage; persist it
@@ -75,13 +133,17 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
       - name: Run ${{ matrix.target }}
+        # What `cargo fuzz run <t>` executes once its build is up to date:
+        # the same artifact prefix, corpus directory and ASAN_OPTIONS.
+        env:
+          ASAN_OPTIONS: detect_odr_violation=0
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time=${{ github.event.inputs.max_total_time || '300' }}
+          t=${{ matrix.target }}
+          mkdir -p "fuzz/artifacts/$t" "fuzz/corpus/$t"
+          "./bins/$t" -artifact_prefix="fuzz/artifacts/$t/" \
+            -max_total_time=${{ github.event.inputs.max_total_time || '300' }} \
+            "fuzz/corpus/$t"
 
       - name: Upload crash artifacts
         if: failure()
