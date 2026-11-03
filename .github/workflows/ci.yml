@@ -26,6 +26,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# No job writes to the repository: caches and artifacts use the runner's own
+# token, not GITHUB_TOKEN. Keep the token read-only.
+permissions:
+  contents: read
+
 # Caching policy: every `Swatinem/rust-cache` step below restores everywhere but
 # saves only on master (`save-if`). One run saves ~6.5 GB of caches (nine
 # compiling jobs at 0.45-0.9 GB each) against the repository's 10 GB cache
