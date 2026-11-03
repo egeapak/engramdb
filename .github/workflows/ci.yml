@@ -334,7 +334,8 @@ jobs:
   #     `--workspace-remap` points the archived binaries at;
   #   - `.config/nextest.toml`: read from that checkout too, so the
   #     `ml-models` group keeps `max-threads = 1` within every shard.
-  # ONNX models are downloaded at run time exactly as before, per shard.
+  # ONNX models come from the shared model cache (restored, never saved,
+  # here); anything it lacks is downloaded at run time exactly as before.
   test-build:
     name: Test (build)
     runs-on: ubuntu-latest
@@ -410,6 +411,15 @@ jobs:
           sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
                   /usr/local/lib/libonnxruntime.so
           sudo ldconfig
+
+      - name: Restore the ONNX model cache
+        # Saved by the `coverage` job (see there); restore-only here, so three
+        # shards never race to save it.
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
 
       - name: Download the test archive
         uses: actions/download-artifact@v8
@@ -598,6 +608,15 @@ jobs:
                   /usr/local/lib/libonnxruntime.so
           sudo ldconfig
 
+      - name: Restore the ONNX model cache
+        # Saved by the `coverage` job (see there); restore-only here, so three
+        # shards never race to save it.
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
       - name: Download the test archive
         uses: actions/download-artifact@v8
         with:
@@ -652,11 +671,51 @@ jobs:
                   /usr/local/lib/libonnxruntime.so
           sudo ldconfig
 
+      # The HuggingFace models the suite loads (embedding, T5, NLI, reranker)
+      # live in `model_cache_dir()` = ~/.cache/engramdb/models. Without a
+      # cache, all seven test jobs of a run (two suites x three shards, plus
+      # this one) download them from HuggingFace anonymously, ~7x per run:
+      # seconds each, but a rate limit or an HF outage fails the run.
+      #
+      # This job is the one that saves it, because it is the only one that
+      # runs the *whole* suite in one place, so it is the only one guaranteed
+      # to have touched every model a test loads (a shard sees a third of the
+      # tests, and would save a third of the models under a key nothing ever
+      # refreshes). It saves on master only, like every other cache here.
+      #
+      # Keyed on the files that name the model repos and files. Editing one
+      # restores the previous set through `restore-keys` and downloads only
+      # the difference; the union is saved under the new key. Bump `v1` to
+      # drop models no spec names any more. Not keyed on Cargo.lock: a
+      # fastembed bump that changes a registry model's files just downloads
+      # that model at run time, rather than writing a new entry every week.
+      - name: Restore the ONNX model cache
+        id: models
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
       - name: Run tests under coverage instrumentation
         # Mirror the `test` job's invocation so coverage reflects the real
         # suite. `--no-report` defers report generation so we can emit
         # multiple formats from the one profdata set below.
         run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
+
+      - name: Report the ONNX model cache
+        run: |
+          du -sh ~/.cache/engramdb/models/models--*/ 2>/dev/null | sort -h || true
+          du -sh ~/.cache/engramdb/models 2>/dev/null || echo "no model cache"
+
+      - name: Save the ONNX model cache
+        # Only after a green run: a test that falls back when a download fails
+        # could otherwise leave a model out of the saved set.
+        if: github.ref == 'refs/heads/master' && steps.models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: ${{ steps.models.outputs.cache-primary-key }}
 
       - name: Generate coverage reports
         # Exclude integration-test harness files and the test-isolation crate
