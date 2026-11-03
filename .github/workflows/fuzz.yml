@@ -46,9 +46,21 @@ jobs:
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
+      # Registry and git sources only, no build output. Nine matrix legs share
+      # one rust-cache key (the key has the job id, not the matrix value), so
+      # the first leg to finish would save `fuzz/target` (ASan-instrumented
+      # nightly deps, multiple GB; a full one is ~14 GB) into the 10 GB repo
+      # quota CI's caches live in, and evict them. A weekly run on a new
+      # nightly would barely reuse those artifacts anyway. The root `target`
+      # was listed too, though no step here ever builds in it. As of run
+      # 41441935829 every leg dies mid-compile (runner shutdown, exit 143)
+      # before the post step, so nothing has been saved yet: this keeps it so
+      # once those runs pass.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ". -> target\nfuzz -> target"
+          workspaces: "fuzz -> target"
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Restore fuzz corpus
         # The corpus grows as libfuzzer discovers new coverage; persist it
