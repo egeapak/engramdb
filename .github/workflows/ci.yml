@@ -18,6 +18,23 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
+# A newer push to the same PR makes the older run's result worthless; cancel
+# it instead of letting it hold ~12 runners. Pushes to master are never
+# cancelled, so every master commit still gets a complete run (and saves the
+# caches every PR restores from).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Caching policy: every `Swatinem/rust-cache` step below restores everywhere but
+# saves only on master (`save-if`). One run saves ~6.5 GB of caches (nine
+# compiling jobs at 0.45-0.9 GB each) against the repository's 10 GB cache
+# quota, so when PR branches saved too, each PR run evicted master's entries:
+# in a 12-run sample, the Linux `Test` job restored nothing on all four master
+# pushes and had to compile ~580 crates from scratch (5-9 min) each time. A PR
+# branch's own cache only ever helped a PR that changed Cargo.lock, since
+# rust-cache never stores workspace crates anyway.
+
 # Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
 # they need the full ONNX runtime plus downloaded embedding models, and
 # shared-runner variance makes any timing threshold flaky. They are local
@@ -195,6 +212,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -231,8 +250,8 @@ jobs:
 
   # Linux full tests run in the `test` job below; this matrix covers the
   # non-Linux targets that `release.yml` actually ships (macOS + Windows):
-  # a full-workspace `cargo check` so every platform-gated line compiles on
-  # every PR, plus a small filtered nextest subset so the platform-divergent
+  # a full-workspace build so every platform-gated line compiles on every PR,
+  # plus a small filtered nextest subset so the platform-divergent
   # IPC/filesystem code — most importantly the Windows named-pipe daemon
   # transport (`#[cfg(windows)]` in src/daemon/transport.rs) vs the
   # `#[cfg(unix)]` Unix-socket path, path resolution, and the advisory write
@@ -261,17 +280,28 @@ jobs:
         run: choco install protoc -y
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Check
-        # ONNX Runtime is downloaded + statically linked by fastembed's
-        # `download-binaries` (same as release.yml), so no manual ORT setup.
-        run: cargo check --workspace --all-features --locked
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         # Prebuilt binary, same rationale as the `test` job below.
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      # There used to be a `cargo check --workspace --all-features` step here.
+      # It was pure overhead (median ~4 min per OS, measured): the test build
+      # below compiles every lib and bin target of every workspace crate with
+      # full codegen (the integration tests link the libs and spawn the
+      # binary), which type-checks strictly more than `check` did, and `check`
+      # shares only build scripts and proc-macros with that build (its
+      # dependency artifacts are rmeta-only and get rebuilt). Everything is
+      # compiled exactly once now, in the step below; it is split out from the
+      # run only so the step timings show build and test separately.
+      - name: Build (full workspace, all features)
+        # ONNX Runtime is downloaded + statically linked by fastembed's
+        # `download-binaries` (same as release.yml), so no manual ORT setup.
+        run: cargo nextest run --workspace --all-features --locked --no-run
 
       - name: Test platform-gated IPC and filesystem code
         # `daemon::transport` exercises the Unix-socket/named-pipe transports
@@ -283,11 +313,26 @@ jobs:
           cargo nextest run --workspace --all-features --locked
           -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
 
-  test:
-    name: Test
+  # Build once, run sharded. The suite is ~26 CPU-minutes of test time that
+  # nextest already spreads across all 4 cores of one runner (~6.8 min wall,
+  # measured), so it is CPU-bound and splits almost linearly across runners.
+  # `test-build` compiles every test binary exactly once and packs them with
+  # `cargo nextest archive`; each `test` shard downloads that archive and runs a
+  # third of the tests with no Rust build (and no rust-cache restore) at all.
+  #
+  # Things the archive has to carry, and does:
+  #   - the `engramdb` binary the tier-2 CLI tests spawn: nextest archives the
+  #     workspace's bin targets and sets `CARGO_BIN_EXE_engramdb` at run time,
+  #     which is the first place `assert_cmd::Command::cargo_bin` looks;
+  #   - fixtures and insta snapshots: those are read from the source tree, and
+  #     every shard checks out the same commit at the same path, which
+  #     `--workspace-remap` points the archived binaries at;
+  #   - `.config/nextest.toml`: read from that checkout too, so the
+  #     `ml-models` group keeps `max-threads = 1` within every shard.
+  # ONNX models are downloaded at run time exactly as before, per shard.
+  test-build:
+    name: Test (build)
     runs-on: ubuntu-latest
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -298,12 +343,52 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         # Use the prebuilt binary instead of `cargo install cargo-nextest`,
         # which compiles nextest from source (~7 min on a cache miss). This
         # downloads a prebuilt release in seconds, every run, regardless of
         # cache state.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build and archive the test binaries
+        run: >-
+          cargo nextest archive --workspace --all-features --locked
+          --archive-file nextest-all-features.tar.zst
+
+      - name: Upload the test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-all-features
+          path: nextest-all-features.tar.zst
+          # Already zstd: re-deflating it costs time and saves nothing.
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  test:
+    name: Test (shard ${{ matrix.shard }}/3)
+    needs: test-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        # Nothing is compiled here; the toolchain is only what `cargo nextest`
+        # is dispatched through.
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install nextest
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -321,8 +406,20 @@ jobs:
                   /usr/local/lib/libonnxruntime.so
           sudo ldconfig
 
-      - name: Run tests
-        run: cargo nextest run --workspace --all-features --locked
+      - name: Download the test archive
+        uses: actions/download-artifact@v8
+        with:
+          name: nextest-all-features
+
+      - name: Run tests (shard ${{ matrix.shard }}/3)
+        # `count:` deals each binary's tests round-robin across the shards, so
+        # every shard gets a third of the slow tier-2 CLI binary rather than
+        # one shard getting all of it.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-all-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --partition count:${{ matrix.shard }}/3
 
   # `ops::compress::dot_unit` is `fearless_simd`, whose `dispatch!` normalises
   # *up* to the best SIMD level the CPU supports and offers no runtime way down.
@@ -360,6 +457,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: simd-${{ matrix.level }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         uses: taiki-e/install-action@v2
@@ -383,11 +481,17 @@ jobs:
   # ship: default features, where the runtime is `dlopen`ed at run time. This job
   # covers that path — including the case that used to abort the process, a
   # *missing* runtime, which must degrade to "embeddings unavailable" instead.
-  test-load-dynamic:
-    name: Test (default features, runtime-loaded ONNX)
+  #
+  # Split the same way as `test` (build once, three shards), and for the same
+  # reason: this was the slowest Linux job (median 14.3 min: ~6 min build,
+  # ~1.2 min test-target build, ~6.5 min of tests). The build-only assertions
+  # (ldd, start-up, the missing-runtime probe) stay in the build job, which
+  # deliberately never installs a runtime — so "must start with no runtime
+  # installed" now really runs with none, rather than with the one the old
+  # single job had already put in /usr/local/lib for its test step.
+  test-load-dynamic-build:
+    name: Test (default features, runtime-loaded ONNX) (build)
     runs-on: ubuntu-latest
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -398,21 +502,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-
-      - name: Install ONNX Runtime
-        # The official Microsoft build. Deliberately not the one `ort` would
-        # download: that prebuilt executes quantized models incorrectly on
-        # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
 
       - name: Build with default features
         # No ONNX Runtime is required to build under `load-dynamic`; this must
@@ -439,21 +534,78 @@ jobs:
       - name: Binary must start with no runtime installed
         run: ./target/debug/engramdb --version
 
-      - name: Test with the runtime discovered from /usr/local/lib
-        # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
-        # system-installed runtime the way a Homebrew or distro install would.
-        run: cargo nextest run --workspace --locked
+      - name: Build and archive the test binaries
+        run: >-
+          cargo nextest archive --workspace --locked
+          --archive-file nextest-default-features.tar.zst
 
       - name: Missing runtime must degrade, not abort
         # The regression guard for the whole change. `ort`'s own loader panics
         # when the dylib is absent and the release profile is `panic = "abort"`,
         # so without the pre-flight probe in `engram_onnx::runtime` this aborts.
+        # No runtime was ever installed on this runner, so nothing to remove.
         run: |
-          sudo rm /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+          if ldconfig -p | grep -qi onnxruntime; then
+            echo "::error::an ONNX Runtime is installed on this runner; the missing-runtime checks would not test anything."
+            exit 1
+          fi
           cargo nextest run --workspace --locked -E 'test(runtime::tests::)'
           echo "Probe reports:"
           cargo run --quiet --locked --bin engramdb -- doctor || true
+
+      - name: Upload the test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-default-features
+          path: nextest-default-features.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  test-load-dynamic:
+    name: Test (default features, runtime-loaded ONNX) (shard ${{ matrix.shard }}/3)
+    needs: test-load-dynamic-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install ONNX Runtime
+        # The official Microsoft build. Deliberately not the one `ort` would
+        # download: that prebuilt executes quantized models incorrectly on
+        # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+
+      - name: Download the test archive
+        uses: actions/download-artifact@v8
+        with:
+          name: nextest-default-features
+
+      - name: Test with the runtime discovered from /usr/local/lib (shard ${{ matrix.shard }}/3)
+        # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
+        # system-installed runtime the way a Homebrew or distro install would.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-default-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --partition count:${{ matrix.shard }}/3
 
   coverage:
     name: Coverage
@@ -472,6 +624,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest and cargo-llvm-cov
         # Prebuilt binaries (same rationale as the test job): avoids a
