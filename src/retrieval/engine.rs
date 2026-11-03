@@ -234,8 +234,9 @@ pub struct RetrievalEngine {
     /// Optional session ID — recorded with every event, used to compute
     /// followup rate and unique-session count.
     session_id: Option<String>,
-    /// The usage view the usage boost reads, refreshed at most every
-    /// `signals::USAGE_CACHE_TTL` (read only when `usage_weight > 0`).
+    /// Handle on the process-wide, per-store usage views the usage boost
+    /// reads, refreshed at most every `signals::USAGE_CACHE_TTL` (read only
+    /// when `usage_weight > 0`).
     usage_cache: UsageCache,
 }
 
@@ -256,7 +257,7 @@ impl RetrievalEngine {
             stats: None,
             project_id: None,
             session_id: None,
-            usage_cache: UsageCache::default(),
+            usage_cache: UsageCache,
         }
     }
 
@@ -1623,12 +1624,20 @@ impl RetrievalEngine {
 
         // Step 9.5: one-hop link expansion (opt-in). Neighbours come from the
         // filtered candidate set only, so `memory_map` already holds them.
-        let expanded = self
-            .expand_candidates(query, &candidates, tail, &filtered_entries, graph)
+        let (expanded, new_in_total) = self
+            .expand_candidates(
+                query,
+                &candidates,
+                tail,
+                &filtered_entries,
+                graph,
+                signals.as_ref(),
+            )
             .await;
         // Expanded neighbours are results the caller sees, so `total` counts
-        // them ("Found 3 memories (out of 2 total)" would read as a bug).
-        let total = total + expanded.len();
+        // them ("Found 3 memories (out of 2 total)" would read as a bug) —
+        // only those it did not already count as a cut candidate.
+        let total = total + new_in_total;
         if !expanded.is_empty() {
             candidates.extend(expanded);
             sort_candidates(&mut candidates);
@@ -1789,10 +1798,10 @@ impl RetrievalEngine {
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
         let tail = candidates.split_off(max_results.min(candidates.len()));
-        let expanded = self
-            .expand_candidates(query, &candidates, tail, filtered_entries, graph)
+        let (expanded, new_in_total) = self
+            .expand_candidates(query, &candidates, tail, filtered_entries, graph, signals)
             .await;
-        let total = total + expanded.len();
+        let total = total + new_in_total;
         if !expanded.is_empty() {
             candidates.extend(expanded);
             sort_candidates(&mut candidates);
@@ -1881,13 +1890,22 @@ impl RetrievalEngine {
 
     /// One-hop link expansion from `hits` (the truncated, sorted result).
     ///
-    /// Returns at most `expand_links` neighbours, best first, each scored at
-    /// its best parent's score times `expand_links_decay` (or its own score
-    /// when that is higher — a candidate cut only by `max_results`) and
-    /// marked with [`LinkVia`]. A neighbour must be in `entries` — the
-    /// candidate set after every hard filter — so expansion can never return
-    /// a memory the query itself was not allowed to return. Weak fallback
-    /// hits (`below_threshold`) expand nothing: a lead is not a hit.
+    /// Returns at most `expand_links` neighbours, best first, each marked
+    /// with [`LinkVia`], plus how many of them were *not* already counted in
+    /// the query's `total` (a neighbour cut only by `max_results` was). A
+    /// neighbour must be in `entries` — the candidate set after every hard
+    /// filter — so expansion can never return a memory the query itself was
+    /// not allowed to return. Weak fallback hits (`below_threshold`) expand
+    /// nothing: a lead is not a hit.
+    ///
+    /// A neighbour is scored as its best parent's score × `expand_links_decay`
+    /// × its own situation multiplier, **minus its own challenge and
+    /// `contradicts` penalties** — a disputed memory does not ride in at full
+    /// strength on a healthy one's relevance — or at its own score when the
+    /// query scored it and that is higher. Its breakdown is its own (the
+    /// query's, or a scope-only one built with its signals and the query's
+    /// situation), so `contradicted_by` / `contradicts_penalty` still say it
+    /// is disputed.
     async fn expand_candidates(
         &self,
         query: &RetrievalQuery,
@@ -1895,7 +1913,8 @@ impl RetrievalEngine {
         tail: Vec<ScoredCandidate>,
         entries: &[crate::storage::IndexForFiltering],
         graph: Option<GraphSnapshot>,
-    ) -> Vec<ScoredCandidate> {
+        signals: Option<&HashMap<String, ScoreSignals>>,
+    ) -> (Vec<ScoredCandidate>, usize) {
         let n = query
             .expand_links
             .unwrap_or(self.config.retrieval.expand_links)
@@ -1905,7 +1924,7 @@ impl RetrievalEngine {
             .filter(|c| !c.breakdown.below_threshold)
             .collect();
         if n == 0 || parents.is_empty() {
-            return Vec::new();
+            return (Vec::new(), 0);
         }
         let visible: HashMap<&str, &crate::storage::IndexForFiltering> =
             entries.iter().map(|e| (e.id.as_str(), e)).collect();
@@ -1932,6 +1951,8 @@ impl RetrievalEngine {
             tail.into_iter().map(|c| (c.id, c.breakdown)).collect();
         let now = Utc::now();
 
+        // The neighbour's own breakdown, computed once per neighbour.
+        let mut own_cache: HashMap<&str, ScoreBreakdown> = HashMap::new();
         let mut best: HashMap<&str, ScoredCandidate> = HashMap::new();
         for parent in parents {
             for (nid, kind) in graph.neighbours(&parent.id) {
@@ -1941,34 +1962,62 @@ impl RetrievalEngine {
                 let Some(entry) = visible.get(nid) else {
                     continue;
                 };
-                let decayed = parent.score * decay;
-                let mut breakdown = match tail.get(nid) {
-                    Some(b) => b.clone(),
-                    None => {
-                        // Not scored by this query (it failed filter mode's
-                        // relevance test, or the rank threshold dropped it):
-                        // its own query-independent components, so the
-                        // breakdown still explains the memory.
-                        let target = ScoreTarget {
-                            created_at: entry.created_at,
-                            decay: &entry.decay,
-                            criticality: entry.criticality,
-                            physical: &entry.physical,
-                            logical: &entry.logical,
-                            provenance_source: entry.provenance_source,
-                            status: entry.status,
-                            epistemic: entry.epistemic,
-                            verified_at: entry.verified_at,
-                        };
-                        let ctx = ScoringContext::scope_only(None, &[]);
-                        composite_score_target(target, &ctx, &self.config, now)
-                    }
+                let scored_by_query = tail.contains_key(nid);
+                let own = own_cache
+                    .entry(nid)
+                    .or_insert_with(|| match tail.get(nid) {
+                        Some(b) => b.clone(),
+                        None => {
+                            // Not scored by this query (it failed filter
+                            // mode's relevance test, or the rank threshold
+                            // dropped it): its own query-independent
+                            // components, with its own signals and the
+                            // query's situation, so the breakdown still
+                            // explains — and still flags — the memory.
+                            let target = ScoreTarget {
+                                created_at: entry.created_at,
+                                decay: &entry.decay,
+                                criticality: entry.criticality,
+                                physical: &entry.physical,
+                                logical: &entry.logical,
+                                provenance_source: entry.provenance_source,
+                                status: entry.status,
+                                epistemic: entry.epistemic,
+                                verified_at: entry.verified_at,
+                            };
+                            let ctx = ScoringContext::scope_only(None, &[])
+                                .with_situation(query.situation)
+                                .with_signals(signals.and_then(|m| m.get(nid)));
+                            composite_score_target(target, &ctx, &self.config, now)
+                        }
+                    })
+                    .clone();
+                let challenge = if entry.status == crate::types::Status::Challenged {
+                    self.config
+                        .retrieval
+                        .scoring
+                        .challenge_penalty
+                        .penalty_for(entry.epistemic)
+                } else {
+                    0.0
                 };
-                let own = tail.get(nid).map(|b| b.final_score).unwrap_or(0.0);
-                let score = decayed.max(own);
+                let decayed = parent.score * decay * own.situation_multiplier
+                    - challenge
+                    - own.contradicts_penalty.unwrap_or(0.0);
+                let decayed = if decayed.is_finite() {
+                    decayed.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let score = if scored_by_query {
+                    decayed.max(own.final_score)
+                } else {
+                    decayed
+                };
                 if best.get(nid).is_some_and(|b| b.score >= score) {
                     continue;
                 }
+                let mut breakdown = own;
                 breakdown.final_score = score;
                 breakdown.gate_score = None;
                 breakdown.below_threshold = false;
@@ -1994,7 +2043,8 @@ impl RetrievalEngine {
                 .then_with(|| a.id.cmp(&b.id))
         });
         out.truncate(n);
-        out
+        let new_in_total = out.iter().filter(|c| !tail.contains_key(&c.id)).count();
+        (out, new_in_total)
     }
 }
 
@@ -7191,5 +7241,141 @@ mod graph_signal_tests {
             .await
             .unwrap();
         assert!(find(&r, GC).is_some());
+    }
+
+    /// With every knob at its default, a query performs no phase-5 lookup:
+    /// no edges read, no usage read. The golden test cannot show this (a
+    /// zero knob scores bit-identically whether or not evidence was loaded),
+    /// so the read counters in `retrieval::signals` do.
+    #[tokio::test]
+    async fn default_config_reads_no_edges_or_usage() {
+        use crate::retrieval::signals::lookup_counts;
+        let (_tmp, store) = graph_fixture().await;
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default());
+        let before = lookup_counts();
+        for q in graph_fixture_queries() {
+            engine.query(&q).await.unwrap();
+        }
+        assert_eq!(
+            lookup_counts(),
+            before,
+            "default config must not look anything up"
+        );
+
+        // The counters do count: each knob reads only what it needs.
+        let edges = RetrievalEngine::new(
+            store.clone(),
+            knobs(|c| c.retrieval.scoring.contradicts_penalty = 0.1),
+        );
+        edges.query(&graph_fixture_queries()[1]).await.unwrap();
+        let after_edges = lookup_counts();
+        assert_eq!(after_edges.0, before.0 + 1);
+        assert_eq!(after_edges.1, before.1, "an edge knob reads no usage");
+        let usage = RetrievalEngine::new(store, knobs(|c| c.retrieval.scoring.usage_weight = 0.1));
+        usage.query(&graph_fixture_queries()[1]).await.unwrap();
+        let after_usage = lookup_counts();
+        assert_eq!(
+            after_usage.0, after_edges.0,
+            "the usage knob reads no edges"
+        );
+        assert_eq!(after_usage.1, after_edges.1 + 1);
+    }
+
+    /// The usage view is cached per store for the whole process, so the
+    /// fresh engine every front end builds per call still shares it.
+    #[tokio::test]
+    async fn usage_view_is_shared_across_engines_of_one_store() {
+        use crate::retrieval::signals::{invalidate_usage_cache, lookup_counts};
+        let (_tmp, store) = graph_fixture().await;
+        let config = knobs(|c| c.retrieval.scoring.usage_weight = 0.1);
+        let q = &graph_fixture_queries()[0];
+        let before = lookup_counts().1;
+        for _ in 0..3 {
+            RetrievalEngine::new(store.clone(), config.clone())
+                .query(q)
+                .await
+                .unwrap();
+        }
+        assert_eq!(lookup_counts().1, before + 1, "one read for three engines");
+        invalidate_usage_cache(Some(&store));
+        RetrievalEngine::new(store, config).query(q).await.unwrap();
+        assert_eq!(lookup_counts().1, before + 2);
+    }
+
+    /// An expanded neighbour keeps its own doubts: its challenge and
+    /// `contradicts` penalties come off its decayed score, and its breakdown
+    /// still names the contradiction. And `total` counts each distinct
+    /// memory once, even one expansion pulled back from the cut tail.
+    #[tokio::test]
+    async fn expanded_neighbour_pays_its_own_penalties() {
+        use crate::types::{Link, LinkKind, LinkOrigin, LinkStatus};
+        let (_tmp, store) = graph_fixture().await;
+        // G (live) now confirms a contradiction with D, and D is challenged.
+        store
+            .update_with(GG, |m| {
+                let mut l = Link::new(GD, LinkKind::Contradicts, LinkOrigin::Human);
+                l.status = LinkStatus::Confirmed;
+                m.links.push(l);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store
+            .update_with(GD, |m| {
+                m.status = crate::types::Status::Challenged;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let challenge = EngramConfig::default()
+            .retrieval
+            .scoring
+            .challenge_penalty
+            .penalty_for(store.get(GD).await.unwrap().epistemic);
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("rotation".to_string()),
+            max_results: Some(1),
+            expand_links: Some(5),
+            ..Default::default()
+        };
+
+        // Default knobs: the challenge penalty alone (it is always on).
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default());
+        let r = engine.query(&q).await.unwrap();
+        assert_eq!(r.memories[0].memory.id, GA);
+        let hit = r.memories[0].score;
+        let d = find(&r, GD).expect("D is reached through A");
+        assert!(d.score_breakdown.contradicted_by.is_empty(), "knob off");
+        let want = (hit * 0.5 - challenge).max(0.0);
+        assert!((d.score - want).abs() < 1e-12, "{} vs {want}", d.score);
+        // A (hit), C (a cut candidate, pulled back as a neighbour) and D:
+        // three distinct memories, counted once each.
+        let ids: std::collections::HashSet<&str> =
+            r.memories.iter().map(|sm| sm.memory.id.as_str()).collect();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        assert_eq!(r.total, 3);
+
+        // With the contradicts knob on, D also pays for G's contradiction,
+        // and its breakdown says so. (A pays for B's, so it can fall below C;
+        // keep both as hits.)
+        let engine = RetrievalEngine::new(
+            store,
+            knobs(|c| c.retrieval.scoring.contradicts_penalty = 0.1),
+        );
+        let r = engine
+            .query(&RetrievalQuery {
+                max_results: Some(2),
+                ..q
+            })
+            .await
+            .unwrap();
+        let hit = find(&r, GA).expect("A is a hit").score;
+        let d = find(&r, GD).expect("D is still reached through A");
+        assert_eq!(d.score_breakdown.via.as_ref().unwrap().from, GA);
+        assert_eq!(d.score_breakdown.contradicted_by, vec![GG.to_string()]);
+        assert_eq!(d.score_breakdown.contradicts_penalty, Some(0.1));
+        let want = (hit * 0.5 - challenge - 0.1).max(0.0);
+        assert!((d.score - want).abs() < 1e-12, "{} vs {want}", d.score);
     }
 }

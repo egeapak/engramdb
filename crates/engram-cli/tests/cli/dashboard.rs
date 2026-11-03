@@ -64,6 +64,9 @@ fn json_output_is_one_line_with_the_fragment_url() {
     assert!(!url.contains('?'), "never in the query string");
     assert_eq!(v["allow_writes"], false);
     assert!(v["address"].as_str().unwrap().starts_with("127.0.0.1:"));
+    assert_eq!(v["opened_browser"], false);
+    let bare = v["address_url"].as_str().unwrap();
+    assert!(bare.starts_with("http://127.0.0.1:") && !bare.contains("token"));
     assert!(
         v["current_project"].is_null(),
         "started outside any project"

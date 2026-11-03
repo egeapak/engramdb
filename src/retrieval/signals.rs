@@ -17,7 +17,10 @@
 //!   already loaded it, and otherwise loads edges for the top hits only.
 //! - **Usage**: [`load_current_usage`](crate::telemetry::usage::load_current_usage)
 //!   (the rollup table plus the undrained log) once per
-//!   [`USAGE_CACHE_TTL`] per engine. Usage moves slowly and is already
+//!   [`USAGE_CACHE_TTL`] per store **per process** — the cache is
+//!   process-wide, keyed by store, because front ends build a fresh engine
+//!   per call. A one-shot CLI command therefore always pays one cold read;
+//!   a long-lived MCP server or the daemon (hooks) pays it once per TTL. Usage moves slowly and is already
 //!   approximate (distinct-session counts are an upper bound), so a
 //!   half-minute-old view costs nothing that matters.
 //!
@@ -31,7 +34,7 @@
 //!   far end is live would need another store opened per query, and an
 //!   unknown end is not evidence (the same rule `links` applies to
 //!   `Unknown` vs `Dangling`). Only same-store edges count.
-//! - **The usage view can be [`USAGE_CACHE_TTL`] stale** within one engine.
+//! - **The usage view can be [`USAGE_CACHE_TTL`] stale** within one process.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -44,7 +47,7 @@ use crate::storage::edge_index::EdgeRow;
 use crate::storage::{IndexForFiltering, MemoryStore};
 use crate::types::{LinkKind, LinkStatus};
 
-/// How long one engine reuses a usage view.
+/// How long a process reuses one store's usage view.
 pub const USAGE_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Edge kinds link expansion follows, in either direction.
@@ -92,6 +95,7 @@ impl GraphSnapshot {
         with_liveness: bool,
         now: DateTime<Utc>,
     ) -> Self {
+        EDGE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let ids: Vec<String> = entries.iter().map(|e| e.id.clone()).collect();
         let edges = match store.edges_touching_any(&ids).await {
             Ok(rows) => rows
@@ -216,24 +220,67 @@ impl GraphSnapshot {
 /// Usage counts by full memory id.
 pub type UsageMap = HashMap<String, UsageSignal>;
 
-/// A per-engine cache of the store's usage view (module docs).
-#[derive(Default)]
-pub struct UsageCache {
-    slot: Mutex<Option<(Instant, Arc<UsageMap>)>>,
+type UsageSlots = HashMap<(String, std::path::PathBuf), (Instant, Arc<UsageMap>)>;
+
+/// The process-wide usage views, one per store (`project_id` + directory).
+/// Process-wide rather than per engine because every front end builds a new
+/// `RetrievalEngine` per call (each CLI command, each MCP tool call, each
+/// hook), so a per-engine cache would be cold on every query and the TTL
+/// would promise nothing. The daemon and a long-lived MCP server are where
+/// it pays; a one-shot CLI process reads once, as it must.
+static USAGE_VIEWS: std::sync::OnceLock<Mutex<UsageSlots>> = std::sync::OnceLock::new();
+
+/// Read counters, so a test can prove that a default config performs no
+/// phase-5 lookup at all (`graph_signal_tests::default_config_reads_no_edges_or_usage`).
+/// Per process — nextest runs every test in its own.
+static EDGE_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static USAGE_READS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `(edge snapshot loads, usage reads)` performed by this process so far.
+pub fn lookup_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (EDGE_READS.load(Relaxed), USAGE_READS.load(Relaxed))
 }
+
+/// Forget the cached usage view of `store` (or of every store with `None`),
+/// so the next query reads it fresh. For benchmarks measuring a cold query
+/// and for tests that write usage and then query within the TTL.
+pub fn invalidate_usage_cache(store: Option<&MemoryStore>) {
+    let Some(views) = USAGE_VIEWS.get() else {
+        return;
+    };
+    let mut views = views.lock().unwrap_or_else(|e| e.into_inner());
+    match store {
+        Some(s) => {
+            views.remove(&(s.project_id.clone(), s.project_dir.clone()));
+        }
+        None => views.clear(),
+    }
+}
+
+/// Handle on the process-wide cache of store usage views (module docs).
+/// Zero-sized: every engine shares the same views.
+#[derive(Default)]
+pub struct UsageCache;
 
 impl UsageCache {
     /// The store's usage, from the cache when fresh. A failed read is cached
     /// as empty for the TTL too, so a broken log costs one read per TTL rather
     /// than one per query.
     pub async fn get(&self, store: &MemoryStore) -> Arc<HashMap<String, UsageSignal>> {
-        if let Some((at, view)) = self.slot.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        let key = (store.project_id.clone(), store.project_dir.clone());
+        let views = USAGE_VIEWS.get_or_init(Default::default);
+        if let Some((at, view)) = views.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             if at.elapsed() < USAGE_CACHE_TTL {
                 return view.clone();
             }
         }
         let view = Arc::new(load_usage_signals(store).await);
-        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), view.clone()));
+        let mut views = views.lock().unwrap_or_else(|e| e.into_inner());
+        // Bounded by the stores this process queries; drop stale ones so a
+        // long-lived daemon serving many projects does not keep them all.
+        views.retain(|_, (at, _)| at.elapsed() < USAGE_CACHE_TTL);
+        views.insert(key, (Instant::now(), view.clone()));
         view
     }
 }
@@ -241,6 +288,7 @@ impl UsageCache {
 /// Every memory's usage counts in `store`, through the side-effect-free read
 /// API. Empty on any failure (module docs).
 async fn load_usage_signals(store: &MemoryStore) -> HashMap<String, UsageSignal> {
+    USAGE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match crate::telemetry::usage::load_current_usage(&store.project_dir, &store.project_id).await {
         Ok(view) => view
             .by_memory
@@ -252,6 +300,7 @@ async fn load_usage_signals(store: &MemoryStore) -> HashMap<String, UsageSignal>
                         fetched: u.counts.fetched,
                         injected: u.counts.injected,
                         injected_sessions: u.counts.injected_sessions,
+                        returned: u.counts.returned,
                     },
                 )
             })

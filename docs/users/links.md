@@ -148,6 +148,19 @@ not evidence).
 | `[retrieval.scoring] usage_weight` | `0.0` (max `0.2`) | Usage boost; see [configuration](./configuration.md#links-and-usage-in-scoring). Not a link setting, listed here because it rides the same path. |
 | `[retrieval] expand_links` | `0` (max `20`) | Default for `query --expand-links`: add up to N one-hop neighbours of the top results. |
 
+**Turning `contradicts_penalty` on can hide both sides of a contradiction
+from the hooks.** The penalty also counts against the relevance test a
+scope-only match uses to clear the rank threshold, so a file-scoped memory
+whose own relevance (criticality × freshness) is less than the threshold
+plus the penalty no longer clears it — and both ends of the contradiction
+pay. The SessionStart and PreToolUse hooks return no weak fallback matches,
+so they then inject *neither* memory, on exactly the file the dispute is
+about. This is the knob doing what it says (a disputed memory ranks lower
+everywhere), not an exemption the hooks get; if you would rather see the
+conflict, resolve it (`--winner`, or reject the link) instead of raising the
+penalty, or keep the penalty below the gap between your memories'
+criticality and `[retrieval] relevance_threshold`.
+
 A contradiction you resolve with `--winner` is no longer a `contradicts`
 link: it becomes `<winner> supersedes <loser>`, the loser is invalidated and
 so hidden from queries by default, and only the loser is affected. A
@@ -157,9 +170,13 @@ penalizing at once.
 ### Following links from results
 
 ```bash
-engramdb query "deploy freeze" --mode filter --expand-links 3
+engramdb query "deploy freeze" --mode filter --expand-links=3
 engramdb query "deploy freeze" --mode filter --expand-links      # bare flag: 5
+engramdb query --mode filter --expand-links "deploy freeze"      # still the query, N = 5
 ```
+
+The value needs the `=` (`--expand-links=3`): a word after the bare flag is
+always your query, never N.
 
 MCP: `query` with `"expand_links": 3`. From each direct result (not from a
 weak fallback match), confirmed `supports`, `derived_from` and `related_to`
@@ -169,8 +186,21 @@ again) or `supersedes` (one end is invalidated).
 
 An added result is marked with the hit and link it came through (`via
 <id> (supports)` in text output, `"via": {"from", "kind"}` in JSON) and is
-scored at the hit's score × `[retrieval] expand_links_decay` (0.5), or its
-own score when that is higher. It is added on top of `--max-results`.
+scored at the hit's score × `[retrieval] expand_links_decay` (0.5) × its own
+situation weight, **minus its own challenge and `contradicts` penalties** —
+a disputed memory does not ride in at full strength on a healthy hit — or at
+its own score when the query scored it and that is higher. Its score
+breakdown is its own, so a contradicted neighbour still shows
+`contradicts … from <id>`. It never ranks above the hit it came from. Up to
+N are added **per query** (not per store, when groups or the global store
+fan in), on top of `--max-results`. When results from stores embedded with
+different models are re-ranked together (cross-store equalization), only
+the direct results are re-ranked and cut to `--max-results`; the neighbours
+of the survivors are then put back, each capped at its hit's new score.
+
+A result reached only through a link is not counted as *returned* in usage
+statistics: it did not survive ranking, so it cannot re-confirm (and
+promote) a task-bound memory.
 
 **Expansion never shows you a memory the query would not have been allowed to
 return.** A neighbour must pass every filter the query applies — type, tags,

@@ -122,6 +122,52 @@ pub fn truncate_keeping_expansions(memories: &mut Vec<ScoredMemory>, max: usize)
     memories.retain(|_| flags.next().unwrap_or(false));
 }
 
+/// Keep at most `n` link-expanded results (the first, i.e. best-ranked, `n`
+/// in list order); direct results are untouched. The fan-in merges several
+/// stores, each of which expanded up to `n` on its own.
+pub fn cap_expansions(memories: &mut Vec<ScoredMemory>, n: usize) {
+    let mut seen = 0usize;
+    memories.retain(|sm| {
+        if sm.score_breakdown.via.is_none() {
+            return true;
+        }
+        seen += 1;
+        seen <= n
+    });
+}
+
+/// Put link-expanded results back after a cross-store rerank of the direct
+/// hits. A neighbour whose hit was cut goes; one whose hit survived keeps its
+/// own score, capped at the hit's new (blended) score so it still ranks at or
+/// below the result it came from. Re-sorted stably by score, so a neighbour
+/// tied with its hit stays after it.
+fn reattach_expansions(memories: &mut Vec<ScoredMemory>, expansions: Vec<ScoredMemory>) {
+    let hits: std::collections::HashMap<String, f64> = memories
+        .iter()
+        .map(|sm| (sm.memory.id.clone(), sm.score))
+        .collect();
+    for mut sm in expansions {
+        let Some(parent) = sm
+            .score_breakdown
+            .via
+            .as_ref()
+            .and_then(|v| hits.get(&v.from))
+        else {
+            continue;
+        };
+        if sm.score > *parent {
+            sm.score = *parent;
+            sm.score_breakdown.final_score = *parent;
+        }
+        memories.push(sm);
+    }
+    memories.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// Drop link-expanded results whose hit is not in `memories` — after an
 /// audience filter removed the hit, the neighbour's `via.from` would reveal
 /// a memory hidden from the viewer.
@@ -442,29 +488,46 @@ where
             .map(str::trim)
             .filter(|q| !q.is_empty())
         {
+            // Link-expanded neighbours stay out of the cross-encoder pass and
+            // its cut to `max`: they are added on top of `max`, and a
+            // neighbour must never take a direct slot or outrank its hit.
+            let original = result.memories.clone();
+            let (direct, expansions): (Vec<ScoredMemory>, Vec<ScoredMemory>) =
+                std::mem::take(&mut result.memories)
+                    .into_iter()
+                    .partition(|sm| sm.score_breakdown.via.is_none());
+            result.memories = direct;
             match engine.rerank_merged(q, &mut result.memories, max).await {
                 Ok(true) => {
                     equalized = true;
                     result.retrieval_quality = format!("{}+equalized", result.retrieval_quality);
+                    reattach_expansions(&mut result.memories, expansions);
                 }
-                Ok(false) => {}
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "cross-store rerank equalization failed; keeping per-store scores"
-                ),
+                Ok(false) => result.memories = original,
+                Err(e) => {
+                    result.memories = original;
+                    tracing::warn!(
+                        error = %e,
+                        "cross-store rerank equalization failed; keeping per-store scores"
+                    )
+                }
             }
         }
     }
     // Extras always over-fetch to `extra_pool`, so the merged result can exceed
-    // `max`. When equalization ran, `rerank_merged` already truncated; otherwise
-    // trim back to the caller's `max` here.
+    // `max`. When equalization ran, `rerank_merged` already cut the direct
+    // hits to `max` (and the neighbours were re-attached to the survivors);
+    // otherwise trim back to the caller's `max` here.
     if !equalized {
         truncate_keeping_expansions(&mut result.memories, max);
-    } else {
-        // `rerank_merged` cut to `max` by blended score, hits and neighbours
-        // alike; a neighbour must not outlive its hit.
-        drop_orphaned_expansions(&mut result.memories);
     }
+    // Every store's engine added up to `expand_links` neighbours of its own;
+    // the caller asked for up to N in the answer, not N per store.
+    let n = query
+        .expand_links
+        .unwrap_or(engine.config().retrieval.expand_links)
+        .min(crate::types::MAX_EXPAND_LINKS);
+    cap_expansions(&mut result.memories, n);
     let kept: HashSet<&str> = result
         .memories
         .iter()
@@ -864,6 +927,44 @@ mod tests {
         truncate_keeping_expansions(&mut v, 2);
         let ids: Vec<&str> = v.iter().map(|m| m.memory.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn expansions_are_capped_per_query_not_per_store() {
+        // Two stores each expanded two neighbours; the caller asked for 2.
+        let mut v = vec![
+            scored("a", 0.9),
+            via("na1", "a", 0.45),
+            scored("b", 0.8),
+            via("na2", "a", 0.42),
+            via("nb1", "b", 0.40),
+            via("nb2", "b", 0.30),
+        ];
+        cap_expansions(&mut v, 2);
+        let ids: Vec<&str> = v.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "na1", "b", "na2"]);
+        cap_expansions(&mut v, 0);
+        let ids: Vec<&str> = v.iter().map(|m| m.memory.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    /// After a cross-store rerank of the direct hits, neighbours come back
+    /// only for surviving hits, never above their hit.
+    #[test]
+    fn reattached_expansions_stay_below_their_reranked_hit() {
+        // Reranked and cut to max = 2: b now leads, a dropped to 0.3, c cut.
+        let mut v = vec![scored("b", 0.7), scored("a", 0.3)];
+        reattach_expansions(
+            &mut v,
+            vec![
+                via("na", "a", 0.45),
+                via("nb", "b", 0.4),
+                via("nc", "c", 0.35),
+            ],
+        );
+        let got: Vec<(&str, f64)> = v.iter().map(|m| (m.memory.id.as_str(), m.score)).collect();
+        assert_eq!(got, vec![("b", 0.7), ("nb", 0.4), ("a", 0.3), ("na", 0.3)]);
+        assert_eq!(v[3].score_breakdown.final_score, 0.3);
     }
 
     #[test]

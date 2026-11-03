@@ -856,9 +856,17 @@ pub enum Command {
 
         /// Add up to N one-hop neighbours of the top results, over confirmed
         /// `supports`, `derived_from` and `related_to` edges (bare flag: 5;
-        /// 0 = off; max 20). Defaults to `[retrieval].expand_links` (0).
-        /// Added results are marked with the hit and edge they came through.
-        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "5")]
+        /// `--expand-links=N` for another N — the `=` is required, so a query
+        /// after the flag stays the query; 0 = off; max 20). Defaults to
+        /// `[retrieval].expand_links` (0). Added results are marked with the
+        /// hit and edge they came through.
+        #[arg(
+            long,
+            value_name = "N",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "5"
+        )]
         expand_links: Option<usize>,
 
         /// Also merge global (cross-project) memories into the results.
@@ -1368,7 +1376,9 @@ pub enum Command {
         #[arg(long, default_value = "127.0.0.1")]
         bind: std::net::IpAddr,
 
-        /// Print the URL but do not open a browser
+        /// Print the sign-in URL (with its token) instead of opening a browser.
+        /// Without it the terminal shows only the bare address, unless the
+        /// browser cannot be launched
         #[arg(long)]
         no_open: bool,
 
@@ -1654,10 +1664,10 @@ mod tests {
             _ => panic!("expected Query"),
         }
 
-        // query --expand-links: bare flag = 5, a value, absent = None.
+        // query --expand-links: bare flag = 5, `=N`, absent = None.
         for (args, want) in [
             (&["--expand-links"][..], Some(5)),
-            (&["--expand-links", "2"][..], Some(2)),
+            (&["--expand-links=2"][..], Some(2)),
             (&[][..], None),
         ] {
             let mut argv = vec!["engramdb", "query", "--mode", "filter", "x"];
@@ -1665,6 +1675,30 @@ mod tests {
             let cli = Cli::try_parse_from(argv).expect("--expand-links must parse");
             match cli.command {
                 Command::Query { expand_links, .. } => assert_eq!(expand_links, want, "{args:?}"),
+                _ => panic!("expected Query"),
+            }
+        }
+        // A query after the bare flag stays the query (`require_equals`):
+        // without it, clap took "10" as N and "deploy freeze" as a bad N.
+        for text in ["deploy freeze", "10"] {
+            let cli = Cli::try_parse_from([
+                "engramdb",
+                "query",
+                "--mode",
+                "filter",
+                "--expand-links",
+                text,
+            ])
+            .expect("positional query after --expand-links must parse");
+            match cli.command {
+                Command::Query {
+                    expand_links,
+                    query_pos,
+                    ..
+                } => {
+                    assert_eq!(expand_links, Some(5), "{text}");
+                    assert_eq!(query_pos.as_deref(), Some(text));
+                }
                 _ => panic!("expected Query"),
             }
         }

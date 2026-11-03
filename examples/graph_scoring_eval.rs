@@ -391,11 +391,18 @@ async fn latency() {
 
     println!("## Latency ({n} memories, ~300 confirmed + ~100 proposed edges, {reps} reps)\n");
     println!(
-        "{:<30} {:<26} {:>9} {:>9} {:>9}",
-        "query", "config", "p50 ms", "p90 ms", "Δp50 ms"
+        "Warm: one engine, usage view cached (a long-lived MCP server or the daemon).\n\
+         Cold: a fresh engine and an emptied usage cache per query (what a one-shot\n\
+         CLI command or the first query after the 30 s TTL pays).\n"
     );
+    println!(
+        "{:<30} {:<26} {:>9} {:>9} {:>9} {:>11} {:>11}",
+        "query", "config", "p50 ms", "p90 ms", "Δp50 ms", "cold p50", "Δcold p50"
+    );
+    let cold_reps = (reps / 4).max(5);
     for (shape, q) in &shapes {
         let mut base_p50 = None;
+        let mut base_cold = None;
         for (name, cfg, expand) in &configs {
             let engine = RetrievalEngine::new(store.clone(), cfg.clone());
             let mut q = q.clone();
@@ -409,27 +416,46 @@ async fn latency() {
                 engine.query(&q).await.unwrap();
                 ms.push(t.elapsed().as_secs_f64() * 1000.0);
             }
+            let mut cold = Vec::with_capacity(cold_reps);
+            for _ in 0..cold_reps {
+                engramdb::retrieval::signals::invalidate_usage_cache(None);
+                let t = Instant::now();
+                let engine = RetrievalEngine::new(store.clone(), cfg.clone());
+                engine.query(&q).await.unwrap();
+                cold.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
             let p50 = pct(ms.clone(), 0.5);
+            let cold_p50 = pct(cold, 0.5);
             let base = *base_p50.get_or_insert(p50);
+            let base_c = *base_cold.get_or_insert(cold_p50);
             println!(
-                "{:<30} {:<26} {:>9.2} {:>9.2} {:>+9.2}",
+                "{:<30} {:<26} {:>9.2} {:>9.2} {:>+9.2} {:>11.2} {:>+11.2}",
                 shape,
                 name,
                 p50,
                 pct(ms, 0.9),
-                p50 - base
+                p50 - base,
+                cold_p50,
+                cold_p50 - base_c
             );
         }
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Keep the global data dir (LanceDB, usage tables) out of the real one.
+    // Set before the runtime exists: `set_var` is only sound while no other
+    // thread can read the environment.
     let data = tempfile::TempDir::new().unwrap();
     let config = tempfile::TempDir::new().unwrap();
     std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
     std::env::set_var("ENGRAMDB_CONFIG_DIR", config.path());
-    quality().await;
-    latency().await;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            quality().await;
+            latency().await;
+        });
 }

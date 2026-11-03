@@ -60,12 +60,14 @@
 //!   `1 + boost * min(n, 3)` for `n` live confirmed incoming `supports` edges.
 //! - **Usage** (`retrieval.scoring.usage_weight` = α, default 0, ≤ 0.2):
 //!   `1 + α * min(3, ρ * ln(1 + fetched + 0.3 * injected_sessions))`, with the
-//!   exposure ratio `ρ = min(1, (fetched + 1) / (injected + 1))` so a memory
+//!   exposure ratio `ρ = min(1, (fetched + 1) / (injected + returned + 1))` so a memory
 //!   that is injected but never opened cannot reward itself (see
 //!   [`usage_term`]).
 //! - **Expansion** (`expand_links`) is not a scoring term: an expanded
-//!   neighbour's score is its hit's score times `expand_links_decay`, and its
-//!   breakdown carries [`LinkVia`].
+//!   neighbour's score is its hit's score × `expand_links_decay` × its own
+//!   situation multiplier, minus its own challenge and `contradicts`
+//!   penalties (or its own query score when higher), and its breakdown — its
+//!   own, so a contradiction stays visible — carries [`LinkVia`].
 //! - Decay strategies include None, Linear, Exponential, and Step functions.
 //! - Final score is clamped to [0.0, 1.0].
 mod composite;

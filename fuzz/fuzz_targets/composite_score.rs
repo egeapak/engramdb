@@ -41,8 +41,8 @@ struct ScoreInput {
     /// Graph evidence: (contradicting count, supporter count); `None` = no
     /// signals attached (the default-config path).
     graph_counts: Option<(u8, u8)>,
-    /// Usage counts: (fetched, injected, injected_sessions).
-    usage: Option<(u64, u64, u64)>,
+    /// Usage counts: (fetched, injected, injected_sessions, returned).
+    usage: Option<(u64, u64, u64, u64)>,
 }
 
 // `composite_score` is the heart of ranking: it folds criticality, decay,
@@ -52,10 +52,9 @@ struct ScoreInput {
 // `criticality`, which is parsed with a plain `f64::parse` (so a file can
 // carry `NaN`/`inf`), plus the scope vectors, timestamps, the epistemic class
 // and `verified_at` (the fact freshness anchor). Per-class challenge-penalty
-// config values are fuzzed too (the fuzzer ignores config validation). A
-// The phase-5 graph/usage terms (contradicts penalty, supports and usage
-// boosts) and their knobs are fuzzed the same way. A
-// non-finite `final_score` is dangerous: ranking sorts with
+// config values are fuzzed too (the fuzzer ignores config validation), and
+// so are the phase-5 graph/usage terms (contradicts penalty, supports and
+// usage boosts) and their knobs. A non-finite `final_score` is dangerous: ranking sorts with
 // `partial_cmp(..).unwrap()`, which panics on NaN. This target asserts the
 // score is always finite no matter how hostile the memory is.
 fuzz_target!(|input: ScoreInput| {
@@ -139,11 +138,14 @@ fuzz_target!(|input: ScoreInput| {
     let signals = graph_counts.map(|(contra, sup)| ScoreSignals {
         contradicted_by: (0..contra).map(|i| i.to_string()).collect(),
         supported_by: (0..sup).map(|i| i.to_string()).collect(),
-        usage: usage.map(|(fetched, injected, injected_sessions)| UsageSignal {
-            fetched,
-            injected,
-            injected_sessions,
-        }),
+        usage: usage.map(
+            |(fetched, injected, injected_sessions, returned)| UsageSignal {
+                fetched,
+                injected,
+                injected_sessions,
+                returned,
+            },
+        ),
     });
     let context = context.with_signals(signals.as_ref());
 

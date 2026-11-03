@@ -282,10 +282,14 @@ fn html_attr_escape(s: &str) -> String {
 }
 
 /// Try to open `url` in the user's browser, silently, through a
-/// [`LaunchPage`]; returns it so the caller can keep it until exit. A failure
-/// (no display, no opener installed, a headless box over SSH) is not an
-/// error: the URL has been printed. The opener is detached with its output
-/// discarded, so a chatty `xdg-open` cannot scribble over the terminal.
+/// [`LaunchPage`]; returns it so the caller can keep it until exit, or `None`
+/// when the launch file could not be written or the opener could not be
+/// started (no opener installed, an unsupported platform). On `None` the
+/// caller prints the sign-in URL instead — the one case it reaches the
+/// terminal without `--no-open`. "Started" is all this can know: the opener
+/// is detached with its output discarded (so a chatty `xdg-open` cannot
+/// scribble over the terminal), and an opener that starts but finds no
+/// display fails after this returns — the user then re-runs with `--no-open`.
 pub fn open_browser(url: &str) -> Option<LaunchPage> {
     let page = match LaunchPage::write(url) {
         Ok(p) => p,
@@ -317,15 +321,22 @@ pub fn open_browser(url: &str) -> Option<LaunchPage> {
     #[cfg(any(unix, target_os = "windows"))]
     {
         use std::process::Stdio;
-        let _ = cmd
+        if let Err(e) = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn();
+            .spawn()
+        {
+            tracing::debug!("cannot launch a browser: {e}");
+            return None;
+        }
+        Some(page)
     }
     #[cfg(not(any(unix, target_os = "windows")))]
-    let _ = target;
-    Some(page)
+    {
+        let _ = (target, page);
+        None
+    }
 }
 
 // Test isolation: see `engram-test-support`. The API tests open real stores

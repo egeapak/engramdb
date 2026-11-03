@@ -11,12 +11,17 @@ confirm or reject *proposed* edges between memories (see
 ```bash
 cd ~/code/my-project
 engramdb dashboard
-# EngramDB dashboard: http://127.0.0.1:7341/#token=3f9c…
+# EngramDB dashboard at http://127.0.0.1:7341/ — opened in your browser
 # Current project: /home/me/code/my-project (a1b2c3d4e5f60718)
 # Read-only view. Press Ctrl-C to stop.
 ```
 
-Your browser opens the printed URL (pass `--no-open` to skip that). The
+Your browser opens the dashboard, signed in; the terminal shows only the
+bare address, which has no token and does not sign you in. To get the
+sign-in URL, pass `--no-open`: nothing is launched and the terminal prints
+it instead (`EngramDB dashboard: http://127.0.0.1:7341/#token=3f9c…`). If
+the browser cannot be launched at all, the sign-in URL is printed as a
+fallback, so you are never left without a way in. The
 project of the directory you started in is selected; switch with the menu in
 the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local-web-dashboard).
 
@@ -168,12 +173,13 @@ The dashboard is a web server on your machine, so it is locked down:
   no cookie: cookies are shared by every program listening on your
   machine's `127.0.0.1`, whatever its port. The page's own files (its HTML,
   CSS and scripts) are served without the token, since they hold nothing
-  of yours. To open the dashboard in another browser or tab, use the
-  printed URL again.
+  of yours. To open the dashboard in another browser or tab, start it
+  with `--no-open` and use the printed sign-in URL.
 - The browser is opened through a private file only you can read, so the
-  token never appears in a process list. It is printed in your terminal so
-  `--no-open` works; another user on the machine can reach the port but
-  cannot see your terminal.
+  token never appears in a process list. The token reaches your terminal
+  only with `--no-open` (or when no browser could be launched, as a
+  fallback); otherwise the terminal shows the address without it, so it
+  does not end up in terminal scrollback, logs or screen recordings.
 - It only answers requests addressed to `localhost`, `127.0.0.1` or `[::1]`
   (or the `--bind` address) on its own port. That stops *DNS rebinding*,
   where a web page you visit points its own domain at your machine.

@@ -209,7 +209,7 @@ pub struct ScoringConfig {
 
     /// Weight of the usage boost (default 0.0 = off):
     /// `1 + usage_weight * min(3, ρ * ln(1 + fetched + 0.3 * injected_sessions))`
-    /// with the exposure ratio `ρ = min(1, (fetched + 1) / (injected + 1))`,
+    /// with the exposure ratio `ρ = min(1, (fetched + 1) / (injected + returned + 1))`,
     /// so a memory that is only ever injected — and is injected *because*
     /// it already ranks well — cannot reward itself (see
     /// `scoring::usage_multiplier`). At most 0.2.

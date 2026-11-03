@@ -300,20 +300,36 @@ score = base × scope × trust × situation × supports_multiplier × usage_mult
 
 ```text
 usage_multiplier = 1 + α × min(3, ρ × ln(1 + fetched + 0.3 × injected_sessions))
-ρ                = min(1, (fetched + 1) / (injected + 1))
+ρ                = min(1, (fetched + 1) / (injected + returned + 1))
 ```
 
 `fetched` counts explicit opens by id (`get`), `injected` the times a hook put
 the memory into an agent's context, `injected_sessions` the distinct sessions
-it was injected into. The exposure ratio ρ is what stops a feedback loop: a
-memory is injected *because* it already ranks well, so counting injections on
-their own would let it reward itself. A memory that is injected but never
-opened keeps ρ = 1/(injected + 1), and its term stays below about 0.17 however
-often it is injected; one that agents open as often as they see it keeps
-ρ = 1. Usage is read from the store's usage tables and log (see
-`engramdb stats --memory`), at most every 30 seconds per process; a failed read
-means no boost, never a failed query. Usage is recorded only when
-`[stats].enabled` is on.
+it was injected into, `returned` the times a `query` answer carried it (direct
+results only; a result reached through `--expand-links` is not counted). The
+exposure ratio ρ is what stops a feedback loop: a memory is shown *because* it
+already ranks well, so counting exposure as reward would let it reward itself
+— and an agent that opens whatever `query` hands back would otherwise keep
+ρ = 1 for exactly the memories ranking already favours. A memory that is shown
+but never opened keeps ρ = 1/(injected + returned + 1), and its term stays
+below about 0.17 however often it is shown; one that agents open as often as
+they are shown it keeps ρ = 1. Usage is read from the store's usage tables and
+log (see `engramdb stats --memory`), at most once every 30 seconds per store
+per process — a long-running MCP server or the daemon (which runs the hooks)
+reads it once per 30 seconds, while each one-shot CLI command pays one read;
+a failed read means no boost, never a failed query. Usage is recorded only
+when `[stats].enabled` is on.
+
+**`contradicts_penalty` and the hooks.** The penalty counts against the
+relevance test a file-scoped memory uses to clear the rank threshold, so with
+it on, a memory whose criticality × freshness is below `relevance_threshold +
+contradicts_penalty` stops clearing it — and both ends of a contradiction pay.
+The SessionStart and PreToolUse hooks then inject *neither* memory, on the
+very file the conflict is about. That is a consequence of turning the knob
+on, not something the hooks are exempted from; resolve the contradiction
+(`engramdb link <a> contradicts <b> --winner <id>`, or reject it) rather than
+leaving a confirmed one standing, or keep the penalty small. See
+[links](./links.md#links-in-retrieval-opt-in).
 
 With any of these on, `query --show-scores` lists what moved each score
 (`contradicts -0.10 from <id>`, `supports x1.05 from <id>`, `usage x1.12`),
@@ -322,11 +338,20 @@ and the JSON breakdown (CLI `--show-scores`, MCP `score_breakdown`) carries
 `supported_by` and `usage_multiplier`, present only when they changed the
 score.
 
-Cost: each edge knob adds one `edges` query per query (plus one index lookup
-for linked memories outside the candidate set), usage one read cached for 30
-seconds, and expansion one `edges` query when the scoring knobs did not
-already load it. Measured with `examples/graph_scoring_eval.rs` (`--profile
-eval`, 1,000 memories, ~400 edges, no embedding model, p50): the no-query rank
-shape the hooks use goes from 11.0 ms to 13.9 ms with the edge knobs, 12.0 ms
-with usage, 15.3 ms with everything plus `expand_links 5`; keyword queries
-(~30 ms) gain 1–4 ms. With every knob off nothing is looked up.
+Cost: each edge knob adds one `edges` query per query, over the whole
+candidate set after the hard filters (an `IN` list up to 500 memories, one
+scan of the edges table above that — hooks included, since only expansion is
+off for them), plus one index lookup for linked memories outside the
+candidate set; usage one read per store per process, cached for 30 seconds;
+and expansion one `edges` query when the scoring knobs did not already load
+it. Measured with `examples/graph_scoring_eval.rs` (`--profile eval`, 1,000
+memories, ~400 edges, no embedding model, p50, on a shared and noisy
+machine — read the deltas as ±3 ms): the no-query rank shape the hooks use
+goes from 11.6 ms to 15.6 ms with the edge knobs, 13.9 ms with usage, and
+16.4 ms with everything plus `expand_links 5`; keyword queries (~30 ms) gain
+2–9 ms. A *cold* query — a fresh engine and no cached usage view, which is
+what each one-shot CLI command pays — goes from 13.2 ms to 17.5 ms with
+usage and 19.6 ms with everything on. When a reranker is on, it blends over
+the composite score, so a penalty shown in the breakdown is scaled by
+`1 − [rerank].weight` in the final score, exactly like the challenge
+penalty. With every knob off nothing is looked up.

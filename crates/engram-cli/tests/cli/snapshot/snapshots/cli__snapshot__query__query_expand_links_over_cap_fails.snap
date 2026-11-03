@@ -1,8 +1,8 @@
 ---
 source: crates/engram-cli/tests/cli/snapshot/query.rs
-expression: "f.run(&[\"query\", \"--mode\", \"filter\", \"--query\", \"rust\", \"--expand-links\",\n\"21\"])"
+expression: "f.run(&[\"query\", \"--mode\", \"filter\", \"--query\", \"rust\", \"--expand-links=21\"])"
 ---
-$ engramdb --no-maintenance --dir [PROJECT] query --mode filter --query rust --expand-links 21
+$ engramdb --no-maintenance --dir [PROJECT] query --mode filter --query rust --expand-links=21
 exit: 1
 --- stdout ---
 --- stderr ---

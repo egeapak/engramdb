@@ -141,6 +141,12 @@ pub async fn record_fetched(
 
 /// Record `returned` for every memory in a query answer, in its owner's log.
 ///
+/// A result reached through `expand_links` (`score_breakdown.via` set) is
+/// **not** recorded: `returned` means "survived ranking", and a linked
+/// neighbour did not — counting it would let a memory be re-confirmed (and
+/// promoted, see `ops::task::promote_reconfirmed_memories`) in sessions
+/// whose queries never matched it. Ranks count direct hits only.
+///
 /// `owners` maps the ids that came from a fanned-in group or global store
 /// ([`crate::ops::ExtraStoresResult::owners`]); every other id belongs to
 /// `engine`'s own store. Gated on `engine`'s config — the querying project's
@@ -162,7 +168,11 @@ pub fn record_returned(
         RetrievalMode::Filter => "filter",
     };
     let mut by_owner: Vec<(StoreRef, Vec<MemoryEvent>)> = Vec::new();
-    for (i, sm) in result.memories.iter().enumerate() {
+    let direct = result
+        .memories
+        .iter()
+        .filter(|sm| sm.score_breakdown.via.is_none());
+    for (i, sm) in direct.enumerate() {
         let owner = owners.get(&sm.memory.id).unwrap_or(&primary);
         let event = MemoryEvent::new(&sm.memory.id, &owner.id, UsageKind::Returned, surface)
             .with_session(session_id)

@@ -196,7 +196,7 @@ struct QueryInput {
     include_global: Option<bool>,
 
     #[schemars(
-        description = "Add up to N one-hop neighbours of the top results, reached over confirmed supports / derived_from / related_to edges (0 = off, max 20; default from [retrieval].expand_links, normally 0). Each added result carries `via` {from, kind}; it is scored at its hit's score times expand_links_decay and passes every filter a direct result would."
+        description = "Add up to N one-hop neighbours of the top results, reached over confirmed supports / derived_from / related_to edges (0 = off, max 20; default from [retrieval].expand_links, normally 0). Each added result carries `via` {from, kind}; it is scored at its hit's score times expand_links_decay minus its own challenge/contradicts penalties (never above its hit), passes every filter a direct result would, and N is per query across every fanned-in store."
     )]
     expand_links: Option<u32>,
 

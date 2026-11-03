@@ -171,7 +171,7 @@ _arguments "${_arguments_options[@]}" : \
 '--detail-level=[Detail level\: summary, content, full]:DETAIL_LEVEL:_default' \
 '*--epistemic=[Filter by epistemic class\: fact, observation, decision (repeatable)]:EPISTEMIC:_default' \
 '--situation=[Your situation, to reweight classes\: session_start, file_edit, debugging, design_choice]:SITUATION:_default' \
-'--expand-links=[Add up to N one-hop neighbours of the top results, over confirmed \`supports\`, \`derived_from\` and \`related_to\` edges (bare flag\: 5; 0 = off; max 20). Defaults to \`\[retrieval\].expand_links\` (0). Added results are marked with the hit and edge they came through]::N:_default' \
+'--expand-links=[Add up to N one-hop neighbours of the top results, over confirmed \`supports\`, \`derived_from\` and \`related_to\` edges (bare flag\: 5; \`--expand-links=N\` for another N — the \`=\` is required, so a query after the flag stays the query; 0 = off; max 20). Defaults to \`\[retrieval\].expand_links\` (0). Added results are marked with the hit and edge they came through]::N:_default' \
 '(--global)--group=[Query a named group store directly (instead of the current project). Subscribed groups already fan into a normal project query; use this to inspect one group'\''s memories in isolation]:GROUP:_default' \
 '(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
 json\:"JSON output for programmatic parsing"
@@ -1725,7 +1725,7 @@ json\:"JSON output for programmatic parsing"
 plain\:"Plain text output without colors"))' \
 '--dir=[Working directory (default\: current directory)]:DIR:_files' \
 '--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
-'--no-open[Print the URL but do not open a browser]' \
+'--no-open[Print the sign-in URL (with its token) instead of opening a browser. Without it the terminal shows only the bare address, unless the browser cannot be launched]' \
 '--allow-writes[Allow the dashboard'\''s one write\: confirming or rejecting proposed memory edges]' \
 '--json[Output as JSON]' \
 '-q[Suppress non-essential output]' \

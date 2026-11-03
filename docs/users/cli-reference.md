@@ -107,7 +107,7 @@ engramdb query --mode <rank|filter> [query] [flags...]
 | `--situation <session_start\|file_edit\|debugging\|design_choice>` | Your situation — reweights classes via `[retrieval.scoring.situation]` (see [configuration.md](./configuration.md)). |
 | `--include-invalidated` | Include invalidated memories (closed validity windows). |
 | `--show-scores` | Print composite score per result, plus any link/usage component that moved it (`contradicts -0.10 from <id>`, `supports x1.05 from <id>`, `usage x1.12`; only when those [settings](./configuration.md#links-and-usage-in-scoring) are on). |
-| `--expand-links [N]` | Add up to N one-hop neighbours of the results over confirmed `supports` / `derived_from` / `related_to` links (bare flag: 5; `0` = off; max 20; default `[retrieval].expand_links`, 0). Each is marked `via <id> (<kind>)`. A neighbour passes every filter a direct result would. See [links.md](./links.md#following-links-from-results). |
+| `--expand-links[=N]` | Add up to N one-hop neighbours of the results over confirmed `supports` / `derived_from` / `related_to` links (bare flag: 5; give another N as `--expand-links=N` — the `=` is required, so a word after the bare flag stays the query; `0` = off; max 20 per query, across every fanned-in store; default `[retrieval].expand_links`, 0). Each is marked `via <id> (<kind>)`. A neighbour passes every filter a direct result would. See [links.md](./links.md#following-links-from-results). |
 | `--include-global` | Merge global-store memories into results. |
 | `--global` | Search the global store instead of the current project. |
 
@@ -432,17 +432,17 @@ The HTTP server listens on `127.0.0.1` only and has no authentication. It refuse
 engramdb dashboard [--port <N>] [--bind <addr>] [--no-open] [--assets-dir <dir>] [--allow-writes]
 ```
 
-Serves a read-only (unless `--allow-writes`) web view of every store on this machine and prints its URL; with no `--no-open` it also tries to open your browser. The project of the directory you ran it in is selected. See [dashboard.md](./dashboard.md).
+Serves a read-only (unless `--allow-writes`) web view of every store on this machine and opens it in your browser, printing only the bare address (no token). With `--no-open` it launches nothing and prints the sign-in URL (with the token) instead; if the browser cannot be launched, it prints the sign-in URL as a fallback. The project of the directory you ran it in is selected. See [dashboard.md](./dashboard.md).
 
 | Flag | Meaning |
 |---|---|
 | `--port <N>` | Port to listen on. Default `7341`, or a free port when that one is taken; `0` asks for any free port. An explicit port that is taken is an error. |
 | `--bind <addr>` | Address to listen on (default `127.0.0.1`). Any other address prints a warning: the dashboard is then reachable from the network, unencrypted, guarded only by the URL's token. |
-| `--no-open` | Print the URL, do not launch a browser. Launch failures are silent anyway. |
+| `--no-open` | Print the sign-in URL (with its token), do not launch a browser. Without it the token is never printed unless the launch fails. |
 | `--assets-dir <dir>` | Serve the web files from `<dir>` (e.g. `crates/engram-dashboard/web`) instead of the copy built into the binary, uncached, so a frontend edit needs only a reload. |
 | `--allow-writes` | Allow the dashboard's one write: confirming or rejecting *proposed* edges between memories ([reviewing proposed edges](./dashboard.md#reviewing-proposed-edges)). Without it the review buttons are disabled and the server answers such a request with `403`. |
 
-The URL carries a token that is new on every run, after `#` (`http://127.0.0.1:7341/#token=…`), so it is never sent to a server. The page keeps it for its tab, removes it from the address bar, and sends it as `Authorization: Bearer` on every `/api` request; one without it is refused with `401`. The page's own static files need no token. Unless `--no-open` is given, the browser is opened through a private temporary file, so the token never appears on a command line. With `--format json` the command prints `{"url", "address", "current_project", "allow_writes"}` once and keeps serving.
+The URL carries a token that is new on every run, after `#` (`http://127.0.0.1:7341/#token=…`), so it is never sent to a server. The page keeps it for its tab, removes it from the address bar, and sends it as `Authorization: Bearer` on every `/api` request; one without it is refused with `401`. The page's own static files need no token. Unless `--no-open` is given, the browser is opened through a private temporary file, so the token never appears on a command line. With `--format json` the command prints `{"address", "address_url", "opened_browser", "current_project", "allow_writes"}` once, plus `"url"` (the sign-in URL with the token) only when it would be printed in text mode — with `--no-open` or after a failed launch — and keeps serving.
 
 ## `daemon` — shared embedding daemon
 

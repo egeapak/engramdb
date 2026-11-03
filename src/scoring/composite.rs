@@ -71,6 +71,9 @@ pub struct UsageSignal {
     pub injected: u64,
     /// Distinct sessions it was injected into.
     pub injected_sessions: u64,
+    /// Times a `query` answer carried it (direct hits only, never a linked
+    /// neighbour). Counted as exposure in `ρ`, never as reward.
+    pub returned: u64,
 }
 
 /// Graph and usage evidence about one memory, gathered by the retrieval
@@ -115,16 +118,21 @@ pub fn supports_multiplier(boost: f64, supporters: usize) -> f64 {
 
 /// The usage term `min(USAGE_TERM_CAP, ρ · ln(1 + fetched + 0.3 · injected_sessions))`.
 ///
-/// `ρ = min(1, (fetched + 1) / (injected + 1))` is the exposure ratio: how
-/// often being put in front of an agent led it to open the memory. It is what
-/// breaks the feedback loop — a memory is injected *because* it already ranks
-/// well, so counting injections alone would let it reward itself. With no
-/// fetch at all the term is `ln(1 + 0.3·s) / (i + 1)` with `s ≤ i`, which never
-/// exceeds about 0.17 however often the memory is injected; a memory that
-/// agents actually open keeps `ρ = 1` and earns the full logarithm.
+/// `ρ = min(1, (fetched + 1) / (injected + returned + 1))` is the exposure
+/// ratio: how often being put in front of an agent — by a hook (`injected`)
+/// or in a `query` answer (`returned`) — led it to open the memory. It is
+/// what breaks the feedback loop — a memory is shown *because* it already
+/// ranks well, so counting exposure as reward would let it reward itself, and
+/// an agent that `get`s whatever `query` returns would otherwise keep `ρ = 1`
+/// for exactly the memories ranking already favours. With no fetch at all the
+/// term is `ln(1 + 0.3·s) / (i + r + 1)` with `s ≤ i`, which never exceeds
+/// about 0.17 however often the memory is shown; a memory that agents open
+/// more often than they are shown it keeps `ρ = 1` and earns the full
+/// logarithm.
 pub fn usage_term(usage: &UsageSignal) -> f64 {
     let fetched = usage.fetched as f64;
-    let rho = ((fetched + 1.0) / (usage.injected as f64 + 1.0)).min(1.0);
+    let exposure = usage.injected as f64 + usage.returned as f64;
+    let rho = ((fetched + 1.0) / (exposure + 1.0)).min(1.0);
     let raw = fetched + INJECTED_SESSION_WEIGHT * usage.injected_sessions as f64;
     (rho * raw.ln_1p()).clamp(0.0, USAGE_TERM_CAP)
 }
@@ -2176,6 +2184,7 @@ mod epistemic_tests {
                 fetched: 50,
                 injected: 2,
                 injected_sessions: 2,
+                returned: 0,
             }),
         );
         let plain = composite_score(&m, &ScoringContext::scope_only(None, &[]), &config, now);
@@ -2270,6 +2279,7 @@ mod epistemic_tests {
             fetched: f,
             injected: i,
             injected_sessions: s,
+            returned: 0,
         };
         assert_eq!(usage_term(&u(0, 0, 0)), 0.0);
         // Fetched, never injected: full logarithm.
@@ -2283,6 +2293,20 @@ mod epistemic_tests {
         assert!(usage_term(&u(0, 10_000, 10_000)) < usage_term(&u(0, 10, 10)));
         // Fetched in proportion to exposure keeps ρ = 1.
         assert!((usage_term(&u(10, 9, 9)) - (10.0 + 2.7f64).ln_1p()).abs() < 1e-12);
+        // `returned` is exposure too: fetching what `query` hands back, at
+        // the rate it hands it back, does not keep ρ = 1.
+        let returned = |f, r| UsageSignal {
+            fetched: f,
+            returned: r,
+            ..Default::default()
+        };
+        assert!((usage_term(&returned(10, 0)) - 11f64.ln()).abs() < 1e-12);
+        let shown = usage_term(&returned(10, 30));
+        assert!(
+            (shown - (11.0 / 31.0) * 11f64.ln()).abs() < 1e-12,
+            "{shown}"
+        );
+        assert_eq!(usage_term(&returned(0, 1_000_000)), 0.0);
         // Capped.
         assert_eq!(usage_term(&u(u64::MAX, 0, 0)), USAGE_TERM_CAP);
         assert!(usage_multiplier(0.2, &u(u64::MAX, 0, 0)) <= 1.0 + 0.2 * USAGE_TERM_CAP);
@@ -2303,6 +2327,7 @@ mod epistemic_tests {
                 fetched: 100,
                 injected: 0,
                 injected_sessions: 0,
+                returned: 0,
             }),
         );
         let b = composite_score(
@@ -2348,6 +2373,7 @@ mod epistemic_tests {
                 fetched: 3,
                 injected: 1,
                 injected_sessions: 1,
+                returned: 0,
             }),
         );
         let b = composite_score(

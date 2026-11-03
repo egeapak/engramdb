@@ -299,8 +299,7 @@ fn query_filter_expand_links_marks_neighbour() {
             "--query",
             "rust",
             "--show-scores",
-            "--expand-links",
-            "3"
+            "--expand-links=3"
         ])
     );
 }
@@ -321,6 +320,25 @@ fn query_filter_expand_links_bare_flag() {
             "--query",
             "rust",
             "--expand-links"
+        ])
+    );
+}
+
+/// The bare flag before a positional query leaves the query alone: the
+/// value form needs `=` (`require_equals`), so "rust" is the query, not N.
+#[test]
+fn query_expand_links_before_positional_query() {
+    let f = linked();
+    insta::assert_snapshot!(
+        "query_expand_links_before_positional_query",
+        f.run(&[
+            "--format",
+            "plain",
+            "query",
+            "--mode",
+            "filter",
+            "--expand-links",
+            "rust"
         ])
     );
 }
@@ -346,8 +364,7 @@ fn query_expand_links_over_cap_fails() {
             "filter",
             "--query",
             "rust",
-            "--expand-links",
-            "21"
+            "--expand-links=21"
         ])
     );
 }

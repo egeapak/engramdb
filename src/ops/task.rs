@@ -569,6 +569,76 @@ mod promotion_tests {
         );
     }
 
+    /// A memory that only ever arrived through `expand_links` (its breakdown
+    /// carries `via`) did not survive ranking, so `record_returned` leaves it
+    /// out and it is never re-confirmed — however many sessions saw it.
+    #[tokio::test]
+    async fn expanded_neighbours_are_not_returned_and_never_promote() {
+        use crate::ops::usage::{record_returned, Surface};
+        use crate::retrieval::engine::RetrievalMode;
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalResult, ScoredMemory};
+        use crate::scoring::{LinkVia, ScoreBreakdown};
+        let (_t, store, config) = store_with_task_memory(true).await;
+        let engine = RetrievalEngine::new(store.clone(), config.clone());
+        let scored = |id: &str, via: Option<LinkVia>| ScoredMemory {
+            memory: Memory {
+                id: id.to_string(),
+                ..Memory::new(MemoryType::Decision, "s", "c", Provenance::human())
+            },
+            score: 0.5,
+            score_breakdown: ScoreBreakdown {
+                via,
+                ..Default::default()
+            },
+        };
+        let via = LinkVia {
+            from: "hit-1".to_string(),
+            kind: crate::types::LinkKind::RelatedTo,
+        };
+        let expanded = RetrievalResult {
+            memories: vec![scored("hit-1", None), scored("promo-1", Some(via))],
+            total: 2,
+            retrieval_quality: "keyword_only".to_string(),
+            dropped_below_threshold: 0,
+        };
+        for sid in ["s1", "s2", "s3", "s4"] {
+            record_returned(
+                &engine,
+                &expanded,
+                &Default::default(),
+                RetrievalMode::Filter,
+                Surface::Mcp,
+                Some(sid),
+            );
+        }
+        let events = crate::telemetry::usage::load_memory_events(&store.project_dir)
+            .unwrap()
+            .events;
+        assert!(events.iter().all(|e| e.memory_id == "hit-1"), "{events:?}");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].rank, Some(1));
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert!(report.promoted.is_empty() && report.suggestions.is_empty());
+
+        // The same memory returned directly in three sessions does promote.
+        let direct = RetrievalResult {
+            memories: vec![scored("promo-1", None)],
+            ..expanded
+        };
+        for sid in ["s1", "s2", "s3"] {
+            record_returned(
+                &engine,
+                &direct,
+                &Default::default(),
+                RetrievalMode::Filter,
+                Surface::Mcp,
+                Some(sid),
+            );
+        }
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert_eq!(report.promoted, vec!["promo-1".to_string()]);
+    }
+
     /// Promotion reads `returned` usage events that name a session (a CLI
     /// query's, when it runs under a session id), and a session seen in both
     /// those and a legacy row counts once. A sessionless event never counts.
