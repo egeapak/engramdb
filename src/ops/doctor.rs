@@ -130,7 +130,8 @@ pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
     let healthy = stale_entries.is_empty()
         && orphaned_files.is_empty()
         && drifted_entries.as_ref().is_none_or(|d| d.is_empty())
-        && undetermined.is_empty();
+        && undetermined.is_empty()
+        && unparseable.is_empty();
 
     Ok(DoctorResult {
         indexed,
@@ -238,10 +239,16 @@ async fn check_memory_edges(store: &MemoryStore) -> Option<EnvironmentCheck> {
             })
         }
     };
-    if health.total == 0 {
+    if health.total == 0 && health.table_drift == 0 {
         return None;
     }
     let mut details = vec![format!("edges: {}", health.total)];
+    if health.table_drift > 0 {
+        details.push(format!(
+            "edges table out of step with the memory files: {} row(s)",
+            health.table_drift
+        ));
+    }
     for e in health.dangling.iter().take(10) {
         details.push(format!("dangling: {} {} {}", e.src, e.kind, e.dst));
     }
@@ -269,9 +276,13 @@ async fn check_memory_edges(store: &MemoryStore) -> Option<EnvironmentCheck> {
             health.unknown_kinds
         ));
     }
-    let warn = !health.dangling.is_empty() || !health.personal_leaks.is_empty();
+    let warn =
+        !health.dangling.is_empty() || !health.personal_leaks.is_empty() || health.table_drift > 0;
     let message = if warn {
         let mut parts = Vec::new();
+        if health.table_drift > 0 {
+            parts.push(format!("{} table row(s) out of step", health.table_drift));
+        }
         if !health.dangling.is_empty() {
             parts.push(format!("{} dangling", health.dangling.len()));
         }
@@ -292,7 +303,8 @@ async fn check_memory_edges(store: &MemoryStore) -> Option<EnvironmentCheck> {
         suggestion: warn.then(|| {
             "Dangling edges point at deleted memories and are hidden from queries; remove them \
              with `engramdb unlink`. A committed memory naming a personal one leaks that id into \
-             git: unlink it and re-link from the personal side."
+             git: unlink it and re-link from the personal side. An edges table out of step \
+             with the files is rebuilt by `engramdb reindex`."
                 .to_string()
         }),
         details,
@@ -505,6 +517,15 @@ pub async fn doctor_environment(
                         },
                         suggestion: if result.healthy {
                             None
+                        } else if !result.unparseable.is_empty() {
+                            // A reindex cannot fix these: it keeps their old
+                            // rows and vectors, and they stay flagged until
+                            // the file itself is repaired.
+                            Some(
+                                "Fix the memory file(s) that do not parse (an unresolved merge \
+                                 conflict?), then run `engramdb reindex`"
+                                    .to_string(),
+                            )
                         } else {
                             Some("Run `engramdb reindex` to repair".to_string())
                         },
@@ -3155,11 +3176,14 @@ mod tests {
         assert_eq!(result.unparseable[0].id, id);
         assert!(result.unparseable[0].error.contains("merge conflict"));
 
-        // After a reindex the row is gone (orphan) — still named, still intact.
+        // A reindex keeps its row (now drifted from the bytes) rather than
+        // dropping it — still named, still intact, still unhealthy.
         store.reindex().await.unwrap();
         let result = doctor(&store).await.unwrap();
-        assert_eq!(result.orphaned_files, vec![id.clone()]);
+        assert!(result.orphaned_files.is_empty(), "{result:?}");
+        assert_eq!(result.drifted_entries.as_deref(), Some(&[id.clone()][..]));
         assert_eq!(result.unparseable[0].id, id);
+        assert!(!result.healthy);
         assert_eq!(async_fs::read_to_string(&path).await.unwrap(), conflicted);
     }
 

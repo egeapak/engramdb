@@ -449,7 +449,7 @@ _arguments "${_arguments_options[@]}" : \
 '--store=[The target'\''s store, when it is not this one\: \`global\`, \`group\:<name>\`, or a project id]:STORE:_default' \
 '--confidence=[How sure the link is, 0.0-1.0 (default 1.0)]:CONFIDENCE:_default' \
 '--note=[Why the two are linked]:NOTE:_default' \
-'--status=[Review status\: proposed, confirmed (default) or rejected]:STATUS:_default' \
+'--status=[Review status\: proposed, confirmed (default) or rejected. Not for \`supersedes\`, which is always confirmed (unlink it to reject it)]:STATUS:_default' \
 '(--status --confidence --store)--winner=[Resolve a \`contradicts\` edge by direction\: this memory (one of the two) supersedes the other, whose validity window closes. The edge is rewritten as \`<winner> supersedes <loser>\`]:WINNER:_default' \
 '(--json)--format=[Output format]:FORMAT:((pretty\:"Human-friendly colored output with formatting"
 json\:"JSON output for programmatic parsing"

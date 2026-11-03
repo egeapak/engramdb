@@ -7,7 +7,7 @@ exit: 0
 --- stdout ---
 Link two memories with a typed edge (or update an existing edge)
 
-Kinds: contradicts, supersedes, supports, derived_from, related_to, duplicates. Symmetric kinds (contradicts, related_to, duplicates) are stored once and shown on both memories. Re-linking the same edge updates its confidence, note and status (e.g. `--status rejected`).
+Kinds: contradicts, supersedes, supports, derived_from, related_to, duplicates. Symmetric kinds (contradicts, related_to, duplicates) are stored once and shown on both memories. Re-linking the same edge changes only what you pass (e.g. `--status rejected` keeps its note); a proposed link never changes an existing one.
 
 Usage: engramdb link [OPTIONS] <SRC> <KIND> <DST>
 
@@ -32,7 +32,7 @@ Options:
           Why the two are linked
 
       --status <STATUS>
-          Review status: proposed, confirmed (default) or rejected
+          Review status: proposed, confirmed (default) or rejected. Not for `supersedes`, which is always confirmed (unlink it to reject it)
 
       --winner <WINNER>
           Resolve a `contradicts` edge by direction: this memory (one of the two) supersedes the other, whose validity window closes. The edge is rewritten as `<winner> supersedes <loser>`

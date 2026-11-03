@@ -25,6 +25,9 @@ pub struct ReindexResult {
     /// vectors are preserved in that case, but the user asked for a full
     /// reindex and didn't get one, so surfaces (CLI/MCP) must render these.
     pub warnings: Vec<String>,
+    /// Memory files the rebuild could not parse (also named in `warnings`).
+    /// Their existing rows and vectors were kept, not dropped.
+    pub unparseable: Vec<crate::storage::UnparseableMemoryFile>,
 }
 
 /// What a [`reindex`] call should do.
@@ -263,6 +266,7 @@ pub async fn reindex(
     let mut embedded = 0;
     let mut skipped = 0;
     let mut rows_skipped = 0;
+    let mut unparseable = Vec::new();
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
 
@@ -290,13 +294,27 @@ pub async fn reindex(
     if !embeddings_only {
         // `force` means "rebuild everything", which includes the rows: a
         // repair that skipped rows would not be a repair.
-        if incremental && !force {
-            let counts = store.reindex_incremental().await?;
-            indexed = counts.indexed;
-            rows_skipped = counts.skipped;
+        let counts = if incremental && !force {
+            store.reindex_incremental().await?
         } else {
-            indexed = store.reindex().await?;
+            store.reindex_counted().await?
+        };
+        indexed = counts.indexed;
+        rows_skipped = counts.skipped;
+        for u in &counts.unparseable {
+            warnings.push(format!(
+                "{} does not parse ({}); {} — fix the file (an unresolved merge conflict?) \
+                 and reindex",
+                u.path.display(),
+                u.error,
+                if u.preserved {
+                    "its index row, vectors and edges were kept as they were"
+                } else {
+                    "it is not in the index"
+                }
+            ));
         }
+        unparseable = counts.unparseable;
         if let Some(other) = &foreign_checkout {
             warnings.push(format!(
                 "this checkout shares its project ID (and index) with another checkout \
@@ -487,6 +505,7 @@ pub async fn reindex(
         skipped,
         errors,
         warnings,
+        unparseable,
     })
 }
 

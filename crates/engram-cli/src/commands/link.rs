@@ -358,4 +358,33 @@ mod tests {
             redact_times(&cap.transcript()),
         );
     }
+
+    /// Review p3-ops #6: a bad `--against` fails the whole command before the
+    /// challenge is recorded, so a retry cannot record it twice.
+    #[tokio::test]
+    async fn link_challenge_against_a_bad_target_records_nothing() {
+        let p = TempProject::new();
+        let (a, _b) = two_memories(&p).await;
+        let (f, _cap) = capturing_plain();
+        for against in [a.clone(), "ffffffff-no-such".to_string()] {
+            let err = run_challenge(
+                p.path(),
+                false,
+                ChallengeParams {
+                    id: a.clone(),
+                    evidence: "x".into(),
+                    source_file: None,
+                    against: Some(against),
+                },
+                &f,
+            )
+            .await
+            .unwrap_err();
+            assert!(err.to_string().contains("--against"), "{err:#}");
+        }
+        let store = MemoryStore::open(p.path()).await.unwrap();
+        let m = store.get(&a).await.unwrap();
+        assert!(m.challenges.is_empty(), "{:?}", m.challenges);
+        assert!(m.links.is_empty());
+    }
 }

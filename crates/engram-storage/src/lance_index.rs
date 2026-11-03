@@ -1906,6 +1906,78 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// The memories-table rows of `ids`, verbatim, for [`Self::restore_rows`].
+    ///
+    /// `reindex` uses this to carry the row of a memory whose file does not
+    /// parse across the table clear: the file cannot be re-derived, and
+    /// dropping its row would make a merge conflict delete the memory from
+    /// every query.
+    pub async fn snapshot_rows(&self, ids: &[String]) -> Result<Vec<RecordBatch>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let table = self.open_table().await?;
+        let mut out = Vec::new();
+        for group in ids.chunks(500) {
+            let list = group.iter().map(lit).collect::<Vec<_>>();
+            let mut stream = table
+                .query()
+                .only_if_expr(is_in(col("id"), list))
+                .execute()
+                .await
+                .context("Failed to snapshot memories rows")?;
+            while let Some(batch) = stream.next().await {
+                let batch = batch.context("Failed to read snapshot batch")?;
+                if batch.num_rows() > 0 {
+                    out.push(batch);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Re-insert rows taken by [`Self::snapshot_rows`], conformed to the
+    /// current schema: a column the snapshot lacks is filled with nulls, an
+    /// extra one is dropped. Returns how many rows were restored and how many
+    /// could not be — a batch missing a **non-nullable** column has no value
+    /// to fill it with, so it is not restored (a declared loss, only possible
+    /// across a schema migration that adds such a column; the caller warns).
+    pub async fn restore_rows(&self, batches: Vec<RecordBatch>) -> Result<(usize, usize)> {
+        let schema = self.memories_schema();
+        let mut conformed = Vec::new();
+        let mut lost = 0;
+        'batch: for batch in batches {
+            let mut columns = Vec::with_capacity(schema.fields().len());
+            for field in schema.fields() {
+                match batch.column_by_name(field.name()) {
+                    Some(c) if c.data_type() == field.data_type() => columns.push(c.clone()),
+                    _ if field.is_nullable() => columns.push(arrow_array::new_null_array(
+                        field.data_type(),
+                        batch.num_rows(),
+                    )),
+                    _ => {
+                        lost += batch.num_rows();
+                        continue 'batch;
+                    }
+                }
+            }
+            conformed.push(RecordBatch::try_new(Arc::clone(&schema), columns)?);
+        }
+        let restored: usize = conformed.iter().map(RecordBatch::num_rows).sum();
+        if restored > 0 {
+            let table = self.open_table().await?;
+            let reader =
+                RecordBatchIterator::new(conformed.into_iter().map(Ok), Arc::clone(&schema));
+            let mut op = table.merge_insert(&["id"]);
+            op.when_matched_update_all(None);
+            op.when_not_matched_insert_all();
+            op.execute(Box::new(reader))
+                .await
+                .context("Failed to restore memories rows")?;
+        }
+        Ok((restored, lost))
+    }
+
     /// The vector width of the on-disk chunks table, or `None` when the
     /// table doesn't exist (or has no vector column).
     ///
@@ -2007,10 +2079,16 @@ impl LanceIndex {
     /// optimization is maintenance, not correctness.
     pub async fn optimize(&self) -> Result<IndexOptimizeStats> {
         let mut total = IndexOptimizeStats::default();
-        for (table, label) in [
+        let mut tables = vec![
             (self.open_table().await?, "memories"),
             (self.open_chunks_table().await?, "chunks"),
-        ] {
+        ];
+        // The derived edges table (schema 0.9.0) takes a version per edge
+        // write too. Only when it exists — optimize must not create it.
+        if let Some(edges) = crate::edge_index::open(&self.connection).await? {
+            tables.push((edges, "edges"));
+        }
+        for (table, label) in tables {
             let stats = table
                 .optimize(OptimizeAction::All)
                 .await

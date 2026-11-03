@@ -224,6 +224,42 @@ pub fn parse_memory_file(content: &str) -> Result<Memory> {
     parser.parse(content)
 }
 
+/// Best-effort recovery of the memory id of a file that does not parse.
+///
+/// Used by `reindex`, which must not let a file it cannot read (a merge
+/// conflict in the hidden block is the common case) drop that memory's index
+/// row and vectors: it needs the id to keep them. Tries the frontmatter's
+/// `id` line first (YAML `id: …` or TOML `id = "…"`, inside the leading `---`
+/// fence), then the filename stem. `None` when neither yields a UUID.
+pub fn recover_id(content: &str, path: &std::path::Path) -> Option<String> {
+    fn as_uuid(s: &str) -> Option<String> {
+        let s = s.trim().trim_matches(|c| c == '"' || c == '\'');
+        uuid::Uuid::parse_str(s)
+            .ok()
+            .map(|_| s.to_ascii_lowercase())
+    }
+    let mut lines = content.lines();
+    if lines.next().map(str::trim) == Some("---") {
+        for line in lines {
+            let line = line.trim();
+            if line == "---" {
+                break;
+            }
+            if let Some(rest) = line
+                .strip_prefix("id:")
+                .or_else(|| line.strip_prefix("id ="))
+                .or_else(|| line.strip_prefix("id="))
+            {
+                if let Some(id) = as_uuid(rest) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    let stem = path.file_stem()?.to_str()?;
+    as_uuid(extract_id_from_stem(stem))
+}
+
 /// Write a memory in the latest format.
 pub fn write_memory_file(memory: &Memory) -> Result<String> {
     let writer = latest_writer();

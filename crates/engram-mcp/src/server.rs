@@ -2718,21 +2718,20 @@ impl EngramDbServer {
         let mut out = serde_json::to_value(memory_to_output(&memory, true))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         // Edges both ways, in the default view (dangling, invalidated and
-        // rejected hidden, but counted). Omitted when there are none, so a
-        // memory that was never linked reads exactly as before. A failed
-        // edge read must not fail the get: the memory itself was read fine.
+        // rejected hidden, but counted). Always present — empty lists when
+        // there are none — so a client need not tell "no edges" from "not
+        // reported"; the key is `edges`, as in the CLI's JSON. A failed edge
+        // read must not fail the get (the memory itself was read fine): it
+        // is reported as `edges_error` instead.
         match ops::links::links_of(&store, &memory.id, &ops::LinkFilter::default()).await {
-            Ok(view)
-                if !view.outbound.is_empty() || !view.inbound.is_empty() || view.hidden > 0 =>
-            {
-                out["links"] = serde_json::json!({
+            Ok(view) => {
+                out["edges"] = serde_json::json!({
                     "outbound": view.outbound,
                     "inbound": view.inbound,
                     "hidden": view.hidden,
                 });
             }
-            Ok(_) => {}
-            Err(e) => out["links_error"] = serde_json::json!(format!("{e:#}")),
+            Err(e) => out["edges_error"] = serde_json::json!(format!("{e:#}")),
         }
         let r = serde_json::to_string(&out)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -2924,6 +2923,16 @@ impl EngramDbServer {
         self.check_cross_project_write(input.project.as_deref())
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
+        // Validate `against` before the challenge is recorded: a bad target
+        // must fail the whole call, not leave a challenge a retry duplicates.
+        if let Some(against) = &input.against {
+            ops::links::check_link(
+                &store,
+                ops::links::challenge_edge(&input.id, against, &input.evidence),
+            )
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &format!("against: {e:#}")))?;
+        }
         let result = ops::challenge_memory(
             &store,
             &input.id,
@@ -3155,7 +3164,15 @@ impl EngramDbServer {
             |e: anyhow::Error| error_response(ErrorCode::ValidationError, &format!("{e:#}"));
         let value = if kind == ops::links::LinkKind::Contradicts && input.dst_store.is_none() {
             let verdict = match (status, input.winner) {
-                (_, Some(winner)) => ops::ContradictionVerdict::Supersedes { winner },
+                (ops::links::LinkStatus::Confirmed, Some(winner)) => {
+                    ops::ContradictionVerdict::Supersedes { winner }
+                }
+                (_, Some(_)) => {
+                    return Err(error_response(
+                        ErrorCode::ValidationError,
+                        "`winner` resolves a contradiction, so it needs `status: \"confirmed\"`",
+                    ));
+                }
                 (ops::links::LinkStatus::Rejected, None) => ops::ContradictionVerdict::Reject,
                 (ops::links::LinkStatus::Confirmed, None) => ops::ContradictionVerdict::BothStand,
                 (status, None) => {
@@ -3684,7 +3701,8 @@ impl EngramDbServer {
             "skipped": result.skipped,
             "rows_skipped": result.rows_skipped,
             "errors": result.errors,
-            "warnings": result.warnings
+            "warnings": result.warnings,
+            "unparseable": result.unparseable
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();

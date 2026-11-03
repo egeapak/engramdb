@@ -52,7 +52,7 @@ Every returned memory carries `epistemic` (always) plus `valid_while`, `valid_fr
 
 Returns the full memory object including `details` (which is lazy-loaded in `query`).
 
-When the memory has edges, the response adds `links: {outbound, inbound, hidden}`. Each edge names the `other_id` (and `other_store`, `other_summary`), `kind`, `symmetric`, `status`, `origin`, `confidence`, `note`, and the far end's `state` (`live`, `invalidated` with its `successor`, `dangling`, or `unknown` for a store not reachable here). Dangling, invalidated and rejected edges are hidden and counted in `hidden`. A memory without edges reads exactly as before.
+The response always carries `edges: {outbound, inbound, hidden}` (empty lists when there are none; `edges_error` instead if they could not be read). Each edge names the `other_id` (and `other_store`, `other_summary`), `kind`, `symmetric`, `status`, `origin`, `confidence`, `note`, and the far end's `state` (`live`, `invalidated` with its `successor`, `dangling`, or `unknown` for a store not reachable here). Dangling, invalidated and rejected edges are hidden and counted in `hidden`.
 
 ### `list` (read-only)
 
@@ -166,7 +166,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `id` | `string` | Required. |
 | `evidence` | `string` | Required. What contradicts the memory. |
 | `source_file?` | `string` | File where evidence was found. |
-| `against?` | `string` | The memory this one contradicts. Also proposes a `contradicts` edge between the two (status `proposed`, origin `agent`, the evidence as its note), returned as `edge` (or `edge_error`). Resolve it with [`link_status`](#link_status-mutates). |
+| `against?` | `string` | The memory this one contradicts, validated before anything is written (a bad one fails the call). Also proposes a `contradicts` edge between the two (status `proposed`, origin `agent`, the evidence as its note), returned as `edge` (or `edge_error`). Resolve it with [`link_status`](#link_status-mutates). |
 | `project?` | `string` | See conventions. |
 
 ### `review` (read-only)
@@ -215,7 +215,7 @@ Returns `{ id, verified, review_cleared }`.
 
 ## Edge tools
 
-Typed edges between memories. Kinds: `contradicts`, `related_to`, `duplicates` (symmetric — stored once, seen from both ends), `supports`, `derived_from`, `supersedes` (directed; `supersedes` also closes the target's validity window, like `create`'s `supersedes`). Statuses: `proposed`, `confirmed` (the default for an explicit link), `rejected` (kept so it is not proposed again). A shared — committed — memory never names a personal one: a symmetric edge is stored on the personal side, a directed one is refused. Edges into a deleted memory are left dangling and reported by `doctor`. Full rules: [docs/users/links.md](../users/links.md).
+Typed edges between memories. Kinds: `contradicts`, `related_to`, `duplicates` (symmetric — stored once, seen from both ends), `supports`, `derived_from`, `supersedes` (directed; `supersedes` also closes the target's validity window, like `create`'s `supersedes`). Statuses: `proposed`, `confirmed` (the default for an explicit link), `rejected` (kept so it is not proposed again). A shared — committed — memory never names a personal one, in any direction: a symmetric edge is stored on the personal side, a directed one is refused, a supersession between shared and personal is refused either way, and so is an `update` of `visibility` that would break the rule. A `supersedes` edge has no review status: `link_status` refuses it; `unlink` it to reject it. Edges into a deleted memory are left dangling and reported by `doctor`. Full rules: [docs/users/links.md](../users/links.md).
 
 ### `link` (mutates)
 
@@ -229,7 +229,7 @@ Typed edges between memories. Kinds: `contradicts`, `related_to`, `duplicates` (
 | `dst_store?` | `string` | `"global"`, `"group:<name>"` or a 16-char project id when the target is not in the source's store. A store that cannot be opened here is recorded as `unknown`, never dangling. |
 | `confidence?` | `f64` | 0..1, default 1.0. |
 | `note?` | `string` | Why the edge holds (≤ 1000 chars). |
-| `status?` | `"proposed"` \| `"confirmed"` | Default `confirmed`. |
+| `status?` | `"proposed"` \| `"confirmed"` | Default `confirmed` for a new edge. On an existing edge only the fields you pass change (origin is kept), and a `proposed` link never changes an existing edge. `supersedes` is always confirmed. |
 | `project?` | `string` | See conventions. |
 
 Returns `{owner_id, src_id, dst_id, dst_store, kind, status, created, target_state, stored_note?}`; `owner_id` differs from `src_id` when a symmetric edge was stored on the other side (`stored_note` says why).
@@ -248,7 +248,7 @@ Returns `{owner_id, src_id, dst_id, dst_store, kind, status, created, target_sta
 | `dst` | `string` | Required. The other end. |
 | `kind?` | `string` | Default `contradicts`. |
 | `status` | `"confirmed"` \| `"rejected"` \| `"proposed"` | Required. |
-| `winner?` | `string` | `contradicts` only: the memory that is right. The edge becomes `winner supersedes loser` and the loser is invalidated; only it is demoted. Without `winner`, `confirmed` means both stand, in conflict. |
+| `winner?` | `string` | `contradicts` only, with `status: "confirmed"`: the memory that is right. Refused if the loser is already superseded by a third memory. The edge becomes `winner supersedes loser` and the loser is invalidated; only it is demoted. Without `winner`, `confirmed` means both stand, in conflict. |
 | `note?` | `string` | Reviewer's note. |
 | `dst_store?` | `string` | As on `link`. |
 | `project?` | `string` | See conventions. |
@@ -325,6 +325,8 @@ Returns `{ task, demoted, kept_custom_decay, project_wide_review }`.
 | `embeddings_only?` | `bool` | Only re-embed, skip index rebuild. |
 | `index_only?` | `bool` | Only rebuild index, skip embedding. |
 | `project?` | `string` | See conventions. |
+
+The response includes `unparseable`: memory files the rebuild could not parse (usually an unresolved merge conflict), each with `path`, `id`, `error` and `preserved`. Their existing index rows, vectors and edges are kept, not dropped; they are also named in `warnings`.
 
 ---
 

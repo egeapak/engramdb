@@ -13,8 +13,10 @@ engramdb links <id> [--all] [--kind <kind>]... [--global]
 engramdb challenge <id> --evidence <text> --against <other-id>
 ```
 
-`engramdb get <id>` shows a memory's links under the memory itself (and, in
-`--format json`, as an `edges` object beside the memory's own `links` list).
+`engramdb get <id>` shows a memory's links under the memory itself. In
+`--format json` (and in the MCP `get`) they are an `edges` object —
+`{outbound, inbound, hidden}`, always present, empty when there are none —
+beside the memory's own `links` list (its outbound links as stored).
 
 ## Kinds
 
@@ -25,13 +27,17 @@ engramdb challenge <id> --evidence <text> --against <other-id>
 | `duplicates` | symmetric | The two say the same thing. |
 | `supports` | `src → dst` | `src` is evidence for `dst`. |
 | `derived_from` | `src → dst` | `src` was derived from `dst`. |
-| `supersedes` | `src → dst` | `src` replaces `dst`. Same as `add --supersedes`: `dst`'s validity window closes. `unlink` reopens it when this link was what closed it. |
+| `supersedes` | `src → dst` | `src` replaces `dst`. Same as `add --supersedes`: `dst`'s validity window closes. `unlink` reopens it, unless another memory also supersedes `dst` (that one then becomes its successor). A supersession has no review status — it is never proposed or rejected; to reject one, `unlink` it. |
 
 A **symmetric** link is stored once, on whichever memory it was first written
 to, and is listed on both. Linking the reverse direction updates that one copy.
 
-Linking the same pair with the same kind again **updates** the link (its note,
-confidence, status) instead of adding a second one.
+Linking the same pair with the same kind again **updates** the link instead
+of adding a second one, and changes only what you pass: `--status rejected`
+alone keeps the note, confidence and origin. A **proposal** (`--status
+proposed`, or `challenge --against`) never changes an existing link at all —
+re-proposing cannot downgrade a confirmed link, revive a rejected one, or
+replace a reviewer's note.
 
 ## Review status
 
@@ -59,7 +65,14 @@ engramdb link 019a3c contradicts 019a41 --winner 019a41
 Outbound links are stored in the memory's own `.md` file, in the hidden
 `<!-- engramdb -->` block, so they are committed and travel with a clone. The
 index keeps a derived `edges` table so that inbound links can be listed; it is
-rebuilt by `engramdb reindex` like the rest of the index.
+rebuilt by `engramdb reindex` like the rest of the index. A failed write to that
+table never fails the memory write; `doctor` (Memory edges) reports a table out
+of step with the files, and `reindex` rebuilds it.
+
+A memory file that does not parse — an unresolved merge conflict in its hidden
+block is the usual cause — keeps its index row, its vectors and its links
+through every `reindex`. `reindex` and `doctor` name the file; fix it by hand
+and reindex. Nothing in the file is reset or rewritten meanwhile.
 
 **A link always records the target's full id**, never the prefix you typed:
 a prefix that is unique today stops being unique as the store grows.
@@ -67,10 +80,15 @@ a prefix that is unique today stops being unique as the store grows.
 ## Rules worth knowing
 
 - **Personal memories stay out of git.** A shared memory's file is committed,
-  so it must not name a personal memory. A symmetric link between a shared and
-  a personal memory is stored on the personal side instead (the output says
-  so); a directed link from a shared memory to a personal one is refused. Group
-  and global stores are not in a repository, so the rule does not apply there.
+  so it must not name a personal memory — in any direction. A symmetric link
+  between a shared and a personal memory is stored on the personal side
+  instead (the output says so); a directed link from a shared memory to a
+  personal one is refused; so is a supersession between a shared and a
+  personal memory either way (each file names the other), including through
+  `--winner` and `add --supersedes`. Changing a memory's visibility is refused
+  when it would break the rule: personal → shared while its links name a
+  personal memory, shared → personal while a shared file names it. Group and
+  global stores are not in a repository, so the rule does not apply there.
 - **Other stores.** `--store global`, `--store group:<name>` or `--store
   <project-id>` points a link at a memory in another store. Give the full id;
   if that store cannot be opened on this machine the link is still recorded

@@ -1104,7 +1104,8 @@ pub enum Command {
     /// Kinds: contradicts, supersedes, supports, derived_from, related_to,
     /// duplicates. Symmetric kinds (contradicts, related_to, duplicates) are
     /// stored once and shown on both memories. Re-linking the same edge
-    /// updates its confidence, note and status (e.g. `--status rejected`).
+    /// changes only what you pass (e.g. `--status rejected` keeps its note);
+    /// a proposed link never changes an existing one.
     Link {
         /// Source memory ID (supports prefix matching)
         src: String,
@@ -1129,7 +1130,8 @@ pub enum Command {
         #[arg(long)]
         note: Option<String>,
 
-        /// Review status: proposed, confirmed (default) or rejected
+        /// Review status: proposed, confirmed (default) or rejected. Not for
+        /// `supersedes`, which is always confirmed (unlink it to reject it)
         #[arg(long)]
         status: Option<String>,
 

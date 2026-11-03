@@ -414,7 +414,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--store', '--store', [CompletionResultType]::ParameterName, 'The target''s store, when it is not this one: `global`, `group:<name>`, or a project id')
             [CompletionResult]::new('--confidence', '--confidence', [CompletionResultType]::ParameterName, 'How sure the link is, 0.0-1.0 (default 1.0)')
             [CompletionResult]::new('--note', '--note', [CompletionResultType]::ParameterName, 'Why the two are linked')
-            [CompletionResult]::new('--status', '--status', [CompletionResultType]::ParameterName, 'Review status: proposed, confirmed (default) or rejected')
+            [CompletionResult]::new('--status', '--status', [CompletionResultType]::ParameterName, 'Review status: proposed, confirmed (default) or rejected. Not for `supersedes`, which is always confirmed (unlink it to reject it)')
             [CompletionResult]::new('--winner', '--winner', [CompletionResultType]::ParameterName, 'Resolve a `contradicts` edge by direction: this memory (one of the two) supersedes the other, whose validity window closes. The edge is rewritten as `<winner> supersedes <loser>`')
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')

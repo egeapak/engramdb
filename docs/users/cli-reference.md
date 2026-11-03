@@ -177,7 +177,7 @@ engramdb unlink <src> <kind> <dst> [--store <spec>] [--global]
 engramdb links <id> [--all] [--kind <kind>]... [--global]
 ```
 
-Kinds: `contradicts`, `related_to`, `duplicates` (symmetric, stored once and listed on both memories), `supports`, `derived_from`, `supersedes` (directed). Re-linking the same pair and kind updates the link. `--store` names the target's store (`global`, `group:<name>`, a project id) when it is not this one. `--winner` resolves a `contradicts` link as `<winner> supersedes <loser>` and invalidates the loser. `links --all` also shows dangling, invalidated and rejected links. Full rules: [links.md](./links.md).
+Kinds: `contradicts`, `related_to`, `duplicates` (symmetric, stored once and listed on both memories), `supports`, `derived_from`, `supersedes` (directed). Re-linking the same pair and kind updates only the fields you pass (`--status rejected` keeps the note and confidence); a `proposed` link never changes an existing one; `supersedes` takes no `--status` (unlink to reject it). `--store` names the target's store (`global`, `group:<name>`, a project id) when it is not this one. `--winner` resolves a `contradicts` link as `<winner> supersedes <loser>` and invalidates the loser. `links --all` also shows dangling, invalidated and rejected links. Full rules: [links.md](./links.md).
 
 ## `task` — session task lifecycle
 
@@ -265,7 +265,7 @@ Without a subcommand: full environment diagnostics (paths, embedding backend, da
 
 `doctor` exits non-zero when any check fails (see [Exit codes](#exit-codes)).
 
-Two store checks concern memory files and links. A memory file whose hidden `<!-- engramdb -->` block does not parse — typically an unresolved merge conflict — is listed by name under the store check: such a file is skipped by `reindex` and refused by `get`/`update` rather than read with its hidden fields silently reset, so resolve the conflict by hand. **Memory edges** (shown only once the store has links) warns about dangling links (into a deleted memory) and about a committed memory that names a personal one; neither changes the exit code.
+Two store checks concern memory files and links. A memory file whose hidden `<!-- engramdb -->` block does not parse — typically an unresolved merge conflict — is listed by name under the store check: such a file is refused by `get`/`update` rather than read with its hidden fields silently reset, and `reindex` keeps its existing row, vectors and edges (and warns, naming it) instead of dropping it — resolve the conflict by hand, then reindex. **Memory edges** (shown only once the store has links) warns about dangling links (into a deleted memory), about a committed memory that names a personal one, and about an edges table out of step with the files (rebuilt by `reindex`); none of these changes the exit code.
 
 ## `gc` — garbage collect
 

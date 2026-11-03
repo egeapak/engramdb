@@ -29,6 +29,17 @@ pub async fn run_challenge(
     } else {
         MemoryStore::open(dir).await?
     };
+    // Validate the edge before recording the challenge: a bad `--against`
+    // must fail the whole command, not leave a challenge that a retry
+    // would then record twice.
+    if let Some(against) = &params.against {
+        engramdb::ops::links::check_link(
+            &store,
+            engramdb::ops::links::challenge_edge(&params.id, against, &params.evidence),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("--against: {e:#}"))?;
+    }
     let result = challenge_memory(
         &store,
         &params.id,

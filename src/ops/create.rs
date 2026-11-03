@@ -295,6 +295,26 @@ async fn create_memory_unrecorded(
         }
     }
 
+    // No personal id in a committed file, in either direction of a
+    // supersession (`links::check_privacy`) — checked before anything is
+    // written.
+    let named: Vec<String> = memory
+        .links
+        .iter()
+        .filter(|l| l.store.is_none())
+        .map(|l| l.to.clone())
+        .chain(memory.supersedes.iter().cloned())
+        .collect();
+    super::links::check_privacy(
+        store,
+        None,
+        memory.visibility,
+        &named,
+        &memory.supersedes,
+        false,
+    )
+    .await?;
+
     let id = store.create(&memory).await?;
 
     // Supersession closes validity windows (§2.4 writer 1): each referenced

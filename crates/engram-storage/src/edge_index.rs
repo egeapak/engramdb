@@ -110,17 +110,28 @@ pub struct EdgeRow {
 
 impl EdgeRow {
     /// Identity of the *logical* edge, ignoring which file declared it.
+    ///
+    /// A same-store symmetric edge is keyed on its sorted endpoints: two
+    /// concurrent `link A related_to B` / `link B related_to A` can each store
+    /// a copy (the one-copy check runs before the write lock), and those two
+    /// rows are one edge.
     pub fn edge_key(&self) -> (String, String, String, Option<String>) {
+        let (a, b) =
+            if self.kind.is_symmetric() && self.dst_store.is_none() && self.dst_id < self.src_id {
+                (&self.dst_id, &self.src_id)
+            } else {
+                (&self.src_id, &self.dst_id)
+            };
         (
-            self.src_id.clone(),
-            self.dst_id.clone(),
+            a.clone(),
+            b.clone(),
             self.kind.as_str().to_string(),
             self.dst_store.clone(),
         )
     }
 
     /// Primary key of the row (owner + field + logical edge).
-    fn row_key(&self) -> String {
+    pub fn row_key(&self) -> String {
         format!(
             "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
             self.owner_id,
@@ -155,6 +166,18 @@ pub fn edges_of(memory: &Memory) -> Vec<EdgeRow> {
         }
     };
     for link in &memory.links {
+        // `supersedes` is canonical in its own field: a `links` entry of that
+        // kind only carries metadata for an edge the field actually records,
+        // and only a confirmed one (a supersession is never proposed or
+        // rejected — rejecting one is removing it). `MemoryUpdate.supersedes`
+        // replaces the field wholesale, so an entry can outlive its edge; it
+        // must not then keep claiming one in the table.
+        if link.kind == LinkKind::Supersedes
+            && link.store.is_none()
+            && (!memory.supersedes.contains(&link.to) || link.status != LinkStatus::Confirmed)
+        {
+            continue;
+        }
         push(row_from_link(memory, link, now_invalid), &mut rows);
     }
     for target in &memory.supersedes {
@@ -218,13 +241,28 @@ fn row_from_link(memory: &Memory, link: &Link, src_invalidated: bool) -> EdgeRow
 /// Fold rows that describe the same logical edge (module docs), preferring
 /// the row the *source* declared — it carries the edge's real metadata — and
 /// otherwise the first seen. Order of first appearance is kept.
+fn status_rank(s: &LinkStatus) -> u8 {
+    match s {
+        LinkStatus::Confirmed => 3,
+        LinkStatus::Proposed => 2,
+        LinkStatus::Rejected => 1,
+        LinkStatus::Other(_) => 0,
+    }
+}
+
 pub fn dedupe(rows: Vec<EdgeRow>) -> Vec<EdgeRow> {
     let mut index: HashMap<(String, String, String, Option<String>), usize> = HashMap::new();
     let mut out: Vec<EdgeRow> = Vec::new();
     for row in rows {
         match index.get(&row.edge_key()) {
             Some(&i) => {
-                if out[i].owner_id != out[i].src_id && row.owner_id == row.src_id {
+                // Prefer the source-declared row (it carries the metadata);
+                // between two copies of a symmetric edge, the more decided
+                // review state (confirmed > proposed > rejected) wins.
+                let better = (out[i].owner_id != out[i].src_id && row.owner_id == row.src_id)
+                    || (row.kind.is_symmetric()
+                        && status_rank(&row.status) > status_rank(&out[i].status));
+                if better {
                     out[i] = row;
                 }
             }
@@ -337,6 +375,27 @@ async fn ensure(conn: &Connection) -> Result<Table> {
     }
 }
 
+/// Whether any row is owned by one of `owner_ids` — the read that lets a
+/// write with nothing to change skip its commit.
+async fn owns_any(table: &Table, owner_ids: &[String]) -> Result<bool> {
+    for owners in owner_ids.chunks(IN_LIST_CHUNK) {
+        let mut stream = table
+            .query()
+            .only_if_expr(owner_filter(owners))
+            .select(lancedb::query::Select::Columns(vec!["row_key".into()]))
+            .limit(1)
+            .execute()
+            .await
+            .context("Failed to query edges")?;
+        while let Some(batch) = stream.next().await {
+            if batch.context("Failed to read edges")?.num_rows() > 0 {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn owner_filter(owner_ids: &[String]) -> lancedb::expr::DfExpr {
     is_in(col("owner_id"), owner_ids.iter().map(lit).collect())
 }
@@ -360,8 +419,11 @@ pub async fn replace_owned(
     // never-linked store one on its first write.
     let table = if rows.is_empty() {
         match open(conn).await? {
-            Some(t) => t,
-            None => return Ok(()),
+            // Lance commits a version for a delete that matches nothing, so
+            // a memory that had no edges and still has none must not reach
+            // the delete: check first (a read, no commit).
+            Some(t) if owns_any(&t, owner_ids).await? => t,
+            _ => return Ok(()),
         }
     } else {
         ensure(conn).await?
@@ -421,6 +483,9 @@ pub async fn delete_owned(conn: &Connection, owner_ids: &[String]) -> Result<()>
     let Some(table) = open(conn).await? else {
         return Ok(());
     };
+    if owner_ids.is_empty() || !owns_any(&table, owner_ids).await? {
+        return Ok(());
+    }
     for owners in owner_ids.chunks(IN_LIST_CHUNK) {
         table
             .delete(&owner_filter(owners))
@@ -549,6 +614,98 @@ mod tests {
         let folded = dedupe(b_rows.into_iter().chain(rows).collect());
         assert_eq!(folded.len(), 1);
         assert_eq!(folded[0].owner_id, "a");
+    }
+
+    /// Review p3-storage #4: `MemoryUpdate.supersedes` replaces the field
+    /// wholesale and can leave a `supersedes` link entry behind; that entry
+    /// must not keep claiming an edge the canonical field no longer records.
+    /// Likewise a non-confirmed `supersedes` entry (hand-written) is inert.
+    #[test]
+    fn a_supersedes_entry_without_its_field_is_not_an_edge() {
+        let mut a = mem("a");
+        a.links
+            .push(Link::new("b", LinkKind::Supersedes, LinkOrigin::Human));
+        assert!(edges_of(&a).is_empty(), "{:?}", edges_of(&a));
+        a.supersedes = vec!["b".into()];
+        a.links[0].status = LinkStatus::Rejected;
+        let rows = edges_of(&a);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].field,
+            EdgeField::Supersedes,
+            "the field row, confirmed"
+        );
+        assert_eq!(rows[0].status, LinkStatus::Confirmed);
+    }
+
+    /// Review p3-storage #9: two concurrent opposite links of a symmetric
+    /// kind can each store a copy; they are one edge.
+    #[test]
+    fn swapped_symmetric_copies_fold_into_one_edge() {
+        let mut a = mem("a");
+        let mut l = Link::new("b", LinkKind::Contradicts, LinkOrigin::Nli);
+        l.status = LinkStatus::Proposed;
+        a.links.push(l);
+        let mut b = mem("b");
+        b.links
+            .push(Link::new("a", LinkKind::Contradicts, LinkOrigin::Human));
+        let folded = dedupe(edges_of(&a).into_iter().chain(edges_of(&b)).collect());
+        assert_eq!(folded.len(), 1, "{folded:?}");
+        assert_eq!(
+            folded[0].status,
+            LinkStatus::Confirmed,
+            "the decided copy wins"
+        );
+        // A directed kind in both directions is two edges.
+        let mut c = mem("c");
+        c.links
+            .push(Link::new("d", LinkKind::Supports, LinkOrigin::Human));
+        let mut d = mem("d");
+        d.links
+            .push(Link::new("c", LinkKind::Supports, LinkOrigin::Human));
+        assert_eq!(
+            dedupe(edges_of(&c).into_iter().chain(edges_of(&d)).collect()).len(),
+            2
+        );
+    }
+
+    /// Review p3-storage #5: a write with no edges before or after commits
+    /// nothing (Lance versions a no-match delete).
+    #[tokio::test]
+    async fn edgeless_writes_commit_no_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = lancedb::connect(tmp.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let none: Vec<EdgeRow> = Vec::new();
+        replace_owned(&conn, &["a".to_string()], &none)
+            .await
+            .unwrap();
+        assert!(
+            open(&conn).await.unwrap().is_none(),
+            "no table for no edges"
+        );
+
+        let mut x = mem("x");
+        x.links
+            .push(Link::new("y", LinkKind::Supports, LinkOrigin::Human));
+        replace_owned(&conn, &["x".to_string()], &edges_of(&x))
+            .await
+            .unwrap();
+        let table = open(&conn).await.unwrap().unwrap();
+        let before = table.version().await.unwrap();
+        replace_owned(&conn, &["a".to_string()], &none)
+            .await
+            .unwrap();
+        delete_owned(&conn, &["a".to_string()]).await.unwrap();
+        let table = open(&conn).await.unwrap().unwrap();
+        assert_eq!(table.version().await.unwrap(), before, "no commit");
+        // A memory that HAD edges still has them removed.
+        replace_owned(&conn, &["x".to_string()], &none)
+            .await
+            .unwrap();
+        assert!(load_all(&conn).await.unwrap().is_empty());
     }
 
     #[tokio::test]

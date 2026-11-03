@@ -299,13 +299,108 @@ pub fn challenge_edge(challenged: &str, against: &str, evidence: &str) -> LinkPa
     }
 }
 
-/// Add an edge, or update the attributes of the same edge (same target, kind
-/// and store) when it already exists. See the module docs for the rules.
-pub async fn link(
+/// Refuse a write that would put a personal memory's id into a committed
+/// file — in any direction, before anything is written (module docs).
+///
+/// `holder` is the memory whose file is being written, as it will be after
+/// the write. `named` are the same-store ids that file will name (`links`
+/// without a store, `supersedes`, `superseded_by`); `supersede_targets` are
+/// the ids whose files will name `holder` back (`superseded_by = holder`).
+/// With `check_inbound`, the files that already name `holder` are checked
+/// too — for a shared → personal visibility change, where the leak is in
+/// *other* committed files.
+///
+/// Only project stores are committed; group and global stores pass.
+pub(crate) async fn check_privacy(
     store: &MemoryStore,
-    params: LinkParams,
-    surface: super::usage::Surface,
-) -> Result<LinkResult> {
+    holder_id: Option<&str>,
+    holder_visibility: Visibility,
+    named: &[String],
+    supersede_targets: &[String],
+    check_inbound: bool,
+) -> Result<()> {
+    if store.is_global() || store.is_group() {
+        return Ok(());
+    }
+    let mut ids: Vec<&str> = named.iter().map(String::as_str).collect();
+    ids.extend(supersede_targets.iter().map(String::as_str));
+    ids.retain(|id| Some(*id) != holder_id);
+    let loaded: HashMap<String, Memory> = store.get_batch(&ids).await?.into_iter().collect();
+    let holder = holder_id.unwrap_or("the new memory");
+    if holder_visibility == Visibility::Shared {
+        for id in named {
+            if loaded
+                .get(id)
+                .is_some_and(|m| m.visibility == Visibility::Personal)
+            {
+                bail!(
+                    "refusing: shared memory {holder}'s file is committed to git and would name \
+                     personal memory {id}, leaking its id into the repository. Make both the \
+                     same visibility, or link from the personal side"
+                );
+            }
+        }
+    } else {
+        for id in supersede_targets {
+            if loaded
+                .get(id)
+                .is_some_and(|m| m.visibility == Visibility::Shared)
+            {
+                bail!(
+                    "refusing: personal memory {holder} cannot supersede shared memory {id} — \
+                     the shared memory's committed file would record `superseded_by = \
+                     {holder}`, leaking a personal id into the repository"
+                );
+            }
+        }
+        if check_inbound {
+            if let Some(hid) = holder_id {
+                let rows = store.list_edge_rows_touching(hid).await?;
+                let owners: Vec<&str> = rows
+                    .iter()
+                    .filter(|r| r.owner_id != hid && r.dst_store.is_none())
+                    .map(|r| r.owner_id.as_str())
+                    .collect();
+                let owner_mems = store.get_batch(&owners).await?;
+                if let Some((_, m)) = owner_mems
+                    .iter()
+                    .find(|(_, m)| m.visibility == Visibility::Shared)
+                {
+                    bail!(
+                        "refusing to make {hid} personal: shared memory {}'s committed file \
+                         names it (an edge or a supersession). Remove that edge first",
+                        m.id
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every check [`link`] makes, and what it would write — computed without
+/// writing anything.
+struct Plan {
+    src: Memory,
+    target: Target,
+    dst_store: Option<String>,
+    /// The file that will hold the edge.
+    owner: String,
+    edge: Link,
+    /// Which of the caller's optional fields were given (a re-link only
+    /// changes what it was asked to change).
+    given: Given,
+    stored_note: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct Given {
+    confidence: bool,
+    status: bool,
+    note: bool,
+}
+
+async fn plan_link(store: &MemoryStore, params: LinkParams) -> Result<Plan> {
     if !params.kind.is_known() {
         bail!(
             "unknown edge kind {:?} (known: {})",
@@ -313,9 +408,28 @@ pub async fn link(
             LinkKind::known_list()
         );
     }
+    let given = Given {
+        confidence: params.confidence.is_some(),
+        status: params.status.is_some(),
+        note: params.note.is_some(),
+    };
     let confidence = super::validate_score(params.confidence.unwrap_or(1.0), "confidence")?;
     let note = validate_note(params.note)?;
     let status = params.status.unwrap_or(LinkStatus::Confirmed);
+    if !status.is_known() {
+        bail!(
+            "unknown edge status {:?} (known: {})",
+            status.as_str(),
+            LinkStatus::known_list()
+        );
+    }
+    if params.kind == LinkKind::Supersedes && status != LinkStatus::Confirmed {
+        bail!(
+            "a supersession is never {status}: it closes the target's validity window, so it is \
+             either recorded or not. Propose a `contradicts` edge instead, or `unlink` an \
+             existing supersession to reject it"
+        );
+    }
     let dst_store = normalize_store(store, params.dst_store.as_deref())?;
 
     let src = store.get(&params.src).await?;
@@ -324,19 +438,52 @@ pub async fn link(
         bail!("a memory cannot link to itself");
     }
 
-    let template = Link {
+    let edge = Link {
         to: target.id.clone(),
         kind: params.kind.clone(),
         store: dst_store.clone(),
         confidence,
         origin: params.origin,
-        status: status.clone(),
+        status,
         at: Some(Utc::now()),
         note,
     };
 
     if params.kind == LinkKind::Supersedes {
-        return link_supersedes(store, src, target, template, surface).await;
+        if dst_store.is_some() {
+            bail!(
+                "`supersedes` edges must stay within one store (superseded_by cannot name \
+                 another)"
+            );
+        }
+        // Both files name the other: src's `supersedes`, target's
+        // `superseded_by`. Either direction can leak.
+        check_privacy(
+            store,
+            Some(&src.id),
+            src.visibility,
+            std::slice::from_ref(&target.id),
+            std::slice::from_ref(&target.id),
+            false,
+        )
+        .await?;
+        if let Some(t) = &target.memory {
+            if let Some(other) = t.superseded_by.as_deref().filter(|o| *o != src.id) {
+                bail!(
+                    "{} is already superseded by {other}; unlink that supersession first",
+                    t.id
+                );
+            }
+        }
+        return Ok(Plan {
+            owner: src.id.clone(),
+            src,
+            target,
+            dst_store,
+            edge,
+            given,
+            stored_note: None,
+        });
     }
 
     // The personal-id rule (module docs).
@@ -345,12 +492,12 @@ pub async fn link(
         .as_ref()
         .is_some_and(|m| m.visibility == Visibility::Personal);
     let mut owner = src.id.clone();
-    let mut edge = template.clone();
+    let mut stored = edge.clone();
     let mut stored_note = None;
     if is_committed(store, &src) && target_personal {
         if params.kind.is_symmetric() && dst_store.is_none() {
             owner = target.id.clone();
-            edge.to = src.id.clone();
+            stored.to = src.id.clone();
             stored_note = Some(format!(
                 "stored on the personal memory {}: a committed memory's file must not name a \
                  personal memory",
@@ -372,130 +519,169 @@ pub async fn link(
         }
     } else if params.kind.is_symmetric() && dst_store.is_none() {
         // Already stored on the other side? Update that copy (one per edge).
+        // This read is outside the write lock and spans two files, so two
+        // concurrent opposite links can each store a copy; the edge index
+        // keys a symmetric edge on its sorted endpoints, so readers still see
+        // one edge (`edge_index::EdgeRow::edge_key`).
         if let Some(other) = &target.memory {
             let reverse = Link {
                 to: src.id.clone(),
-                ..template.clone()
+                ..edge.clone()
             };
             if other.links.iter().any(|l| l.same_edge(&reverse)) {
                 owner = other.id.clone();
-                edge = reverse;
+                stored = reverse;
             }
         }
     }
+    Ok(Plan {
+        src,
+        target,
+        dst_store,
+        owner,
+        edge: stored,
+        given,
+        stored_note,
+    })
+}
 
-    let created = upsert_edge(store, &owner, edge).await?;
-    let related = if owner == src.id {
-        target.id.clone()
+/// Run every check [`link`] would, and write nothing. Front ends call this
+/// before a write the edge depends on (`challenge --against`), so a bad
+/// target fails the whole request instead of leaving half of it done.
+pub async fn check_link(store: &MemoryStore, params: LinkParams) -> Result<()> {
+    plan_link(store, params).await.map(|_| ())
+}
+
+/// Add an edge, or update the attributes of the same edge (same target, kind
+/// and store) when it already exists. See the module docs for the rules.
+///
+/// Updating an existing edge changes only what the caller passed: an absent
+/// confidence, note or status keeps the stored one, and the origin is always
+/// kept (it records who proposed the edge). A **proposal** (`status:
+/// proposed`) never touches an existing edge at all — re-proposing would
+/// otherwise downgrade a confirmed edge, resurrect a rejected one, and
+/// overwrite the reviewer's note.
+pub async fn link(
+    store: &MemoryStore,
+    params: LinkParams,
+    surface: super::usage::Surface,
+) -> Result<LinkResult> {
+    let plan = plan_link(store, params).await?;
+    let kind = plan.edge.kind.clone();
+    // A proposal onto an existing edge changes nothing — not even the file's
+    // `updated_at`, so it is answered without a write.
+    let owner_mem = if plan.owner == plan.src.id {
+        Some(&plan.src)
     } else {
-        src.id.clone()
+        plan.target.memory.as_ref()
+    };
+    let existing = owner_mem.and_then(|m| m.links.iter().find(|l| l.same_edge(&plan.edge)));
+    if let (LinkStatus::Proposed, Some(existing)) = (&plan.edge.status, existing) {
+        return Ok(LinkResult {
+            owner_id: plan.owner.clone(),
+            src_id: plan.src.id.clone(),
+            dst_id: plan.target.id.clone(),
+            dst_store: plan.dst_store.clone(),
+            kind,
+            status: existing.status.clone(),
+            created: false,
+            target_state: plan.target.state,
+            stored_note: plan.stored_note.clone(),
+        });
+    }
+    let (created, written) = if kind == LinkKind::Supersedes {
+        let target_id = plan.target.id.clone();
+        let edge = plan.edge.clone();
+        let given = plan.given;
+        let mut created = false;
+        let mut written = edge.clone();
+        store
+            .update_with(&plan.src.id, |m| {
+                if !m.supersedes.contains(&target_id) {
+                    m.supersedes.push(target_id.clone());
+                    created = true;
+                }
+                written = merge_into(&mut m.links, edge.clone(), given)?.1;
+                Ok(())
+            })
+            .await?;
+        super::close_superseded_windows(store, std::slice::from_ref(&target_id), &plan.src.id)
+            .await;
+        (created, written)
+    } else {
+        upsert_edge(store, &plan.owner, plan.edge.clone(), plan.given).await?
+    };
+    let related = if plan.owner == plan.src.id {
+        plan.target.id.clone()
+    } else {
+        plan.src.id.clone()
     };
     super::usage::record_write(
         store,
-        &owner,
+        &plan.owner,
         super::usage::UsageKind::Linked,
         surface,
         Some(&related),
     )
     .await;
     Ok(LinkResult {
-        owner_id: owner,
-        src_id: src.id,
-        dst_id: target.id,
-        dst_store,
-        kind: params.kind,
-        status,
+        owner_id: plan.owner,
+        src_id: plan.src.id,
+        dst_id: plan.target.id,
+        dst_store: plan.dst_store,
+        kind,
+        status: written.status,
         created,
-        target_state: target.state,
-        stored_note,
+        target_state: plan.target.state,
+        stored_note: plan.stored_note,
     })
 }
 
-/// Add `edge` to `owner`'s links, or update the existing same edge in place.
-/// Returns whether it was new.
-async fn upsert_edge(store: &MemoryStore, owner: &str, edge: Link) -> Result<bool> {
-    let mut created = false;
+/// Merge `edge` into `links` (see [`link`] for what an update changes).
+/// Returns whether it was new, and the edge as it now stands.
+fn merge_into(links: &mut Vec<Link>, edge: Link, given: Given) -> Result<(bool, Link)> {
+    if let Some(existing) = links.iter_mut().find(|l| l.same_edge(&edge)) {
+        if edge.status == LinkStatus::Proposed {
+            return Ok((false, existing.clone()));
+        }
+        if given.status {
+            existing.status = edge.status;
+        }
+        if given.confidence {
+            existing.confidence = edge.confidence;
+        }
+        if given.note {
+            existing.note = edge.note;
+        }
+        existing.at = edge.at;
+        return Ok((false, existing.clone()));
+    }
+    if links.len() >= MAX_LINKS_PER_MEMORY {
+        bail!(
+            "this memory already has {MAX_LINKS_PER_MEMORY} outbound edges; remove some before \
+             adding more"
+        );
+    }
+    links.push(edge.clone());
+    Ok((true, edge))
+}
+
+/// Add `edge` to `owner`'s links, or update the existing same edge in place
+/// ([`merge_into`]). Returns whether it was new and the edge as stored.
+async fn upsert_edge(
+    store: &MemoryStore,
+    owner: &str,
+    edge: Link,
+    given: Given,
+) -> Result<(bool, Link)> {
+    let mut out = (false, edge.clone());
     store
         .update_with(owner, |m| {
-            if let Some(existing) = m.links.iter_mut().find(|l| l.same_edge(&edge)) {
-                *existing = edge;
-            } else {
-                if m.links.len() >= MAX_LINKS_PER_MEMORY {
-                    bail!(
-                        "memory {} already has {MAX_LINKS_PER_MEMORY} outbound edges; remove \
-                         some before adding more",
-                        m.id
-                    );
-                }
-                m.links.push(edge);
-                created = true;
-            }
+            out = merge_into(&mut m.links, edge.clone(), given)?;
             Ok(())
         })
         .await?;
-    Ok(created)
-}
-
-/// `link A supersedes B`: the canonical fields, plus a `links` entry that
-/// keeps the edge's metadata (module docs). Same store only — `superseded_by`
-/// cannot name another store, so a cross-store supersession has no canonical
-/// form to write.
-async fn link_supersedes(
-    store: &MemoryStore,
-    src: Memory,
-    target: Target,
-    edge: Link,
-    surface: super::usage::Surface,
-) -> Result<LinkResult> {
-    if edge.store.is_some() {
-        bail!("`supersedes` edges must stay within one store (superseded_by cannot name another)");
-    }
-    if let Some(t) = &target.memory {
-        if is_committed(store, &src) && t.visibility == Visibility::Personal {
-            bail!(
-                "refusing to record that shared memory {} supersedes personal memory {}: the \
-                 personal id would leak into the committed file",
-                src.id,
-                t.id
-            );
-        }
-    }
-    let target_id = target.id.clone();
-    let mut created = false;
-    store
-        .update_with(&src.id, |m| {
-            if !m.supersedes.contains(&target_id) {
-                m.supersedes.push(target_id.clone());
-                created = true;
-            }
-            if let Some(existing) = m.links.iter_mut().find(|l| l.same_edge(&edge)) {
-                *existing = edge.clone();
-            } else {
-                m.links.push(edge.clone());
-            }
-            Ok(())
-        })
-        .await?;
-    super::close_superseded_windows(store, std::slice::from_ref(&target_id), &src.id).await;
-    super::usage::record_write(
-        store,
-        &src.id,
-        super::usage::UsageKind::Linked,
-        surface,
-        Some(&target_id),
-    )
-    .await;
-    Ok(LinkResult {
-        owner_id: src.id.clone(),
-        src_id: src.id,
-        dst_id: target_id,
-        dst_store: None,
-        kind: LinkKind::Supersedes,
-        status: edge.status,
-        created,
-        target_state: target.state,
-        stored_note: None,
-    })
+    Ok(out)
 }
 
 /// Which edge to remove or review.
@@ -634,18 +820,47 @@ async fn unlink_supersedes(
             })
             .await?;
     }
+    // Reopen the target only when nothing else still supersedes it: another
+    // memory listing it in `supersedes` takes over the mirror instead, and
+    // the window stays closed.
     let reopened = if mirrored {
         let src_id = src.id.clone();
+        let others: Vec<String> = store
+            .list_edge_rows_touching(&dst_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| {
+                r.kind == LinkKind::Supersedes
+                    && r.field == EdgeField::Supersedes
+                    && r.dst_id == dst_id
+                    && r.src_id != src_id
+            })
+            .map(|r| r.src_id)
+            .collect();
+        let successor = store
+            .get_batch(&others.iter().map(String::as_str).collect::<Vec<_>>())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(_, m)| m.supersedes.contains(&dst_id))
+            .map(|(id, _)| id);
+        let reopen = successor.is_none();
         store
             .update_with(&dst_id, |m| {
                 if m.superseded_by.as_deref() == Some(src_id.as_str()) {
-                    m.superseded_by = None;
-                    m.invalidated_at = None;
+                    match successor {
+                        Some(next) => m.superseded_by = Some(next),
+                        None => {
+                            m.superseded_by = None;
+                            m.invalidated_at = None;
+                        }
+                    }
                 }
                 Ok(())
             })
             .await?;
-        true
+        reopen
     } else {
         false
     };
@@ -680,6 +895,15 @@ pub async fn set_link_status(
             "unknown edge status {:?} (known: {})",
             status.as_str(),
             LinkStatus::known_list()
+        );
+    }
+    if edge.kind == LinkKind::Supersedes {
+        // A supersession is recorded or it is not (see `link`): flipping
+        // its entry's status would leave the target's window closed under
+        // an edge the table calls rejected.
+        bail!(
+            "a supersession has no review status: it is confirmed by existing. To reject it, \
+             `unlink` it (which reopens the target)"
         );
     }
     let note = validate_note(note)?;
@@ -802,6 +1026,16 @@ pub async fn confirm_contradiction_direction(
                 (true, true) => bail!("winner {winner:?} is a prefix of both {a_id} and {b_id}"),
                 (false, false) => bail!("winner {winner:?} is neither {a_id} nor {b_id}"),
             };
+            // Refuse before any write when the loser was already replaced by
+            // something else (a compress, an earlier verdict): rewriting its
+            // `superseded_by` and `invalidated_at` would erase that history.
+            let loser = store.get(&lose).await?;
+            if let Some(other) = loser.superseded_by.as_deref().filter(|o| *o != win) {
+                bail!(
+                    "{lose} is already superseded by {other}; resolve this contradiction as \
+                     both-stand or rejected, or unlink that supersession first"
+                );
+            }
             let mut carried = Link::new(&lose, LinkKind::Supersedes, stored.origin.clone());
             carried.confidence = stored.confidence;
             carried.note = validate_note(note)?.or(stored.note.clone());
@@ -820,11 +1054,17 @@ pub async fn confirm_contradiction_direction(
                 surface,
             )
             .await?;
-            // `link_supersedes` closed the loser's window unless it was
-            // already closed; a verdict says who replaced it, so make sure
-            // the reverse link names the winner either way.
+            // `link` closed the loser's window if it was live. One that was
+            // already closed without a successor (`resolve invalidate`) keeps
+            // its `invalidated_at` and only gains the mirror.
+            let winner_id = win.clone();
             store
-                .invalidate_with(&lose, Some(win.clone()), Utc::now())
+                .update_with(&lose, |m| {
+                    if m.superseded_by.is_none() {
+                        m.superseded_by = Some(winner_id);
+                    }
+                    Ok(())
+                })
                 .await?;
             store
                 .update_with(&owner, |m| {
@@ -840,6 +1080,15 @@ pub async fn confirm_contradiction_direction(
                 loser: Some(lose),
             })
         }
+    }
+}
+
+fn status_rank(s: &LinkStatus) -> u8 {
+    match s {
+        LinkStatus::Confirmed => 3,
+        LinkStatus::Proposed => 2,
+        LinkStatus::Rejected => 1,
+        LinkStatus::Other(_) => 0,
     }
 }
 
@@ -891,6 +1140,12 @@ async fn carry_links_inner(
     let mut moved_from: HashMap<String, Vec<Link>> = HashMap::new();
     for source in sources {
         for link in &source.links {
+            // A `supersedes` entry is metadata for the source's own canonical
+            // field, which compress does not move; carried alone it would be
+            // an entry with no edge behind it. It stays with its field.
+            if link.kind == LinkKind::Supersedes {
+                continue;
+            }
             let internal = link.store.is_none()
                 && (source_ids.contains(link.to.as_str()) || link.to == summary_id);
             if internal {
@@ -905,8 +1160,12 @@ async fn carry_links_inner(
             }
             let mut moved = link.clone();
             moved.origin = LinkOrigin::Compress;
-            if !carried.iter().any(|c| c.same_edge(&moved)) {
-                carried.push(moved);
+            // Two sources holding the same edge: keep the most decided review
+            // state (confirmed > proposed > rejected), not whichever came first.
+            match carried.iter_mut().find(|c| c.same_edge(&moved)) {
+                Some(c) if status_rank(&moved.status) > status_rank(&c.status) => *c = moved,
+                Some(_) => {}
+                None => carried.push(moved),
             }
             moved_from
                 .entry(source.id.clone())
@@ -1309,27 +1568,55 @@ pub struct DanglingEdge {
     pub kind: LinkKind,
 }
 
-/// What `doctor` reports about a store's edges. Never a failure: every
-/// finding here is legal state (module docs), reported so it can be tidied.
+/// What `doctor` reports about a store's edges. Every finding here is legal
+/// state (module docs) or derived-table drift, reported so it can be tidied;
+/// none of it is a failure.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct EdgeHealth {
     pub total: usize,
     pub dangling: Vec<DanglingEdge>,
-    /// Cross-store edges whose store could not be opened here.
+    /// Cross-store edges whose store could not be opened (or read) here.
     pub unknown: usize,
     /// Committed (shared, project-store) memories whose file names a
-    /// personal memory — the leak the link rules prevent, acquired some other
-    /// way (typically a visibility change after linking).
+    /// personal memory — the leak the write rules refuse, acquired some
+    /// other way (a hand edit, a file from an older binary). Checked on the
+    /// **un-deduplicated** rows: dedupe folds a `superseded_by` mirror into
+    /// its `supersedes` row, and that mirror is the one in the other file.
     pub personal_leaks: Vec<DanglingEdge>,
     /// Edges of a kind this binary does not know (a newer binary wrote them).
     pub unknown_kinds: usize,
+    /// Rows the edges table should hold but does not, plus rows it holds that
+    /// no file declares. The table is derived and its writes never fail a
+    /// memory write, so a failed one surfaces here; `reindex` rebuilds it.
+    pub table_drift: usize,
 }
 
 /// Check every edge of `store`. Side-effect free.
 pub async fn edge_health(store: &MemoryStore) -> Result<EdgeHealth> {
-    let edges = store.list_edges().await?;
+    let raw = store.list_edge_rows().await?;
+
+    // What the files declare, for the drift count. A file that does not
+    // parse is skipped by `get_batch`; its preserved rows are not drift.
+    let ids = store.list_ids().await?;
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let memories = store.get_batch(&id_refs).await?;
+    let parsed: HashSet<&str> = memories.iter().map(|(id, _)| id.as_str()).collect();
+    let expected: HashSet<String> = memories
+        .iter()
+        .flat_map(|(_, m)| crate::storage::edge_index::edges_of(m))
+        .map(|r| r.row_key())
+        .collect();
+    let actual: HashSet<String> = raw
+        .iter()
+        .filter(|r| parsed.contains(r.owner_id.as_str()))
+        .map(|r| r.row_key())
+        .collect();
+    let table_drift = expected.symmetric_difference(&actual).count();
+
+    let edges = crate::storage::edge_index::dedupe(raw.clone());
     let mut health = EdgeHealth {
         total: edges.len(),
+        table_drift,
         ..Default::default()
     };
     if edges.is_empty() {
@@ -1358,44 +1645,55 @@ pub async fn edge_health(store: &MemoryStore) -> Result<EdgeHealth> {
                 dst: e.dst_id.clone(),
                 kind: e.kind.clone(),
             });
-            continue;
         }
-        if committed_store {
-            let owner_vis = visibility.get(&e.owner_id);
-            let other = if e.owner_id == e.src_id {
-                &e.dst_id
+    }
+    if committed_store {
+        for r in raw.iter().filter(|r| r.dst_store.is_none()) {
+            let other = if r.owner_id == r.src_id {
+                &r.dst_id
             } else {
-                &e.src_id
+                &r.src_id
             };
-            if owner_vis == Some(&Visibility::Shared)
+            if visibility.get(&r.owner_id) == Some(&Visibility::Shared)
                 && visibility.get(other) == Some(&Visibility::Personal)
             {
-                health.personal_leaks.push(DanglingEdge {
+                let leak = DanglingEdge {
+                    src: r.src_id.clone(),
+                    dst: r.dst_id.clone(),
+                    kind: r.kind.clone(),
+                };
+                if !health
+                    .personal_leaks
+                    .iter()
+                    .any(|l| l.src == leak.src && l.dst == leak.dst && l.kind == leak.kind)
+                {
+                    health.personal_leaks.push(leak);
+                }
+            }
+        }
+    }
+    for (sid, ids) in foreign {
+        // Absence of evidence is not evidence of deletion: a store that will
+        // not open, or will not answer, leaves its edges unknown.
+        let found = match open_store_by_id(&sid, true).await {
+            Ok(other) => other.batch_exists(&ids).await.ok(),
+            Err(_) => None,
+        };
+        let Some(found) = found else {
+            health.unknown += ids.len();
+            continue;
+        };
+        for e in edges
+            .iter()
+            .filter(|e| e.dst_store.as_deref() == Some(sid.as_str()))
+        {
+            if !found.contains(&e.dst_id) {
+                health.dangling.push(DanglingEdge {
                     src: e.src_id.clone(),
                     dst: e.dst_id.clone(),
                     kind: e.kind.clone(),
                 });
             }
-        }
-    }
-    for (sid, ids) in foreign {
-        match open_store_by_id(&sid, true).await {
-            Ok(other) => {
-                let found = other.batch_exists(&ids).await.unwrap_or_default();
-                for e in edges
-                    .iter()
-                    .filter(|e| e.dst_store.as_deref() == Some(sid.as_str()))
-                {
-                    if !found.contains(&e.dst_id) {
-                        health.dangling.push(DanglingEdge {
-                            src: e.src_id.clone(),
-                            dst: e.dst_id.clone(),
-                            kind: e.kind.clone(),
-                        });
-                    }
-                }
-            }
-            Err(_) => health.unknown += ids.len(),
         }
     }
     Ok(health)
@@ -1438,6 +1736,40 @@ mod tests {
             origin: LinkOrigin::Human,
             status: None,
             note: None,
+        }
+    }
+
+    fn upd() -> crate::ops::UpdateParams {
+        crate::ops::UpdateParams {
+            type_: None,
+            content: None,
+            summary: None,
+            title: None,
+            physical: None,
+            logical: None,
+            tags: None,
+            tags_add: None,
+            tags_remove: None,
+            criticality: None,
+            confidence: None,
+            details: None,
+            visibility: None,
+            status: None,
+            supersedes: None,
+            audience: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: None,
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            clear_validity: false,
+            clear_invalidated: false,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+            embed_async: false,
         }
     }
 
@@ -1724,6 +2056,342 @@ mod tests {
             .unwrap();
         assert_eq!(sup.origin, LinkOrigin::Nli);
         assert_eq!(sup.note.as_deref(), Some("reviewed"));
+    }
+
+    /// Review p3-ops #1: the reverse direction of a supersession leaks too —
+    /// `personal supersedes shared` would write the personal id into the
+    /// shared file's `superseded_by`. Refused before any write, on `link`,
+    /// on `--winner`, and on `create --supersedes`.
+    #[tokio::test]
+    async fn personal_cannot_supersede_shared_in_any_path() {
+        let (_t, store) = store().await;
+        let s = mem(&store, "shared", Visibility::Shared).await;
+        let p = mem(&store, "personal", Visibility::Personal).await;
+        let err = link(&store, params(&p, LinkKind::Supersedes, &s), Surface::Cli)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("superseded_by"), "{err:#}");
+        let sm = store.get(&s).await.unwrap();
+        assert!(sm.superseded_by.is_none() && !sm.is_invalidated());
+        assert!(store.get(&p).await.unwrap().supersedes.is_empty());
+
+        // The winner path goes through the same check.
+        let mut c = params(&p, LinkKind::Contradicts, &s);
+        c.status = Some(LinkStatus::Proposed);
+        link(&store, c, Surface::Cli).await.unwrap();
+        let err = confirm_contradiction_direction(
+            &store,
+            &p,
+            &s,
+            ContradictionVerdict::Supersedes { winner: p.clone() },
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("superseded_by"), "{err:#}");
+        assert!(store.get(&s).await.unwrap().superseded_by.is_none());
+
+        // And create: a personal memory created with `supersedes = [shared]`.
+        let cp = crate::ops::CreateParams {
+            type_: MemoryType::Decision,
+            content: "c".into(),
+            summary: "new personal".into(),
+            title: None,
+            physical: vec![],
+            logical: vec![],
+            tags: vec![],
+            criticality: 0.5,
+            confidence: 0.8,
+            details: None,
+            visibility: Visibility::Personal,
+            provenance: crate::types::Provenance::human(),
+            supersedes: vec![s.clone()],
+            audience: None,
+            epistemic: None,
+            premise: None,
+            invalidated_by: vec![],
+            origin_task: None,
+            generality: None,
+            valid_from: None,
+            decay_strategy: None,
+            decay_half_life: None,
+            decay_ttl: None,
+            decay_floor: None,
+            title_strategy: crate::title::TitleStrategy::None,
+            embed_async: false,
+        };
+        assert!(crate::ops::create_memory(&store, cp, None, Surface::Cli)
+            .await
+            .is_err());
+        assert!(store.get(&s).await.unwrap().superseded_by.is_none());
+    }
+
+    /// Review p3-ops #2 / lead decision (b): a supersession exists only as
+    /// confirmed.
+    #[tokio::test]
+    async fn supersedes_is_never_proposed_or_rejected() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        for status in [LinkStatus::Proposed, LinkStatus::Rejected] {
+            let mut p = params(&a, LinkKind::Supersedes, &b);
+            p.status = Some(status);
+            assert!(link(&store, p, Surface::Cli).await.is_err());
+            assert!(!store.get(&b).await.unwrap().is_invalidated());
+        }
+        link(&store, params(&a, LinkKind::Supersedes, &b), Surface::Cli)
+            .await
+            .unwrap();
+        let err = set_link_status(
+            &store,
+            eref(&a, LinkKind::Supersedes, &b),
+            LinkStatus::Rejected,
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("unlink"), "{err:#}");
+        assert!(store.get(&b).await.unwrap().is_invalidated());
+    }
+
+    /// Review p3-ops #3 / #4 / lead decision (d): a proposal never touches an
+    /// existing edge, and a status-only change keeps the metadata.
+    #[tokio::test]
+    async fn proposals_never_overwrite_and_status_changes_keep_metadata() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        // challenge --against twice: one edge, first note kept.
+        link(&store, challenge_edge(&a, &b, "first"), Surface::Cli)
+            .await
+            .unwrap();
+        let r = link(&store, challenge_edge(&a, &b, "second"), Surface::Cli)
+            .await
+            .unwrap();
+        assert!(!r.created);
+        let am = store.get(&a).await.unwrap();
+        assert_eq!(am.links.len(), 1);
+        assert_eq!(am.links[0].note.as_deref(), Some("first"));
+
+        // A reviewer rejects it with a note; a re-proposal changes nothing.
+        set_link_status(
+            &store,
+            eref(&a, LinkKind::Contradicts, &b),
+            LinkStatus::Rejected,
+            Some("not a conflict".into()),
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let before = store.get(&a).await.unwrap();
+        let r = link(&store, challenge_edge(&b, &a, "again"), Surface::Cli)
+            .await
+            .unwrap();
+        assert_eq!(r.status, LinkStatus::Rejected, "reported as it stands");
+        let after = store.get(&a).await.unwrap();
+        assert_eq!(after.links, before.links);
+        assert_eq!(after.updated_at, before.updated_at, "no write at all");
+
+        // A confirmed edge is not downgraded either.
+        let mut p = params(&a, LinkKind::Contradicts, &b);
+        p.status = Some(LinkStatus::Confirmed);
+        link(&store, p, Surface::Cli).await.unwrap();
+        link(&store, challenge_edge(&a, &b, "x"), Surface::Cli)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get(&a).await.unwrap().links[0].status,
+            LinkStatus::Confirmed
+        );
+
+        // A status-only re-link keeps origin, confidence and note.
+        let mut p = params(&b, LinkKind::Supports, &a);
+        p.origin = LinkOrigin::Nli;
+        p.confidence = Some(0.4);
+        p.note = Some("evidence".into());
+        p.status = Some(LinkStatus::Proposed);
+        link(&store, p, Surface::Cli).await.unwrap();
+        let mut p = params(&b, LinkKind::Supports, &a);
+        p.status = Some(LinkStatus::Rejected);
+        link(&store, p, Surface::Cli).await.unwrap();
+        let l = store.get(&b).await.unwrap().links[0].clone();
+        assert_eq!(l.status, LinkStatus::Rejected);
+        assert_eq!(l.origin, LinkOrigin::Nli);
+        assert_eq!(l.confidence, 0.4);
+        assert_eq!(l.note.as_deref(), Some("evidence"));
+    }
+
+    /// Review p3-ops #5: a verdict must not rewrite the history of a loser
+    /// that something else already superseded.
+    #[tokio::test]
+    async fn winner_refuses_a_loser_superseded_by_another() {
+        let (_t, store) = store().await;
+        let (a, b) = proposed_contradiction(&store).await;
+        let c = mem(&store, "c", Visibility::Shared).await;
+        link(&store, params(&c, LinkKind::Supersedes, &b), Surface::Cli)
+            .await
+            .unwrap();
+        let before = store.get(&b).await.unwrap();
+        let err = confirm_contradiction_direction(
+            &store,
+            &a,
+            &b,
+            ContradictionVerdict::Supersedes { winner: a.clone() },
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("already superseded"), "{err:#}");
+        let after = store.get(&b).await.unwrap();
+        assert_eq!(after.superseded_by, before.superseded_by);
+        assert_eq!(after.invalidated_at, before.invalidated_at);
+        assert!(
+            store.get(&a).await.unwrap().supersedes.is_empty(),
+            "no write"
+        );
+        assert!(after.links.iter().any(|l| l.kind == LinkKind::Contradicts));
+    }
+
+    /// Review p3-storage #7: unlinking one of two supersessions keeps the
+    /// target closed and points its mirror at the other.
+    #[tokio::test]
+    async fn unlink_supersedes_hands_the_mirror_to_another_superseder() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let c = mem(&store, "c", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        link(&store, params(&a, LinkKind::Supersedes, &b), Surface::Cli)
+            .await
+            .unwrap();
+        // C also supersedes B (canonical field only: `link` refuses a second
+        // superseder, `create`/`update --supersedes` does not).
+        crate::ops::update_memory(
+            &store,
+            &c,
+            crate::ops::UpdateParams {
+                supersedes: Some(vec![b.clone()]),
+                ..upd()
+            },
+            None,
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let r = unlink(&store, eref(&a, LinkKind::Supersedes, &b), Surface::Cli)
+            .await
+            .unwrap();
+        assert!(!r.reopened);
+        let bm = store.get(&b).await.unwrap();
+        assert!(bm.is_invalidated());
+        assert_eq!(bm.superseded_by.as_deref(), Some(c.as_str()));
+    }
+
+    /// Review p3-storage #3 / lead decision (c): visibility changes that would
+    /// leak are refused, both ways, before any write.
+    #[tokio::test]
+    async fn visibility_change_cannot_leak_a_personal_id() {
+        let (_t, store) = store().await;
+        let p1 = mem(&store, "p1", Visibility::Personal).await;
+        let p2 = mem(&store, "p2", Visibility::Personal).await;
+        link(&store, params(&p1, LinkKind::Supports, &p2), Surface::Cli)
+            .await
+            .unwrap();
+        let to = |v| crate::ops::UpdateParams {
+            visibility: Some(v),
+            ..upd()
+        };
+        // p1 → shared would commit a file naming p2.
+        assert!(
+            crate::ops::update_memory(&store, &p1, to(Visibility::Shared), None, Surface::Cli)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.get(&p1).await.unwrap().visibility,
+            Visibility::Personal
+        );
+
+        // s → personal while a shared file names s.
+        let s1 = mem(&store, "s1", Visibility::Shared).await;
+        let s2 = mem(&store, "s2", Visibility::Shared).await;
+        link(&store, params(&s1, LinkKind::Supports, &s2), Surface::Cli)
+            .await
+            .unwrap();
+        assert!(crate::ops::update_memory(
+            &store,
+            &s2,
+            to(Visibility::Personal),
+            None,
+            Surface::Cli
+        )
+        .await
+        .is_err());
+        assert_eq!(store.get(&s2).await.unwrap().visibility, Visibility::Shared);
+        // With no edge in the way the change goes through.
+        let s3 = mem(&store, "s3", Visibility::Shared).await;
+        crate::ops::update_memory(&store, &s3, to(Visibility::Personal), None, Surface::Cli)
+            .await
+            .unwrap();
+    }
+
+    /// Review p3-storage #2: the leak check sees the `superseded_by` mirror,
+    /// which dedupe folds away.
+    #[tokio::test]
+    async fn edge_health_flags_a_superseded_by_leak() {
+        let (_t, store) = store().await;
+        let p = mem(&store, "p", Visibility::Personal).await;
+        // A shared memory whose committed file says `superseded_by = p` —
+        // what an older binary (or a hand edit) could leave behind.
+        let mut s = Memory::new(
+            MemoryType::Decision,
+            "s",
+            "c",
+            crate::types::Provenance::human(),
+        );
+        s.superseded_by = Some(p.clone());
+        let s = store.create(&s).await.unwrap();
+        store
+            .update_with(&p, |m| {
+                m.supersedes.push(s.clone());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let h = edge_health(&store).await.unwrap();
+        assert_eq!(h.personal_leaks.len(), 1, "{h:?}");
+        assert_eq!(h.personal_leaks[0].src, p);
+        assert_eq!(h.personal_leaks[0].dst, s);
+        assert_eq!(h.table_drift, 0, "{h:?}");
+    }
+
+    /// Cross-store edges against a real, openable group store: checked as
+    /// live, then dangling once the target is deleted.
+    #[tokio::test]
+    async fn cross_store_edge_into_a_group_store() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let name = format!("links-test-{}", uuid::Uuid::now_v7().simple());
+        let gid = crate::storage::paths::compute_group_id(&name);
+        let group = MemoryStore::open_group(&gid).await.unwrap();
+        let g = mem(&group, "in the group", Visibility::Shared).await;
+        let mut p = params(&a, LinkKind::Supports, &g[..24]);
+        p.dst_store = Some(format!("group:{name}"));
+        let r = link(&store, p, Surface::Cli).await.unwrap();
+        assert_eq!(r.dst_store.as_deref(), Some(gid.as_str()));
+        assert_eq!(r.dst_id, g, "the prefix resolved in the other store");
+        assert_eq!(r.target_state, EdgeState::Live);
+        let v = links_of(&store, &a, &LinkFilter::default()).await.unwrap();
+        assert_eq!(v.outbound.len(), 1);
+        assert_eq!(v.outbound[0].state, EdgeState::Live);
+        assert_eq!(edge_health(&store).await.unwrap().unknown, 0);
+
+        group.delete(&g).await.unwrap();
+        let v = links_of(&store, &a, &LinkFilter::all()).await.unwrap();
+        assert_eq!(v.outbound[0].state, EdgeState::Dangling);
+        assert_eq!(edge_health(&store).await.unwrap().dangling.len(), 1);
     }
 
     /// `resolve --keep` clears challenges; it must not take the edge too.

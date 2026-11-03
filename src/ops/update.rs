@@ -134,6 +134,37 @@ async fn update_memory_unrecorded(
     // an unrelated field update doesn't rewrite scope).
     let strip_physical = store.is_group() || store.is_global();
 
+    // A visibility or supersedes change can put a personal id into a
+    // committed file (this one, a superseded target's, or — going shared →
+    // personal — a file that already names this memory). Refused before any
+    // write (`links::check_privacy`). Read outside the lock: the checks span
+    // several files, which `update_with`'s one-file closure cannot.
+    if params.visibility.is_some() || params.supersedes.is_some() {
+        let current = store.get(id).await?;
+        let visibility = params.visibility.unwrap_or(current.visibility);
+        let supersedes = params
+            .supersedes
+            .clone()
+            .unwrap_or_else(|| current.supersedes.clone());
+        let named: Vec<String> = current
+            .links
+            .iter()
+            .filter(|l| l.store.is_none())
+            .map(|l| l.to.clone())
+            .chain(supersedes.iter().cloned())
+            .chain(current.superseded_by.iter().cloned())
+            .collect();
+        super::links::check_privacy(
+            store,
+            Some(&current.id),
+            visibility,
+            &named,
+            &supersedes,
+            current.visibility == Visibility::Shared && visibility == Visibility::Personal,
+        )
+        .await?;
+    }
+
     // Merge the params into the memory atomically: `update_with` re-reads the
     // memory inside the per-project write lock, so two concurrent updates
     // cannot snapshot the same old state and silently erase each other's

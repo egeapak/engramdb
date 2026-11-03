@@ -130,7 +130,7 @@ fn edge_state_suffix(e: &EdgeView) -> String {
     match e.state {
         EdgeState::Live => String::new(),
         EdgeState::Invalidated => match &e.successor {
-            Some(s) => format!(" [invalidated, superseded by {}]", short_id(s)),
+            Some(s) => format!(" [invalidated, superseded by {}]", clean(short_id(s))),
             None => " [invalidated]".to_string(),
         },
         EdgeState::Dangling => " [dangling]".to_string(),
@@ -138,26 +138,33 @@ fn edge_state_suffix(e: &EdgeView) -> String {
     }
 }
 
+/// Every string in an edge row comes from a memory file, which is committed
+/// and hand-editable: an `Other` kind/status/origin, a store id or a target
+/// id can carry terminal escapes or a newline that forges a row.
+fn clean(s: &str) -> std::borrow::Cow<'_, str> {
+    sanitize_one_line(s)
+}
+
 fn edge_pretty_line(e: &EdgeView) -> String {
     let store = e
         .other_store
         .as_deref()
-        .map(|s| format!(" @{s}"))
+        .map(|s| format!(" @{}", clean(s)))
         .unwrap_or_default();
     let summary = e
         .other_summary
         .as_deref()
-        .map(|s| format!("  {}", sanitize_one_line(s)))
+        .map(|s| format!("  {}", clean(s)))
         .unwrap_or_default();
     format!(
         "{} {} {}{}{}  ({}, {}, {:.2}){}",
-        e.kind,
+        clean(e.kind.as_str()),
         edge_arrow(e),
-        short_id(&e.other_id),
+        clean(short_id(&e.other_id)),
         store,
         summary,
-        e.status,
-        e.origin,
+        clean(e.status.as_str()),
+        clean(e.origin.as_str()),
         e.confidence,
         edge_state_suffix(e)
     )
@@ -176,16 +183,16 @@ fn edge_plain_line(e: &EdgeView) -> String {
     };
     let mut line = format!(
         "edge direction={dir} kind={} other={} store={} status={} origin={} confidence={:.2} state={state} at={}",
-        e.kind,
-        e.other_id,
-        e.other_store.as_deref().unwrap_or("-"),
-        e.status,
-        e.origin,
+        clean(e.kind.as_str()),
+        clean(&e.other_id),
+        clean(e.other_store.as_deref().unwrap_or("-")),
+        clean(e.status.as_str()),
+        clean(e.origin.as_str()),
         e.confidence,
         e.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     );
     if let Some(s) = &e.successor {
-        line.push_str(&format!(" successor={s}"));
+        line.push_str(&format!(" successor={}", clean(s)));
     }
     if let Some(n) = &e.note {
         line.push_str(&format!(" note={n:?}"));
@@ -1482,24 +1489,28 @@ impl OutputFormatter {
 
     /// Print a memory and, when it has any, its edges (`get`).
     ///
-    /// With no edges (shown or hidden) this is byte-identical to
-    /// [`print_memory`](Self::print_memory), so a store that never links
-    /// sees no change. Json adds an `edges` key beside the memory's own
-    /// `links` (the outbound list as stored), carrying both directions with
-    /// their far ends checked.
+    /// In the text formats, with no edges (shown or hidden) this is
+    /// byte-identical to [`print_memory`](Self::print_memory). Json always
+    /// adds an `edges` key beside the memory's own `links` (the outbound list
+    /// as stored), carrying both directions with their far ends checked.
     pub fn print_memory_with_links(&self, memory: &Memory, view: Option<&LinksView>) {
-        let Some(view) = view.filter(|v| links_view_nonempty(v)) else {
-            return self.print_memory(memory);
-        };
         if self.silent {
             return;
         }
+        // Json always carries `edges` when the edges were read (empty lists
+        // when there are none), like the MCP `get`; the text formats add a
+        // section only when there is something to show.
+        if let (OutputFormat::Json, Some(view)) = (self.format, view) {
+            let mut value = serde_json::to_value(memory).unwrap();
+            value["edges"] = serde_json::to_value(view).unwrap();
+            outln!(self, "{}", serde_json::to_string_pretty(&value).unwrap());
+            return;
+        }
+        let Some(view) = view.filter(|v| links_view_nonempty(v)) else {
+            return self.print_memory(memory);
+        };
         match self.format {
-            OutputFormat::Json => {
-                let mut value = serde_json::to_value(memory).unwrap();
-                value["edges"] = serde_json::to_value(view).unwrap();
-                outln!(self, "{}", serde_json::to_string_pretty(&value).unwrap());
-            }
+            OutputFormat::Json => unreachable!("handled above"),
             OutputFormat::Pretty => {
                 self.print_memory_pretty(memory);
                 outln!(self, "Links:");
@@ -1597,14 +1608,14 @@ impl OutputFormatter {
         let store = result
             .dst_store
             .as_deref()
-            .map(|s| format!(" @{s}"))
+            .map(|s| format!(" @{}", clean(s)))
             .unwrap_or_default();
         self.print_success(&format!(
             "{verb} {} {} {}{store} ({})",
             short_id(&result.src_id),
-            result.kind,
-            short_id(&result.dst_id),
-            result.status
+            clean(result.kind.as_str()),
+            clean(short_id(&result.dst_id)),
+            clean(result.status.as_str())
         ));
         if let Some(note) = &result.stored_note {
             self.print_hint(note);
@@ -4019,16 +4030,13 @@ mod tests {
         });
     }
 
-    /// No edges at all: `get` must render exactly what it did before edges
-    /// existed, in every format.
+    /// No edges at all: `get`'s text formats render exactly what they did
+    /// before edges existed (Json always carries `edges`; see
+    /// `snap_memory_with_no_links_json`).
     #[test]
     fn memory_without_links_renders_as_before() {
         let view = empty_links_view();
-        for format in [
-            OutputFormat::Pretty,
-            OutputFormat::Json,
-            OutputFormat::Plain,
-        ] {
+        for format in [OutputFormat::Pretty, OutputFormat::Plain] {
             let (with, cap_with) = OutputFormatter::capturing(format);
             with.print_memory_with_links(&rich_memory(), Some(&view));
             let (without, cap_without) = OutputFormatter::capturing(format);
@@ -4039,6 +4047,14 @@ mod tests {
                 "{format:?}"
             );
         }
+    }
+
+    #[test]
+    fn snap_memory_with_no_links_json() {
+        let view = empty_links_view();
+        let (f, cap) = OutputFormatter::capturing(OutputFormat::Json);
+        f.print_memory_with_links(&test_memory(), Some(&view));
+        snap("memory_with_no_links__json", cap.transcript());
     }
 
     #[test]

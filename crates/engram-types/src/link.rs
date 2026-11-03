@@ -17,6 +17,17 @@
 //! would then erase it from a committed file. `Other` round-trips the exact
 //! spelling instead, and every policy decision treats it as inert: an unknown
 //! kind is never symmetric, never scored, never rewritten into a known one.
+//!
+//! **Unknown keys do not survive.** A field this binary does not know (on a
+//! link, or a new key in the hidden block) is ignored on read and therefore
+//! dropped by the next rewrite of that file. Preserving them needs a
+//! `#[serde(flatten)]` catch-all, which the hidden block's YAML
+//! deserializer and every `Link { .. }` literal would have to carry; that was
+//! judged not worth it before any newer field exists. A binary that adds a
+//! field to `Link` must therefore treat its absence as the old behaviour —
+//! which every field here already does — and must not rely on an older
+//! binary preserving it. (A binary older than links drops the whole `links`
+//! list on rewrite for the same reason; nothing written now can change that.)
 
 use std::fmt;
 

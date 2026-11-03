@@ -7238,8 +7238,8 @@ async fn link_tools_round_trip_and_get_shows_both_ends() {
             }))
             .await,
     );
-    assert_eq!(got["links"]["inbound"][0]["other_id"], a.as_str());
-    assert_eq!(got["links"]["inbound"][0]["note"], "same root cause");
+    assert_eq!(got["edges"]["inbound"][0]["other_id"], a.as_str());
+    assert_eq!(got["edges"]["inbound"][0]["note"], "same root cause");
     let got = parse_ok(
         &server
             .memory_get(Parameters(GetInput {
@@ -7248,7 +7248,7 @@ async fn link_tools_round_trip_and_get_shows_both_ends() {
             }))
             .await,
     );
-    assert_eq!(got["links"]["outbound"][0]["other_id"], b.as_str());
+    assert_eq!(got["edges"]["outbound"][0]["other_id"], b.as_str());
 
     // Unknown kinds are a validation error at the boundary.
     let err = server
@@ -7284,10 +7284,10 @@ async fn link_tools_round_trip_and_get_shows_both_ends() {
             }))
             .await,
     );
-    assert!(
-        got.get("links").is_none(),
-        "a never-linked view reads as before: {got}"
-    );
+    // Always present, empty once the edge is gone (lead decision (f)).
+    assert_eq!(got["edges"]["outbound"], serde_json::json!([]), "{got}");
+    assert_eq!(got["edges"]["inbound"], serde_json::json!([]), "{got}");
+    assert_eq!(got["edges"]["hidden"], 0, "{got}");
 }
 
 #[tokio::test]
@@ -7321,7 +7321,7 @@ async fn create_links_param_adds_edges_and_reports_failures() {
             .memory_get(Parameters(GetInput { id, project: None }))
             .await,
     );
-    assert_eq!(got["links"]["outbound"][0]["kind"], "derived_from");
+    assert_eq!(got["edges"]["outbound"][0]["kind"], "derived_from");
 
     // A typo'd kind fails the whole call before anything is written.
     let mut bad = create_input("decision", "Never written", "x");
@@ -7380,4 +7380,57 @@ async fn challenge_against_proposes_a_contradiction_a_reviewer_resolves() {
     );
     assert_eq!(got["superseded_by"], new.as_str());
     assert!(got["invalidated_at"].is_string());
+}
+
+/// Review p3-ops #6: a bad `against` fails the call before the challenge is
+/// written. Review #9: `winner` needs `status: confirmed`.
+#[tokio::test]
+async fn challenge_against_is_validated_first_and_winner_needs_confirmed() {
+    let (_dir, server) = setup().await;
+    let a = create_and_get_id(&server, "decision", "Use structlog", "logging").await;
+    let b = create_and_get_id(&server, "decision", "Use tracing", "logging").await;
+    let res = server
+        .memory_challenge(Parameters(ChallengeInput {
+            id: a.clone(),
+            evidence: "x".into(),
+            source_file: None,
+            project: None,
+            against: Some(a.clone()),
+        }))
+        .await;
+    assert!(res.is_err(), "{res:?}");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: a.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["status"], "active", "no challenge recorded: {got}");
+
+    parse_ok(
+        &server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: a.clone(),
+                evidence: "x".into(),
+                source_file: None,
+                project: None,
+                against: Some(b.clone()),
+            }))
+            .await,
+    );
+    let res = server
+        .memory_link_status(Parameters(LinkStatusInput {
+            src: a.clone(),
+            dst: b.clone(),
+            kind: None,
+            status: "rejected".into(),
+            winner: Some(b.clone()),
+            note: None,
+            dst_store: None,
+            project: None,
+        }))
+        .await;
+    assert!(res.is_err(), "{res:?}");
 }
