@@ -13,8 +13,8 @@ export function errorBox(e) {
   return h('div', { class: 'error-box', role: 'alert' }, h('b', null, title), h('p', null, (e && e.message) || String(e)));
 }
 
-export function secHead(title, aside) {
-  return h('div', { class: 'sec-head' }, h('h2', null, title), aside || null);
+export function secHead(title, ...aside) {
+  return h('div', { class: 'sec-head' }, h('h2', null, title), aside.length ? h('div', { class: 'sec-aside' }, aside) : null);
 }
 
 export function projHead(eyebrow, title, metaLines) {

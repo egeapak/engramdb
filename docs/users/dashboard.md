@@ -2,8 +2,11 @@
 
 `engramdb dashboard` serves a local web page that shows every EngramDB store
 on this machine: your projects, their worktrees and linked sub-projects, the
-group stores and the global store. It is a viewer. Nothing you do there
-changes a store, and looking at a memory there does not count as using it.
+group stores and the global store. It is a viewer: by default nothing you do
+there changes a store, and looking at a memory there never counts as using it.
+The one exception is opt-in — started with `--allow-writes`, it lets you
+confirm or reject *proposed* edges between memories (see
+[Reviewing proposed edges](#reviewing-proposed-edges)).
 
 ```bash
 cd ~/code/my-project
@@ -23,9 +26,10 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   (retrieved, injected, fetched), each against the 7 days before; how many
   memories have been read at all; and how many are challenged. A 30-day
   chart with one row per signal — retrieved, injected, fetched and writes —
-  each on its own scale. A *needs attention* list: challenged memories
-  (shown as a red "service disruption"), memories that need review, and
-  memories nobody has read in 30 days.
+  each on its own scale. A *needs attention* list: proposed contradictions
+  first (a red "service disruption"), then challenged memories, memories
+  that need review, other proposed edges, and memories nobody has read in 30
+  days. Each proposed edge opens a *Review* panel in place.
 - **Memories** — every memory in a sortable table, filterable by text, kind,
   status and line. *Retrieved*, *injected* and *fetched* are separate
   columns and are never added up: a memory retrieved by a query, put into an
@@ -34,8 +38,10 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   memories are hidden unless you pick the *Invalidated* or *Everything*
   status.
 - **Memory** — the body (a small, safe subset of Markdown), usage counts and
-  a 30-day chart, supersedes links, challenges with their evidence, all
-  metadata, and a timeline. Its counts are exact; the Memories table reads a
+  a 30-day chart, a *Review* section for its proposed edges, every edge in and
+  out (kind, status, origin, confidence, note, and whether the far end is
+  deleted, invalidated or in a store that cannot be checked here),
+  challenges with their evidence, all metadata, and a timeline. Its counts are exact; the Memories table reads a
   cheaper summary that can trail them briefly until the next refresh.
 - **Health** — the index-against-files part of `engramdb doctor` for the
   selected store: stale rows, orphaned files, content drift, unreadable
@@ -43,7 +49,8 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
 - **Projects** — every store on the machine. A project whose directory is
   gone, or a worktree (which keeps its memories in the main checkout), is
   listed as unavailable with the reason rather than hidden.
-- **Route map** — coming with typed edges between memories.
+- **Route map** — the store's memories and the edges between them, drawn as
+  a transit map (below).
 
 The look follows a transit map: each top-level logical scope (`storage` in
 `storage.paths`) is a *line* with its own colour and two-letter badge, and
@@ -52,11 +59,70 @@ lines get seven colours; further lines reuse a colour with a round, then a
 ringed, badge. A line keeps its colour on every page. The header button
 switches between the light and dark map; by default it follows your system.
 
+## The route map
+
+Each line is a top-level logical scope and runs through its memories; each
+connector between two stations is an edge (see [Linking memories](./links.md)):
+
+| Connector | Edge |
+|---|---|
+| Red, with a ⊣ bar at each end | `contradicts` — dashed while proposed, solid once confirmed |
+| Heavy line, arrow at the replaced memory | `supersedes` |
+| Line with an arrow | `supports` |
+| Dotted line with an arrow | `derived_from` |
+| Thin grey line / grey dash-dot | `related_to` / `duplicates` |
+| Any kind, dashed | proposed, not yet reviewed |
+| Ending at a crossed-out station | the far end was deleted (dangling) |
+| Ending at a `?` | the far end is in a store that could not be opened here |
+
+Station size follows reads, so a memory nothing reads is small. Filters (kinds,
+whether to include proposed, rejected and invalidated, and one line) live in
+the address bar, so a filtered map can be bookmarked. Drag or use the arrow
+keys to pan, the wheel, a pinch or `+`/`-` to zoom, and `0` or *Fit* to see it
+all. Hovering (or focusing) a station shows a card with its connections;
+clicking it opens the memory. Clicking a connector pins it in the card, where
+a proposed one can be reviewed. Below the map, a table lists every connector
+for keyboard and screen-reader use.
+
+A large store shows its most connected memories first (800 by default); the
+page says when it is partial, and picking a line shows the rest of it. The
+layout runs in a background worker and is deterministic: the same store
+draws the same map.
+
+## Reviewing proposed edges
+
+Proposed edges come from `challenge --against` and from the automatic
+proposers (see [Linking memories](./links.md#automatic-proposals)). Start the
+dashboard with `--allow-writes` to review them:
+
+```bash
+engramdb dashboard --allow-writes
+# Writes enabled (--allow-writes): proposed edges can be confirmed or rejected from the page.
+```
+
+A proposed `contradicts` edge has four choices:
+
+- **Both stand (conflict)** — the contradiction is confirmed; both memories
+  stay valid.
+- **This one supersedes the other** / **The other supersedes this one** —
+  the edge becomes a `supersedes` edge and the loser's validity window
+  closes, exactly like `engramdb link … contradicts … --winner <id>`.
+- **Not a contradiction** — the edge is kept as `rejected`, so no proposer
+  raises it again.
+
+Any other proposed edge is confirmed or rejected. Every choice asks once more
+in the page, saying what will happen, before anything is written. The write
+goes through the same code as `engramdb link`, takes the project's write lock,
+and records a `linked` event (and `resolved` on a superseded loser) from the
+`dashboard` surface. Without `--allow-writes` the buttons are shown disabled,
+with the command to restart. Nothing else on the page writes.
+
 ## What it reads, and what it never does
 
 The dashboard opens stores **read-only**. Unlike every other command it does
 not create the store's `.gitignore`, build a missing index, or run a schema
-migration. A store whose schema is behind this binary is shown with a note;
+migration. (An edge review with `--allow-writes` opens that one store for
+writing, like any `engramdb` command, and may therefore do those things.) A store whose schema is behind this binary is shown with a note;
 run any `engramdb` command in that project to upgrade it. A store that was
 never indexed on this machine (a fresh clone) is listed as unavailable.
 
@@ -93,7 +159,8 @@ The dashboard is a web server on your machine, so it is locked down:
   where a web page you visit points its own domain at your machine.
 - Anything other than a plain read must come from the dashboard's own page
   and carry a per-run check value, so another site cannot make your browser
-  act on it.
+  act on it. The only such requests are the edge reviews, and the server
+  refuses those too unless it was started with `--allow-writes`.
 - Pages forbid inline scripts, framing and outside resources, and memory
   text is always shown as text: a memory that contains HTML cannot run code
   in the page.

@@ -956,7 +956,7 @@ plain\t'Plain text output without colors'"
 complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -l dir -d 'Working directory (default: current directory)' -r -F
 complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -l embedding-backend -d 'Embedding backend: auto, onnx, or ollama' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -l no-open -d 'Print the URL but do not open a browser'
-complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -l allow-writes -d 'Allow the dashboard\'s review actions (edge confirm/reject, once available)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -l allow-writes -d 'Allow the dashboard\'s one write: confirming or rejecting proposed memory edges'
 complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -l json -d 'Output as JSON'
 complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -s q -l quiet -d 'Suppress non-essential output'
 complete -c engramdb -n "__fish_engramdb_using_subcommand dashboard" -s v -l verbose -d 'Verbose output'

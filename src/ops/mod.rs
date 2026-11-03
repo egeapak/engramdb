@@ -16,6 +16,7 @@ pub mod get;
 pub mod harvest;
 pub mod harvest_index;
 pub mod harvest_pin;
+pub mod link_proposals;
 pub mod links;
 pub mod list;
 pub mod maintenance;

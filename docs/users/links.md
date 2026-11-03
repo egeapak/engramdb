@@ -45,8 +45,8 @@ Every link has a status:
 
 - `confirmed` — the default for a link you write yourself.
 - `proposed` — written by something that is not sure: `challenge --against`
-  proposes a `contradicts` link (with the evidence as its note), and automatic
-  proposers will do the same.
+  proposes a `contradicts` link (with the evidence as its note), and the
+  [automatic proposers](#automatic-proposals) do the same.
 - `rejected` — kept, not deleted, so the same link is not proposed again.
   Hidden from `links` and `get` unless you pass `--all`.
 
@@ -76,6 +76,44 @@ and reindex. Nothing in the file is reset or rewritten meanwhile.
 
 **A link always records the target's full id**, never the prefix you typed:
 a prefix that is unique today stops being unique as the store grows.
+
+Proposed links can also be reviewed in the
+[dashboard](./dashboard.md#reviewing-proposed-edges) (`engramdb dashboard
+--allow-writes`), which offers the same three resolutions plus reject.
+
+## Automatic proposals
+
+When a memory is created (and when an MCP `update` re-embeds it), EngramDB
+compares it with its nearest neighbours by embedding and may *propose* links.
+Nothing it proposes is trusted until someone reviews it: a proposed link
+changes no score and no retrieval result.
+
+- **Contradictions** — when `[nli].enabled` is on, the same NLI check that
+  auto-challenges a contradiction also proposes a `contradicts` link to the
+  other memory, `origin: nli`, with the NLI contradiction score as its
+  confidence.
+- **Similar memories** — a neighbour at or above
+  `[links].duplicate_threshold` (0.92) is proposed as `duplicates`; one at or
+  above `[links].related_threshold` (0.80) as `related_to`; both
+  `origin: similarity`, with the similarity as confidence. This needs only
+  embeddings, not NLI.
+
+The proposers follow the same rules as `link`, plus three of their own:
+
+- **They never touch an existing link.** If *any* link already joins the two
+  memories — confirmed, proposed, or rejected, of any kind — nothing is
+  proposed. A link you rejected is therefore never proposed again.
+- **They are capped.** A memory carries at most
+  `[links].max_proposals_per_memory` (3) unreviewed automatic proposals,
+  counted on both ends; contradictions take the slots first.
+- **They never run in a hook.** Only `add`/`create` (and MCP `update`) do
+  this work, never the per-prompt or per-tool-call hooks.
+
+A shared memory still never names a personal one: a proposal between them is
+stored on the personal side. Each proposal records a `linked` usage event
+from the `maintenance` surface. Switch them off with
+`[links].propose_contradictions = false` / `propose_similar = false`; see
+[configuration](./configuration.md).
 
 ## Rules worth knowing
 

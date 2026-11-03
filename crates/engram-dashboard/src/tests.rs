@@ -323,7 +323,7 @@ async fn non_get_requests_need_origin_and_csrf() {
         assert_eq!(r.status, StatusCode::FORBIDDEN, "{origin:?} {csrf:?}");
         assert_eq!(r.json()["error"]["code"], "csrf");
     }
-    // Both right: past the guard, where there is no write route yet.
+    // Both right: past the guard, where this path has no POST route.
     let r = send(&app, post(Some(&me), Some(CSRF))).await;
     assert_eq!(r.status, StatusCode::METHOD_NOT_ALLOWED);
     // The same for a page path.
@@ -1080,6 +1080,8 @@ async fn no_endpoint_writes_anything() {
         format!("/api/projects/{id}/memories/{}", fx.ids[0]),
         format!("/api/projects/{id}/memories/{}", fx.ids[2]),
         format!("/api/projects/{id}/doctor"),
+        format!("/api/projects/{id}/graph"),
+        format!("/api/projects/{id}/graph?include_invalidated=true&kinds=contradicts"),
         format!("/api/projects/{}/stats", paths::GLOBAL_PROJECT_ID),
     ] {
         let r = send(&app, authed(&uri)).await;
@@ -1097,7 +1099,8 @@ async fn no_endpoint_writes_anything() {
 // ---------------------------------------------------------------------------
 
 /// Every relative `import … from '…'` / `import('…')` / `export … from '…'`
-/// in an embedded module, resolved against the module's directory.
+/// / `new URL('…', import.meta.url)` (a module worker) in an embedded
+/// module, resolved against the module's directory.
 fn imports(path: &str, src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let dir = match path.rfind('/') {
@@ -1117,6 +1120,9 @@ fn imports(path: &str, src: &str) -> Vec<String> {
             vec![&t[i + 7..]]
         } else if t.starts_with("import '") || t.starts_with("import \"") {
             vec![&t[7..]]
+        } else if let Some(i) = t.find("new URL(").filter(|_| t.contains("import.meta.url")) {
+            // A module worker: `new Worker(new URL('./w.js', import.meta.url))`.
+            vec![&t[i + 8..]]
         } else {
             vec![]
         };
@@ -1170,6 +1176,19 @@ fn every_import_resolves_to_an_embedded_file() {
         checked >= 10,
         "the import scan found only {checked} imports"
     );
+    // The layout worker is reached only through `new URL(…)`, so the scan
+    // must see it or a renamed worker would 404 at run time.
+    let graph = crate::assets::find("js/views/graph.js").expect("graph view embedded");
+    let graph_imports = imports(
+        "js/views/graph.js",
+        std::str::from_utf8(graph.bytes).unwrap(),
+    );
+    assert!(
+        graph_imports
+            .iter()
+            .any(|t| t == "js/graph/layout-worker.js"),
+        "{graph_imports:?}"
+    );
     // And the page's own references.
     let index = std::str::from_utf8(crate::assets::find("index.html").unwrap().bytes).unwrap();
     for needle in ["src=\"", "href=\""] {
@@ -1222,4 +1241,431 @@ fn the_frontend_never_parses_html_or_inlines_script_or_style() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Edges: the graph endpoint and the confirm/reject writes
+// ---------------------------------------------------------------------------
+
+use engramdb::ops::links::{self as ops_links, LinkKind, LinkOrigin, LinkParams, LinkStatus};
+
+/// The base fixture plus edges of every review state: a proposed NLI
+/// contradiction `b ⊣ c`, a confirmed `b supports d`, a proposed similarity
+/// `c related_to d`, and `b derived_from` a memory that was then deleted.
+struct EdgeFixture {
+    fx: Fixture,
+    gone: String,
+}
+
+async fn edge_fixture() -> EdgeFixture {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let edge = |src: &str, kind, dst: &str, origin, status, confidence| LinkParams {
+        src: src.to_string(),
+        kind,
+        dst: dst.to_string(),
+        dst_store: None,
+        confidence: Some(confidence),
+        origin,
+        status: Some(status),
+        note: None,
+    };
+    let (b, c, d) = (&fx.ids[1], &fx.ids[2], &fx.ids[3]);
+    let gone = memory(MemoryType::Context, "Deleted later", &[], &[]);
+    store.create(&gone).await.unwrap();
+    for p in [
+        edge(
+            b,
+            LinkKind::Contradicts,
+            c,
+            LinkOrigin::Nli,
+            LinkStatus::Proposed,
+            0.91,
+        ),
+        edge(
+            b,
+            LinkKind::Supports,
+            d,
+            LinkOrigin::Human,
+            LinkStatus::Confirmed,
+            1.0,
+        ),
+        edge(
+            c,
+            LinkKind::RelatedTo,
+            d,
+            LinkOrigin::Similarity,
+            LinkStatus::Proposed,
+            0.84,
+        ),
+        edge(
+            b,
+            LinkKind::DerivedFrom,
+            &gone.id,
+            LinkOrigin::Human,
+            LinkStatus::Confirmed,
+            1.0,
+        ),
+    ] {
+        ops_links::link(&store, p, Surface::Cli).await.unwrap();
+    }
+    store.delete(&gone.id).await.unwrap();
+    EdgeFixture { fx, gone: gone.id }
+}
+
+fn edge_of<'a>(edges: &'a serde_json::Value, kind: &str) -> &'a serde_json::Value {
+    edges
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == kind)
+        .unwrap_or_else(|| panic!("no {kind} edge in {edges}"))
+}
+
+#[tokio::test]
+async fn a_store_without_an_edges_table_still_has_a_graph() {
+    // No `link` ever ran, so there is no edges table: the graph is the
+    // memories plus the one edge a memory file itself declares
+    // (`d.supersedes = [a]`), never an error.
+    let fx = fixture().await;
+    let (s, v) = get_json(
+        &app(Some(fx.current.clone())),
+        &format!("/api/projects/{}/graph", fx.id),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let edges = v["edges"].as_array().unwrap();
+    assert!(edges.iter().all(|e| e["kind"] == "supersedes"), "{v}");
+    assert_eq!(v["counts"]["proposed"], 0);
+    // Invalidated memories are hidden by default (the fixture has one).
+    assert_eq!(v["shown_nodes"], 4);
+    assert_eq!(v["truncated"], false);
+    let (_, v) = get_json(
+        &app(Some(fx.current.clone())),
+        &format!("/api/projects/{}/graph?include_invalidated=true", fx.id),
+    )
+    .await;
+    assert_eq!(v["shown_nodes"], 5);
+}
+
+#[tokio::test]
+async fn the_graph_has_nodes_edges_states_and_bounds() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/graph", fx.id);
+    let (s, v) = get_json(&app, &base).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+
+    let c = edge_of(&v["edges"], "contradicts");
+    assert_eq!(c["status"], "proposed");
+    assert_eq!(c["origin"], "nli");
+    assert!((c["confidence"].as_f64().unwrap() - 0.91).abs() < 1e-9);
+    assert_eq!(c["state"], "live");
+    assert_eq!(edge_of(&v["edges"], "supports")["status"], "confirmed");
+    assert_eq!(edge_of(&v["edges"], "related_to")["origin"], "similarity");
+    let dangling = edge_of(&v["edges"], "derived_from");
+    assert_eq!(dangling["state"], "dangling");
+    assert_eq!(dangling["dst"], ef.gone.as_str());
+    assert_eq!(v["counts"]["proposed"], 2);
+    assert_eq!(v["counts"]["proposed_contradictions"], 1);
+    assert_eq!(v["counts"]["dangling"], 1);
+
+    let node = v["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == fx.ids[1].as_str())
+        .unwrap();
+    assert_eq!(node["degree"], 3);
+    assert!(node["line"].is_string(), "{node}");
+    assert!(node["line_slot"].is_u64(), "{node}");
+
+    // Filters: kinds, proposed.
+    let (_, v) = get_json(&app, &format!("{base}?kinds=supports")).await;
+    assert_eq!(v["edges"].as_array().unwrap().len(), 1);
+    let (_, v) = get_json(&app, &format!("{base}?include_proposed=false")).await;
+    assert!(v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["status"] != "proposed"));
+
+    // Bounded: the best-connected memory survives a limit of 1, and the
+    // page says it is partial.
+    let (_, v) = get_json(&app, &format!("{base}?limit=1")).await;
+    assert_eq!(v["truncated"], true);
+    assert_eq!(v["shown_nodes"], 1);
+    assert_eq!(v["nodes"][0]["id"], fx.ids[1].as_str());
+    for bad in ["kinds=nope", "limit=many", "include_proposed=maybe"] {
+        let (s, v) = get_json(&app, &format!("{base}?{bad}")).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn the_graph_and_detail_views_write_nothing() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    std::fs::remove_file(fx.dir.join(".engramdb").join(".gitignore")).ok();
+    let before = machine(&fx.dir);
+    // Writes enabled: a GET still writes nothing.
+    let app = app_with(Some(fx.current.clone()), None, true);
+    for uri in [
+        format!("/api/projects/{}/graph", fx.id),
+        format!(
+            "/api/projects/{}/graph?include_invalidated=true&include_rejected=true",
+            fx.id
+        ),
+        format!("/api/projects/{}/memories/{}", fx.id, fx.ids[1]),
+        format!("/api/projects/{}/stats", fx.id),
+    ] {
+        let r = send(&app, authed(&uri)).await;
+        assert_eq!(r.status, StatusCode::OK, "{uri}");
+    }
+    assert_eq!(before, machine(&fx.dir), "a GET changed something on disk");
+}
+
+#[tokio::test]
+async fn detail_and_attention_carry_the_proposals() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    let (s, v) = get_json(
+        &app,
+        &format!("/api/projects/{}/memories/{}", fx.id, fx.ids[2]),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // `c` holds the related_to edge and is the target of the contradiction
+    // (symmetric, so it may be stored on either side: look in both).
+    let all: Vec<&serde_json::Value> = v["edges"]["outbound"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(v["edges"]["inbound"].as_array().unwrap())
+        .collect();
+    assert!(all
+        .iter()
+        .any(|e| e["kind"] == "contradicts" && e["other_id"] == fx.ids[1].as_str()));
+    assert!(all
+        .iter()
+        .any(|e| e["kind"] == "related_to" && e["other_id"] == fx.ids[3].as_str()));
+
+    let (_, v) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    let att = v["attention"].as_array().unwrap();
+    assert_eq!(att[0]["reason"], "proposed_contradiction", "{att:?}");
+    assert_eq!(att[0]["edge"]["kind"], "contradicts");
+    assert_eq!(att[0]["edge"]["origin"], "nli");
+    assert!(att.iter().any(|a| a["reason"] == "proposed_edge"));
+    assert_eq!(v["edges"]["proposed_contradictions"], 1);
+    assert_eq!(v["edges"]["proposed"], 2);
+}
+
+fn post_edge(path: &str, body: serde_json::Value) -> Request<Body> {
+    req(Method::POST, path)
+        .header(header::AUTHORIZATION, bearer())
+        .header(header::ORIGIN, format!("http://{HOST}"))
+        .header(CSRF_HEADER, CSRF)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+async fn edge_status(dir: &Path, src: &str, kind: LinkKind, dst: &str) -> Option<LinkStatus> {
+    let store = MemoryStore::open_read_only(dir).await.unwrap();
+    for id in [src, dst] {
+        let m = store.get(id).await.unwrap();
+        let other = if id == src { dst } else { src };
+        if let Some(l) = m.links.iter().find(|l| l.kind == kind && l.to == other) {
+            return Some(l.status.clone());
+        }
+    }
+    None
+}
+
+#[tokio::test]
+async fn writes_are_refused_unless_enabled_and_same_origin() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let uri = format!("/api/projects/{}/edges/confirm", fx.id);
+    let body = serde_json::json!({
+        "src": fx.ids[2], "kind": "related_to", "dst": fx.ids[3],
+    });
+
+    // Read-only dashboard: 403 read_only, nothing written.
+    let ro = app(Some(fx.current.clone()));
+    let r = send(&ro, post_edge(&uri, body.clone())).await;
+    assert_eq!(r.status, StatusCode::FORBIDDEN);
+    assert_eq!(r.json()["error"]["code"], "read_only");
+    let r = send(
+        &ro,
+        post_edge(
+            &format!("/api/projects/{}/edges/reject", fx.id),
+            body.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(r.json()["error"]["code"], "read_only");
+
+    // Writes enabled, but no CSRF header / a foreign Origin: the guard.
+    let rw = app_with(Some(fx.current.clone()), None, true);
+    let no_csrf = req(Method::POST, &uri)
+        .header(header::AUTHORIZATION, bearer())
+        .header(header::ORIGIN, format!("http://{HOST}"))
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let foreign = req(Method::POST, &uri)
+        .header(header::AUTHORIZATION, bearer())
+        .header(header::ORIGIN, "http://evil.example")
+        .header(CSRF_HEADER, CSRF)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let no_token = req(Method::POST, &uri)
+        .header(header::ORIGIN, format!("http://{HOST}"))
+        .header(CSRF_HEADER, CSRF)
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    for (r, code) in [
+        (no_csrf, StatusCode::FORBIDDEN),
+        (foreign, StatusCode::FORBIDDEN),
+        (no_token, StatusCode::UNAUTHORIZED),
+    ] {
+        assert_eq!(send(&rw, r).await.status, code);
+    }
+    assert_eq!(
+        edge_status(&fx.dir, &fx.ids[2], LinkKind::RelatedTo, &fx.ids[3]).await,
+        Some(LinkStatus::Proposed),
+        "a refused write changed the edge"
+    );
+
+    // Malformed requests are 400, before any store is opened for writing.
+    for bad in [
+        serde_json::json!({"src": fx.ids[1], "kind": "supersedes", "dst": fx.ids[2]}),
+        serde_json::json!({"src": fx.ids[1], "kind": "nope", "dst": fx.ids[2]}),
+        serde_json::json!({"src": fx.ids[1], "kind": "contradicts", "dst": fx.ids[2], "verdict": "maybe"}),
+        serde_json::json!({"src": fx.ids[2], "kind": "related_to", "dst": fx.ids[3], "verdict": "both_stand"}),
+        serde_json::json!({"src": fx.ids[2], "kind": "related_to", "dst": fx.ids[3], "extra": 1}),
+    ] {
+        let r = send(&rw, post_edge(&uri, bad.clone())).await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    // An edge that does not exist is 404.
+    let r = send(
+        &rw,
+        post_edge(
+            &uri,
+            serde_json::json!({"src": fx.ids[3], "kind": "related_to", "dst": fx.ids[0]}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::NOT_FOUND, "{}", r.json());
+    assert_eq!(r.json()["error"]["code"], "unknown_edge");
+}
+
+fn dashboard_events(dir: &Path, kind: UsageKind) -> Vec<MemoryEvent> {
+    engramdb::telemetry::usage::load_memory_events(dir)
+        .unwrap()
+        .events
+        .into_iter()
+        .filter(|e| e.kind == kind && e.surface == Surface::Dashboard)
+        .collect()
+}
+
+#[tokio::test]
+async fn confirm_and_reject_write_through_ops_and_refresh_the_cache() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let (b, c, d) = (&fx.ids[1], &fx.ids[2], &fx.ids[3]);
+    let state = AppState::new(security(), None, true, Some(fx.current.clone()));
+    let app = crate::router(state.clone());
+    let graph = format!("/api/projects/{}/graph", fx.id);
+    let (_, before) = get_json(&app, &graph).await;
+    assert_eq!(before["counts"]["proposed"], 2);
+    assert_eq!(state.stores.open_count().await, 1);
+
+    // Reject the similarity proposal: kept as rejected.
+    let r = send(
+        &app,
+        post_edge(
+            &format!("/api/projects/{}/edges/reject", fx.id),
+            serde_json::json!({"src": c, "kind": "related_to", "dst": d}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    assert_eq!(
+        edge_status(&fx.dir, c, LinkKind::RelatedTo, d).await,
+        Some(LinkStatus::Rejected)
+    );
+    // The write dropped the cached read-only handle.
+    assert_eq!(state.stores.open_count().await, 0);
+    let (_, after) = get_json(&app, &graph).await;
+    assert_eq!(after["counts"]["proposed"], 1);
+    assert!(after["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|e| e["kind"] != "related_to"));
+    assert!(!dashboard_events(&fx.dir, UsageKind::Linked).is_empty());
+
+    // Supersede: `c` wins over `b`; only `b` closes, the contradiction
+    // becomes `c supersedes b`, and `b` records `resolved`.
+    let r = send(
+        &app,
+        post_edge(
+            &format!("/api/projects/{}/edges/confirm", fx.id),
+            serde_json::json!({
+                "src": b, "kind": "contradicts", "dst": c,
+                "verdict": "supersedes", "winner": c,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    let store = MemoryStore::open_read_only(&fx.dir).await.unwrap();
+    assert!(store.get(b).await.unwrap().invalidated_at.is_some());
+    assert!(store.get(c).await.unwrap().invalidated_at.is_none());
+    assert_eq!(
+        edge_status(&fx.dir, b, LinkKind::Contradicts, c).await,
+        None
+    );
+    let resolved = dashboard_events(&fx.dir, UsageKind::Resolved);
+    assert!(resolved.iter().any(|e| &e.memory_id == b), "{resolved:?}");
+    let (_, after) = get_json(&app, &graph).await;
+    assert_eq!(after["counts"]["proposed_contradictions"], 0);
+}
+
+#[tokio::test]
+async fn both_stand_confirms_the_contradiction() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let (b, c) = (&fx.ids[1], &fx.ids[2]);
+    let app = app_with(Some(fx.current.clone()), None, true);
+    let r = send(
+        &app,
+        post_edge(
+            &format!("/api/projects/{}/edges/confirm", fx.id),
+            serde_json::json!({"src": c, "kind": "contradicts", "dst": b, "verdict": "both_stand"}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.json());
+    assert_eq!(
+        edge_status(&fx.dir, b, LinkKind::Contradicts, c).await,
+        Some(LinkStatus::Confirmed)
+    );
+    let store = MemoryStore::open_read_only(&fx.dir).await.unwrap();
+    assert!(store.get(b).await.unwrap().invalidated_at.is_none());
+    assert!(store.get(c).await.unwrap().invalidated_at.is_none());
+    // A contradiction must be confirmed with a verdict.
+    let r = send(
+        &app,
+        post_edge(
+            &format!("/api/projects/{}/edges/confirm", fx.id),
+            serde_json::json!({"src": b, "kind": "contradicts", "dst": c}),
+        ),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST);
 }

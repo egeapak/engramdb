@@ -2,11 +2,13 @@
 
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, stamp, plural, label } from '../format.js';
+import { fmt, ago, stamp, plural, label, shortId } from '../format.js';
 import { badge, slot, lineName, kindIcon, TYPE_LABEL } from '../lines.js';
 import { smallMultiples } from '../chart.js';
 import { renderMarkdown } from '../markdown.js';
 import { secHead, pill, statusPill, disruption, errorBox } from './common.js';
+import { reviewControls } from './review.js';
+import { connectorSample, kindLabel } from '../graph/glyphs.js';
 
 const TIMELINE = {
   created: 'Created',
@@ -25,44 +27,86 @@ function statusKey(status) {
   return { Challenged: 'challenged', NeedsReview: 'needs_review' }[status] || 'active';
 }
 
-function relGlyph() {
-  return s(
-    'svg',
-    { width: 40, height: 12, viewBox: '0 0 40 12', 'aria-hidden': 'true' },
-    s('path', { class: 'rel-line', d: 'M2,6 H36' }),
-    s('path', { class: 'rel-chev', d: 'M31,1.5 L37,6 L31,10.5' }),
+/** One edge row: direction, connector, kind, status, the other memory. */
+function edgeItem(e, ctx) {
+  const dir = e.symmetric ? '↔' : e.direction === 'out' ? 'Out →' : '← In';
+  const other =
+    e.state === 'unknown'
+      ? h('span', { class: 'muted' }, `In store ${shortId(e.other_store)}, which cannot be checked here`)
+      : e.state === 'dangling'
+        ? h('span', { class: 'muted' }, 'Deleted memory')
+        : e.other_store
+          ? h('span', null, h('span', { class: 'muted' }, `In store ${shortId(e.other_store)} `), h('span', { class: 'mono' }, shortId(e.other_id)))
+          : h('a', { href: ctx.href('detail', ctx.project.id, e.other_id) }, e.other_summary || e.other_id);
+  return h(
+    'li',
+    null,
+    h('span', { class: 'dir' }, dir),
+    h(
+      'div',
+      null,
+      h(
+        'div',
+        { class: 'rt' },
+        connectorSample(e.kind, e.status, 40),
+        kindLabel(e.kind),
+        h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)),
+        e.state === 'invalidated' ? h('span', { class: 'ep invalidated' }, 'invalidated') : null,
+      ),
+      h('div', { class: 'other' }, other),
+      h(
+        'div',
+        { class: 'org' },
+        `${e.origin} · ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`,
+        e.successor ? [' · replaced by ', h('a', { href: ctx.href('detail', ctx.project.id, e.successor) }, shortId(e.successor))] : null,
+      ),
+      e.note ? h('div', { class: 'org clamp' }, e.note) : null,
+    ),
   );
 }
 
 function relations(d, ctx) {
-  const items = [];
-  for (const l of d.supersedes) items.push({ dir: 'Out →', label: 'Supersedes', link: l });
-  if (d.superseded_by) items.push({ dir: '← In', label: 'Superseded by', link: d.superseded_by });
-  if (!items.length) {
-    return h('p', { class: 'muted' }, 'No relations yet. Typed edges between memories (supports, contradicts, derived from) arrive with the route map.');
+  const edges = [...d.edges.outbound, ...d.edges.inbound];
+  if (!edges.length) {
+    return h('p', { class: 'muted' }, 'No edges. Agents link memories with the link tool; NLI and embedding similarity propose edges as memories are created.');
   }
-  return h(
-    'ul',
-    { class: 'rels' },
-    items.map((it) =>
-      h(
-        'li',
-        null,
-        h('span', { class: 'dir' }, it.dir),
-        h(
-          'div',
+  return [
+    h('ul', { class: 'rels' }, edges.map((e) => edgeItem(e, ctx))),
+    d.edges.hidden ? h('p', { class: 'faint' }, `${plural(d.edges.hidden, 'edge')} not shown.`) : null,
+  ];
+}
+
+/** Proposed edges, each with its review controls. */
+function review(d, ctx) {
+  const m = d.memory;
+  const proposed = [...d.edges.outbound, ...d.edges.inbound].filter((e) => e.status === 'proposed' && e.kind !== 'supersedes');
+  if (!proposed.length) return null;
+  return [
+    secHead('Review', h('span', { class: 'faint num' }, plural(proposed.length, 'proposed edge'))),
+    h(
+      'ul',
+      { class: ['att', 'plain', 'review-list'] },
+      proposed.map((e) => {
+        const out = e.direction === 'out';
+        const edge = {
+          src: out ? m.id : e.other_id,
+          dst: out ? e.other_id : m.id,
+          dst_store: out ? e.other_store : null,
+          kind: e.kind,
+          status: e.status,
+          src_summary: out ? m.summary : e.other_summary,
+          dst_summary: out ? e.other_summary : m.summary,
+        };
+        return h(
+          'li',
           null,
-          h('div', { class: 'rt' }, relGlyph(), it.label),
-          h(
-            'div',
-            { class: 'other' },
-            it.link.found ? h('a', { href: ctx.href('detail', ctx.project.id, it.link.id) }, it.link.summary) : h('span', { class: 'muted' }, 'Not in this store (deleted, or in another store)'),
-          ),
-          h('div', { class: 'org mono' }, it.link.id),
-        ),
-      ),
+          h('div', { class: 'ttl' }, connectorSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
+          h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`),
+          reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => ctx.refresh(), 600) }),
+        );
+      }),
     ),
-  );
+  ];
 }
 
 function meta(m) {
@@ -172,7 +216,8 @@ export async function renderDetail(main, ctx) {
         ),
         h('p', { class: 'faint' }, `Across ${plural(u.returned_sessions, 'session')} retrieved and ${plural(u.injected_sessions, 'session')} injected. Viewing it here counts as nothing.`),
         chartBox,
-        secHead('Relations', h('span', { class: 'faint num' }, fmt(d.supersedes.length + (d.superseded_by ? 1 : 0)))),
+        review(d, ctx),
+        secHead('Edges', h('span', { class: 'faint num' }, fmt(d.edges.outbound.length + d.edges.inbound.length)), h('a', { class: 'btn sm', href: ctx.href('graph', p.id) }, 'Route map →')),
         relations(d, ctx),
         m.challenges && m.challenges.length
           ? [

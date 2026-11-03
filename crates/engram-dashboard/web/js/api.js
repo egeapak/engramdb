@@ -48,6 +48,47 @@ export class ApiError extends Error {
   }
 }
 
+let csrfToken = null;
+
+/** The per-run CSRF value from /api/session, sent on every non-GET. */
+export function setCsrf(v) {
+  csrfToken = v;
+}
+
+async function request(method, url, body) {
+  let res;
+  try {
+    const headers = { Accept: 'application/json' };
+    const token = readToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const init = { method, credentials: 'omit', headers };
+    if (method !== 'GET') {
+      headers['Content-Type'] = 'application/json';
+      if (csrfToken) headers['X-EngramDB-CSRF'] = csrfToken;
+      init.body = JSON.stringify(body || {});
+    }
+    res = await fetch(url, init);
+  } catch (e) {
+    throw new ApiError(0, 'offline', 'The dashboard server is not answering. Is `engramdb dashboard` still running?');
+  }
+  let parsed = null;
+  try {
+    parsed = await res.json();
+  } catch (_) {
+    /* a non-JSON refusal (e.g. the host check) */
+  }
+  if (!res.ok) {
+    const err = parsed && parsed.error;
+    if (res.status === 401) {
+      // A token from an earlier run (same port, same tab) is useless now.
+      forgetToken();
+      throw new ApiError(401, 'unauthorized', 'This tab has no valid dashboard token. Open the URL `engramdb dashboard` printed — each run has a new token, and it is kept per tab.');
+    }
+    throw new ApiError(res.status, err ? err.code : 'http', err ? err.message : `HTTP ${res.status}`);
+  }
+  return parsed;
+}
+
 export async function get(path, params) {
   let url = path;
   if (params) {
@@ -58,31 +99,12 @@ export async function get(path, params) {
     const qs = q.toString();
     if (qs) url += '?' + qs;
   }
-  let res;
-  try {
-    const headers = { Accept: 'application/json' };
-    const token = readToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    res = await fetch(url, { credentials: 'omit', headers });
-  } catch (e) {
-    throw new ApiError(0, 'offline', 'The dashboard server is not answering. Is `engramdb dashboard` still running?');
-  }
-  let body = null;
-  try {
-    body = await res.json();
-  } catch (_) {
-    /* a non-JSON refusal (e.g. the host check) */
-  }
-  if (!res.ok) {
-    const err = body && body.error;
-    if (res.status === 401) {
-      // A token from an earlier run (same port, same tab) is useless now.
-      forgetToken();
-      throw new ApiError(401, 'unauthorized', 'This tab has no valid dashboard token. Open the URL `engramdb dashboard` printed — each run has a new token, and it is kept per tab.');
-    }
-    throw new ApiError(res.status, err ? err.code : 'http', err ? err.message : `HTTP ${res.status}`);
-  }
-  return body;
+  return request('GET', url);
+}
+
+/** A write. The server refuses it unless started with --allow-writes. */
+export function post(path, body) {
+  return request('POST', path, body);
 }
 
 const enc = encodeURIComponent;
@@ -94,4 +116,7 @@ export const api = {
   memories: (id, params) => get(`/api/projects/${enc(id)}/memories`, params),
   memory: (id, mid) => get(`/api/projects/${enc(id)}/memories/${enc(mid)}`),
   doctor: (id) => get(`/api/projects/${enc(id)}/doctor`),
+  graph: (id, params) => get(`/api/projects/${enc(id)}/graph`, params),
+  confirmEdge: (id, body) => post(`/api/projects/${enc(id)}/edges/confirm`, body),
+  rejectEdge: (id, body) => post(`/api/projects/${enc(id)}/edges/reject`, body),
 };

@@ -73,13 +73,18 @@ pub async fn run_dashboard(
                 "Started outside any project; showing every store on this machine."
             ),
         }
-        if params.allow_writes {
-            outln!(formatter, "Writes enabled (--allow-writes).");
-        }
         if params.assets_dir.is_some() {
             outln!(formatter, "Serving web files from disk (no caching).");
         }
-        outln!(formatter, "Read-only view. Press Ctrl-C to stop.");
+        if params.allow_writes {
+            outln!(
+                formatter,
+                "Writes enabled (--allow-writes): proposed edges can be confirmed or rejected \
+                 from the page. Press Ctrl-C to stop."
+            );
+        } else {
+            outln!(formatter, "Read-only view. Press Ctrl-C to stop.");
+        }
     }
     // Held until the server stops: dropping it deletes the launch file.
     let _launch = if params.no_open {

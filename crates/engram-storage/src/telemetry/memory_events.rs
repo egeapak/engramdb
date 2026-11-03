@@ -210,13 +210,18 @@ pub enum Surface {
     HookPreTool,
     #[serde(rename = "daemon")]
     Daemon,
-    /// The throttled lifecycle pass (auto-promotion).
+    /// The throttled lifecycle pass (auto-promotion), and the automatic
+    /// edge proposers that run after an embed (`ops::link_proposals`).
     #[serde(rename = "maintenance")]
     Maintenance,
+    /// `engramdb dashboard`'s edge review (confirm / reject), behind
+    /// `--allow-writes`. Its reads record nothing.
+    #[serde(rename = "dashboard")]
+    Dashboard,
 }
 
 impl Surface {
-    pub const ALL: [Surface; 7] = [
+    pub const ALL: [Surface; 8] = [
         Self::Mcp,
         Self::Cli,
         Self::HookSessionStart,
@@ -224,6 +229,7 @@ impl Surface {
         Self::HookPreTool,
         Self::Daemon,
         Self::Maintenance,
+        Self::Dashboard,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -235,6 +241,7 @@ impl Surface {
             Self::HookPreTool => "hook:pre_tool",
             Self::Daemon => "daemon",
             Self::Maintenance => "maintenance",
+            Self::Dashboard => "dashboard",
         }
     }
 

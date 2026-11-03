@@ -203,6 +203,37 @@ impl ReadStore {
             .map_err(ApiError::internal)
     }
 
+    /// The store's edges and node set ([`ops::links::load_graph`]): reads the
+    /// index only and creates nothing, so a store without an `edges` table
+    /// (not yet on schema 0.9.0) answers with no edges.
+    pub async fn graph(
+        &self,
+        filter: &ops::links::GraphFilter,
+    ) -> Result<ops::links::StoreGraph, ApiError> {
+        match ops::links::load_graph(&self.inner, filter).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+        }
+    }
+
+    /// Every edge of the store, deduplicated (one row per logical edge).
+    pub async fn edges(&self) -> Result<Vec<ops::links::EdgeRow>, ApiError> {
+        match self.inner.list_edges().await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(ApiError::from_storage(e)).await),
+        }
+    }
+
+    /// One memory's edges in both directions, every state and status shown
+    /// (the page says which are dangling, invalidated or rejected). A
+    /// cross-store far end is checked by opening that store read-only.
+    pub async fn links_of(&self, id: &str) -> Result<ops::links::LinksView, ApiError> {
+        match ops::links::links_of(&self.inner, id, &ops::links::LinkFilter::all()).await {
+            Ok(v) => Ok(v),
+            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+        }
+    }
+
     /// The daily series of the last 30 days, for one memory or the store.
     pub async fn series(&self, memory_id: Option<&str>) -> Result<Vec<DailyUsage>, ApiError> {
         ops::usage::load_daily_series(
@@ -259,6 +290,14 @@ impl StoreCache {
         }
         entries.push((location.clone(), store.clone(), Instant::now()));
         Ok(store)
+    }
+
+    /// Drop the cached handle of `location`, so the next read opens it
+    /// again. The write path calls this after a write: freshness does not
+    /// need it (see above), but a write through `MemoryStore::open` may have
+    /// migrated the store under the handle, and a fresh open re-reads it.
+    pub async fn invalidate(&self, location: &Location) {
+        self.entries.lock().await.retain(|e| &e.0 != location);
     }
 
     /// How many stores are open, for tests.

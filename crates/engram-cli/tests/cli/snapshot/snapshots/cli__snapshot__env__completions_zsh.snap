@@ -1725,7 +1725,7 @@ plain\:"Plain text output without colors"))' \
 '--dir=[Working directory (default\: current directory)]:DIR:_files' \
 '--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
 '--no-open[Print the URL but do not open a browser]' \
-'--allow-writes[Allow the dashboard'\''s review actions (edge confirm/reject, once available)]' \
+'--allow-writes[Allow the dashboard'\''s one write\: confirming or rejecting proposed memory edges]' \
 '--json[Output as JSON]' \
 '-q[Suppress non-essential output]' \
 '--quiet[Suppress non-essential output]' \

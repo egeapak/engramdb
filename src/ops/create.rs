@@ -345,7 +345,8 @@ async fn create_memory_unrecorded(
                 // local memory into the spawned task without re-reading from
                 // disk. The local `summary` variable carries the value through
                 // to the returned CreateResult below.
-                let _ = engine.spawn_ingest(memory);
+                let follow_up = super::link_proposals::follow_up(engine.config().links.clone());
+                let _ = engine.spawn_ingest(memory, Some(follow_up));
             } else {
                 // `memory.id == id` (set by Memory::new), so embed the
                 // in-hand value directly — the old `store.get(&id)` re-read
@@ -365,31 +366,40 @@ async fn create_memory_unrecorded(
                     );
                 }
 
-                // Detect contradictions with existing memories (best-effort).
-                // Challenge writes are spawned so create_memory returns without
-                // waiting for them; per-write errors are logged inside the
-                // helper.
-                if engine.nli_available() {
-                    if let Ok(contradictions) = engine.detect_contradictions(&saved).await {
-                        if !contradictions.is_empty() {
-                            tracing::debug!(
-                                memory_id = %saved.id,
-                                count = contradictions.len(),
-                                "NLI detected contradictions with existing memories"
-                            );
-                            let store_clone = store.clone();
-                            let new_meta = crate::ops::NewMemoryMeta::from(&saved);
-                            tokio::spawn(async move {
-                                crate::ops::challenge_for_contradictions(
-                                    &store_clone,
-                                    &new_meta,
-                                    &contradictions,
-                                )
-                                .await;
-                            });
-                        }
-                    }
+                // Detect contradictions with existing memories and find its
+                // embedding neighbours (best-effort, one embed + one search).
+                // Challenge writes are spawned so create_memory returns
+                // without waiting for them; per-write errors are logged
+                // inside the helper. Edge proposals run inline: they are a
+                // bounded handful of small writes (`[links]
+                // max_proposals_per_memory`), and a one-shot CLI that exits
+                // right after would otherwise drop them.
+                let findings = engine.ingest_findings(&saved).await;
+                if !findings.contradictions.is_empty() {
+                    tracing::debug!(
+                        memory_id = %saved.id,
+                        count = findings.contradictions.len(),
+                        "NLI detected contradictions with existing memories"
+                    );
+                    let store_clone = store.clone();
+                    let new_meta = crate::ops::NewMemoryMeta::from(&saved);
+                    let contradictions = findings.contradictions.clone();
+                    tokio::spawn(async move {
+                        crate::ops::challenge_for_contradictions(
+                            &store_clone,
+                            &new_meta,
+                            &contradictions,
+                        )
+                        .await;
+                    });
                 }
+                super::link_proposals::apply_ingest_findings(
+                    store,
+                    &saved.id,
+                    &findings,
+                    &engine.config().links,
+                )
+                .await;
             }
         }
     }

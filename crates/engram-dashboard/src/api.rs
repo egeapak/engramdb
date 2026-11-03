@@ -1,5 +1,6 @@
-//! The JSON API. Every endpoint is a GET and every one is a pure read: see
-//! the crate docs ("No writes on GET") and [`crate::stores::ReadStore`].
+//! The JSON API. Every GET is a pure read: see the crate docs ("No writes on
+//! GET") and [`crate::stores::ReadStore`]. The only writes are the two edge
+//! review POSTs in [`crate::writes`], behind `--allow-writes`.
 //!
 //! Memory text, titles, challenge evidence, tags and paths are returned as
 //! data, unescaped: HTML escaping is the frontend's job (it renders through
@@ -11,7 +12,7 @@ use std::sync::Arc;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Duration, Utc};
 use engramdb::ops::parsing::{parse_epistemic, parse_memory_type, parse_status};
@@ -24,7 +25,7 @@ use crate::projects::{self, Location};
 use crate::stores::ReadStore;
 use crate::{ApiError, AppState};
 
-type ApiResult = Result<Response, ApiError>;
+pub(crate) type ApiResult = Result<Response, ApiError>;
 
 /// Serialize `body` as a JSON response with `no-store`.
 pub fn json_response<T: Serialize + ?Sized>(status: StatusCode, body: &T) -> Response {
@@ -43,12 +44,12 @@ pub fn json_response<T: Serialize + ?Sized>(status: StatusCode, body: &T) -> Res
     }
 }
 
-fn ok<T: Serialize>(body: &T) -> ApiResult {
+pub(crate) fn ok<T: Serialize>(body: &T) -> ApiResult {
     Ok(json_response(StatusCode::OK, body))
 }
 
 /// The query string as a map (last value wins; empty values dropped).
-fn query(raw: Option<String>) -> HashMap<String, String> {
+pub(crate) fn query(raw: Option<String>) -> HashMap<String, String> {
     raw.map(|q| {
         form_urlencoded::parse(q.as_bytes())
             .filter(|(_, v)| !v.trim().is_empty())
@@ -66,9 +67,21 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{id}/memories", get(list_memories))
         .route("/api/projects/{id}/memories/{mid}", get(memory_detail))
         .route("/api/projects/{id}/doctor", get(project_doctor))
+        .route("/api/projects/{id}/graph", get(crate::graph::project_graph))
+        .route(
+            "/api/projects/{id}/edges/confirm",
+            post(crate::writes::confirm_edge),
+        )
+        .route(
+            "/api/projects/{id}/edges/reject",
+            post(crate::writes::reject_edge),
+        )
 }
 
-async fn open(state: &AppState, id: &str) -> Result<(Location, Arc<ReadStore>), ApiError> {
+pub(crate) async fn open(
+    state: &AppState,
+    id: &str,
+) -> Result<(Location, Arc<ReadStore>), ApiError> {
     let loc = projects::locate(id, state.current.as_ref()).await?;
     let store = state.stores.get(&loc).await?;
     Ok((loc, store))
@@ -141,7 +154,7 @@ impl From<&UsageCounts> for UsageCols {
 
 /// The first segment of a memory's first logical scope: its "line" on the
 /// route map. `None` for a memory with no logical scope.
-fn line_of(logical: &[String]) -> Option<String> {
+pub(crate) fn line_of(logical: &[String]) -> Option<String> {
     logical
         .first()
         .and_then(|l| l.split('.').next())
@@ -177,7 +190,7 @@ fn slot_of(slots: &HashMap<String, u32>, line: Option<&String>) -> Option<u32> {
     line.and_then(|l| slots.get(l).copied())
 }
 
-fn status_str(s: Status) -> &'static str {
+pub(crate) fn status_str(s: Status) -> &'static str {
     match s {
         Status::Active => "active",
         Status::NeedsReview => "needs_review",
@@ -214,7 +227,7 @@ struct MemoryRow {
 
 /// A unit enum's serde name (`"decision"`, `"shared"`), so the API speaks
 /// the same words as the memory files and the MCP tools.
-fn wire<T: Serialize>(v: &T) -> String {
+pub(crate) fn wire<T: Serialize>(v: &T) -> String {
     match serde_json::to_value(v) {
         Ok(serde_json::Value::String(s)) => s,
         _ => String::new(),
@@ -613,6 +626,30 @@ struct AttentionItem {
     detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     count: Option<usize>,
+    /// A proposed edge (`proposed_contradiction`, `proposed_edge`): the edge
+    /// as the review POSTs name it, `id` being its source.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge: Option<AttentionEdge>,
+}
+
+#[derive(Serialize)]
+struct AttentionEdge {
+    kind: engramdb::ops::links::LinkKind,
+    dst: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dst_store: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dst_summary: Option<String>,
+    origin: engramdb::ops::links::LinkOrigin,
+    confidence: f64,
+}
+
+/// The store's edges at a glance.
+#[derive(Serialize, Default)]
+struct EdgeTotals {
+    total: usize,
+    proposed: usize,
+    proposed_contradictions: usize,
 }
 
 #[derive(Serialize)]
@@ -668,6 +705,7 @@ struct StatsPage {
     newest: Option<DateTime<Utc>>,
     avg_criticality: f64,
     usage: UsageTotals,
+    edges: EdgeTotals,
     /// Oldest first; the last 30 days, today included.
     series: Vec<DailyUsage>,
     attention: Vec<AttentionItem>,
@@ -731,9 +769,66 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
     totals.last_7_days = Signals::of(&series[n.saturating_sub(7)..]);
     totals.previous_7_days = Signals::of(&series[n.saturating_sub(14)..n.saturating_sub(7)]);
 
-    // Needs attention: challenged (with the newest evidence), needs review,
-    // then stale.
+    // Needs attention: proposed contradictions (the review queue), then
+    // challenged (with the newest evidence), needs review, other proposed
+    // edges, then stale.
     let mut attention = Vec::new();
+    let edges = store.edges().await?;
+    let by_id: HashMap<&str, &IndexFilterable> = all.iter().map(|e| (e.id.as_str(), e)).collect();
+    let mut edge_totals = EdgeTotals {
+        total: edges.len(),
+        ..EdgeTotals::default()
+    };
+    let proposed_items = |contradictions: bool, out: &mut Vec<AttentionItem>| {
+        let mut n = 0;
+        for e in edges.iter().filter(|e| {
+            e.status == engramdb::ops::links::LinkStatus::Proposed
+                && (e.kind == engramdb::ops::links::LinkKind::Contradicts) == contradictions
+        }) {
+            // A proposal between memories a reader no longer sees is not a
+            // review anyone needs to do now.
+            let Some(src) = by_id
+                .get(e.src_id.as_str())
+                .filter(|r| !is_invalidated(r, now))
+            else {
+                continue;
+            };
+            let dst = by_id
+                .get(e.dst_id.as_str())
+                .filter(|_| e.dst_store.is_none());
+            if dst.is_some_and(|d| is_invalidated(d, now)) {
+                continue;
+            }
+            n += 1;
+            if n > ATTENTION_PER_KIND {
+                continue;
+            }
+            out.push(AttentionItem {
+                id: src.id.clone(),
+                summary: src.summary.clone(),
+                line: line_of(&src.logical),
+                line_slot: slot_of(&slots, line_of(&src.logical).as_ref()),
+                reason: if contradictions {
+                    "proposed_contradiction"
+                } else {
+                    "proposed_edge"
+                },
+                at: Some(e.created_at),
+                detail: e.note.clone(),
+                count: None,
+                edge: Some(AttentionEdge {
+                    kind: e.kind.clone(),
+                    dst: e.dst_id.clone(),
+                    dst_store: e.dst_store.clone(),
+                    dst_summary: dst.map(|d| d.summary.clone()),
+                    origin: e.origin.clone(),
+                    confidence: e.confidence,
+                }),
+            });
+        }
+        n
+    };
+    edge_totals.proposed_contradictions = proposed_items(true, &mut attention);
     let challenged: Vec<String> = live
         .iter()
         .filter(|e| e.status == Status::Challenged)
@@ -759,6 +854,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             at: newest.map(|c| c.timestamp),
             detail: newest.map(|c| c.evidence.clone()),
             count: m.as_ref().map(|m| m.challenges.len()),
+            edge: None,
         });
     }
     for e in live
@@ -775,8 +871,11 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             at: Some(e.updated_at),
             detail: None,
             count: None,
+            edge: None,
         });
     }
+    let other_proposed = proposed_items(false, &mut attention);
+    edge_totals.proposed = edge_totals.proposed_contradictions + other_proposed;
     let cutoff = now - Duration::days(STALE_DAYS);
     let mut stale: Vec<(&IndexFilterable, Option<DateTime<Utc>>)> = live
         .iter()
@@ -807,6 +906,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             at: Some(lr.unwrap_or(e.created_at)),
             detail: None,
             count: None,
+            edge: None,
         });
     }
 
@@ -837,6 +937,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         newest: stats.newest,
         avg_criticality: stats.avg_criticality,
         usage: totals,
+        edges: edge_totals,
         series,
         attention,
         rebuilding,
@@ -887,6 +988,10 @@ struct MemoryDetail {
     supersedes: Vec<Link>,
     #[serde(skip_serializing_if = "Option::is_none")]
     superseded_by: Option<Link>,
+    /// Every edge in and out (`ops::links::links_of`), all states and
+    /// statuses, with the far ends checked; `proposed` ones are the review
+    /// section.
+    edges: engramdb::ops::links::LinksView,
 }
 
 fn timeline(m: &Memory, u: &UsageCounts) -> Vec<TimelineEntry> {
@@ -981,6 +1086,7 @@ async fn memory_detail(
     };
     let supersedes = memory.supersedes.iter().map(link).collect();
     let superseded_by = memory.superseded_by.as_ref().map(link);
+    let edges = store.links_of(&memory.id).await?;
     ok(&MemoryDetail {
         store_id: store.store_id().to_string(),
         line_slot: slot_of(&slots, line.as_ref()),
@@ -990,6 +1096,7 @@ async fn memory_detail(
         series,
         supersedes,
         superseded_by,
+        edges,
         memory,
     })
 }

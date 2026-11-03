@@ -25,15 +25,19 @@
 //! through it by accident. A dashboard view records no usage event either: a
 //! page view is not a `fetched` (the agent did not open the memory), and
 //! counting it would let browsing inflate the signal the promotion job reads.
-//! `--allow-writes` is accepted and shown, and gates the phase-4 edge
-//! confirm/reject; there is no write endpoint yet.
+//! The one exception is opt-in: with `--allow-writes`, the two POST routes in
+//! `writes.rs` confirm or reject a *proposed* edge, each on a writable store
+//! opened for that request (never through the read-only cache, which it then
+//! invalidates). Without the flag they answer 403.
 
 pub mod api;
 pub mod assets;
 mod error;
+mod graph;
 pub mod projects;
 pub mod security;
 pub mod stores;
+mod writes;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;

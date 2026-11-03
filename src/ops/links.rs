@@ -725,7 +725,7 @@ async fn locate(store: &MemoryStore, edge: &EdgeRef) -> Result<(String, Link, St
             }
         }
     }
-    bail!(
+    Err(EdgeNotFound(format!(
         "no {} edge from {} to {}{}",
         edge.kind,
         src.id,
@@ -733,8 +733,23 @@ async fn locate(store: &MemoryStore, edge: &EdgeRef) -> Result<(String, Link, St
         dst_store
             .map(|s| format!(" in store {s}"))
             .unwrap_or_default()
-    )
+    ))
+    .into())
 }
+
+/// The edge a status write or `unlink` named does not exist (both ends may).
+/// Typed so a front end can answer "not found" rather than "refused"; the
+/// message is what the CLI prints.
+#[derive(Debug)]
+pub struct EdgeNotFound(pub String);
+
+impl std::fmt::Display for EdgeNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EdgeNotFound {}
 
 /// What [`unlink`] did.
 #[derive(Debug, Clone, Serialize)]
@@ -1072,6 +1087,16 @@ pub async fn confirm_contradiction_direction(
                     Ok(())
                 })
                 .await?;
+            // The loser's window closed: the same `resolved` event a
+            // `resolve invalidate --superseded-by` records, naming the winner.
+            super::usage::record_write(
+                store,
+                &lose,
+                super::usage::UsageKind::Resolved,
+                surface,
+                Some(&win),
+            )
+            .await;
             Ok(ContradictionOutcome {
                 a: a_id,
                 b: b_id,
@@ -1473,6 +1498,10 @@ pub struct StoreGraph {
     pub edges: Vec<GraphEdge>,
     /// Same-store edges left out because an end no longer exists.
     pub dangling: usize,
+    /// Those of them whose *source* is still a shown node — the ones a view
+    /// can draw as a stub to a closed station. (A dangling edge whose source
+    /// is gone is a `superseded_by` mirror with nothing left to draw from.)
+    pub dangling_edges: Vec<GraphEdge>,
     /// Edges into another store, which this view does not open: included in
     /// `edges` (with `dst_store` set), never counted as dangling.
     pub external: usize,
@@ -1512,6 +1541,7 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
         nodes,
         edges: Vec::new(),
         dangling: 0,
+        dangling_edges: Vec::new(),
         external: 0,
     };
     for row in store.list_edges().await? {
@@ -1531,6 +1561,9 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
         }
         if row.dst_store.is_none() && !all_ids.contains(&row.dst_id) {
             graph.dangling += 1;
+            if shown.contains(&row.src_id) {
+                graph.dangling_edges.push(GraphEdge::from_row(row));
+            }
             continue;
         }
         if !shown.contains(&row.src_id) || (row.dst_store.is_none() && !shown.contains(&row.dst_id))
@@ -1540,7 +1573,14 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
         if row.dst_store.is_some() {
             graph.external += 1;
         }
-        graph.edges.push(GraphEdge {
+        graph.edges.push(GraphEdge::from_row(row));
+    }
+    Ok(graph)
+}
+
+impl GraphEdge {
+    fn from_row(row: EdgeRow) -> Self {
+        Self {
             src: row.src_id,
             dst: row.dst_id,
             dst_store: row.dst_store,
@@ -1551,9 +1591,8 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
             status: row.status,
             created_at: row.created_at,
             note: row.note,
-        });
+        }
     }
-    Ok(graph)
 }
 
 // ---------------------------------------------------------------------------
@@ -2447,6 +2486,11 @@ mod tests {
         let graph = load_graph(&store, &GraphFilter::default()).await.unwrap();
         assert!(graph.edges.is_empty());
         assert_eq!(graph.dangling, 1);
+        assert_eq!(
+            graph.dangling_edges.len(),
+            1,
+            "drawable: its source is shown"
+        );
     }
 
     /// A store that cannot be opened is "unknown", never "dangling".

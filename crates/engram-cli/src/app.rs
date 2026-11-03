@@ -1369,7 +1369,7 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         assets_dir: Option<PathBuf>,
 
-        /// Allow the dashboard's review actions (edge confirm/reject, once available)
+        /// Allow the dashboard's one write: confirming or rejecting proposed memory edges
         #[arg(long)]
         allow_writes: bool,
     },

@@ -611,7 +611,16 @@ impl RetrievalEngine {
     ///
     /// Used by the MCP `create` tool so the agent isn't blocked on embedding
     /// model inference and NLI classification during memory ingestion.
-    pub fn spawn_ingest(&self, memory: Memory) -> Option<tokio::task::JoinHandle<()>> {
+    ///
+    /// `follow_up`, when given, runs last with the [`IngestFindings`] (NLI
+    /// contradictions and embedding neighbours): it is how `ops` writes the
+    /// proposed edges without this layer depending up on `ops`. It is not run
+    /// when the embed itself failed.
+    pub fn spawn_ingest(
+        &self,
+        memory: Memory,
+        follow_up: Option<IngestFollowUp>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         let provider = Arc::clone(self.embedding_provider.as_ref()?);
         let chunk_tokens =
             effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
@@ -623,6 +632,7 @@ impl RetrievalEngine {
             None
         };
         let nli_config = self.config.nli.clone();
+        let links_config = self.config.links.clone();
         let telemetry = self.ingest_telemetry();
 
         Some(tokio::spawn(async move {
@@ -644,43 +654,56 @@ impl RetrievalEngine {
                 return;
             }
 
-            let nli = match nli_provider {
-                Some(n) => n,
-                None => return,
-            };
-
-            match detect_contradictions_with(
-                nli.as_ref(),
+            let findings = ingest_findings_with(
+                nli_provider.as_deref(),
                 provider.as_ref(),
                 &store,
                 &nli_config,
+                &links_config,
                 &memory,
             )
-            .await
-            {
-                Ok(contradictions) if !contradictions.is_empty() => {
-                    tracing::debug!(
-                        memory_id = %memory.id,
-                        count = contradictions.len(),
-                        "NLI detected contradictions with existing memories"
-                    );
-                    crate::nli::challenge_for_contradictions(
-                        &store,
-                        &crate::nli::NewMemoryMeta::from(&memory),
-                        &contradictions,
-                    )
-                    .await;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        memory_id = %memory.id,
-                        "Background contradiction detection failed: {}",
-                        e
-                    );
-                }
+            .await;
+            if !findings.contradictions.is_empty() {
+                tracing::debug!(
+                    memory_id = %memory.id,
+                    count = findings.contradictions.len(),
+                    "NLI detected contradictions with existing memories"
+                );
+                crate::nli::challenge_for_contradictions(
+                    &store,
+                    &crate::nli::NewMemoryMeta::from(&memory),
+                    &findings.contradictions,
+                )
+                .await;
+            }
+            if let Some(follow_up) = follow_up {
+                follow_up(store, memory, findings).await;
             }
         }))
+    }
+
+    /// What an ingest found next to `memory` — its NLI contradictions (when
+    /// `[nli]` is on) and its embedding neighbours above
+    /// `[links].related_threshold` (when the similarity proposer is on) — from
+    /// one embed and one vector search. Never fails: a failure is logged and
+    /// leaves the part it would have filled empty.
+    pub async fn ingest_findings(&self, memory: &Memory) -> IngestFindings {
+        let Some(provider) = &self.embedding_provider else {
+            return IngestFindings::default();
+        };
+        let nli = match &self.nli_provider {
+            Some(p) if self.config.nli.enabled => Some(p.as_ref()),
+            _ => None,
+        };
+        ingest_findings_with(
+            nli,
+            provider.as_ref(),
+            &self.store,
+            &self.config.nli,
+            &self.config.links,
+            memory,
+        )
+        .await
     }
 
     /// Get a reference to the memory store.
@@ -2055,6 +2078,102 @@ async fn embed_memory_with(
     Ok(())
 }
 
+/// What [`RetrievalEngine::ingest_findings`] found next to a new memory.
+#[derive(Debug, Clone, Default)]
+pub struct IngestFindings {
+    /// `(existing id, NLI result)` above `[nli].contradiction_threshold`.
+    pub contradictions: Vec<(String, NliResult)>,
+    /// Live neighbours at or above `[links].related_threshold`, best first,
+    /// at most `[links].similar_candidates`. Scores are the vector search's.
+    pub neighbours: Vec<crate::storage::lance_index::VectorMatch>,
+}
+
+/// The step `spawn_ingest` runs last (see there). Boxed so `ops` can hand in
+/// a closure over its own config without this layer naming `ops` types.
+pub type IngestFollowUp = Box<
+    dyn FnOnce(
+            MemoryStore,
+            Memory,
+            IngestFindings,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send,
+>;
+
+/// [`RetrievalEngine::ingest_findings`] in free-function form, for the
+/// spawned ingest task. One embed of the memory's text and one vector search
+/// sized for whichever of the two consumers asks for more candidates.
+async fn ingest_findings_with(
+    nli: Option<&dyn NliProvider>,
+    embedding_provider: &dyn EmbeddingProvider,
+    store: &MemoryStore,
+    nli_config: &crate::types::NliConfig,
+    links_config: &crate::types::LinksConfig,
+    memory: &Memory,
+) -> IngestFindings {
+    let want_similar = links_config.similar_enabled();
+    if nli.is_none() && !want_similar {
+        return IngestFindings::default();
+    }
+    let limit = match (nli.is_some(), want_similar) {
+        (true, true) => nli_config
+            .max_comparisons
+            .max(links_config.similar_candidates + 1),
+        (true, false) => nli_config.max_comparisons,
+        // +1: the memory itself is its own nearest neighbour.
+        _ => links_config.similar_candidates + 1,
+    };
+    let text = format!("{} {}", memory.summary, memory.content);
+    let matches = match embedding_provider.embed(&text).await {
+        Ok(v) => match store.vector_search(v, limit, None).await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(memory_id = %memory.id, "ingest neighbour search failed: {e}");
+                return IngestFindings::default();
+            }
+        },
+        Err(e) => {
+            tracing::warn!(memory_id = %memory.id, "ingest embed for neighbour search failed: {e}");
+            return IngestFindings::default();
+        }
+    };
+    let mut findings = IngestFindings::default();
+    if let Some(nli) = nli {
+        let nli_matches: Vec<_> = matches
+            .iter()
+            .take(nli_config.max_comparisons)
+            .cloned()
+            .collect();
+        match contradictions_among(nli, store, nli_config, memory, nli_matches).await {
+            Ok(c) => findings.contradictions = c,
+            Err(e) => {
+                tracing::warn!(memory_id = %memory.id, "Background contradiction detection failed: {e}")
+            }
+        }
+    }
+    if want_similar {
+        let close: Vec<_> = matches
+            .into_iter()
+            .filter(|m| m.id != memory.id && m.score >= links_config.related_threshold)
+            .take(links_config.similar_candidates)
+            .collect();
+        // Invalidated neighbours are history, not relations worth proposing.
+        let ids: Vec<&str> = close.iter().map(|m| m.id.as_str()).collect();
+        let now = Utc::now();
+        let live: std::collections::HashSet<String> = store
+            .get_batch(&ids)
+            .await
+            .map(|v| {
+                v.into_iter()
+                    .filter(|(_, m)| !m.is_invalidated_at(now))
+                    .map(|(id, _)| id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        findings.neighbours = close.into_iter().filter(|m| live.contains(&m.id)).collect();
+    }
+    findings
+}
+
 /// Vector-search for similar memories and run NLI classification, returning
 /// the (memory_id, NliResult) pairs that exceed the contradiction threshold.
 ///
@@ -2073,7 +2192,18 @@ async fn detect_contradictions_with(
     let matches = store
         .vector_search(query_vector, nli_config.max_comparisons, None)
         .await?;
+    contradictions_among(nli, store, nli_config, memory, matches).await
+}
 
+/// The NLI half of [`detect_contradictions_with`], over vector matches the
+/// caller already has.
+async fn contradictions_among(
+    nli: &dyn NliProvider,
+    store: &MemoryStore,
+    nli_config: &crate::types::NliConfig,
+    memory: &Memory,
+    matches: Vec<crate::storage::lance_index::VectorMatch>,
+) -> anyhow::Result<Vec<(String, NliResult)>> {
     let candidates: Vec<_> = matches
         .into_iter()
         .filter(|m| m.score >= nli_config.similarity_threshold && m.id != memory.id)

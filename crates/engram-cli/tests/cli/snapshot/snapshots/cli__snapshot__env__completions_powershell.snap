@@ -1431,7 +1431,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
             [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
             [CompletionResult]::new('--no-open', '--no-open', [CompletionResultType]::ParameterName, 'Print the URL but do not open a browser')
-            [CompletionResult]::new('--allow-writes', '--allow-writes', [CompletionResultType]::ParameterName, 'Allow the dashboard''s review actions (edge confirm/reject, once available)')
+            [CompletionResult]::new('--allow-writes', '--allow-writes', [CompletionResultType]::ParameterName, 'Allow the dashboard''s one write: confirming or rejecting proposed memory edges')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')

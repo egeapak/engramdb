@@ -1235,6 +1235,133 @@ pub struct EngramConfig {
     /// Index-currency checking (how hard the staleness check works)
     #[serde(default)]
     pub index: IndexConfig,
+
+    /// Automatic edge proposals (NLI contradictions, embedding neighbours)
+    #[serde(default)]
+    pub links: LinksConfig,
+}
+
+/// Automatic proposal of typed memory edges (`[links]` section).
+///
+/// Two proposers write `status: proposed` edges into memory files when a
+/// memory is embedded on create (and on an MCP update): an NLI contradiction
+/// becomes a proposed `contradicts` edge, and an embedding neighbour above
+/// `related_threshold` a proposed `related_to` (above `duplicate_threshold`,
+/// `duplicates`). A proposal never changes a score; a reviewer confirms or
+/// rejects it (`engramdb link`, MCP `link_status`, the dashboard).
+///
+/// **Not part of the provider cache's model keys**: the proposers reuse the
+/// vectors and NLI results the ingest already computed and load no model of
+/// their own, so these fields must never be folded into a model key.
+///
+/// The thresholds are on the vector search's similarity score (the scale
+/// `[nli].similarity_threshold` uses; 1.0 = identical). For the default
+/// unit-length embeddings that score is `1 / (3 - 2·cos)`, so 0.80 is a
+/// cosine of about 0.88 and 0.92 about 0.96.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinksConfig {
+    /// Propose a `contradicts` edge for each NLI contradiction (needs
+    /// `[nli].enabled`). The NLI challenge itself is written either way.
+    #[serde(default = "default_true")]
+    pub propose_contradictions: bool,
+
+    /// Propose `related_to` / `duplicates` edges to embedding neighbours.
+    #[serde(default = "default_true")]
+    pub propose_similar: bool,
+
+    /// Similarity score at or above which a neighbour is proposed as
+    /// `related_to`.
+    #[serde(default = "default_related_threshold")]
+    pub related_threshold: f64,
+
+    /// Similarity score at or above which a neighbour is proposed as
+    /// `duplicates` instead.
+    #[serde(default = "default_duplicate_threshold")]
+    pub duplicate_threshold: f64,
+
+    /// Nearest neighbours examined per embedded memory.
+    #[serde(default = "default_similar_candidates")]
+    pub similar_candidates: usize,
+
+    /// Most pending (`proposed`) automatic edges one memory may take part in.
+    /// A proposal is skipped when either end is at the cap, so a noisy model
+    /// cannot flood a committed file; confirming or rejecting one frees a
+    /// slot. `0` turns both proposers off.
+    #[serde(default = "default_max_proposals_per_memory")]
+    pub max_proposals_per_memory: usize,
+}
+
+fn default_related_threshold() -> f64 {
+    0.80
+}
+
+fn default_duplicate_threshold() -> f64 {
+    0.92
+}
+
+fn default_similar_candidates() -> usize {
+    5
+}
+
+fn default_max_proposals_per_memory() -> usize {
+    3
+}
+
+impl Default for LinksConfig {
+    fn default() -> Self {
+        Self {
+            propose_contradictions: true,
+            propose_similar: true,
+            related_threshold: default_related_threshold(),
+            duplicate_threshold: default_duplicate_threshold(),
+            similar_candidates: default_similar_candidates(),
+            max_proposals_per_memory: default_max_proposals_per_memory(),
+        }
+    }
+}
+
+impl LinksConfig {
+    /// Thresholds in `[0, 1]` and ordered; a bounded candidate count.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        for (name, v) in [
+            ("links.related_threshold", self.related_threshold),
+            ("links.duplicate_threshold", self.duplicate_threshold),
+        ] {
+            if !(0.0..=1.0).contains(&v) {
+                anyhow::bail!("{name} ({v}) must be in [0.0, 1.0]");
+            }
+        }
+        if self.duplicate_threshold < self.related_threshold {
+            anyhow::bail!(
+                "links.duplicate_threshold ({}) must be >= links.related_threshold ({})",
+                self.duplicate_threshold,
+                self.related_threshold
+            );
+        }
+        if self.similar_candidates > 50 {
+            anyhow::bail!(
+                "links.similar_candidates ({}) must be at most 50",
+                self.similar_candidates
+            );
+        }
+        if self.max_proposals_per_memory > 32 {
+            anyhow::bail!(
+                "links.max_proposals_per_memory ({}) must be at most 32",
+                self.max_proposals_per_memory
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the similarity proposer runs at all.
+    pub fn similar_enabled(&self) -> bool {
+        self.propose_similar && self.max_proposals_per_memory > 0 && self.similar_candidates > 0
+    }
+
+    /// Whether the contradiction proposer runs at all.
+    pub fn contradictions_enabled(&self) -> bool {
+        self.propose_contradictions && self.max_proposals_per_memory > 0
+    }
 }
 
 /// Settings for harvesting past Claude Code sessions (`[harvest]` section).
@@ -2186,6 +2313,7 @@ impl EngramConfig {
         self.review.validate()?;
         self.harvest.validate()?;
         self.index.validate()?;
+        self.links.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");

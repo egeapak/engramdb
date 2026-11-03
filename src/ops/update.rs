@@ -324,7 +324,8 @@ async fn update_memory_unrecorded(
     if let Some(engine) = engine {
         if engine.embeddings_available() {
             if embed_async {
-                let _ = engine.spawn_ingest(saved);
+                let follow_up = super::link_proposals::follow_up(engine.config().links.clone());
+                let _ = engine.spawn_ingest(saved, Some(follow_up));
             } else {
                 engine.embed_memory(&saved).await?;
             }

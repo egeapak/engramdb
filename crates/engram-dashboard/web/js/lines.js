@@ -42,7 +42,8 @@ export function badge(line, n, large) {
   );
 }
 
-function shape(type, r) {
+/** A station glyph for a memory type, centred on 0,0 (stroke comes from the parent). */
+export function stationShape(type, r) {
   switch (type) {
     case 'convention':
     case 'preference': {
@@ -71,7 +72,7 @@ export function kindIcon(type, n) {
   return s(
     'svg',
     { width: 16, height: 16, viewBox: '-8 -8 16 16', 'aria-hidden': 'true', class: 'stroke-' + slot(n) },
-    shape(type, 4.6),
+    stationShape(type, 4.6),
   );
 }
 

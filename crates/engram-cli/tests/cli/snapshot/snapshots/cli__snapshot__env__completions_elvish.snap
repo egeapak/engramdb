@@ -1326,7 +1326,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand --dir 'Working directory (default: current directory)'
             cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
             cand --no-open 'Print the URL but do not open a browser'
-            cand --allow-writes 'Allow the dashboard''s review actions (edge confirm/reject, once available)'
+            cand --allow-writes 'Allow the dashboard''s one write: confirming or rejecting proposed memory edges'
             cand --json 'Output as JSON'
             cand -q 'Suppress non-essential output'
             cand --quiet 'Suppress non-essential output'

@@ -5,12 +5,12 @@
 //   #/p/<id>                overview
 //   #/p/<id>/memories?…     memory list (filters in the hash query)
 //   #/p/<id>/m/<memory id>  memory detail
-//   #/p/<id>/graph          route map (placeholder until phase 4)
+//   #/p/<id>/graph?…        route map (filters in the hash query)
 //   #/p/<id>/doctor         store health
 //   #/projects              every store on the machine
 
 import { $, $$, h, mount } from './dom.js';
-import { api, takeToken } from './api.js';
+import { api, takeToken, setCsrf } from './api.js';
 import { renderOverview } from './views/overview.js';
 import { renderMemories } from './views/memories.js';
 import { renderDetail } from './views/detail.js';
@@ -87,7 +87,7 @@ export function href(view, id, extra) {
     case 'detail':
       return `#/p/${e(id)}/m/${e(extra)}`;
     case 'graph':
-      return `#/p/${e(id)}/graph`;
+      return `#/p/${e(id)}/graph${extra ? '?' + extra : ''}`;
     case 'doctor':
       return `#/p/${e(id)}/doctor`;
     default:
@@ -149,6 +149,7 @@ function renderNav(route) {
 
 let renderSeq = 0;
 let firstRender = true;
+let keepFocus = false;
 
 async function route() {
   const seq = ++renderSeq;
@@ -165,7 +166,20 @@ async function route() {
   renderSwitcher();
   renderNav(r);
   const main = $('#main');
-  const ctx = { state, route: r, href, project: project(r.id), isStale: () => seq !== renderSeq };
+  // `refresh` re-renders the current view in place (after a review write),
+  // keeping the scroll position.
+  const ctx = {
+    state,
+    route: r,
+    href,
+    project: project(r.id),
+    isStale: () => seq !== renderSeq,
+    refresh: () => {
+      const y = window.scrollY;
+      keepFocus = true;
+      route().then(() => window.scrollTo(0, y));
+    },
+  };
   try {
     if (r.view === 'projects') await renderProjects(main, ctx);
     else if (!r.id) mount(main, h('p', { class: 'muted' }, 'No EngramDB projects are registered on this machine yet. Run `engramdb init` in a project.'));
@@ -180,12 +194,13 @@ async function route() {
   }
   // Move focus to the new view's heading on navigation (not on the first
   // load), so keyboard and screen-reader users land where the page changed.
-  if (seq === renderSeq && !firstRender) {
+  if (seq === renderSeq && !firstRender && !keepFocus) {
     const title = document.getElementById('view-title') || main;
     if (!title.hasAttribute('tabindex')) title.setAttribute('tabindex', '-1');
     title.focus({ preventScroll: false });
   }
   firstRender = false;
+  keepFocus = false;
 }
 
 async function boot() {
@@ -204,12 +219,13 @@ async function boot() {
     return;
   }
   const s = state.session;
+  setCsrf(s.csrf);
   $('#brand-sub').textContent = `Memory network · ${location.host}`;
   const tag = $('#mode-tag');
   if (s.allow_writes) {
-    tag.textContent = 'Writes enabled';
+    tag.textContent = 'Edge review on';
     tag.classList.add('warn');
-    $('#foot-mode').textContent = 'Started with --allow-writes · edge review arrives with the route map';
+    $('#foot-mode').textContent = 'Started with --allow-writes · confirming or rejecting a proposed edge writes to the store';
   }
   $('#foot-version').textContent = `engramdb ${s.version} · schema ${s.schema_version} · served by engramdb dashboard`;
   window.addEventListener('hashchange', route);
