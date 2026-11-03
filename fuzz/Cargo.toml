@@ -27,6 +27,35 @@ members = ["."]
 [profile.release]
 debug = 1
 
+# Dependencies build at opt-level 1 without debuginfo; only the crates whose
+# code the targets exercise keep opt-level 3.
+#
+# `cargo fuzz build` adds `-Ccodegen-units=1` to RUSTFLAGS in release mode
+# (sancov blocks ThinLTO imports otherwise), so each crate is optimized as one
+# LLVM module, ASan-instrumented. At opt-level 3 that put `lance` and
+# `lance-index` at 6-8 GB of RSS *each* and still growing (measured on a
+# 4-core/15 GB box: OOM-killed at -j4, and again at -j2 with only those two
+# compiling), which is what killed every leg of the weekly run on 16 GB
+# runners from #19 (2026-08-24) on. None of LanceDB, DataFusion, Arrow or the
+# ONNX stack is reached by a fuzz target; they are only linked in. With this
+# profile, same box: all nine targets cold in 16m17s at -j4, peak 13 GB
+# system-wide, fuzz/target 2.8 GB.
+#
+# Profile overrides cannot beat RUSTFLAGS, so this leaves codegen-units=1 in
+# place; it lowers what each of those single modules costs to optimize.
+[profile.release.package."*"]
+opt-level = 1
+debug = false
+
+[profile.release.package.engramdb]
+opt-level = 3
+
+[profile.release.package.engram-storage]
+opt-level = 3
+
+[profile.release.package.engram-types]
+opt-level = 3
+
 [[bin]]
 name = "memory_file"
 path = "fuzz_targets/memory_file.rs"
