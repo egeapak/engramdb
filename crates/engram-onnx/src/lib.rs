@@ -231,6 +231,37 @@ pub fn apply_backend(builder: SessionBuilder, backend: Backend) -> ort::Result<S
     }
 }
 
+/// The process's one ONNX Runtime environment, created on first use.
+///
+/// Since `ort` 2.0.0-rc.15 a session builder needs an explicit
+/// [`Environment`](ort::environment::Environment), and a process may hold only
+/// **one**: a second `ort::init().build()` while the first is alive fails with
+/// "only one environment". `fastembed` keeps its own default environment for
+/// the life of the process, so if it built one first, every `Session::builder`
+/// here would fail (and vice versa — fastembed reports `EnvironmentRequired`).
+/// Every ONNX session in EngramDB therefore takes its environment from here:
+/// the ones we build ([`session_builder`]) and the ones fastembed builds
+/// (`with_environment(engram_onnx::environment()?)` on its init options).
+///
+/// Call it only after the runtime check ([`runtime_status`]): under
+/// `load-dynamic` creating the environment is what loads the library.
+pub fn environment() -> ort::Result<ort::environment::Environment> {
+    use std::sync::{Mutex, PoisonError};
+    static ENVIRONMENT: Mutex<Option<ort::environment::Environment>> = Mutex::new(None);
+    let mut slot = ENVIRONMENT.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(environment) = slot.as_ref() {
+        return Ok(environment.clone());
+    }
+    let environment = ort::init().with_name("engramdb").build()?;
+    *slot = Some(environment.clone());
+    Ok(environment)
+}
+
+/// A session builder on the shared [`environment`].
+pub fn session_builder() -> ort::Result<SessionBuilder> {
+    ort::session::Session::builder(&environment()?)
+}
+
 /// Apply the build-selected default backend's execution providers to an
 /// `ort` session builder.
 pub fn apply_execution_providers(builder: SessionBuilder) -> ort::Result<SessionBuilder> {

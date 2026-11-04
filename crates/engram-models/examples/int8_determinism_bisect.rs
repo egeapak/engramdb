@@ -31,7 +31,7 @@ use engram_models::embeddings::{
 };
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use ndarray::Array2;
-use ort::session::{builder::GraphOptimizationLevel, Session};
+use ort::session::builder::GraphOptimizationLevel;
 use ort::value::Value;
 use tokenizers::Tokenizer;
 
@@ -126,7 +126,10 @@ fn l2(case: &Case, iters: usize) -> Result<Option<Vec<Vec<f32>>>> {
     let cache_dir = engram_storage::paths::model_cache_dir().map_err(|e| anyhow::anyhow!("{e}"))?;
     let options = TextInitOptions::new(case.fastembed_model.clone())
         .with_cache_dir(cache_dir)
-        .with_max_length(256);
+        .with_max_length(256)
+        // One ONNX Runtime environment per process: share the one
+        // `OnnxProvider` (L1) uses, or whichever loads second fails.
+        .with_environment(engram_onnx::environment().map_err(|e| anyhow::anyhow!("{e}"))?);
     let Ok(mut model) = TextEmbedding::try_new(options) else {
         return Ok(None);
     };
@@ -230,7 +233,7 @@ fn run_l3(
     // `SessionBuilder`'s error type is neither Send nor Sync, so it can't ride
     // `?` into anyhow — same dance as `nli::onnx`.
     let to_err = |e: ort::Error<ort::session::builder::SessionBuilder>| anyhow::anyhow!("{e}");
-    let mut builder = Session::builder()
+    let mut builder = engram_onnx::session_builder()
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_optimization_level(opts.opt_level)
         .map_err(to_err)?

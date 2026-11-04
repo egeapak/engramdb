@@ -176,7 +176,7 @@ impl T5TitleGenerator {
         let (encoder_path, decoder_path, tokenizer_path) = download_model_files(spec)?;
         let intra = intra_threads.max(1);
 
-        let encoder = engram_onnx::apply_backend(Session::builder()?, backend)?
+        let encoder = engram_onnx::apply_backend(engram_onnx::session_builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(crate::erase_builder_err)?
             .with_intra_threads(intra)
@@ -184,7 +184,7 @@ impl T5TitleGenerator {
             .commit_from_file(&encoder_path)
             .context("Failed to load T5 encoder ONNX model")?;
 
-        let decoder = engram_onnx::apply_backend(Session::builder()?, backend)?
+        let decoder = engram_onnx::apply_backend(engram_onnx::session_builder()?, backend)?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(crate::erase_builder_err)?
             .with_intra_threads(intra)
