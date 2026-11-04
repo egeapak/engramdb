@@ -5,9 +5,11 @@
 // every layout module visible to the embedded-import check. A Rust test
 // checks every style's `layout.name` is a key here.
 //
-// Phase E's scope overview (one disc per scope, bands between them) is not a
-// style: it will be a separate core render path with its own entry in this
-// table, chosen by the core view (views/graph.js says where).
+// The scope overview (one disc per scope, bands between them;
+// ./scope-overview.js) is not a style: it is a separate core render path
+// (views/graph-overview.js) with its own entry in this table, chosen by the
+// core view when a store has more than OVERVIEW_MIN memories. An opened
+// scope is laid out by 'scope-force' whatever style is picked.
 //
 // **Input** (built by views/graph.js):
 //   { layout: name, options: the style's layout options (or {}),
@@ -34,11 +36,12 @@
 
 import { layout as grid } from './themes/grid/layout.js';
 import { layout as scopeForce } from './scope-force.js';
+import { layout as scopeOverview } from './scope-overview.js';
 
-export const LAYOUTS = Object.freeze({ grid, 'scope-force': scopeForce });
+export const LAYOUTS = Object.freeze({ grid, 'scope-force': scopeForce, 'scope-overview': scopeOverview });
 
 /** The layouts that read `input.width` (Grid does not). */
-const WIDTH_LAYOUTS = Object.freeze({ 'scope-force': true });
+const WIDTH_LAYOUTS = Object.freeze({ 'scope-force': true, 'scope-overview': true });
 
 /** Whether layout `name` reads `input.width`. */
 export const usesWidth = (name) => Object.hasOwn(WIDTH_LAYOUTS, name);

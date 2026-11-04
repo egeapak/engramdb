@@ -115,7 +115,7 @@ const DEFAULTS = Object.freeze({
  * one where its related discs are nearest and the pack stays compact (a
  * distance stretched by the box shape). Returns centres [x0, y0, …].
  */
-function pack(rad, aff, aspect, pad) {
+export function pack(rad, aff, aspect, pad) {
   const m = rad.length;
   const out = new Float64Array(m * 2);
   if (m <= 1) return out;

@@ -32,6 +32,19 @@
 // arrows pan, +/- zoom, 0 fits, ] and [ step through memories, Enter pins,
 // Escape unpins. The relations table below lists the proposed relations and
 // expands to all of them: the keyboard and screen-reader way to every edge.
+//
+// **Three render paths.** A store with more than OVERVIEW_MIN memories (after
+// the status filters) opens on the scope overview (./graph-overview.js: one
+// disc per top scope, bands between them), unless the hash says `all=1`
+// ("Show all memories", still bounded by the server's limit). A scope opened
+// from it (`top_scope=<name>`) is laid out by the core scope-force layout
+// whatever the style, sub-scopes as regions, and its relations to other
+// scopes are faint stubs ending in one tag per far scope (../graph/opened.js).
+// Everything else — every store of OVERVIEW_MIN memories or fewer, and the
+// show-all graph — is the style's own full graph, drawn as it always was.
+// On a graph of more than OVERVIEW_MIN memories zoomed to 3× Fit or more,
+// only relations with both ends on screen are drawn whole, the rest as
+// short stubs (recomputed when a pan or zoom settles, never per frame).
 
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
@@ -43,8 +56,11 @@ import { along, pathD } from '../graph/geometry.js';
 import { reads, radius } from '../graph/radius.js';
 import { makeT } from '../graph/strings.js';
 import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.js';
+import { filtered } from '../graph/tally.js';
+import { subKey, drawRegions, placeTags } from '../graph/opened.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
+import { OVERVIEW_MIN, renderOverview, overviewLayout } from './graph-overview.js';
 
 // ---------------------------------------------------------------------------
 // Layout worker and caches
@@ -85,6 +101,12 @@ function hashKey(str) {
     b = Math.imul(b ^ c, 0x5bd1e995);
   }
   return (a >>> 0).toString(16) + (b >>> 0).toString(16) + '.' + str.length;
+}
+
+/** Start the layout worker ahead of need (the overview does not use it, the scope it opens will). */
+function warmWorker() {
+  if (worker || workerBroken) return;
+  runLayout({ layout: 'scope-force', nodes: [], edges: [], aspect: 0.62, width: 800 }).catch(() => {});
 }
 
 function runLayout(input) {
@@ -144,6 +166,8 @@ function filtersOf(query) {
     invalidated: query.get('invalidated') === '1',
     rejected: query.get('rejected') === '1',
     top_scope: query.get('top_scope') || '',
+    // "Show all memories": the full graph even above OVERVIEW_MIN.
+    all: query.get('all') === '1',
     // Only a style named in the hash: none means this browser's stored pick.
     style: styleById(query.get('style')) ? query.get('style') : '',
   };
@@ -156,6 +180,7 @@ function filterQuery(f) {
   if (f.invalidated) q.set('invalidated', '1');
   if (f.rejected) q.set('rejected', '1');
   if (f.top_scope) q.set('top_scope', f.top_scope);
+  if (f.all) q.set('all', '1');
   if (f.style) q.set('style', f.style);
   return q.toString();
 }
@@ -171,6 +196,14 @@ function shows(f, e) {
   if (e.status === 'proposed' && !f.proposed) return false;
   if (e.status === 'rejected' && !f.rejected) return false;
   return true;
+}
+
+/** From this zoom (× the Fit scale) a big graph draws only on-screen relations whole. */
+const CUT_ZOOM = 3;
+
+/** A far scope's tag text, for sizing ("storage · 12  ⚠ 2"). */
+function tagText(name, count, contradictions) {
+  return `${scopeName(name)} · ${fmt(count)}${contradictions ? `  ⚠ ${fmt(contradictions)}` : ''}`;
 }
 
 /** A relation's far-end state, in words (`live` is not shown). */
@@ -196,6 +229,52 @@ export function shortLabel(summary, max = 24) {
   return words.join(' ').replace(/[,.:;\s]+$/, '') + '…';
 }
 
+/**
+ * The filter rows (kinds, proposed / rejected / invalidated, the top-scope
+ * picker) into `filterBox`; shared by the graph and the scope overview.
+ * `setFilters(next)` applies a display filter in place; the invalidated chip
+ * and the picker change the memory set, so they go through the hash.
+ */
+function buildFilters(filterBox, ctx, f, g, theme, setFilters) {
+  const chip = (pressed, content, onclick, title) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(pressed), onclick, title }, content);
+  const kindChips = KINDS.map((k) =>
+    chip(f.kinds.includes(k), [theme.edgeSample(k, 'confirmed', 26), kindLabel(k)], () => {
+      const on = f.kinds.includes(k);
+      // Never filter everything out: the last kind cannot be switched off.
+      if (on && f.kinds.length === 1) return;
+      setFilters({ kinds: on ? f.kinds.filter((x) => x !== k) : KINDS.filter((x) => x === k || f.kinds.includes(x)) });
+    }),
+  );
+  const toggles = [
+    chip(f.proposed, 'Proposed', () => setFilters({ proposed: !f.proposed }), 'Relations awaiting review'),
+    chip(f.rejected, 'Rejected', () => setFilters({ rejected: !f.rejected }), 'Relations a reviewer rejected'),
+    // These two change the memories, so they reload the graph.
+    chip(f.invalidated, 'Invalidated', () => (location.hash = hashOf(ctx, { ...f, invalidated: !f.invalidated })), 'Memories whose validity window closed'),
+  ];
+  const sel = h(
+    'select',
+    { 'aria-label': 'Top-level scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, top_scope: ev.target.value, all: ev.target.value ? f.all : false })) },
+    h('option', { value: '' }, 'All top-level scopes'),
+    g.scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
+  );
+  // Keep keyboard focus on the chip that was pressed.
+  const active = document.activeElement;
+  const was = active && filterBox.contains(active) ? [...filterBox.querySelectorAll('button, select')].indexOf(active) : -1;
+  mount(
+    filterBox,
+    h(
+      'div',
+      { class: 'filt' },
+      h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Relation kinds shown' }, h('span', { class: 'eyebrow lab' }, 'Show'), kindChips),
+      h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Include' }, h('span', { class: 'eyebrow lab' }, 'Include'), toggles, h('label', { class: 'sel' }, sel)),
+    ),
+  );
+  if (was >= 0) {
+    const again = filterBox.querySelectorAll('button, select')[was];
+    if (again) again.focus();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The view
 // ---------------------------------------------------------------------------
@@ -207,11 +286,12 @@ export async function renderGraph(main, ctx) {
   }
   const p = ctx.project;
   const f = filtersOf(ctx.route.query);
-  // The render path. Today there is one: every memory the server sent, laid
-  // out by the style. Phase E adds a second, core-owned path for a large
-  // store (the scope overview: discs and bands, with its own entry in
-  // graph/layouts.js and neutral CSS), chosen here before any style hook
-  // runs; styles keep drawing only memories and relations.
+  // The render path (module docs), chosen before any style hook runs: the
+  // overview is asked for with a limit of OVERVIEW_MIN + 1, so a store at or
+  // under it comes back whole (and is drawn exactly as before) while a
+  // larger one sends its totals and only a sliver of memories.
+  const opened = f.top_scope && !f.top_scope.includes(',') ? f.top_scope : null;
+  const wantOverview = !f.top_scope && !f.all;
   const theme = useStyle(f.style);
   const t = makeT(theme);
   if (!p.available) {
@@ -227,6 +307,7 @@ export async function renderGraph(main, ctx) {
       include_rejected: 'true',
       include_invalidated: f.invalidated ? 'true' : 'false',
       top_scope: f.top_scope || undefined,
+      limit: wantOverview ? String(OVERVIEW_MIN + 1) : undefined,
     });
   } catch (e) {
     if (ctx.isStale()) return;
@@ -234,6 +315,49 @@ export async function renderGraph(main, ctx) {
     return;
   }
   if (ctx.isStale()) return;
+
+  if (wantOverview && g.total_nodes > OVERVIEW_MIN) {
+    renderOverview(main, ctx, g, {
+      t,
+      f,
+      hashOf,
+      styleControl,
+      filters: (box, onChange) => {
+        const apply = (next) => {
+          Object.assign(f, next);
+          history.replaceState(null, '', hashOf(ctx, f));
+          buildFilters(box, ctx, f, g, theme, apply);
+          onChange();
+        };
+        buildFilters(box, ctx, f, g, theme, apply);
+      },
+    });
+    if (refocusStyle) {
+      refocusStyle = false;
+      const sel = main.querySelector('.g-style select');
+      if (sel) sel.focus();
+    }
+    warmWorker();
+    return;
+  }
+  // A big graph (an opened scope, or show-all past OVERVIEW_MIN) draws only
+  // on-screen relations whole once zoomed in (module docs).
+  const big = g.nodes.length > OVERVIEW_MIN;
+  // Where "back" goes: the overview when the store has one.
+  const storeTotal = g.scopes.reduce((n, l) => n + l.count, 0);
+  // Show-all's way back sits in the tools row instead (one button), so the
+  // full graph's box stays where it always was.
+  const backToOverview = !opened && f.all && storeTotal > OVERVIEW_MIN ? h('a', { class: 'btn sm', href: hashOf(ctx, { ...f, all: false }) }, t('crumbAll')) : null;
+  const crumbs =
+    opened
+      ? h(
+          'nav',
+          { class: 'g-crumbs', 'aria-label': t('crumbsAria') },
+          h('a', { href: hashOf(ctx, { ...f, top_scope: '', all: false }) }, storeTotal > OVERVIEW_MIN ? t('crumbAll') : t('crumbAllMemories')),
+          h('span', { class: 'sep', 'aria-hidden': 'true' }, ' › '),
+          h('span', { 'aria-current': 'page' }, scopeName(opened === '-' ? '' : opened)),
+        )
+      : null;
 
   // Controls rendered before the layout is ready call through here; they do
   // nothing until the graph exists.
@@ -266,12 +390,14 @@ export async function renderGraph(main, ctx) {
       h(
         'div',
         { class: 'g-main' },
+        crumbs,
         h(
           'div',
           { class: 'graph-tools' },
           h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Zoom in', onclick: () => ctl.zoom(1 / 1.4) }, '+'),
           h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Zoom out', onclick: () => ctl.zoom(1.4) }, '−'),
           h('button', { type: 'button', class: 'btn sm', onclick: () => ctl.fit() }, 'Fit'),
+          backToOverview,
           h('span', { class: 'faint' }, t('toolsHint')),
           styleControl(),
         ),
@@ -323,43 +449,7 @@ export async function renderGraph(main, ctx) {
   }
 
   function renderFilters() {
-    const chip = (pressed, content, onclick, title) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(pressed), onclick, title }, content);
-    const kindChips = KINDS.map((k) =>
-      chip(f.kinds.includes(k), [theme.edgeSample(k, 'confirmed', 26), kindLabel(k)], () => {
-        const on = f.kinds.includes(k);
-        // Never filter everything out: the last kind cannot be switched off.
-        if (on && f.kinds.length === 1) return;
-        setFilters({ kinds: on ? f.kinds.filter((x) => x !== k) : KINDS.filter((x) => x === k || f.kinds.includes(x)) });
-      }),
-    );
-    const toggles = [
-      chip(f.proposed, 'Proposed', () => setFilters({ proposed: !f.proposed }), 'Relations awaiting review'),
-      chip(f.rejected, 'Rejected', () => setFilters({ rejected: !f.rejected }), 'Relations a reviewer rejected'),
-      // These two change the memories, so they reload the graph.
-      chip(f.invalidated, 'Invalidated', () => (location.hash = hashOf(ctx, { ...f, invalidated: !f.invalidated })), 'Memories whose validity window closed'),
-    ];
-    const sel = h(
-      'select',
-      { 'aria-label': 'Top-level scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, top_scope: ev.target.value })) },
-      h('option', { value: '' }, 'All top-level scopes'),
-      g.all_scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
-    );
-    // Keep keyboard focus on the chip that was pressed.
-    const active = document.activeElement;
-    const was = active && filterBox.contains(active) ? [...filterBox.querySelectorAll('button, select')].indexOf(active) : -1;
-    mount(
-      filterBox,
-      h(
-        'div',
-        { class: 'filt' },
-        h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Relation kinds shown' }, h('span', { class: 'eyebrow lab' }, 'Show'), kindChips),
-        h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Include' }, h('span', { class: 'eyebrow lab' }, 'Include'), toggles, h('label', { class: 'sel' }, sel)),
-      ),
-    );
-    if (was >= 0) {
-      const again = filterBox.querySelectorAll('button, select')[was];
-      if (again) again.focus();
-    }
+    buildFilters(filterBox, ctx, f, g, theme, setFilters);
   }
 
   function renderNotes(ks) {
@@ -405,10 +495,14 @@ export async function renderGraph(main, ctx) {
   // and the name of the style's layout (part of the cache key).
   const labels = g.nodes.map((n) => shortLabel(n.summary));
   const boxAspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / (graphBox.clientWidth || 800)));
+  // An opened scope: scope-force whatever the style, each sub-scope a
+  // region (its key stands in for the top scope the layout groups by).
+  const layoutName = opened ? 'scope-force' : theme.layout.name;
+  const groupKeys = g.nodes.map((n) => (opened ? subKey(n) : n.top_scope || ''));
   const input = {
-    layout: theme.layout.name,
-    nodes: g.nodes.map((n, i) => ({ id: n.id, top_scope: n.top_scope || '', slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
-    options: theme.layout.options || {},
+    layout: layoutName,
+    nodes: g.nodes.map((n, i) => ({ id: n.id, top_scope: groupKeys[i], slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
+    options: opened ? {} : theme.layout.options || {},
     edges: g.edges.map((e) => {
       const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
       // A stub's far end is not in the node set, so its scope is unknown
@@ -420,7 +514,7 @@ export async function renderGraph(main, ctx) {
   // The box's width in pixels, coarsely (so a resize rarely misses the
   // cache), only for a layout that sizes what must stay readable at Fit by
   // it: any other would lay out again on every resize for nothing.
-  if (usesWidth(theme.layout.name)) input.width = Math.round((graphBox.clientWidth || 800) / 40) * 40;
+  if (usesWidth(layoutName)) input.width = Math.round((graphBox.clientWidth || 800) / 40) * 40;
   const res = await runLayout(input).catch((e) => {
     if (!ctx.isStale()) mount(graphBox, errorBox(e));
     return null;
@@ -437,9 +531,20 @@ export async function renderGraph(main, ctx) {
   let adj = [];
 
   // The style's backdrop: under the relations and over them (Grid: scope
-  // lines and their badges).
-  const backdrop = theme.drawBackdrop(g, lay) || {};
+  // lines and their badges). An opened scope's regions are its sub-scopes:
+  // a style laid out by scope-force draws them as its own regions (it reads
+  // each node's group as its top scope); any other gets the core's neutral
+  // ones, since its backdrop expects its own layout.
+  const backdrop = !opened
+    ? theme.drawBackdrop(g, lay) || {}
+    : theme.layout.name === layoutName
+      ? theme.drawBackdrop({ ...g, nodes: g.nodes.map((n, i) => ({ ...n, top_scope: groupKeys[i] })) }, lay) || {}
+      : drawRegions(groupKeys, lay);
   const edgesLayer = s('g', { class: 'edges', 'aria-hidden': 'true' });
+  // An opened scope's stubs (under the relations) and far-scope tags (over everything).
+  const stubsLayer = s('g', { class: 'xs-stubs', 'aria-hidden': 'true' });
+  const tagsLayer = s('g', { class: 'xs-tags' });
+  let stubEls = g.nodes.map(() => []);
   // Labels sit under the memories, so a label never hides one.
   const labelsLayer = s('g', { class: 'labels', 'aria-hidden': 'true' });
   const nodesLayer = s('g', { class: 'nodes' });
@@ -492,18 +597,118 @@ export async function renderGraph(main, ctx) {
     { class: 'graph', role: 'group', 'aria-label': 'Memories' },
     s('rect', { class: 'bg', x: -1e5, y: -1e5, width: 2e5, height: 2e5, 'aria-hidden': 'true' }),
     backdrop.below || null,
+    stubsLayer,
     edgesLayer,
     backdrop.above || null,
     labelsLayer,
     nodesLayer,
+    tagsLayer,
   );
   mount(graphBox, svg, tip, hint);
+
+  // ---- an opened scope's far scopes: one tag each, stubs into it ----------
+  // Placed once from the unfiltered counts (so a display filter never moves
+  // a tag; one with nothing left under the filters is not drawn).
+  let viewBounds = lay.bounds;
+  const tagByName = new Map();
+  if (opened && g.stub_scopes && g.stub_scopes.length) {
+    const bw = graphBox.clientWidth || 800;
+    const bh = graphBox.clientHeight || 500;
+    const dirs = new Map();
+    const ov = overviewLayout(g, bw, Math.min(3, Math.max(0.3, bh / bw)));
+    const me = ov.index.get(opened === '-' ? '' : opened);
+    for (const sc of g.stub_scopes) {
+      const j = ov.index.get(sc.name);
+      if (me !== undefined && j !== undefined) dirs.set(sc.name, [ov.lay.pos[2 * j] - ov.lay.pos[2 * me], ov.lay.pos[2 * j + 1] - ov.lay.pos[2 * me + 1]]);
+    }
+    const tags = g.stub_scopes
+      .slice()
+      .sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      .map((sc) => ({ name: sc.name, text: tagText(sc.name, sc.count, sc.contradictions) }));
+    const placed = placeTags(lay.bounds, dirs, tags, bw, bh);
+    viewBounds = placed.bounds;
+    for (const tg of placed.tags) tagByName.set(tg.name, tg);
+  }
+
+  /** Stubs from memories to their far scope's tag, and the tags, under the display filters. */
+  function drawStubs() {
+    if (!tagByName.size) return;
+    stubEls = g.nodes.map(() => []);
+    const lines = [];
+    for (const st of g.stubs || []) {
+      const i = byId.get(st.node);
+      const tg = tagByName.get(st.scope);
+      const ft = filtered(st, f);
+      if (i === undefined || !tg || !ft.count) continue;
+      const [x, y] = P(i);
+      let [x2, y2] = [tg.ax, tg.ay];
+      // Zoomed in (cut mode): a stub whose memory is off screen is not
+      // drawn, one whose tag is off screen is cut short, like a relation.
+      if (cutMode) {
+        const sc = (graphBox.clientWidth || 1) / view.w;
+        const inView = (qx, qy) => qx >= view.x && qx <= view.x + view.w && qy >= view.y && qy <= view.y + view.h;
+        if (!inView(x, y)) continue;
+        if (!inView(x2, y2)) {
+          const dx = x2 - x;
+          const dy = y2 - y;
+          const len = Math.sqrt(dx * dx + dy * dy) || 1;
+          const reach = Math.min(len, 30 / sc);
+          x2 = x + (dx / len) * reach;
+          y2 = y + (dy / len) * reach;
+        }
+      }
+      const el = s('line', {
+        class: ['xs-stub', ft.contradictions && 'contra'],
+        x1: x.toFixed(1),
+        y1: y.toFixed(1),
+        x2: x2.toFixed(1),
+        y2: y2.toFixed(1),
+        'stroke-width': (0.8 + 0.45 * Math.min(4, ft.count - 1)).toFixed(2),
+        'vector-effect': 'non-scaling-stroke',
+      });
+      stubEls[i].push(el);
+      lines.push(el);
+    }
+    mount(stubsLayer, lines);
+    const tagEls = [];
+    for (const sc of g.stub_scopes) {
+      const tg = tagByName.get(sc.name);
+      const ft = filtered(sc, f);
+      if (!tg || !ft.count) continue;
+      const go = () => (location.hash = hashOf(ctx, { ...f, top_scope: sc.name || '-' }));
+      const el = s(
+        'g',
+        { class: ['xs-tag', ft.contradictions && 'contra'], transform: `translate(${tg.x.toFixed(1)},${tg.y.toFixed(1)})`, tabindex: '0', role: 'link', 'aria-label': t('tagAria', scopeName(sc.name), ft.count, ft.contradictions) },
+        s('rect', { x: (-tg.w / 2).toFixed(1), y: (-tg.h / 2).toFixed(1), width: tg.w.toFixed(1), height: tg.h.toFixed(1), rx: (tg.h / 2).toFixed(1) }),
+        s('text', { y: (tg.font * 0.36).toFixed(2), 'font-size': tg.font.toFixed(2), 'text-anchor': 'middle' }, `${scopeName(sc.name)} · ${fmt(ft.count)}`, ft.contradictions ? s('tspan', { class: 'w' }, `  ⚠ ${fmt(ft.contradictions)}`) : null),
+      );
+      el.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        if (!dragged) go();
+      });
+      el.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          ev.stopPropagation();
+          go();
+        }
+      });
+      tagEls.push(el);
+    }
+    mount(tagsLayer, tagEls);
+  }
 
   // ---- relations (redrawn when the display filters change) ----------------
   function drawEdges() {
     const ks = visible();
     const scale = view ? (graphBox.clientWidth || 1) / view.w : 1;
     drawnScale = scale;
+    // Zoomed to 3× Fit or more on a big graph: a relation with one end off
+    // screen is drawn as a short stub from the end on screen, and one with
+    // both ends off is not drawn (module docs).
+    cutMode = big && !!view && fitView().w / view.w >= CUT_ZOOM;
+    const pad = 8 / scale;
+    const onScreen = (q) => q[0] >= view.x - pad && q[0] <= view.x + view.w + pad && q[1] >= view.y - pad && q[1] <= view.y + view.h + pad;
     edgeEls = new Array(g.edges.length).fill(null);
     adj = g.nodes.map(() => []);
     const frag = [];
@@ -511,15 +716,36 @@ export async function renderGraph(main, ctx) {
       const e = g.edges[k];
       const si = byId.get(e.src);
       const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
+      let pts = lay.routes[k];
+      let cut = false;
+      let near = si;
+      if (cutMode && ti >= 0) {
+        const a = P(si);
+        const b = P(ti);
+        const ina = onScreen(a);
+        const inb = onScreen(b);
+        if (!ina && !inb) continue;
+        if (!ina || !inb) {
+          const [p0, p1] = ina ? [a, b] : [b, a];
+          near = ina ? si : ti;
+          const dx = p1[0] - p0[0];
+          const dy = p1[1] - p0[1];
+          const len = Math.sqrt(dx * dx + dy * dy) || 1;
+          const reach = Math.min(len, 30 / scale);
+          pts = [p0, [p0[0] + (dx / len) * reach, p0[1] + (dy / len) * reach]];
+          cut = true;
+        }
+      }
       adj[si].push(k);
       if (ti >= 0) adj[ti].push(k);
-      const pts = lay.routes[k];
       // `scale`: screen px per layout unit now, for a style that sizes
       // what it draws along a relation by the zoom.
-      const drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
+      const drawn = cut
+        ? theme.drawEdge(e, pts, { rs: radius(g.nodes[near]) + 4, rt: 0, stub: true, scale })
+        : theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
       // The wide transparent hit path is the core's, drawn last (on top).
       const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
-      const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
+      const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || []), cut && 'cut'], 'data-k': k }, parts);
       el.addEventListener('mouseenter', () => hover({ edge: k }));
       el.addEventListener('mouseleave', () => hover(null));
       el.addEventListener('click', (ev) => {
@@ -541,6 +767,7 @@ export async function renderGraph(main, ctx) {
   let view = viewports.get(viewKey) || null;
   let drawnScale = null;
   let settleTimer = null;
+  let cutMode = false;
   function apply() {
     svg.setAttribute('viewBox', `${view.x.toFixed(1)} ${view.y.toFixed(1)} ${view.w.toFixed(1)} ${view.h.toFixed(1)}`);
     const scale = (graphBox.clientWidth || 1) / view.w;
@@ -553,13 +780,18 @@ export async function renderGraph(main, ctx) {
     // relations to be redrawn once a zoom settles far enough from the one
     // they were drawn at (Plain: dashes, chevrons, zigzags). Only then, and
     // only the relations: never per frame.
-    if (theme.redrawOnZoom) {
+    // A big graph also redraws when a view settles in (or out of) the
+    // zoomed-in cut mode, and on every settle while in it, since what is on
+    // screen moved.
+    if (theme.redrawOnZoom || big) {
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
         if (!svg.isConnected || drawnScale === null) return;
         const now = (graphBox.clientWidth || 1) / view.w;
-        if (theme.redrawOnZoom(drawnScale, now)) {
+        const cutNow = big && fitView().w / view.w >= CUT_ZOOM;
+        if (cutNow || cutNow !== cutMode || (theme.redrawOnZoom && theme.redrawOnZoom(drawnScale, now))) {
           drawEdges();
+          drawStubs();
           highlight(hovered || pinned);
         }
       }, 160);
@@ -567,8 +799,9 @@ export async function renderGraph(main, ctx) {
     viewports.set(viewKey, { ...view });
     while (viewports.size > 8) viewports.delete(viewports.keys().next().value);
   }
-  function fit() {
-    const b = lay.bounds;
+  /** The view Fit shows: every memory (and an opened scope's tags). */
+  function fitView() {
+    const b = viewBounds;
     const aspect = (graphBox.clientHeight || 400) / (graphBox.clientWidth || 600);
     // Keep the box's aspect so a drag maps 1:1 and nothing is distorted.
     let w = b.w;
@@ -577,13 +810,16 @@ export async function renderGraph(main, ctx) {
       hh = b.h;
       w = b.h / aspect;
     }
-    view = { x: b.x + (b.w - w) / 2, y: b.y + (b.h - hh) / 2, w, h: hh };
+    return { x: b.x + (b.w - w) / 2, y: b.y + (b.h - hh) / 2, w, h: hh };
+  }
+  function fit() {
+    view = fitView();
     apply();
   }
   function zoom(factor, cx, cy) {
     const px = cx ?? view.x + view.w / 2;
     const py = cy ?? view.y + view.h / 2;
-    const w = Math.min(Math.max(view.w * factor, 120), lay.bounds.w * 6 + 2000);
+    const w = Math.min(Math.max(view.w * factor, 120), viewBounds.w * 6 + 2000);
     const k = w / view.w;
     view = { x: px - (px - view.x) * k, y: py - (py - view.y) * k, w, h: view.h * k };
     apply();
@@ -750,6 +986,7 @@ export async function renderGraph(main, ctx) {
     };
     if (sel.node !== undefined) {
       markNode(sel.node);
+      for (const el of stubEls[sel.node]) mark(el);
       for (const k of adj[sel.node]) {
         mark(edgeEls[k]);
         const e = g.edges[k];
@@ -932,20 +1169,22 @@ export async function renderGraph(main, ctx) {
         'dl',
         null,
         h('dt', null, 'Top-level scopes'),
-        h('dd', null, fmt(g.scopes.filter((l) => l.name).length)),
+        h('dd', null, fmt(g.scopes.filter((l) => l.name && l.shown > 0).length)),
         h('dt', null, 'Memories'),
         h('dd', null, g.truncated ? `${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)}` : fmt(g.shown_nodes)),
         h('dt', null, 'Relations'),
         h('dd', null, ks.length === g.edges.length ? fmt(ks.length) : `${fmt(ks.length)} of ${fmt(g.edges.length)} (filtered)`),
         h('dt', null, 'Proposed'),
         h('dd', null, `${fmt(proposed.length)}${proposed.some((e) => e.kind === 'contradicts') ? ` (${fmt(proposed.filter((e) => e.kind === 'contradicts').length)} contradictions)` : ''}`),
+        tagByName.size ? [h('dt', null, 'To other scopes'), h('dd', null, `${plural(g.stub_scopes.reduce((n, sc) => n + filtered(sc, f).count, 0), 'relation')} (tags around the graph)`)] : null,
         g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'relation')} to memories outside this view`)] : null,
       ),
     );
   }
 
   // ---- legend (the style's) -------------------------------------------------
-  mount(legendBox, theme.legend(g, t));
+  // The legend names the scopes drawn, with their drawn memories.
+  mount(legendBox, theme.legend({ ...g, scopes: g.scopes.filter((l) => l.shown > 0).map((l) => ({ ...l, count: l.shown })) }, t));
 
   // ---- the relations table: proposed first, the rest on request -----------
   const PAGE = 100;
@@ -1039,6 +1278,7 @@ export async function renderGraph(main, ctx) {
 
   function redraw() {
     const ks = drawEdges();
+    drawStubs();
     if (pinned && pinned.edge !== undefined && !edgeEls[pinned.edge]) pinned = null;
     highlight(pinned);
     renderFilters();

@@ -75,7 +75,8 @@ const RUNNERS = {
     return { x: res.x, y: res.y, raw: res };
   },
 };
-for (const name of Object.keys(LAYOUTS)) {
+// The scope overview lays out scopes, not memories: nothing here measures it.
+for (const name of Object.keys(LAYOUTS).filter((n) => n !== 'scope-overview')) {
   RUNNERS[name] = (g) => {
     const res = LAYOUTS[name](toInput(g, name));
     const n = g.nodes.length;

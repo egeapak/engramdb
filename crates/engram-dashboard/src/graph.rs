@@ -15,6 +15,17 @@
 //! partial graph never passes for the whole store. `top_scope=` narrows to
 //! some top-level scopes instead (the same parameter as `/memories`).
 //!
+//! **Totals before the limit.** `scopes` (memories per top scope and per
+//! sub-scope) and `scope_edges` (relations per scope pair, by kind and
+//! status) are counted over *every* memory the status filters admit, before
+//! `top_scope=` and before the limit, so the page's scope overview of a
+//! large store is never a picture of the truncated part. With `top_scope=`,
+//! a relation leaving the opened scope (one end in it, the other a memory in
+//! another top scope) is not dropped silently either: it is counted into
+//! `stubs`, one per (drawn memory, far top scope), and into `stub_scopes`,
+//! one per far top scope, over every memory of the opened scope (drawn or
+//! not, so a tag's total is the scope's, not the drawn part's).
+//!
 //! **Far ends.** A same-store edge whose target is gone is returned with
 //! `state: "dangling"` (drawn as a stub to a deleted-memory mark); one into
 //! another store is checked by opening that store read-only — `live` or
@@ -102,8 +113,87 @@ struct Scope {
     name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     slot: Option<u32>,
-    /// Shown memories in the scope.
+    /// Memories in the scope the status filters admit, before `top_scope=`
+    /// and the limit (module docs).
     count: usize,
+    /// Of those, the memories in this response.
+    shown: usize,
+    /// Its sub-scopes (the first two segments of a memory's first logical
+    /// scope, `storage.lock`), by name; the top scope's own memories are in
+    /// `count` only.
+    subs: Vec<SubScope>,
+}
+
+#[derive(Serialize)]
+struct SubScope {
+    name: String,
+    count: usize,
+}
+
+/// Relations counted together: in total, by kind and status (wire names,
+/// so a newer binary's kind is counted rather than dropped), and the two
+/// totals the overview marks. A display filter (kinds, proposed, rejected)
+/// recomputes from `kinds`.
+#[derive(Serialize, Default)]
+struct Tally {
+    count: usize,
+    /// kind → status → relations.
+    kinds: BTreeMap<String, BTreeMap<String, usize>>,
+    /// `contradicts` relations not rejected.
+    contradictions: usize,
+    /// `proposed` relations of any kind.
+    proposed: usize,
+}
+
+impl Tally {
+    fn add(&mut self, e: &GraphEdge) {
+        self.count += 1;
+        *self
+            .kinds
+            .entry(e.kind.as_str().to_string())
+            .or_default()
+            .entry(e.status.as_str().to_string())
+            .or_insert(0) += 1;
+        if e.kind == LinkKind::Contradicts && e.status != LinkStatus::Rejected {
+            self.contradictions += 1;
+        }
+        if e.status == LinkStatus::Proposed {
+            self.proposed += 1;
+        }
+    }
+}
+
+/// The relations between two top scopes (`""`: no logical scope). A
+/// symmetric kind is counted once per unordered pair (`a` ≤ `b`,
+/// `directed: false`); a directed one per ordered pair (`a` the source's
+/// scope). `a == b` counts the relations inside one scope.
+#[derive(Serialize)]
+struct ScopeEdge {
+    a: String,
+    b: String,
+    directed: bool,
+    #[serde(flatten)]
+    tally: Tally,
+}
+
+/// The relations between one drawn memory of the opened scope and the
+/// memories of another top scope (`top_scope=` only).
+#[derive(Serialize)]
+struct Stub {
+    node: String,
+    scope: String,
+    #[serde(flatten)]
+    tally: Tally,
+}
+
+/// Every relation between the opened scope and another top scope.
+#[derive(Serialize)]
+struct StubScope {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot: Option<u32>,
+    #[serde(flatten)]
+    tally: Tally,
 }
 
 #[derive(Serialize, Default)]
@@ -119,7 +209,9 @@ struct Counts {
     /// Of those, edges whose store could not be checked.
     unknown: usize,
     /// Edges left out because an end is a memory this response does not
-    /// draw (over the limit, or outside the `top_scope` filter).
+    /// draw (over the limit, or outside the `top_scope` filter), while the
+    /// other is one the filters admit; neither a relation with both ends
+    /// outside `top_scope=` nor one already counted in `stubs`.
     hidden: usize,
 }
 
@@ -132,20 +224,49 @@ struct GraphPage {
     limit: usize,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
-    scopes: Vec<Scope>,
     /// Every top scope the status filters admit, before `top_scope=` and the
-    /// limit, so a scope picker can offer them all; `count` is its memories
-    /// there.
-    all_scopes: Vec<Scope>,
+    /// limit (module docs), so a scope picker can offer them all and the
+    /// overview is never truncated.
+    scopes: Vec<Scope>,
+    /// Relations between top scopes, over the same memories as `scopes`.
+    scope_edges: Vec<ScopeEdge>,
+    /// `top_scope=` only: relations leaving the opened scope, per drawn
+    /// memory and far top scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stubs: Option<Vec<Stub>>,
+    /// `top_scope=` only: the same, per far top scope, over the whole
+    /// opened scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stub_scopes: Option<Vec<StubScope>>,
     counts: Counts,
 }
 
-/// `(name → count)` as [`Scope`]s in slot order, "no scope" last.
-fn scopes_of(counts: BTreeMap<String, usize>, slots: &HashMap<String, u32>) -> Vec<Scope> {
-    let mut scopes: Vec<Scope> = counts
+/// A memory's sub-scope: the first two segments of its first logical scope,
+/// when it has two.
+fn sub_scope_of(logical: &[String]) -> Option<String> {
+    let first = logical.first()?;
+    let mut parts = first.splitn(3, '.');
+    let top = parts.next().filter(|s| !s.is_empty())?;
+    let sub = parts.next().filter(|s| !s.is_empty())?;
+    Some(format!("{top}.{sub}"))
+}
+
+/// Scope totals as [`Scope`]s in slot order (the store-wide rank), "no
+/// scope" last.
+fn scopes_of(
+    totals: BTreeMap<String, (usize, BTreeMap<String, usize>)>,
+    shown: &HashMap<String, usize>,
+    slots: &HashMap<String, u32>,
+) -> Vec<Scope> {
+    let mut scopes: Vec<Scope> = totals
         .into_iter()
-        .map(|(name, count)| Scope {
+        .map(|(name, (count, subs))| Scope {
             slot: slots.get(&name).copied(),
+            shown: shown.get(&name).copied().unwrap_or(0),
+            subs: subs
+                .into_iter()
+                .map(|(name, count)| SubScope { name, count })
+                .collect(),
             name,
             count,
         })
@@ -279,14 +400,53 @@ pub(crate) async fn project_graph(
     let slots = color_slots(&all);
     let rows: HashMap<&str, &IndexFilterable> = all.iter().map(|e| (e.id.as_str(), e)).collect();
 
-    let mut all_scopes: BTreeMap<String, usize> = BTreeMap::new();
+    // Every memory the status filters admit, with its top scope (`""`:
+    // none): what `scopes` and `scope_edges` count, before `top_scope=` and
+    // the limit.
+    let mut top_of: HashMap<&str, String> = HashMap::with_capacity(graph.nodes.len());
+    let mut totals: BTreeMap<String, (usize, BTreeMap<String, usize>)> = BTreeMap::new();
     for n in &graph.nodes {
         if let Some(e) = rows.get(n.id.as_str()) {
-            *all_scopes
-                .entry(top_scope_of(&e.logical).unwrap_or_default())
-                .or_insert(0) += 1;
+            let top = top_scope_of(&e.logical).unwrap_or_default();
+            let t = totals.entry(top.clone()).or_default();
+            t.0 += 1;
+            if let Some(sub) = sub_scope_of(&e.logical) {
+                *t.1.entry(sub).or_insert(0) += 1;
+            }
+            top_of.insert(e.id.as_str(), top);
         }
     }
+    // Same-store relations between two of them (a dangling or cross-store
+    // one has no far scope to count it under).
+    let scope_pair = |e: &GraphEdge| -> Option<(&str, &str)> {
+        if e.dst_store.is_some() {
+            return None;
+        }
+        Some((
+            top_of.get(e.src.as_str())?.as_str(),
+            top_of.get(e.dst.as_str())?.as_str(),
+        ))
+    };
+    let mut pairs: BTreeMap<(String, String, bool), Tally> = BTreeMap::new();
+    for e in &graph.edges {
+        let Some((a, b)) = scope_pair(e) else {
+            continue;
+        };
+        let (a, b) = if e.symmetric && b < a { (b, a) } else { (a, b) };
+        pairs
+            .entry((a.to_string(), b.to_string(), !e.symmetric))
+            .or_default()
+            .add(e);
+    }
+    let scope_edges: Vec<ScopeEdge> = pairs
+        .into_iter()
+        .map(|((a, b, directed), tally)| ScopeEdge {
+            a,
+            b,
+            directed,
+            tally,
+        })
+        .collect();
     // Memories the filters admit.
     let admitted: Vec<&IndexFilterable> = graph
         .nodes
@@ -331,6 +491,72 @@ pub(crate) async fn project_graph(
     ranked.truncate(limit);
     let shown: HashSet<&str> = ranked.iter().map(|(e, _, _)| e.id.as_str()).collect();
 
+    // An opened scope's relations to other top scopes (module docs).
+    let (stubs, stub_scopes) = match &scopes_wanted {
+        None => (None, None),
+        Some(_) => {
+            let mut per_node: BTreeMap<(&str, &str), Tally> = BTreeMap::new();
+            let mut per_scope: BTreeMap<&str, Tally> = BTreeMap::new();
+            for e in &graph.edges {
+                let Some((a, b)) = scope_pair(e) else {
+                    continue;
+                };
+                let src_in = admitted_ids.contains(e.src.as_str());
+                let dst_in = admitted_ids.contains(e.dst.as_str());
+                let (inside, far) = match (src_in, dst_in) {
+                    (true, false) => (e.src.as_str(), b),
+                    (false, true) => (e.dst.as_str(), a),
+                    _ => continue,
+                };
+                per_scope.entry(far).or_default().add(e);
+                if shown.contains(inside) {
+                    per_node.entry((inside, far)).or_default().add(e);
+                }
+            }
+            (
+                Some(
+                    per_node
+                        .into_iter()
+                        .map(|((node, scope), tally)| Stub {
+                            node: node.to_string(),
+                            scope: scope.to_string(),
+                            tally,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                Some(
+                    per_scope
+                        .into_iter()
+                        .map(|(name, tally)| StubScope {
+                            slot: slots.get(name).copied(),
+                            name: name.to_string(),
+                            tally,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            )
+        }
+    };
+
+    // Whether a relation left out of `edges` counts as `hidden`: one end is
+    // a memory this view admits, and it is not already a stub of an opened
+    // scope (a relation with both ends outside the view is not this view's).
+    let touches_view = |e: &GraphEdge| -> bool {
+        let src_in = admitted_ids.contains(e.src.as_str());
+        let dst_in = e.dst_store.is_none() && admitted_ids.contains(e.dst.as_str());
+        if !src_in && !dst_in {
+            return false;
+        }
+        let stubbed = scopes_wanted.is_some()
+            && src_in != dst_in
+            && scope_pair(e).is_some()
+            && shown.contains(if src_in {
+                e.src.as_str()
+            } else {
+                e.dst.as_str()
+            });
+        !stubbed
+    };
     // Edges between shown memories, plus stubs (dangling, external) from one.
     let mut counts = Counts {
         dangling: graph.dangling,
@@ -346,7 +572,7 @@ pub(crate) async fn project_graph(
                 && (e.dst_store.is_some()
                     || shown.contains(e.dst.as_str())
                     || !rows.contains_key(e.dst.as_str()));
-            if !keep {
+            if !keep && touches_view(e) {
                 counts.hidden += 1;
             }
             keep
@@ -410,7 +636,7 @@ pub(crate) async fn project_graph(
     }
     counts.edges = edges.len();
 
-    let mut scope_count: BTreeMap<String, usize> = BTreeMap::new();
+    let mut scope_count: HashMap<String, usize> = HashMap::new();
     let nodes: Vec<Node> = ranked
         .iter()
         .map(|(e, _, _)| {
@@ -445,9 +671,7 @@ pub(crate) async fn project_graph(
             }
         })
         .collect();
-    // In slot order (the store-wide rank), "no scope" last.
-    let scopes = scopes_of(scope_count, &slots);
-    let all_scopes = scopes_of(all_scopes, &slots);
+    let scopes = scopes_of(totals, &scope_count, &slots);
 
     ok(&GraphPage {
         total_nodes,
@@ -457,7 +681,9 @@ pub(crate) async fn project_graph(
         nodes,
         edges,
         scopes,
-        all_scopes,
+        scope_edges,
+        stubs,
+        stub_scopes,
         counts,
     })
 }

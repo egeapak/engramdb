@@ -366,6 +366,45 @@ dl.meta dd { overflow-wrap: anywhere; }
 .card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .sign.sm { margin-bottom: 6px; gap: 8px; }
 .sign.sm .sc { font-size: 13px; overflow-wrap: anywhere; }
+/* scope overview (views/graph-overview.js) and an opened scope (graph/opened.js): core, neutral */
+.g-crumbs { font-size: 13px; line-height: 20px; margin-bottom: 6px; color: var(--ink-2); overflow-wrap: anywhere; }
+.g-crumbs a { font-weight: 600; }
+.g-crumbs [aria-current] { font-weight: 700; color: var(--ink); }
+.so-graph { cursor: default; }
+.so-band { fill: none; stroke: var(--ink-3); stroke-opacity: .42; stroke-linecap: butt; }
+.so-band.hair { stroke: var(--red); stroke-opacity: .5; stroke-dasharray: 3 3; }
+.so-graph.has-focus .so-band { stroke-opacity: .1; }
+.so-graph.has-focus .so-band.on { stroke-opacity: .85; stroke: var(--ink-2); }
+.so-disc { fill: var(--bg-2); stroke-width: 1.5; stroke-opacity: .55; }
+.so-scope { cursor: pointer; }
+.so-scope:focus { outline: none; }
+.so-scope:hover .so-disc, .so-scope.on .so-disc { fill: var(--bg-3); stroke-opacity: 1; stroke-width: 2.5; }
+.so-scope:focus-visible .so-disc { stroke: var(--focus); stroke-opacity: 1; stroke-width: 3.5; }
+.so-name { font-size: 12.5px; fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+.so-name .nm { font-weight: 700; }
+.so-name .ct { fill: var(--ink-3); }
+.so-name.unplaced { display: none; }
+.so-scope.on .so-name.unplaced, .so-scope:focus .so-name.unplaced { display: inline; }
+.so-pill rect { fill: var(--red); stroke: var(--bg); stroke-width: 1.5; }
+.so-pill text { fill: #fff; font-size: 10.5px; font-weight: 700; text-anchor: middle; }
+.so-graph.has-focus .so-pill { opacity: .35; }
+.so-contra { color: var(--red-ink); }
+.so-legend { grid-template-columns: minmax(0, 1fr); }
+.xs-stub { stroke: var(--ink-3); stroke-opacity: .3; }
+.xs-stub.contra { stroke: var(--red); stroke-opacity: .4; }
+.graph.has-focus .xs-stub { stroke-opacity: .08; }
+.graph .xs-stub.on { stroke-opacity: .8; }
+.xs-tag { cursor: pointer; }
+.xs-tag rect { fill: var(--bg); stroke: var(--ink-3); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.xs-tag.contra rect { stroke: var(--red); }
+.xs-tag text { fill: var(--ink-2); font-weight: 600; }
+.xs-tag text .w { fill: var(--red-ink); }
+.xs-tag:hover rect { fill: var(--bg-2); stroke: var(--ink); }
+.xs-tag:focus { outline: none; }
+.xs-tag:focus-visible rect { stroke: var(--focus); stroke-width: 3; }
+.sub-region { fill: var(--ink-3); }
+.sub-region.tone-0 { fill-opacity: .07; } .sub-region.tone-1 { fill-opacity: .11; } .sub-region.tone-2 { fill-opacity: .05; }
+.sub-name { fill: var(--ink-2); font-weight: 700; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
 /* legend */
 .legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px 28px; margin-top: 22px; font-size: 13px; }
 .legend h4 { font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); margin-bottom: 8px; border-top: 2px solid var(--rule-2); padding-top: 8px; }

@@ -1396,7 +1396,8 @@ fn registered_styles(path: &str, src: &str) -> Vec<String> {
 /// holds only while its arithmetic is exactly rounded everywhere: `+ − × ÷`
 /// and `Math.sqrt`, never the implementation-approximated `Math.cos` / `sin`
 /// / `hypot` / `pow` / `exp` / `log` / `atan*` / `**`, and no `Math.random`.
-/// Checked on the layout and the label placement it calls (comments skipped).
+/// Checked on the layout, the scope overview's layout and the label
+/// placement they call (comments skipped).
 #[test]
 fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
     let banned = [
@@ -1418,6 +1419,7 @@ fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
     // lines and need not start a line) are blanked, nothing else is skipped.
     for path in [
         "js/graph/scope-force.js",
+        "js/graph/scope-overview.js",
         "js/graph/labels.js",
         "js/graph/radius.js",
     ] {
@@ -1465,6 +1467,10 @@ fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
         "export const LAYOUTS = Object.freeze({",
     );
     assert!(layouts.contains(&"scope-force".to_string()), "{layouts:?}");
+    assert!(
+        layouts.contains(&"scope-overview".to_string()),
+        "{layouts:?}"
+    );
     assert!(
         asset_text("js/graph/themes/index.js").contains("export const DEFAULT_STYLE = 'plain';"),
         "Plain is the default style"
@@ -2262,7 +2268,7 @@ async fn the_graph_has_nodes_edges_states_and_bounds() {
     assert!(node["color_slot"].is_u64(), "{node}");
 
     // `top_scope=` narrows to some top-level scopes (`-` is "no logical scope"), and
-    // `all_scopes` still offers every one, so the picker never shrinks.
+    // `scopes` still offers every one, so the picker never shrinks.
     let (_, v) = get_json(&app, &format!("{base}?top_scope=hooks,-")).await;
     let mut got: Vec<&str> = v["nodes"]
         .as_array()
@@ -2282,8 +2288,14 @@ async fn the_graph_has_nodes_edges_states_and_bounds() {
             .map(|l| l["name"].as_str().unwrap().to_string())
             .collect()
     };
-    assert!(names("all_scopes").contains(&"storage".to_string()), "{v}");
-    assert!(!names("scopes").contains(&"storage".to_string()), "{v}");
+    assert!(names("scopes").contains(&"storage".to_string()), "{v}");
+    let storage = v["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "storage")
+        .unwrap();
+    assert_eq!(storage["shown"], 0, "{v}");
 
     // Filters: kinds, proposed.
     let (_, v) = get_json(&app, &format!("{base}?kinds=supports")).await;
@@ -2307,6 +2319,219 @@ async fn the_graph_has_nodes_edges_states_and_bounds() {
     }
 }
 
+/// `v[key]` as `name → entry` (scope lists) or `"a|b|directed" → entry`.
+fn by_name(v: &serde_json::Value, key: &str) -> BTreeMap<String, serde_json::Value> {
+    v[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("no {key} in {v}"))
+        .iter()
+        .map(|x| {
+            let k = if x.get("a").is_some() {
+                format!(
+                    "{}|{}|{}",
+                    x["a"].as_str().unwrap(),
+                    x["b"].as_str().unwrap(),
+                    x["directed"]
+                )
+            } else if x.get("node").is_some() {
+                format!(
+                    "{}|{}",
+                    x["node"].as_str().unwrap(),
+                    x["scope"].as_str().unwrap()
+                )
+            } else {
+                x["name"].as_str().unwrap().to_string()
+            };
+            (k, x.clone())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn scope_totals_are_counted_before_the_limit() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    // A limit of one memory: the totals still cover all four admitted ones
+    // (the invalidated `build` memory is not admitted by default).
+    let (s, v) = get_json(&app, &format!("/api/projects/{}/graph?limit=1", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["shown_nodes"], 1);
+    let scopes = by_name(&v, "scopes");
+    assert_eq!(
+        scopes.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["", "hooks", "storage"],
+        "{v}"
+    );
+    assert_eq!(scopes["storage"]["count"], 2);
+    assert_eq!(
+        scopes["storage"]["shown"], 1,
+        "the best-connected memory, b"
+    );
+    assert_eq!(scopes["hooks"]["shown"], 0);
+    let subs: Vec<(&str, u64)> = scopes["storage"]["subs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| (x["name"].as_str().unwrap(), x["count"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(subs, [("storage.lock", 1), ("storage.paths", 1)]);
+    assert!(scopes["hooks"]["subs"].as_array().unwrap().is_empty());
+
+    // Symmetric kinds per unordered pair, directed ones per ordered pair; a
+    // relation to a deleted memory has no far scope and is not counted.
+    let pairs = by_name(&v, "scope_edges");
+    assert_eq!(
+        pairs.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            "hooks|storage|false",
+            "storage||true",
+            "|hooks|false",
+            "|storage|true"
+        ],
+        "{v}"
+    );
+    let c = &pairs["hooks|storage|false"];
+    assert_eq!(c["count"], 1);
+    assert_eq!(c["contradictions"], 1);
+    assert_eq!(c["proposed"], 1);
+    assert_eq!(c["kinds"]["contradicts"]["proposed"], 1);
+    assert_eq!(pairs["storage||true"]["kinds"]["supports"]["confirmed"], 1);
+    assert_eq!(
+        pairs["|storage|true"]["kinds"]["supersedes"]["confirmed"],
+        1
+    );
+    assert_eq!(pairs["|hooks|false"]["proposed"], 1);
+    // Only an opened scope has stubs.
+    assert!(
+        v.get("stubs").is_none() && v.get("stub_scopes").is_none(),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn an_opened_scope_has_its_memories_and_one_stub_per_far_scope() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let (b, c) = (&fx.ids[1], &fx.ids[2]);
+    let app = app(Some(fx.current.clone()));
+    let (s, v) = get_json(
+        &app,
+        &format!("/api/projects/{}/graph?top_scope=storage", fx.id),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let mut ids: Vec<&str> = v["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    ids.sort();
+    let mut want = vec![fx.ids[0].as_str(), b.as_str()];
+    want.sort();
+    assert_eq!(ids, want, "only the opened scope's memories");
+    // No relation inside storage; the dangling derived_from stays a stub of b.
+    let kinds: Vec<&str> = v["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["derived_from"], "{v}");
+    // Leaving relations: b ⊣ c (hooks), b supports d and d supersedes a ("").
+    let stubs = by_name(&v, "stubs");
+    assert_eq!(stubs.len(), 3, "{v}");
+    let bc = &stubs[&format!("{b}|hooks")];
+    assert_eq!(
+        (bc["count"].clone(), bc["contradictions"].clone()),
+        (1.into(), 1.into())
+    );
+    assert_eq!(stubs[&format!("{b}|")]["kinds"]["supports"]["confirmed"], 1);
+    assert_eq!(
+        stubs[&format!("{}|", fx.ids[0])]["kinds"]["supersedes"]["confirmed"],
+        1
+    );
+    let tags = by_name(&v, "stub_scopes");
+    assert_eq!(tags["hooks"]["count"], 1);
+    assert_eq!(tags["hooks"]["contradictions"], 1);
+    // Stubbed relations are not "hidden", and neither is c related_to d
+    // (both ends outside storage).
+    assert_eq!(v["counts"]["hidden"], 0, "{v}");
+    assert_eq!(tags[""]["count"], 2);
+    assert!(tags["hooks"]["slot"].is_u64());
+
+    // A far scope's total counts the whole opened scope, a stub only a drawn
+    // memory: with a limit of one, b is drawn and a is not.
+    let (_, v) = get_json(
+        &app,
+        &format!("/api/projects/{}/graph?top_scope=storage&limit=1", fx.id),
+    )
+    .await;
+    assert_eq!(by_name(&v, "stub_scopes")[""]["count"], 2, "{v}");
+    assert_eq!(by_name(&v, "stubs").len(), 2, "{v}");
+
+    // The other side: hooks sees c's two relations leave for storage and "".
+    let (_, v) = get_json(
+        &app,
+        &format!("/api/projects/{}/graph?top_scope=hooks", fx.id),
+    )
+    .await;
+    let stubs = by_name(&v, "stubs");
+    assert_eq!(
+        stubs[&format!("{c}|storage")]["kinds"]["contradicts"]["proposed"],
+        1
+    );
+    assert_eq!(
+        stubs[&format!("{c}|")]["kinds"]["related_to"]["proposed"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn scope_totals_follow_include_rejected() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // A rejected relation between storage (a) and hooks (c).
+    ops_links::link(
+        &store,
+        LinkParams {
+            src: fx.ids[0].clone(),
+            kind: LinkKind::RelatedTo,
+            dst: fx.ids[2].clone(),
+            dst_store: None,
+            confidence: Some(0.8),
+            origin: LinkOrigin::Similarity,
+            status: Some(LinkStatus::Rejected),
+            note: None,
+        },
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/graph", fx.id);
+    let (_, v) = get_json(&app, &base).await;
+    let pair = &by_name(&v, "scope_edges")["hooks|storage|false"];
+    assert_eq!(pair["count"], 1, "rejected hidden by default: {v}");
+    assert!(pair["kinds"].get("related_to").is_none());
+    let (_, v) = get_json(&app, &format!("{base}?include_rejected=true")).await;
+    let pair = &by_name(&v, "scope_edges")["hooks|storage|false"];
+    assert_eq!(pair["count"], 2, "{v}");
+    assert_eq!(pair["kinds"]["related_to"]["rejected"], 1);
+    assert_eq!(
+        pair["contradictions"], 1,
+        "a rejected relation is no contradiction"
+    );
+    let (_, v) = get_json(
+        &app,
+        &format!("{base}?include_rejected=true&top_scope=hooks"),
+    )
+    .await;
+    assert_eq!(by_name(&v, "stub_scopes")["storage"]["count"], 2, "{v}");
+}
+
 #[tokio::test]
 async fn the_graph_and_detail_views_write_nothing() {
     let ef = edge_fixture().await;
@@ -2321,6 +2546,8 @@ async fn the_graph_and_detail_views_write_nothing() {
             "/api/projects/{}/graph?include_invalidated=true&include_rejected=true",
             fx.id
         ),
+        format!("/api/projects/{}/graph?top_scope=storage", fx.id),
+        format!("/api/projects/{}/graph?limit=1&top_scope=hooks,-", fx.id),
         format!("/api/projects/{}/memories/{}", fx.id, fx.ids[1]),
         format!("/api/projects/{}/stats", fx.id),
     ] {

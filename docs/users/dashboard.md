@@ -147,6 +147,38 @@ page says when it is partial, and picking a top-level scope shows the rest of it
 layout runs in a background worker and is deterministic: the same store
 draws the same graph.
 
+### Scope overview and opened scopes
+
+A store with **more than 150 memories** (after the *Invalidated* filter)
+opens on a **scope overview** instead of every memory, in every style: one
+disc per top-level scope, its area following its memories, placed next to
+the scopes it shares the most relations with; one grey band per pair of
+related scopes, its width following how many relations they share; and a
+red **⚠ count** on every pair with a contradiction between them. Bands with
+fewer than 2 relations, or under 12% of the largest pair, are left out (the
+note above the graph says how many), but a pair's ⚠ is always shown, on a
+red dashed hairline when its band is left out. The counts cover the whole
+store, not the 800 memories a graph draws. The kind, *Proposed* and
+*Rejected* filters re-count the bands in place. Below the overview, a table
+lists every scope pair, contradictions first.
+
+Click a scope (or Tab to it and press Enter) to **open** it. An opened scope
+shows its memories, gathered into one region per sub-scope (`storage.lock`,
+`storage.paths`, …), with the relations between them drawn as usual. Each
+relation to a memory in *another* scope is a faint line to a tag at the
+graph's edge, one tag per other scope, placed in the direction that scope
+lies on the overview: "storage · 12 ⚠ 2" means 12 relations to `storage`, 2
+of them contradictions. Clicking a tag opens that scope; *All scopes* above
+the graph goes back. Picking a scope from the filter row opens it the same
+way, in any store. *Show all memories* on the overview draws the whole graph
+(still at most 800 memories), with an *All scopes* button to go back.
+
+On a graph of more than 150 memories zoomed in to three times *Fit* or
+closer, only relations with both ends on screen are drawn whole; one with a
+single end on screen is a short stub from that end, so long relations
+crossing the view do not bury the local ones. A store of 150 memories or
+fewer is always drawn whole, as above.
+
 ## Reviewing proposed relations
 
 Proposed relations come from `challenge --against` and from the automatic
