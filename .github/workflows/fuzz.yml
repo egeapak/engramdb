@@ -56,9 +56,17 @@ jobs:
         # with exit 143 and no error from the build itself, so print both
         # once a minute: the last sample before a kill names the resource.
         # Measured peak with fuzz/Cargo.toml's profile is 13 GB at 4 jobs
-        # (4-core/15 GB box); 3 jobs leaves headroom on a 16 GB runner.
+        # (4-core/15 GB box) and 11.7 GB at 3 jobs on a 16 GB runner.
+        #
+        # The build runs in a cgroup capped at MEM_CAP with no swap, so an
+        # overrun OOM-kills one rustc (a normal, logged build error) instead
+        # of starving the whole VM until the runner is shut down with no
+        # error at all. On any failure the build is retried at one job: the
+        # crates that finished are reused, so the retry pays only for what
+        # was left. A real compile error fails the retry too, quickly.
         env:
           CARGO_BUILD_JOBS: 3
+          MEM_CAP: 13G
         run: |
           (
             while sleep 60; do
@@ -69,7 +77,17 @@ jobs:
             done
           ) &
           sampler=$!
-          cargo +nightly fuzz build
+          capped() {
+            sudo --preserve-env systemd-run --scope --quiet \
+              -p MemoryMax="$MEM_CAP" -p MemorySwapMax=0 \
+              --uid="$(id -u)" --gid="$(id -g)" \
+              -- env PATH="$PATH" HOME="$HOME" "$@"
+          }
+          if ! capped cargo +nightly fuzz build; then
+            echo "::warning::fuzz build failed at $CARGO_BUILD_JOBS jobs (likely the $MEM_CAP memory cap); retrying at 1 job"
+            sudo dmesg | grep -iE 'oom|killed process' | tail -5 || true
+            CARGO_BUILD_JOBS=1 capped cargo +nightly fuzz build
+          fi
           kill "$sampler" || true
           free -m
           df -h /
