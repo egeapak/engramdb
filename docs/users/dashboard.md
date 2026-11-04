@@ -5,8 +5,10 @@ on this machine: your projects, their worktrees and linked sub-projects, the
 group stores and the global store. It is a viewer: by default nothing you do
 there changes a store, and looking at a memory there never counts as using it.
 The one exception is opt-in — started with `--allow-writes`, it lets you
-confirm or reject *proposed* edges between memories (see
-[Reviewing proposed edges](#reviewing-proposed-edges)).
+confirm or reject *proposed* relations between memories (see
+[Reviewing proposed relations](#reviewing-proposed-relations)). A
+*relation* is what `engramdb link` and [Linking memories](./links.md) call an
+*edge*; the dashboard says relation throughout.
 
 ```bash
 cd ~/code/my-project
@@ -33,18 +35,18 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   chart with one row per signal — retrieved, injected, fetched and writes —
   each on its own scale. A *needs attention* list: proposed contradictions
   first (under a red banner), then challenged memories, memories
-  that need review, other proposed edges, and memories nobody has read in 30
-  days. Each proposed edge opens a *Review* panel in place.
-- **Memories** — every memory in a sortable table, filterable by text, kind,
-  status and scope. *Retrieved*, *injected* and *fetched* are separate
+  that need review, other proposed relations, and memories nobody has read in 30
+  days. Each proposed relation opens a *Review* panel in place.
+- **Memories** — every memory in a sortable table, filterable by text, type,
+  status and top-level scope. *Retrieved*, *injected* and *fetched* are separate
   columns and are never added up: a memory retrieved by a query, put into an
   agent's context by a hook, and opened by id are three different things
   (see [`stats`](./cli-reference.md#stats--store-statistics)). Invalidated
   memories are hidden unless you pick the *Invalidated* or *Everything*
   status.
 - **Memory** — the body (a small, safe subset of Markdown), usage counts and
-  a 30-day chart, a *Review* section for its proposed edges, every edge in and
-  out (kind, status, origin, confidence, note, and whether the far end is
+  a 30-day chart, a *Review* section for its proposed relations, every relation in
+  and out (kind, status, origin, confidence, note, and whether the far end is
   deleted, invalidated or in a store that cannot be checked here),
   challenges with their evidence, all metadata, and a timeline. Its counts are exact; the Memories table reads a
   cheaper summary that can trail them briefly until the next refresh.
@@ -66,9 +68,9 @@ default it follows your system.
 
 ## The graph
 
-Each memory is a node, coloured by its top scope; memories of one scope are
-joined by a path in its colour. Each relation between two memories is an
-edge (see [Linking memories](./links.md)):
+Each memory is a node, coloured by its top-level scope; memories of one
+scope are joined by a path in its colour. The strokes between memories are
+relations (see [Linking memories](./links.md)):
 
 | Drawn as | Relation |
 |---|---|
@@ -85,7 +87,7 @@ Memory size follows reads, so a memory nothing reads is small; a memory with
 two or more relations has a heavier outline. Labels are the start of each
 memory's summary; where one would overlap another label or a memory it is
 left out, and more appear as you zoom in. Filters (kinds, whether to include
-proposed, rejected and invalidated, and one scope) live in the address bar,
+proposed, rejected and invalidated, and one top-level scope) live in the address bar,
 so a filtered graph can be bookmarked. Toggling a kind, proposed or rejected
 only hides or shows relations: memories stay where they are. Drag or use
 the arrow keys to pan, a pinch or `+`/`-` to zoom, and `0` or *Fit* to see
@@ -101,36 +103,36 @@ Below the graph, a table lists the proposed relations; *Show all relations*
 expands it to every one, for keyboard and screen-reader use.
 
 A large store shows its most connected memories first (800 by default); the
-page says when it is partial, and picking a scope shows the rest of it. The
+page says when it is partial, and picking a top-level scope shows the rest of it. The
 layout runs in a background worker and is deterministic: the same store
 draws the same graph.
 
-## Reviewing proposed edges
+## Reviewing proposed relations
 
-Proposed edges come from `challenge --against` and from the automatic
+Proposed relations come from `challenge --against` and from the automatic
 proposers (see [Linking memories](./links.md#automatic-proposals)). Start the
 dashboard with `--allow-writes` to review them:
 
 ```bash
 engramdb dashboard --allow-writes
-# Writes enabled (--allow-writes): proposed edges can be confirmed or rejected from the page.
+# Writes enabled (--allow-writes): proposed relations can be confirmed or rejected from the page.
 ```
 
-A proposed `contradicts` edge has four choices:
+A proposed `contradicts` relation has four choices:
 
 - **Both stand (conflict)** — the contradiction is confirmed; both memories
   stay valid.
 - **This one supersedes the other** / **The other supersedes this one** —
-  the edge becomes a `supersedes` edge and the loser's validity window
+  the relation becomes a `supersedes` relation and the loser's validity window
   closes, exactly like `engramdb link … contradicts … --winner <id>`.
-- **Not a contradiction** — the edge is kept as `rejected`, so no proposer
+- **Not a contradiction** — the relation is kept as `rejected`, so no proposer
   raises it again.
 
-Any other proposed edge is confirmed or rejected. Every choice asks once more
+Any other proposed relation is confirmed or rejected. Every choice asks once more
 in the page, saying what will happen, before anything is written. The write
 goes through the same code as `engramdb link`, takes the project's write lock,
 and records a `linked` event (and `resolved` on a superseded loser) from the
-`dashboard` surface. A symmetric edge (`contradicts`, `related_to`,
+`dashboard` surface. A symmetric relation (`contradicts`, `related_to`,
 `duplicates`) is stored on both memories, and a review updates both copies.
 
 Settling a contradiction — any of the four choices — also resolves the NLI
@@ -138,9 +140,9 @@ challenge that named the other memory, on either side, and the page says
 which memories it cleared. A memory left with no other challenge goes back
 to `active`.
 
-Only an edge that is still proposed can be reviewed. Sending the same
+Only a relation that is still proposed can be reviewed. Sending the same
 review twice (a double click, a second tab) changes nothing and the page says
-"Already done"; a different review of an edge someone already settled is
+"Already done"; a different review of a relation someone already settled is
 refused with `409 not_proposed`. Without `--allow-writes` the buttons are
 shown disabled, with the command to restart. Nothing else on the page writes.
 
@@ -148,7 +150,7 @@ shown disabled, with the command to restart. Nothing else on the page writes.
 
 The dashboard opens stores **read-only**. Unlike every other command it does
 not create the store's `.gitignore`, build a missing index, or run a schema
-migration. (An edge review with `--allow-writes` opens that one store for
+migration. (A relation review with `--allow-writes` opens that one store for
 writing, like any `engramdb` command, and may therefore do those things.) A store whose schema is behind this binary is shown with a note;
 run any `engramdb` command in that project to upgrade it. A store that was
 never indexed on this machine (a fresh clone) is listed as unavailable.
@@ -187,7 +189,7 @@ The dashboard is a web server on your machine, so it is locked down:
   where a web page you visit points its own domain at your machine.
 - Anything other than a plain read must come from the dashboard's own page
   and carry a per-run check value, so another site cannot make your browser
-  act on it. The only such requests are the edge reviews, and the server
+  act on it. The only such requests are the relation reviews, and the server
   refuses those too unless it was started with `--allow-writes`.
 - Pages forbid inline scripts, framing and outside resources, and memory
   text is always shown as text: a memory that contains HTML cannot run code

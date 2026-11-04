@@ -1726,7 +1726,7 @@ plain\:"Plain text output without colors"))' \
 '--dir=[Working directory (default\: current directory)]:DIR:_files' \
 '--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
 '--no-open[Print the sign-in URL (with its token) instead of opening a browser. Without it the terminal shows only the bare address, unless the browser cannot be launched]' \
-'--allow-writes[Allow the dashboard'\''s one write\: confirming or rejecting proposed memory edges]' \
+'--allow-writes[Allow the dashboard'\''s one write\: confirming or rejecting proposed relations between memories]' \
 '--json[Output as JSON]' \
 '-q[Suppress non-essential output]' \
 '--quiet[Suppress non-essential output]' \

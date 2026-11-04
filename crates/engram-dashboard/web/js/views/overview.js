@@ -42,7 +42,7 @@ function stat(eyebrow, value, sub, alert) {
 
 const REASON = {
   proposed_contradiction: 'Proposed contradictions',
-  proposed_edge: 'Proposed edges',
+  proposed_edge: 'Proposed relations',
   challenged: 'Challenged memories',
   needs_review: 'Needs review',
   stale: 'Stale: no reads in 30 days',
@@ -158,7 +158,7 @@ export async function renderOverview(main, ctx) {
       stat(
         'Memories',
         fmt(st.live),
-        `${scopes ? plural(scopes, 'scope') : 'No scopes yet'} · ${plural(st.edges ? st.edges.total : 0, 'edge')}${st.edges && st.edges.proposed ? ` (${fmt(st.edges.proposed)} proposed)` : ''}${st.invalidated ? ` · ${fmt(st.invalidated)} invalidated` : ''}`,
+        `${scopes ? plural(scopes, 'top-level scope') : 'No scopes yet'} · ${plural(st.edges ? st.edges.total : 0, 'relation')}${st.edges && st.edges.proposed ? ` (${fmt(st.edges.proposed)} proposed)` : ''}${st.invalidated ? ` · ${fmt(st.invalidated)} invalidated` : ''}`,
       ),
       readsStat(st.usage),
       stat('Memories in use', fmt(st.usage.used_memories), `of ${fmt(st.live)} read at least once`),
@@ -177,7 +177,7 @@ export async function renderOverview(main, ctx) {
           { class: 'faint' },
           `Lifetime: ${fmt(st.usage.returned)} retrieved, ${fmt(st.usage.injected)} injected, ${fmt(st.usage.fetched)} fetched. Writes count every change to a memory.`,
         ),
-        secHead('By kind'),
+        secHead('By type'),
         st.by_type.length
           ? h(
               'ul',

@@ -1258,7 +1258,9 @@ fn the_frontend_never_parses_html_or_inlines_script_or_style() {
 /// transit-map look into an optional theme: the core says graph, memory,
 /// relation and scope, and only a theme's own strings may add flavour.
 /// Matched case-insensitively anywhere in a file, comments included, since
-/// none of them has an innocent meaning in this frontend.
+/// none of them has an innocent meaning in this frontend. In a phrase, the
+/// space stands for any run of whitespace, `-` or `_`, so "route-map",
+/// "route_map" and a phrase broken across lines all count.
 const BANNED_TERMS: &[&str] = &[
     "station",
     "metro",
@@ -1266,6 +1268,7 @@ const BANNED_TERMS: &[&str] = &[
     "connector",
     "interchange",
     "disruption",
+    "network",
     "night map",
     "day map",
 ];
@@ -1284,60 +1287,96 @@ const RETIRED_LINE_NAMES: &[&str] = &[
     "--l-",
 ];
 
-/// Files the wording scan skips. Phase B moves both into `themes/grid/`, the
-/// one place a theme may keep its own words; until then their internal names
-/// (`routes`, `lines`, the scope "lines" the layout draws) stay as they are.
-const WORDING_EXEMPT: &[&str] = &["js/graph/layout.js", "js/graph/glyphs.js"];
+/// `x.line` / `x.lines` reads that are allowed in core JS: the layout
+/// module's own output (`lay.lines`, its scope paths). Every API object
+/// names the field `top_scope` / `scopes` now, so any other bare read is a
+/// stale one that would quietly draw "No scope" (or throw on `.filter`).
+/// The layout *input* key `line:` is not a read and is not matched.
+const LINE_READS_ALLOWED: &[&str] = &["lay.lines"];
+
+/// Files the wording scan skips. Phase B moves `layout.js` into
+/// `themes/grid/`, the one place a theme may keep its own words; until then
+/// its internal names (stations, `routes`, `lines`) stay as they are.
+const WORDING_EXEMPT: &[&str] = &["js/graph/layout.js"];
 
 /// Visible text where "line" means a line of text, not a scope.
 const LINE_TEXT_ALLOWED: &[&str] = &["usage log lines"];
 
-/// The string literals of a JS module, with the byte offset each starts at:
-/// quoted strings, and the text parts of template literals (`${…}` is code
-/// again, nested templates included). Comments and regex literals are
-/// skipped; a `/` opens a regex when the previous significant token cannot
-/// end an expression, the usual heuristic, good enough for this hand-written
-/// frontend (`the_wording_scan_reads_strings_not_code` pins it).
-fn js_strings(src: &str) -> Vec<(usize, String)> {
+/// A JS module split for the wording scan.
+struct JsScan {
+    /// Quoted strings and the text parts of template literals (`${…}` is
+    /// code again, nested templates included), with the byte offset each
+    /// starts at.
+    strings: Vec<(usize, String)>,
+    /// The source with comments, string and template text and regex
+    /// literals blanked to spaces (newlines kept, so offsets and line
+    /// numbers still match): what is left is code.
+    code: String,
+}
+
+/// Split a JS module into string literals and code (see [`JsScan`]).
+///
+/// A `/` opens a regex when the previous significant token cannot end an
+/// expression: after an operator or opening punctuation (but not a postfix
+/// `++`/`--`) and after a keyword such as `return`, `typeof` or `else`.
+/// After `)`, `]`, `}`, an identifier or a literal it is a division. That is
+/// the usual heuristic, and it has two declared blind spots: a regex right
+/// after a control-flow `)` (`if (x) /re/.test(s)`) or after a block's `}`
+/// is read as a division, so the strings after it on that line can be
+/// misread. This frontend writes neither, and
+/// `the_wording_scan_reads_strings_not_code` pins the shapes it does write.
+fn js_scan(src: &str) -> JsScan {
     let b = src.as_bytes();
-    let mut out = Vec::new();
+    let mut strings = Vec::new();
+    let mut blank: Vec<(usize, usize)> = Vec::new();
     // Brace depth at each open `${`, innermost last.
     let mut open_exprs: Vec<usize> = Vec::new();
     let mut depth = 0usize;
-    // The last significant byte and identifier: decides regex vs division.
-    let mut prev = b'(';
+    // The last two significant bytes and the last identifier: decide regex
+    // vs division.
+    let (mut prev, mut prev2) = (b'(', b'(');
     let mut word = String::new();
     let mut i = 0;
     // Reads template text from `start` to the closing backtick or the next
     // `${`; returns where code resumes and whether an expression opened.
-    let template = |start: usize, out: &mut Vec<(usize, String)>| -> (usize, bool) {
+    let template = |start: usize,
+                    strings: &mut Vec<(usize, String)>,
+                    blank: &mut Vec<(usize, usize)>|
+     -> (usize, bool) {
         let mut j = start;
         while j < b.len() {
             match b[j] {
                 b'\\' => j += 2,
                 b'`' => {
-                    out.push((start, src[start..j].to_string()));
+                    strings.push((start, src[start..j].to_string()));
+                    blank.push((start, j));
                     return (j + 1, false);
                 }
                 b'$' if b.get(j + 1) == Some(&b'{') => {
-                    out.push((start, src[start..j].to_string()));
+                    strings.push((start, src[start..j].to_string()));
+                    blank.push((start, j));
                     return (j + 2, true);
                 }
                 _ => j += 1,
             }
         }
+        blank.push((start, b.len()));
         (b.len(), false)
     };
     while i < b.len() {
         let c = b[i];
         if c == b'/' && b.get(i + 1) == Some(&b'/') {
+            let start = i;
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
+            blank.push((start, i));
             continue;
         }
         if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            let start = i;
             i = src[i + 2..].find("*/").map_or(b.len(), |k| i + 2 + k + 2);
+            blank.push((start, i));
             continue;
         }
         if c.is_ascii_whitespace() {
@@ -1350,10 +1389,20 @@ fn js_strings(src: &str) -> Vec<(usize, String)> {
                 i += 1;
             }
             word = src[start..i].to_string();
-            prev = b'a';
+            (prev2, prev) = (prev, b'a');
             continue;
         }
         let was_word = std::mem::take(&mut word);
+        let resume_template = |at: usize,
+                               strings: &mut Vec<(usize, String)>,
+                               blank: &mut Vec<(usize, usize)>,
+                               open_exprs: &mut Vec<usize>| {
+            let (next, opened) = template(at, strings, blank);
+            if opened {
+                open_exprs.push(depth);
+            }
+            next
+        };
         match c {
             b'\'' | b'"' => {
                 let start = i + 1;
@@ -1361,37 +1410,42 @@ fn js_strings(src: &str) -> Vec<(usize, String)> {
                 while j < b.len() && b[j] != c && b[j] != b'\n' {
                     j += if b[j] == b'\\' { 2 } else { 1 };
                 }
-                out.push((start, src[start..j.min(b.len())].to_string()));
+                let end = j.min(b.len());
+                strings.push((start, src[start..end].to_string()));
+                blank.push((start, end));
                 i = j + 1;
-                prev = b'"';
+                (prev2, prev) = (prev, b'"');
             }
             b'`' => {
-                let (next, opened) = template(i + 1, &mut out);
-                if opened {
-                    open_exprs.push(depth);
-                    prev = b'(';
-                } else {
-                    prev = b'"';
-                }
-                i = next;
+                i = resume_template(i + 1, &mut strings, &mut blank, &mut open_exprs);
+                (prev2, prev) = (prev, b'"');
             }
             b'}' if open_exprs.last() == Some(&depth) => {
                 open_exprs.pop();
-                let (next, opened) = template(i + 1, &mut out);
-                if opened {
-                    open_exprs.push(depth);
-                    prev = b'(';
-                } else {
-                    prev = b'"';
-                }
-                i = next;
+                i = resume_template(i + 1, &mut strings, &mut blank, &mut open_exprs);
+                (prev2, prev) = (prev, b'"');
             }
             b'/' => {
-                let regex = b"(,=:[!&|?{};+-*%<>~^".contains(&prev)
+                let postfix = matches!((prev2, prev), (b'+', b'+') | (b'-', b'-'));
+                let regex = (b"(,=:[!&|?{};+-*%<>~^".contains(&prev) && !postfix)
                     || matches!(
                         was_word.as_str(),
-                        "return" | "typeof" | "case" | "of" | "in"
+                        "return"
+                            | "typeof"
+                            | "case"
+                            | "of"
+                            | "in"
+                            | "else"
+                            | "void"
+                            | "throw"
+                            | "delete"
+                            | "await"
+                            | "yield"
+                            | "new"
+                            | "do"
+                            | "instanceof"
                     );
+                let start = i;
                 i += 1;
                 if regex {
                     let mut class = false;
@@ -1406,9 +1460,10 @@ fn js_strings(src: &str) -> Vec<(usize, String)> {
                         i += 1;
                     }
                     i += 1;
-                    prev = b'"';
+                    blank.push((start, i.min(b.len())));
+                    (prev2, prev) = (prev, b'"');
                 } else {
-                    prev = b'/';
+                    (prev2, prev) = (prev, b'/');
                 }
             }
             _ => {
@@ -1417,12 +1472,25 @@ fn js_strings(src: &str) -> Vec<(usize, String)> {
                 } else if c == b'}' {
                     depth = depth.saturating_sub(1);
                 }
-                prev = c;
+                (prev2, prev) = (prev, c);
                 i += 1;
             }
         }
     }
-    out
+    let mut code = b.to_vec();
+    for (s, e) in blank {
+        for ch in &mut code[s..e.min(b.len())] {
+            if *ch != b'\n' {
+                *ch = b' ';
+            }
+        }
+    }
+    JsScan {
+        strings,
+        // Only ASCII bytes became spaces, but a blanked range can split a
+        // multi-byte character; lossy keeps the offsets.
+        code: String::from_utf8_lossy(&code).into_owned(),
+    }
 }
 
 /// Whether `text` uses the word "line"/"lines" on its own (not `line-height`,
@@ -1438,6 +1506,31 @@ fn says_line(text: &str) -> bool {
         let rest = rest.strip_prefix('s').unwrap_or(rest);
         edge(t[..at].chars().next_back()) && edge(rest.chars().next())
     })
+}
+
+/// Byte offsets where `term` occurs in `lower` (already lowercased); a space
+/// in `term` matches any run of whitespace, `-` or `_`.
+fn term_hits(lower: &str, term: &str) -> Vec<usize> {
+    let mut words = term.split(' ');
+    let first = words.next().unwrap_or_default();
+    let rest: Vec<&str> = words.collect();
+    lower
+        .match_indices(first)
+        .filter(|(at, _)| {
+            let mut tail = &lower[at + first.len()..];
+            rest.iter().all(|w| {
+                let sep = tail.len()
+                    - tail
+                        .trim_start_matches(|c: char| c.is_whitespace() || c == '-' || c == '_')
+                        .len();
+                tail = &tail[sep..];
+                let ok = sep > 0 && tail.starts_with(w);
+                tail = tail.get(w.len()..).unwrap_or("");
+                ok
+            })
+        })
+        .map(|(at, _)| at)
+        .collect()
 }
 
 /// The visible strings of one asset that say "line": a JS module's string
@@ -1456,12 +1549,40 @@ fn visible_line_words(path: &str, src: &str) -> Vec<(usize, String)> {
     if !path.ends_with(".js") {
         return Vec::new();
     }
-    js_strings(src)
+    js_scan(src)
+        .strings
         .into_iter()
         .filter(|(at, text)| !(text == "line" && src[..*at].ends_with("s('")))
         .filter(|(_, text)| says_line(text))
         .map(|(at, text)| (src[..at].matches('\n').count() + 1, text))
         .collect()
+}
+
+/// Bare `.line` / `.lines` property reads in a JS module's code (strings
+/// and comments excluded), less [`LINE_READS_ALLOWED`], as (line, read).
+fn line_reads(src: &str) -> Vec<(usize, String)> {
+    let code = js_scan(src).code;
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = Vec::new();
+    for (at, _) in code.match_indices(".line") {
+        let after = &code[at + 5..];
+        let after = after.strip_prefix('s').unwrap_or(after);
+        if after.chars().next().is_some_and(ident) {
+            continue;
+        }
+        let end = code.len() - after.len();
+        let owner_start = code[..at]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| ident(*c))
+            .last()
+            .map_or(at, |(i, _)| i);
+        let read = code[owner_start..end].to_string();
+        if !LINE_READS_ALLOWED.contains(&read.as_str()) {
+            out.push((code[..at].matches('\n').count() + 1, read));
+        }
+    }
+    out
 }
 
 #[test]
@@ -1470,16 +1591,48 @@ fn the_wording_scan_reads_strings_not_code() {
                const lines = src.split('\\n');\n\
                nodes.push(s('line', { class: 'grid' }));\n\
                const fence = /^\\s*```/.test(lines[i]) ? 'line-through' : a / b;\n\
-               h('b', { title: `${name} line` }, 'All lines', 'inline', `${`x`}`);\n";
+               h('b', { title: `${name} line` }, 'All lines', 'inline', `${`x`}`);\n\
+               /* 'lines' in a block comment */ const half = (a + b) / 2, t1 = 'A line';\n\
+               const k = i++ / 2, t2 = 'B lines', m = arr[0] / 3, t3 = 'C line';\n\
+               function f(s) { if (!s) return /'/.test(s) ? 'D lines' : ''; else return void /x'/ }\n";
     let hits: Vec<String> = visible_line_words("t.js", src)
         .into_iter()
         .map(|(n, t)| format!("{n}:{t}"))
         .collect();
-    assert_eq!(hits, ["5: line", "5:All lines"]);
+    assert_eq!(
+        hits,
+        [
+            "5: line",
+            "5:All lines",
+            "6:A line",
+            "7:B lines",
+            "7:C line",
+            "8:D lines"
+        ]
+    );
     assert!(visible_line_words("t.css", ".a { line-height: 1 }").is_empty());
     assert_eq!(
         visible_line_words("t.html", "<p>\nOne line\n</p>"),
         [(2, "One line".to_string())]
+    );
+    // Property reads: code only, the allowed ones skipped.
+    let reads = line_reads(
+        "for (const l of lay.lines) f(n.line, g.lines.length, 'x.lines', o.lineup);\n\
+         // m.line in a comment\n\
+         const input = { line: n.top_scope }; badge(m.line);\n",
+    );
+    assert_eq!(
+        reads,
+        [
+            (1, "n.line".to_string()),
+            (1, "g.lines".to_string()),
+            (3, "m.line".to_string())
+        ]
+    );
+    // Phrases match across `-`, `_` and line breaks.
+    assert_eq!(
+        term_hits("a route-map, a route\n  map, a router map", "route map"),
+        [2, 15]
     );
 }
 
@@ -1498,7 +1651,7 @@ fn the_core_frontend_uses_neutral_words() {
         let line_of = |at: usize| src[..at].matches('\n').count() + 1;
         let lower = src.to_lowercase();
         for term in BANNED_TERMS {
-            for (at, _) in lower.match_indices(term) {
+            for at in term_hits(&lower, term) {
                 problems.push(format!("{}:{}: banned word {term:?}", a.path, line_of(at)));
             }
         }
@@ -1517,6 +1670,15 @@ fn the_core_frontend_uses_neutral_words() {
                  line-of-text phrase to LINE_TEXT_ALLOWED)",
                 a.path
             ));
+        }
+        if a.path.ends_with(".js") {
+            for (n, read) in line_reads(src) {
+                problems.push(format!(
+                    "{}:{n}: bare read {read:?}: the API field is `top_scope` (or \
+                     `scopes`); add it to LINE_READS_ALLOWED only if it is not API data",
+                    a.path
+                ));
+            }
         }
     }
     assert!(scanned >= 15, "the wording scan saw only {scanned} assets");
@@ -1676,9 +1838,9 @@ async fn the_graph_has_nodes_edges_states_and_bounds() {
     assert!(node["top_scope"].is_string(), "{node}");
     assert!(node["color_slot"].is_u64(), "{node}");
 
-    // `scope=` narrows to some top scopes (`-` is "no logical scope"), and
+    // `top_scope=` narrows to some top-level scopes (`-` is "no logical scope"), and
     // `all_scopes` still offers every one, so the picker never shrinks.
-    let (_, v) = get_json(&app, &format!("{base}?scope=hooks,-")).await;
+    let (_, v) = get_json(&app, &format!("{base}?top_scope=hooks,-")).await;
     let mut got: Vec<&str> = v["nodes"]
         .as_array()
         .unwrap()

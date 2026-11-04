@@ -43,13 +43,13 @@ function choices(edge, viewer, pid) {
   if (edge.kind === 'contradicts') {
     const sup = (winner, loserName, label) => ({
       label,
-      consequence: `${loserName} will be marked superseded: its validity window closes and it drops out of default retrieval. The contradiction becomes a supersedes edge.${settle}`,
+      consequence: `${loserName} will be marked superseded: its validity window closes and it drops out of default retrieval. The contradiction becomes a supersedes relation.${settle}`,
       send: () => api.confirmEdge(pid, { ...body, verdict: 'supersedes', winner }),
     });
     const out = [
       {
         label: 'Both stand (conflict)',
-        consequence: `The contradiction is confirmed. Both memories stay valid, and the edge records the conflict.${settle}`,
+        consequence: `The contradiction is confirmed. Both memories stay valid, and the relation records the conflict.${settle}`,
         send: () => api.confirmEdge(pid, { ...body, verdict: 'both_stand' }),
       },
     ];
@@ -67,7 +67,7 @@ function choices(edge, viewer, pid) {
     out.push({
       label: 'Not a contradiction',
       tone: 'reject',
-      consequence: `The edge is kept as rejected, so it is never proposed again.${settle}`,
+      consequence: `The relation is kept as rejected, so it is never proposed again.${settle}`,
       send: () => api.rejectEdge(pid, body),
     });
     return out;
@@ -75,13 +75,13 @@ function choices(edge, viewer, pid) {
   return [
     {
       label: 'Confirm',
-      consequence: `The ${kindLabel(edge.kind).toLowerCase()} edge becomes confirmed.`,
+      consequence: `The ${kindLabel(edge.kind).toLowerCase()} relation becomes confirmed.`,
       send: () => api.confirmEdge(pid, body),
     },
     {
       label: 'Reject',
       tone: 'reject',
-      consequence: 'The edge is kept as rejected, so it is never proposed again.',
+      consequence: 'The relation is kept as rejected, so it is never proposed again.',
       send: () => api.rejectEdge(pid, body),
     },
   ];
@@ -110,7 +110,7 @@ export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
   const pid = ctx.project.id;
   const key = edgeKey(pid, edge);
   const writes = !!(ctx.state.session && ctx.state.session.allow_writes);
-  const box = h('div', { class: 'review', role: 'group', 'aria-label': `Review: ${kindLabel(edge.kind)}` });
+  const box = h('div', { class: 'review', role: 'group', 'aria-label': `Review relation: ${kindLabel(edge.kind)}` });
   const live = h('p', { class: 'review-status', role: 'status', 'aria-live': 'polite', tabindex: '-1' });
   const noteId = 'ro-' + Math.random().toString(36).slice(2);
 
@@ -142,7 +142,7 @@ export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
       h('div', { class: 'review-row' }, buttons),
       writes
         ? null
-        : h('p', { class: 'review-note', id: noteId }, 'Read-only dashboard. Restart it with ', h('code', null, 'engramdb dashboard --allow-writes'), ' to review edges.'),
+        : h('p', { class: 'review-note', id: noteId }, 'Read-only dashboard. Restart it with ', h('code', null, 'engramdb dashboard --allow-writes'), ' to review relations.'),
       live,
     );
     if (focusIndex !== undefined && buttons[focusIndex]) buttons[focusIndex].focus();

@@ -3,7 +3,7 @@
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, stamp, plural, label, shortId } from '../format.js';
-import { badge, slot, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
+import { badge, slot, scopeLabel, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { smallMultiples } from '../chart.js';
 import { renderMarkdown } from '../markdown.js';
 import { secHead, pill, statusPill, alertBanner, errorBox } from './common.js';
@@ -68,11 +68,11 @@ function edgeItem(e, ctx) {
 function relations(d, ctx) {
   const edges = [...d.edges.outbound, ...d.edges.inbound];
   if (!edges.length) {
-    return h('p', { class: 'muted' }, 'No edges. Agents link memories with the link tool; NLI and embedding similarity propose edges as memories are created.');
+    return h('p', { class: 'muted' }, 'No relations. Agents link memories with the link tool; NLI and embedding similarity propose relations as memories are created.');
   }
   return [
     h('ul', { class: 'rels' }, edges.map((e) => edgeItem(e, ctx))),
-    d.edges.hidden ? h('p', { class: 'faint' }, `${plural(d.edges.hidden, 'edge')} not shown.`) : null,
+    d.edges.hidden ? h('p', { class: 'faint' }, `${plural(d.edges.hidden, 'relation')} not shown.`) : null,
   ];
 }
 
@@ -82,7 +82,7 @@ function review(d, ctx) {
   const proposed = [...d.edges.outbound, ...d.edges.inbound].filter((e) => e.status === 'proposed' && e.kind !== 'supersedes');
   if (!proposed.length) return null;
   return [
-    secHead('Review', h('span', { class: 'faint num' }, plural(proposed.length, 'proposed edge'))),
+    secHead('Review', h('span', { class: 'faint num' }, plural(proposed.length, 'proposed relation'))),
     h(
       'ul',
       { class: ['att', 'plain', 'review-list'] },
@@ -112,7 +112,7 @@ function review(d, ctx) {
 function meta(m) {
   const rows = [
     ['Id', h('span', { class: 'mono' }, m.id)],
-    ['Kind', TYPE_LABEL[m.type] || m.type],
+    ['Type', TYPE_LABEL[m.type] || m.type],
     ['Epistemic', m.epistemic],
     ['Status', label(statusKey(m.status))],
     ['Visibility', String(m.visibility).toLowerCase()],
@@ -178,7 +178,7 @@ export async function renderDetail(main, ctx) {
   mount(
     main,
     h('a', { class: 'crumb', href: ctx.href('memories', p.id) }, '← All memories'),
-    h('div', { class: 'sign' }, badge(d.top_scope, d.color_slot, true), h('div', null, h('div', { class: 'sc' }, `${scopeName(d.top_scope)} scope`), h('div', { class: 'sid mono' }, `${(m.logical || []).join(', ') || 'no logical scope'} · ${m.id}`))),
+    h('div', { class: 'sign' }, badge(d.top_scope, d.color_slot, true), h('div', null, h('div', { class: 'sc' }, scopeLabel(d.top_scope)), h('div', { class: 'sid mono' }, `${(m.logical || []).join(', ') || 'no logical scope'} · ${m.id}`))),
     h('h1', { class: 'd-title', id: 'view-title' }, title),
     h(
       'div',
@@ -218,7 +218,7 @@ export async function renderDetail(main, ctx) {
         h('p', { class: 'faint' }, `Across ${plural(u.returned_sessions, 'session')} retrieved and ${plural(u.injected_sessions, 'session')} injected. Viewing it here counts as nothing.`),
         chartBox,
         review(d, ctx),
-        secHead('Edges', h('span', { class: 'faint num' }, fmt(d.edges.outbound.length + d.edges.inbound.length)), h('a', { class: 'btn sm', href: ctx.href('graph', p.id) }, 'Graph →')),
+        secHead('Relations', h('span', { class: 'faint num' }, fmt(d.edges.outbound.length + d.edges.inbound.length)), h('a', { class: 'btn sm', href: ctx.href('graph', p.id) }, 'Graph →')),
         relations(d, ctx),
         m.challenges && m.challenges.length
           ? [

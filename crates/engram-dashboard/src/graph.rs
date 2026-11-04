@@ -12,8 +12,8 @@
 //! most [`MAX_LIMIT`]) the memories most worth drawing are kept — the most
 //! connected first, then the most read, then the most critical — and the
 //! response says how many it left out (`total_nodes` vs `shown_nodes`), so a
-//! partial graph never passes for the whole store. `scope=` narrows to
-//! some top scopes instead.
+//! partial graph never passes for the whole store. `top_scope=` narrows to
+//! some top-level scopes instead (the same parameter as `/memories`).
 //!
 //! **Far ends.** A same-store edge whose target is gone is returned with
 //! `state: "dangling"` (drawn as a stub to a deleted-memory mark); one into
@@ -119,7 +119,7 @@ struct Counts {
     /// Of those, edges whose store could not be checked.
     unknown: usize,
     /// Edges left out because an end is a memory this response does not
-    /// draw (over the limit, or outside the `scope` filter).
+    /// draw (over the limit, or outside the `top_scope` filter).
     hidden: usize,
 }
 
@@ -133,7 +133,7 @@ struct GraphPage {
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     scopes: Vec<Scope>,
-    /// Every top scope the status filters admit, before `scope=` and the
+    /// Every top scope the status filters admit, before `top_scope=` and the
     /// limit, so a scope picker can offer them all; `count` is its memories
     /// there.
     all_scopes: Vec<Scope>,
@@ -245,7 +245,7 @@ pub(crate) async fn project_graph(
                 .map(|s| {
                     LinkKind::parse_known(s).ok_or_else(|| {
                         ApiError::bad_request(format!(
-                            "unknown edge kind {s:?} (known: {})",
+                            "unknown relation kind {s:?} (known: {})",
                             LinkKind::known_list()
                         ))
                     })
@@ -262,7 +262,7 @@ pub(crate) async fn project_graph(
         include_invalidated: flag(&q, "include_invalidated", false)?,
     };
     let scopes_wanted: Option<Vec<&str>> = q
-        .get("scope")
+        .get("top_scope")
         .map(|l| l.split(',').map(str::trim).collect());
     let limit: usize = match q.get("limit") {
         Some(l) => l

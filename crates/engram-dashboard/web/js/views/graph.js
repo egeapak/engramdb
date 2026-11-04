@@ -6,7 +6,7 @@
 // page, and is deterministic, so the same store draws the same graph.
 //
 // **Steady graph.** The page asks the server for every edge kind and status
-// (only `invalidated` and `scope`, which change the memory set, go to the
+// (only `invalidated` and `top_scope`, which change the memory set, go to the
 // server) and lays out that one fixed set; the kind / proposed / rejected
 // chips only change which relations are *drawn*, in place, so toggling them
 // never moves a memory or the viewport. Layouts are cached per input and
@@ -112,7 +112,7 @@ function filtersOf(query) {
     proposed: query.get('proposed') !== '0',
     invalidated: query.get('invalidated') === '1',
     rejected: query.get('rejected') === '1',
-    scope: query.get('scope') || '',
+    top_scope: query.get('top_scope') || '',
   };
 }
 
@@ -122,7 +122,7 @@ function filterQuery(f) {
   if (!f.proposed) q.set('proposed', '0');
   if (f.invalidated) q.set('invalidated', '1');
   if (f.rejected) q.set('rejected', '1');
-  if (f.scope) q.set('scope', f.scope);
+  if (f.top_scope) q.set('top_scope', f.top_scope);
   return q.toString();
 }
 
@@ -138,6 +138,9 @@ function shows(f, e) {
   if (e.status === 'rejected' && !f.rejected) return false;
   return true;
 }
+
+/** A relation's far-end state, in words (`live` is not shown). */
+const FAR_END = { dangling: 'far end deleted', invalidated: 'far end invalidated', unknown: 'far end not checked' };
 
 // ---------------------------------------------------------------------------
 // Geometry and text helpers
@@ -210,7 +213,7 @@ export async function renderGraph(main, ctx) {
       include_proposed: 'true',
       include_rejected: 'true',
       include_invalidated: f.invalidated ? 'true' : 'false',
-      scope: f.scope || undefined,
+      top_scope: f.top_scope || undefined,
     });
   } catch (e) {
     if (ctx.isStale()) return;
@@ -240,7 +243,7 @@ export async function renderGraph(main, ctx) {
 
   mount(
     main,
-    projHead('Graph', `${p.name} graph`, ['Each memory is coloured by its top scope; shape follows type.', 'Size follows reads.']),
+    projHead('Graph', `${p.name} graph`, ['Each memory is coloured by its top-level scope; shape follows type.', 'Size follows reads.']),
     alertBox,
     filterBox,
     notesBox,
@@ -286,16 +289,16 @@ export async function renderGraph(main, ctx) {
       }),
     );
     const toggles = [
-      chip(f.proposed, 'Proposed', () => setFilters({ proposed: !f.proposed }), 'Edges awaiting review'),
-      chip(f.rejected, 'Rejected', () => setFilters({ rejected: !f.rejected }), 'Edges a reviewer rejected'),
+      chip(f.proposed, 'Proposed', () => setFilters({ proposed: !f.proposed }), 'Relations awaiting review'),
+      chip(f.rejected, 'Rejected', () => setFilters({ rejected: !f.rejected }), 'Relations a reviewer rejected'),
       // These two change the memories, so they reload the graph.
       chip(f.invalidated, 'Invalidated', () => (location.hash = hashOf(ctx, { ...f, invalidated: !f.invalidated })), 'Memories whose validity window closed'),
     ];
     const sel = h(
       'select',
-      { 'aria-label': 'Scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, scope: ev.target.value })) },
-      h('option', { value: '' }, 'All scopes'),
-      g.all_scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
+      { 'aria-label': 'Top-level scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, top_scope: ev.target.value })) },
+      h('option', { value: '' }, 'All top-level scopes'),
+      g.all_scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
     );
     // Keep keyboard focus on the chip that was pressed.
     const active = document.activeElement;
@@ -306,7 +309,7 @@ export async function renderGraph(main, ctx) {
         'div',
         { class: 'filt' },
         h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Relation kinds shown' }, h('span', { class: 'eyebrow lab' }, 'Show'), kindChips),
-        h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Also show' }, h('span', { class: 'eyebrow lab' }, 'Include'), toggles, h('label', { class: 'sel' }, sel)),
+        h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Include' }, h('span', { class: 'eyebrow lab' }, 'Include'), toggles, h('label', { class: 'sel' }, sel)),
       ),
     );
     if (was >= 0) {
@@ -331,7 +334,7 @@ export async function renderGraph(main, ctx) {
     );
     const notes = [];
     if (g.truncated) {
-      notes.push(h('div', { class: 'note', role: 'status' }, `Showing ${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)} memories: the most connected first, then the most read. Pick a scope to see the rest.`));
+      notes.push(h('div', { class: 'note', role: 'status' }, `Showing ${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)} memories: the most connected first, then the most read. Pick a top-level scope to see the rest.`));
     }
     const dangling = shown.filter((e) => e.state === 'dangling' && (e.dst_store || !byId.has(e.dst))).length;
     const unknown = shown.filter((e) => e.state === 'unknown').length;
@@ -348,7 +351,7 @@ export async function renderGraph(main, ctx) {
   renderNotes(visible());
 
   if (!g.nodes.length) {
-    mount(graphBox, h('p', { class: 'graph-empty muted' }, f.scope ? 'No memories in this scope with these filters.' : 'No memories to draw yet.'));
+    mount(graphBox, h('p', { class: 'graph-empty muted' }, f.top_scope ? 'No memories in this top-level scope with these filters.' : 'No memories to draw yet.'));
     mount(card, h('div', { class: 'eyebrow' }, 'Details'), h('p', { class: 'hint' }, 'Nothing to show.'));
     return;
   }
@@ -810,7 +813,7 @@ export async function renderGraph(main, ctx) {
           h('dd', null, ago(e.created_at)),
           e.note ? [h('dt', null, 'Note'), h('dd', { class: 'clamp' }, e.note)] : null,
         ),
-        e.state === 'dangling' ? h('p', { class: 'hint' }, 'The far end was deleted. The edge stays in the source file until someone unlinks it.') : null,
+        e.state === 'dangling' ? h('p', { class: 'hint' }, 'The far end was deleted. The relation stays in the source file until someone unlinks it.') : null,
         e.state === 'unknown' ? h('p', { class: 'hint' }, 'The far end is in another store that this dashboard could not open, so it is unknown, not missing.') : null,
         e.status === 'proposed'
           ? [h('div', { class: 'eyebrow' }, 'Review'), reviewControls({ ...e, src_summary: src && src.summary, dst_summary: dstNode && dstNode.summary }, ctx, { onDone: afterReview(e) })]
@@ -845,7 +848,7 @@ export async function renderGraph(main, ctx) {
         h(
           'dl',
           null,
-          h('dt', null, 'Kind'),
+          h('dt', null, 'Type'),
           h('dd', null, h('span', { class: 'kind' }, kindIcon(n.type, n.color_slot), TYPE_LABEL[n.type] || n.type)),
           h('dt', null, 'Status'),
           h('dd', null, n.invalidated ? 'invalidated' : label(n.status)),
@@ -869,7 +872,7 @@ export async function renderGraph(main, ctx) {
       h(
         'dl',
         null,
-        h('dt', null, 'Scopes'),
+        h('dt', null, 'Top-level scopes'),
         h('dd', null, fmt(g.scopes.filter((l) => l.name).length)),
         h('dt', null, 'Memories'),
         h('dd', null, g.truncated ? `${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)}` : fmt(g.shown_nodes)),
@@ -889,7 +892,7 @@ export async function renderGraph(main, ctx) {
     h(
       'div',
       null,
-      h('h4', null, 'Scopes (top logical scope)'),
+      h('h4', null, 'Top-level scopes'),
       h(
         'ul',
         null,
@@ -994,7 +997,7 @@ export async function renderGraph(main, ctx) {
               h(
                 'thead',
                 null,
-                h('tr', null, ['From', 'Relation', 'To', 'Status', 'Origin', 'Conf.', ''].map((t, i) => h('th', { scope: 'col', class: i === 5 ? 'n' : null }, t))),
+                h('tr', null, ['From', 'Relation', 'To', 'Status', 'Origin', 'Confidence', ''].map((t, i) => h('th', { scope: 'col', class: i === 5 ? 'n' : null }, t))),
               ),
               h(
                 'tbody',
@@ -1006,7 +1009,7 @@ export async function renderGraph(main, ctx) {
                     h('td', { class: 't' }, edgeEnd(e, 'src')),
                     h('td', null, h('span', { class: 'kind' }, edgeSample(e.kind, e.status, 30), kindLabel(e.kind))),
                     h('td', { class: 't' }, edgeEnd(e, 'dst')),
-                    h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${e.state}`) : null),
+                    h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${FAR_END[e.state] || e.state}`) : null),
                     h('td', null, e.origin),
                     h('td', { class: 'n' }, Number(e.confidence).toFixed(2)),
                     h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show in graph')),

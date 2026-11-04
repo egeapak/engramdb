@@ -223,9 +223,9 @@ async function boot() {
   $('#brand-sub').textContent = `Memory dashboard · ${location.host}`;
   const tag = $('#mode-tag');
   if (s.allow_writes) {
-    tag.textContent = 'Edge review on';
+    tag.textContent = 'Relation review on';
     tag.classList.add('warn');
-    $('#foot-mode').textContent = 'Started with --allow-writes · confirming or rejecting a proposed edge writes to the store';
+    $('#foot-mode').textContent = 'Started with --allow-writes · confirming or rejecting a proposed relation writes to the store';
   }
   $('#foot-version').textContent = `engramdb ${s.version} · schema ${s.schema_version} · served by engramdb dashboard`;
   window.addEventListener('hashchange', route);

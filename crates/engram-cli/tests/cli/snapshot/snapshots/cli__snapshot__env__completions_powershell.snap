@@ -1432,7 +1432,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
             [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
             [CompletionResult]::new('--no-open', '--no-open', [CompletionResultType]::ParameterName, 'Print the sign-in URL (with its token) instead of opening a browser. Without it the terminal shows only the bare address, unless the browser cannot be launched')
-            [CompletionResult]::new('--allow-writes', '--allow-writes', [CompletionResultType]::ParameterName, 'Allow the dashboard''s one write: confirming or rejecting proposed memory edges')
+            [CompletionResult]::new('--allow-writes', '--allow-writes', [CompletionResultType]::ParameterName, 'Allow the dashboard''s one write: confirming or rejecting proposed relations between memories')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress non-essential output')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress non-essential output')

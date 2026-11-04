@@ -1788,7 +1788,7 @@ pub struct StoreGraph {
     /// Same-store edges left out because an end no longer exists.
     pub dangling: usize,
     /// Those of them whose *source* is still a shown node — the ones a view
-    /// can draw as a stub to a closed station. (A dangling edge whose source
+    /// can draw as a stub to a deleted-memory mark. (A dangling edge whose source
     /// is gone is a `superseded_by` mirror with nothing left to draw from.)
     pub dangling_edges: Vec<GraphEdge>,
     /// Edges into another store, which this view does not open: included in

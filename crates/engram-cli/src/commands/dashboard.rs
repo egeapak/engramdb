@@ -112,8 +112,8 @@ pub async fn run_dashboard(
         if params.allow_writes {
             outln!(
                 formatter,
-                "Writes enabled (--allow-writes): proposed edges can be confirmed or rejected \
-                 from the page. Press Ctrl-C to stop."
+                "Writes enabled (--allow-writes): proposed relations can be confirmed or \
+                 rejected from the page. Press Ctrl-C to stop."
             );
         } else {
             outln!(formatter, "Read-only view. Press Ctrl-C to stop.");

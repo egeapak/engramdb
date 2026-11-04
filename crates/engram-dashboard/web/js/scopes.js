@@ -17,7 +17,7 @@ export function slot(n) {
   return n === null || n === undefined ? 'none' : String(n % SLOTS);
 }
 
-/** 0 for the first seven scopes, then 1 (ringed) and 2 (striped), so an eighth scope never repeats a badge exactly. */
+/** 0 for the first seven scopes, then 1 (a round badge) and 2 (a ringed square), so an eighth scope never repeats a badge exactly. */
 export function variant(n) {
   return n === null || n === undefined ? 0 : Math.min(2, Math.floor(n / SLOTS));
 }
@@ -32,13 +32,18 @@ export function scopeName(scope) {
   return scope || 'No scope';
 }
 
-/** A top scope's two-letter badge. `n` is its server-assigned colour slot. */
+/** "storage scope", or "No scope" (never "No scope scope"). */
+export function scopeLabel(scope) {
+  return scope ? `${scope} scope` : 'No scope';
+}
+
+/** A top-level scope's two-letter badge. `n` is its server-assigned colour slot. */
 export function badge(scope, n, large) {
-  const name = scopeName(scope);
+  const name = scopeLabel(scope);
   const v = variant(n);
   return h(
     'span',
-    { class: ['badge', 'b-' + slot(n), v && 'v-' + v, large && 'lg'], title: `${name} scope`, role: 'img', 'aria-label': `${name} scope` },
+    { class: ['badge', 'b-' + slot(n), v && 'v-' + v, large && 'lg'], title: name, role: 'img', 'aria-label': name },
     code(scope),
   );
 }

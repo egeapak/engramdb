@@ -81,7 +81,7 @@ fn read_only() -> ApiError {
         StatusCode::FORBIDDEN,
         "read_only",
         "This dashboard is read-only. Restart it with `engramdb dashboard --allow-writes` to \
-         confirm or reject edges.",
+         confirm or reject relations.",
     )
 }
 
@@ -93,7 +93,7 @@ fn parse(body: &Bytes) -> Result<(EdgeBody, LinkKind), ApiError> {
         .map_err(|e| ApiError::bad_request(format!("invalid request body: {e}")))?;
     let kind = LinkKind::parse_known(&b.kind).ok_or_else(|| {
         ApiError::bad_request(format!(
-            "unknown edge kind {:?} (known: {})",
+            "unknown relation kind {:?} (known: {})",
             b.kind,
             LinkKind::known_list()
         ))
@@ -175,7 +175,7 @@ fn verdict_of(b: &EdgeBody, kind: &LinkKind) -> Result<Option<ContradictionVerdi
     if *kind != LinkKind::Contradicts {
         if b.verdict.is_some() || b.winner.is_some() {
             return Err(ApiError::bad_request(
-                "`verdict` and `winner` apply to contradicts edges only",
+                "`verdict` and `winner` apply to contradicts relations only",
             ));
         }
         return Ok(None);

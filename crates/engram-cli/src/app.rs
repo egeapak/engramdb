@@ -1364,9 +1364,10 @@ pub enum Command {
 
     /// Open a local, read-only web dashboard of every store on this machine
     ///
-    /// Serves on 127.0.0.1 and prints a URL with a one-time token; open it
-    /// in a browser on this machine. Nothing in the dashboard changes a
-    /// store, and viewing a memory there does not count as using it.
+    /// Serves on 127.0.0.1, opens your browser signed in, and prints the
+    /// bare address (no token; `--no-open` prints the sign-in URL instead).
+    /// Viewing a memory there does not count as using it. The one write
+    /// path is reviewing proposed relations, and only with `--allow-writes`.
     Dashboard {
         /// Port to listen on [default: 7341, or a free port when taken; 0: any free port]
         #[arg(long)]
@@ -1386,7 +1387,7 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         assets_dir: Option<PathBuf>,
 
-        /// Allow the dashboard's one write: confirming or rejecting proposed memory edges
+        /// Allow the dashboard's one write: confirming or rejecting proposed relations between memories
         #[arg(long)]
         allow_writes: bool,
     },

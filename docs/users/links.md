@@ -78,7 +78,7 @@ and reindex. Nothing in the file is reset or rewritten meanwhile.
 a prefix that is unique today stops being unique as the store grows.
 
 Proposed links can also be reviewed in the
-[dashboard](./dashboard.md#reviewing-proposed-edges) (`engramdb dashboard
+[dashboard](./dashboard.md#reviewing-proposed-relations) (`engramdb dashboard
 --allow-writes`), which offers the same three resolutions plus reject.
 
 ## Automatic proposals

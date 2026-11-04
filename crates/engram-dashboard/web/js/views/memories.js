@@ -7,15 +7,15 @@ import { badge, kindIcon, scopeName, TYPE_LABEL } from '../scopes.js';
 import { projHead, statusPill, errorBox } from './common.js';
 
 const COLS = [
-  { k: 'scope', label: 'Scope' },
+  { k: 'scope', label: 'Top-level scope' },
   { k: 'summary', label: 'Memory' },
-  { k: 'type', label: 'Kind' },
-  { k: 'returned', label: 'Retr.', n: true, title: 'Times it survived ranking in a query answer' },
-  { k: 'injected', label: 'Inj.', n: true, title: 'Times a hook put it into an agent context' },
-  { k: 'fetched', label: 'Fetch.', n: true, title: 'Times it was opened by id' },
-  { k: 'updated_n', label: 'Upd.', n: true, title: 'Updates' },
+  { k: 'type', label: 'Type' },
+  { k: 'returned', label: 'Retrieved', n: true, title: 'Times it survived ranking in a query answer' },
+  { k: 'injected', label: 'Injected', n: true, title: 'Times a hook put it into an agent context' },
+  { k: 'fetched', label: 'Fetched', n: true, title: 'Times it was opened by id' },
+  { k: 'updated_n', label: 'Updates', n: true, title: 'Times it was updated' },
   { k: 'last_read', label: 'Last read', n: true },
-  { k: 'criticality', label: 'Crit.', n: true },
+  { k: 'criticality', label: 'Criticality', n: true, title: 'How much it matters, 0 to 1' },
 ];
 const TEXT_SORT = new Set(['summary', 'type', 'scope']);
 const PAGE = 100;
@@ -31,13 +31,13 @@ export async function renderMemories(main, ctx) {
     q: q.get('q') || '',
     kind: q.get('kind') || '',
     status: q.get('status') || '',
-    scope: q.get('scope') || '',
+    top_scope: q.get('top_scope') || '',
     sort: q.get('sort') || 'criticality',
     dir: q.get('dir') || '',
   };
 
-  const search = h('input', { class: 'search', type: 'search', placeholder: 'Filter by text, id, tag or scope', 'aria-label': 'Filter memories', value: f.q });
-  const kindSel = h('select', { 'aria-label': 'Kind' }, h('option', { value: '' }, 'All kinds'));
+  const search = h('input', { class: 'search', type: 'search', placeholder: 'Filter by text, id, tag or any scope', 'aria-label': 'Filter memories', value: f.q });
+  const kindSel = h('select', { 'aria-label': 'Type' }, h('option', { value: '' }, 'All types'));
   const statusSel = h(
     'select',
     { 'aria-label': 'Status' },
@@ -53,7 +53,7 @@ export async function renderMemories(main, ctx) {
   // Announced politely: the one change a filter makes that a screen-reader
   // user cannot see.
   const count = h('span', { class: 'cnt num', role: 'status', 'aria-live': 'polite' });
-  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by scope' });
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by top-level scope' });
   const thead = h('thead');
   const tbody = h('tbody', null, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'Loading memories…')));
   const more = h('div', { class: 'more' });
@@ -122,7 +122,7 @@ export async function renderMemories(main, ctx) {
   const renderChips = (scopes) => {
     // '-' names "no logical scope" in the URL, so an empty name survives a join.
     const key = (name) => name || '-';
-    const on = new Set(f.scope ? f.scope.split(',') : scopes.map((l) => key(l.name)));
+    const on = new Set(f.top_scope ? f.top_scope.split(',') : scopes.map((l) => key(l.name)));
     mount(
       chips,
       scopes.map((l) =>
@@ -135,7 +135,7 @@ export async function renderMemories(main, ctx) {
             onclick: () => {
               if (on.has(key(l.name))) on.delete(key(l.name));
               else on.add(key(l.name));
-              f.scope = on.size === scopes.length ? '' : Array.from(on).join(',') || '\u2205';
+              f.top_scope = on.size === scopes.length ? '' : Array.from(on).join(',') || '\u2205';
               writeUrl();
               renderChips(scopes);
               load(false);
@@ -179,8 +179,8 @@ export async function renderMemories(main, ctx) {
     if (ctx.isStale()) return;
     const mine = ++seq;
     const params = { q: f.q, kind: f.kind, status: f.status, sort: f.sort, dir: f.dir, limit: PAGE };
-    // The API's `scope=` is a substring filter; the top-scope chips are `top_scope=`.
-    if (f.scope) params.top_scope = f.scope;
+    // `top_scope=`, not `scope=`: the API's `scope=` is a substring filter.
+    if (f.top_scope) params.top_scope = f.top_scope;
     if (append && cursor) params.cursor = cursor;
     let page;
     try {
@@ -197,7 +197,7 @@ export async function renderMemories(main, ctx) {
       const types = page.facets.types;
       mount(
         kindSel,
-        h('option', { value: '' }, 'All kinds'),
+        h('option', { value: '' }, 'All types'),
         types.map((t) => h('option', { value: t.name, selected: t.name === f.kind }, `${TYPE_LABEL[t.name] || t.name} (${fmt(t.count)})`)),
       );
     }
@@ -206,7 +206,7 @@ export async function renderMemories(main, ctx) {
     if (append) tbody.append(...rows);
     else if (rows.length) mount(tbody, rows);
     else if (!page.total) mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, page.rebuilding ? 'The index is being rebuilt (a reindex is running); reload in a moment.' : 'This store has no memories yet.')));
-    else mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'No memories match. Clear the filter or turn a scope back on.')));
+    else mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'No memories match. Clear the filter or turn a top-level scope back on.')));
     cursor = page.next_cursor || null;
     count.textContent = `${fmt(shown)} of ${fmt(page.matched)} shown · ${fmt(page.total)} in store`;
     mount(
