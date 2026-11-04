@@ -22,6 +22,30 @@ import { kindLabel } from '../relations.js';
 /** Per edge: {state: 'pending' | 'done', text}. Lives as long as the page. */
 const reviews = new Map();
 
+/**
+ * Per edge: the live control boxes showing it (their re-render functions).
+ * A box built while a review of its edge is in flight shows "Saving…"; when
+ * that review settles, every box still on the page is re-rendered (the
+ * result, or the choices again after an error), so none is left saying
+ * "Saving…". Boxes that left the page are dropped as they are seen.
+ */
+const watchers = new Map();
+
+function watch(key, fn, box) {
+  if (!watchers.has(key)) watchers.set(key, new Set());
+  watchers.get(key).add({ fn, box });
+}
+
+function settle(key, except) {
+  const set = watchers.get(key);
+  if (!set) return;
+  for (const w of [...set]) {
+    if (!w.box.isConnected) set.delete(w);
+    else if (w.box !== except) w.fn();
+  }
+  if (!set.size) watchers.delete(key);
+}
+
 const edgeKey = (pid, e) => [pid, e.src, e.kind, e.dst, e.dst_store || ''].join('|');
 
 function short(text, n = 32) {
@@ -121,6 +145,8 @@ export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
       mount(box, live);
       return;
     }
+    // Back from a pending state (another box's send failed): no stale "Saving…".
+    live.textContent = '';
     const opts = choices(edge, viewer, pid);
     const buttons = opts.map((o, i) =>
       h(
@@ -173,10 +199,13 @@ export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
         live.textContent = text;
         mount(box, live);
         live.focus();
+        settle(key, box);
         if (onDone) onDone(out, text);
       } catch (e) {
         reviews.delete(key);
         live.textContent = '';
+        // Any other box for this edge offers the choices again.
+        settle(key, box);
         const backBtn = h('button', { type: 'button', class: ['btn', 'sm'], onclick: () => showChoices(i) }, 'Back');
         mount(box, h('p', { class: 'review-error', role: 'alert' }, (e && e.message) || String(e)), backBtn);
         backBtn.focus();
@@ -186,6 +215,7 @@ export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
     go.focus();
   }
 
+  watch(key, () => showChoices(), box);
   showChoices();
   return box;
 }

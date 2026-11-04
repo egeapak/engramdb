@@ -139,8 +139,10 @@ and `[` step through the memories.
 
 Hovering (or focusing) a memory **focuses** it: its own relations are drawn
 at full strength, its neighbours (the memories at their other ends) are
-labelled, even where the layout had no room for a label, and everything
-else fades. A short tooltip names it. Hovering a relation lights it and its
+labelled (their labels are placed again among themselves so none overlaps;
+a neighbour that still finds no room is named in the tooltip instead), and
+everything else fades. A short tooltip in the corner of the graph away
+from the memory names it. Hovering a relation lights it and its
 two ends the same way.
 
 Clicking a memory **selects** it: the fade stays, and the details panel
@@ -181,9 +183,9 @@ Keys, with the graph focused:
 
 | Key | Does |
 |---|---|
-| `]` / `[` | with nothing selected, step through the memories; with a memory selected, step through its panel's rows in order, focusing each neighbour in the graph |
+| `]` / `[` | with nothing selected, step through the memories; with a memory selected, step through its panel's rows in order, focusing each neighbour in the graph (on a phone, focus stays on the row and the neighbour is ringed); a screen reader hears each row, e.g. "Supported by: …" |
 | `Enter` | select the focused memory; on a row for another scope, open it |
-| `Escape` | clear the selection; a second `Escape` returns focus to the graph |
+| `Escape` | clear the selection and return focus to the graph |
 | arrows, `+` / `-`, `0` | pan, zoom, fit |
 
 `]`, `[` and `Escape` also work from inside the panel.
@@ -272,7 +274,9 @@ panel (each proposed row), in a pinned relation's panel, and on the memory
 page. Without `--allow-writes` the memory panel shows no buttons, only a
 note, and the other two show them disabled, with the command to restart.
 After a review the graph reloads to show the new status, with the same
-memory selected. Nothing else on the page writes.
+memory selected and the result read out; if that memory was just
+superseded (hidden unless *Invalidated* is on), the other end of the
+relation is selected instead, and the note says so. Nothing else on the page writes.
 
 ## What it reads, and what it never does
 

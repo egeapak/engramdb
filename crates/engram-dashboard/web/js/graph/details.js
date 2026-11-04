@@ -109,7 +109,9 @@ export function memoryPanel(o) {
     h(
       'section',
       { class: 'pr-group' },
-      h('h4', { class: 'pr-head' }, theme.edgeSample(gr.kind, 'confirmed', 26), h('span', null, gr.label), h('span', { class: 'faint num' }, fmt(gr.items.length))),
+      // An incoming group's sample is mirrored, so its wide end (the source)
+      // sits on the far side, as "Supported by" reads.
+      h('h4', { class: 'pr-head' }, h('span', { class: ['pr-icon', gr.incoming && 'flip'], 'aria-hidden': 'true' }, theme.edgeSample(gr.kind, 'confirmed', 26)), h('span', null, gr.label), h('span', { class: 'faint num' }, fmt(gr.items.length))),
       h(
         'ul',
         { class: 'pr-list' },
@@ -214,7 +216,7 @@ export function memoryPanel(o) {
     h('a', { class: 'btn solid', href: ctx.href('detail', ctx.project.id, n.id) }, t('panelOpen')),
     h('div', { class: 'eyebrow' }, t('panelRelations', fmt(ks.length + far.reduce((a, x) => a + x.ft.count, 0)))),
     summary ? h('p', { class: 'pr-summary' }, summary) : null,
-    anyProposed && !writes ? h('p', { class: 'review-note' }, t('panelReadOnly')) : null,
+    anyProposed && !writes ? h('p', { class: 'review-note' }, t('panelReadOnly'), h('code', { class: 'nowrap' }, 'engramdb dashboard --allow-writes'), t('panelReadOnlyEnd')) : null,
     groupEls.length || farEl ? [groupEls, farEl] : h('p', { class: 'hint' }, t('panelNone')),
     rows.length ? h('p', { class: 'hint pr-keys' }, t('panelKeys')) : null,
   ];

@@ -19,7 +19,7 @@ export const CORE = {
   empty: 'No memories to draw yet.',
   emptyScope: 'No memories in this top-level scope with these filters.',
   graphAria: (project, n) =>
-    `Graph of ${project}: ${plural(n, 'memory', 'memories')}. Arrow keys pan, plus and minus zoom, 0 fits, ] and [ step through memories (through the selected memory's relations once one is selected), Enter selects, Escape clears the selection.`,
+    `Graph of ${project}: ${plural(n, 'memory', 'memories')}. Arrow keys pan, plus and minus zoom, 0 fits, ] and [ step through memories (through the selected memory's relations once one is selected), Enter selects, Escape clears the selection and returns focus to the graph.`,
   toolsHint: 'Drag to pan · click a memory to select it, or a relation to pin it',
   wheelHint: 'Click the graph (or hold Ctrl/⌘) to zoom with the wheel',
   styleLabel: 'Style',
@@ -102,8 +102,12 @@ export const CORE = {
   panelOtherScopes: 'In other scopes',
   panelScopeRow: (name, n) => `${name} · ${plural(n, 'relation')}`,
   panelScopeAria: (name, n, c) => `${plural(n, 'relation')} to ${name}${c ? `, ${plural(c, 'contradiction')}` : ''}. Open ${name}.`,
-  panelReadOnly: 'Read-only dashboard: restart it with engramdb dashboard --allow-writes to review proposed relations here.',
-  panelKeys: '] and [ step through these relations, Enter selects the memory (or opens the scope), Escape clears the selection.',
+  // Around the command, which the panel keeps on one line.
+  panelReadOnly: 'Read-only dashboard: restart it with ',
+  panelReadOnlyEnd: ' to review proposed relations here.',
+  tipMore: (names, n) => `Also related: ${names.join(', ')}${n > names.length ? ` and ${n - names.length} more` : ''} (no room for their labels).`,
+  reviewMoved: 'The other memory of that relation is now superseded, so it is hidden here (turn on Invalidated to see it); this one is selected instead.',
+  panelKeys: '] and [ step through these relations, Enter selects the memory (or opens the scope), Escape clears the selection and returns to the graph.',
   panelSelectAria: (summary) => `Select ${summary}`,
   // Notes above the graph: a style that marks these ends says how.
   noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory`,

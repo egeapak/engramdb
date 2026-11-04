@@ -370,6 +370,14 @@ dl.meta dd { overflow-wrap: anywhere; }
 .pr-group { border-top: 1px solid var(--rule); padding-top: 8px; margin-top: 6px; }
 .pr-head { display: flex; align-items: center; gap: 6px; margin: 0 0 2px; font-size: 13px; font-weight: 700; flex-wrap: wrap; }
 .pr-head svg { flex: none; }
+.pr-icon { display: inline-flex; flex: none; }
+.pr-icon.flip { transform: scaleX(-1); }
+code.nowrap { white-space: nowrap; }
+.g-tip .tip-more { display: block; margin-top: 3px; color: var(--ink-2); }
+/* A focused memory's label with no free spot among the lit ones (views/graph.js relabel). */
+.graph .lbl.on.nolbl { display: none; }
+/* The neighbour the panel's current row names, while focus stays in the panel. */
+.graph .node.cur .ring { stroke: var(--focus); stroke-width: 3.4; }
 .g-card ul.pr-list { margin: 0 0 6px; }
 .g-card li.pr-row { border-top: 0; padding: 5px 6px; margin: 0 -6px; border-radius: 4px; }
 .g-card li.pr-row.cur { background: var(--bg-2); box-shadow: inset 3px 0 0 var(--focus); }

@@ -1746,6 +1746,56 @@ fn the_details_panel_words_every_relation_kind() {
         strings.contains("\n  relOther: "),
         "a kind with no words is named"
     );
+    // Direction, structurally: a memory reads `out` only for a relation it is
+    // the source of. Swapping either expression flips every directed label
+    // and would still pass the word table above; `node bench/details.mjs`
+    // runs `groupRelations` from both ends of every kind.
+    for needle in [
+        "const incoming = !e.symmetric && e.src !== n.id;",
+        "t(incoming ? known.in : known.out)",
+        "const oid = e.src === n.id ? e.dst : e.src;",
+    ] {
+        assert!(
+            details.contains(needle),
+            "details.js no longer has {needle:?}"
+        );
+    }
+}
+
+/// Where code in `code` reaches the browser dialog `name` (`confirm`,
+/// `alert`, `prompt`): through a global (`window.`, `globalThis.`, `self.`,
+/// with or without a call, so `const ask = window.confirm` counts), or as a
+/// bare call (`confirm(`, `confirm (`, `confirm?.(`) that is neither a method
+/// (`x.confirm(`), part of a longer name (`confirmEdge(`, `$confirm(`) nor a
+/// definition (`function confirm(`).
+fn dialog_uses(code: &str, name: &str) -> Vec<usize> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut out = Vec::new();
+    for (at, _) in code.match_indices(name) {
+        let end = at + name.len();
+        if code[end..].chars().next().is_some_and(ident) {
+            continue;
+        }
+        let before = code[..at].trim_end();
+        if let Some(obj) = before.strip_suffix('.').map(str::trim_end) {
+            if ["window", "globalThis", "self"].iter().any(|g| {
+                obj.ends_with(g)
+                    && !obj[..obj.len() - g.len()].ends_with(|c: char| ident(c) || c == '.')
+            }) {
+                out.push(at);
+            }
+            continue;
+        }
+        if code[..at].ends_with(ident) || before.ends_with("function") {
+            continue;
+        }
+        let rest = code[end..].trim_start();
+        let rest = rest.strip_prefix("?.").unwrap_or(rest).trim_start();
+        if rest.starts_with('(') {
+            out.push(at);
+        }
+    }
+    out
 }
 
 /// A confirm step is in the page (views/review.js), never a browser dialog:
@@ -1758,16 +1808,45 @@ fn the_frontend_never_opens_a_browser_dialog() {
             continue;
         }
         let code = js_scan(std::str::from_utf8(a.bytes).unwrap()).code;
-        for name in ["confirm(", "alert(", "prompt("] {
-            for (at, _) in code.match_indices(name) {
-                let before = code[..at].chars().next_back();
-                assert!(
-                    before.is_some_and(|c| c.is_alphanumeric() || c == '_'),
-                    "{} calls {name}",
-                    a.path
-                );
-            }
+        for name in ["confirm", "alert", "prompt"] {
+            assert_eq!(
+                dialog_uses(&code, name),
+                Vec::<usize>::new(),
+                "{} uses {name}",
+                a.path
+            );
         }
+    }
+    // The checker itself.
+    for hit in [
+        "window.confirm(x)",
+        "confirm(x)",
+        "confirm (x)",
+        "window.confirm?.(x)",
+        "const ask = window.confirm; ask();",
+        "globalThis.alert(1)",
+        "self . prompt('x')",
+        "if (a) alert(b);",
+    ] {
+        let name = ["confirm", "alert", "prompt"]
+            .into_iter()
+            .find(|n| hit.contains(n))
+            .unwrap();
+        assert_eq!(dialog_uses(hit, name).len(), 1, "missed {hit:?}");
+    }
+    for miss in [
+        "api.confirmEdge(pid)",
+        "box.confirm(x)",
+        "$confirm(x)",
+        "showConfirm(x)",
+        "function confirm(x) {}",
+        "myself.confirm(x)",
+        "const confirmed = 1;",
+    ] {
+        assert!(
+            dialog_uses(miss, "confirm").is_empty(),
+            "false positive {miss:?}"
+        );
     }
 }
 

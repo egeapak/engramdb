@@ -12,6 +12,7 @@ node bench/layout.mjs --n 300x8000                     # N memories with E relat
 node bench/layout.mjs --n 1000 --layouts scope-force --runs 9 --cold 5
 node bench/layout.mjs --graph saved-graph.json         # a real store (see below)
 node bench/layout.mjs --json                           # one JSON row per (layout, n)
+node bench/details.mjs                                 # the details panel's direction words from both ends (exits 1 on a wrong one)
 LAYOUT_OPTIONS='{"topPull":0.03}' node bench/layout.mjs --layouts scope-force
 ```
 

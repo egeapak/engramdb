@@ -37,9 +37,16 @@
 // focused) or with Ctrl/⌘ held, so the page still scrolls past it. Keys on
 // the focused graph: arrows pan, +/- zoom, 0 fits, ] and [ step through the
 // memories — or, with a memory selected, through its panel's rows, focusing
-// each neighbour — Enter selects the focused memory (or opens the focused
-// row's scope), Escape clears the selection (a second Escape returns focus
-// to the graph). The relations table below lists the proposed relations and
+// each neighbour (on a stacked phone layout focus stays on the row and the
+// neighbour is ringed, `.cur`), each row said in words through a live
+// region — Enter selects the focused memory (or opens the focused row's
+// scope), Escape clears the selection and returns focus to the graph (from
+// the panel too). A focus re-places the lit labels among themselves
+// (`relabel`, O(degree)) so revealed labels never overlap; one with no spot
+// is hidden and named in the tooltip, which sits in the box corner away
+// from the memory. After a review the first end of the relation still drawn
+// is selected again (the reviewer's memory, else — when it was superseded —
+// the other), with the result read out. The relations table below lists the proposed relations and
 // expands to all of them: the keyboard and screen-reader way to every edge.
 //
 // **Three render paths.** A store with more than OVERVIEW_MIN memories (after
@@ -68,6 +75,7 @@ import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.j
 import { filtered } from '../graph/tally.js';
 import { subKey, drawRegions, placeTags } from '../graph/opened.js';
 import { memoryPanel } from '../graph/details.js';
+import { placeLabels } from '../graph/labels.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
 import { OVERVIEW_MIN, renderOverview, overviewLayout } from './graph-overview.js';
@@ -1038,8 +1046,10 @@ export async function renderGraph(main, ctx) {
   let pinned = null; // {edge: k} | {node: i}
   let hovered = null; // the same, while hovered or focused
   function highlight(sel) {
-    for (const el of lit) el.classList.remove('on', 'nb');
+    for (const el of lit) el.classList.remove('on', 'nb', 'nolbl');
     lit = [];
+    restoreLabels();
+    hiddenNames = [];
     svg.classList.toggle('has-focus', !!sel);
     if (!sel) return;
     const mark = (el) => {
@@ -1067,11 +1077,67 @@ export async function renderGraph(main, ctx) {
       }
       // Last, so a self-relation never marks the focused memory a neighbour.
       markNode(sel.node, false);
+      relabel([sel.node, ...neighboursOf(sel.node)]);
     } else {
       const e = g.edges[sel.edge];
       mark(edgeEls[sel.edge]);
-      for (const id of [e.src, e.dst]) if (!(id === e.dst && e.dst_store) && byId.has(id)) markNode(byId.get(id));
+      const ends = [];
+      for (const id of [e.src, e.dst]) if (!(id === e.dst && e.dst_store) && byId.has(id)) ends.push(byId.get(id));
+      for (const i of ends) markNode(i);
+      relabel(ends);
     }
+  }
+
+  /** Memory `i`'s neighbours on the graph (indices, once each, not `i`). */
+  function neighboursOf(i) {
+    const out = new Set();
+    for (const k of adj[i]) {
+      const e = g.edges[k];
+      for (const id of [e.src, e.dst]) if (byId.has(id) && !(id === e.dst && e.dst_store) && byId.get(id) !== i) out.add(byId.get(id));
+    }
+    return [...out];
+  }
+
+  // The labels a focus shows are placed again among themselves, so none
+  // overlaps another (the layout placed them against every memory, and many
+  // had no spot there). O(degree): only the lit memories take part; the
+  // focused one (first) is placed first and always shown. A label that still
+  // finds no spot is hidden (`.nolbl`) and named in the tooltip instead (the
+  // panel lists every neighbour anyway). Moved labels go back on the next
+  // highlight.
+  let moved = [];
+  let hiddenNames = [];
+  function restoreLabels() {
+    for (const [el, x, y, anchor] of moved) {
+      el.setAttribute('x', x);
+      el.setAttribute('y', y);
+      el.setAttribute('text-anchor', anchor);
+    }
+    moved = [];
+  }
+  function relabel(idx) {
+    if (idx.length < 2) return;
+    const pos = [];
+    const nodes = idx.map((i, at) => {
+      const [x, y] = P(i);
+      pos.push(x, y);
+      const n = g.nodes[i];
+      return { id: n.id, r: radius(n), label: labels[i], degree: at === 0 ? 1e9 : n.degree, weight: reads(n) };
+    });
+    const out = placeLabels(nodes, pos, [], { corners: true });
+    out.forEach((lp, at) => {
+      const el = labelEls[idx[at]];
+      if (!el) return;
+      if (!lp.placed && at > 0) {
+        el.classList.add('nolbl');
+        hiddenNames.push(labels[idx[at]]);
+        return;
+      }
+      moved.push([el, el.getAttribute('x'), el.getAttribute('y'), el.getAttribute('text-anchor')]);
+      el.setAttribute('x', lp.x);
+      el.setAttribute('y', lp.y);
+      el.setAttribute('text-anchor', lp.anchor);
+    });
   }
 
   /**
@@ -1109,10 +1175,20 @@ export async function renderGraph(main, ctx) {
     }
     let x;
     let y;
+    // A memory's tooltip sits in the corner of the box away from it, so it
+    // never covers the neighbour labels its focus just revealed; none for the
+    // selected memory, whose panel says it all.
+    let corner = false;
     if (sel.node !== undefined) {
+      if (pinned && pinned.node === sel.node) {
+        tip.hidden = true;
+        return;
+      }
       const n = g.nodes[sel.node];
       [x, y] = P(sel.node);
-      mount(tip, h('strong', null, n.summary), h('span', { class: 'muted' }, ` · ${TYPE_LABEL[n.type] || n.type} · ${plural(adj[sel.node].length, 'relation')}`));
+      corner = true;
+      const more = hiddenNames.length ? h('span', { class: 'tip-more' }, t('tipMore', hiddenNames.slice(0, 4), hiddenNames.length)) : null;
+      mount(tip, h('strong', null, n.summary), h('span', { class: 'muted' }, ` · ${TYPE_LABEL[n.type] || n.type} · ${plural(adj[sel.node].length, 'relation')}`), more);
     } else {
       const e = g.edges[sel.edge];
       const m = along(lay.routes[sel.edge], 0.5);
@@ -1131,10 +1207,17 @@ export async function renderGraph(main, ctx) {
     requestAnimationFrame(() => {
       if (at !== tipSeq || tip.hidden) return;
       const w = graphBox.clientWidth;
+      const bh = graphBox.clientHeight;
       tip.style.maxWidth = Math.min(320, w - 16) + 'px';
       const tw = tip.offsetWidth;
-      tip.style.left = Math.max(8, Math.min(w - tw - 8, sx - tw / 2)) + 'px';
-      tip.style.top = Math.max(8, sy - tip.offsetHeight - 14) + 'px';
+      const th = tip.offsetHeight;
+      if (corner) {
+        tip.style.left = (sx < w / 2 ? w - tw - 8 : 8) + 'px';
+        tip.style.top = (sy < bh / 2 ? bh - th - 8 : 8) + 'px';
+      } else {
+        tip.style.left = Math.max(8, Math.min(w - tw - 8, sx - tw / 2)) + 'px';
+        tip.style.top = Math.max(8, sy - th - 14) + 'px';
+      }
       tip.classList.remove('measuring');
     });
   }
@@ -1143,6 +1226,7 @@ export async function renderGraph(main, ctx) {
   function pin(sel, focusCard) {
     pinned = sel;
     if (reviewNote && !(sel.node !== undefined && g.nodes[sel.node].id === reviewNote.node)) reviewNote = null;
+    clearCur();
     let x;
     let y;
     if (sel.edge !== undefined) {
@@ -1170,6 +1254,7 @@ export async function renderGraph(main, ctx) {
     if (!pinned) return;
     pinned = null;
     reviewNote = null;
+    clearCur();
     highlight(null);
     renderCard();
   }
@@ -1194,31 +1279,73 @@ export async function renderGraph(main, ctx) {
   let panelRows = [];
   let rowAt = -1;
   const announce = h('p', { class: 'sr-only', 'aria-live': 'polite' });
+  // The neighbour the current row names, ringed (`.cur`) while focus stays
+  // in the panel (a stacked phone layout, where the graph is off screen).
+  let curNode = -1;
+  function clearCur() {
+    if (curNode >= 0 && nodeEls[curNode]) nodeEls[curNode].classList.remove('cur');
+    curNode = -1;
+  }
   function stepRow(dir) {
     if (rowAt >= 0 && panelRows[rowAt]) panelRows[rowAt].li.classList.remove('cur');
+    clearCur();
     rowAt = rowAt < 0 ? (dir > 0 ? 0 : panelRows.length - 1) : (rowAt + dir + panelRows.length) % panelRows.length;
     const row = panelRows[rowAt];
     row.li.classList.add('cur');
-    row.li.scrollIntoView({ block: 'nearest' });
+    // Stacked (phone): the graph is far above the panel, so focus stays on
+    // the row's own button and the neighbour is only ringed. Otherwise
+    // focus goes to the neighbour on the graph (quietly: the selection's
+    // highlight stays).
+    const stacked = window.matchMedia && window.matchMedia('(max-width: 980px)').matches;
     quietFocus = true;
     try {
       if (row.node !== null) {
         const [x, y] = P(row.node);
         if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
-        nodeEls[row.node].focus({ preventScroll: true });
-        announce.textContent = '';
+        nodeEls[row.node].classList.add('cur');
+        curNode = row.node;
+      }
+      const btn = row.li.querySelector('button');
+      if (stacked && btn) {
+        btn.focus({ preventScroll: true });
+        row.li.scrollIntoView({ block: 'nearest' });
       } else {
-        graphBox.focus({ preventScroll: true });
-        announce.textContent = row.text;
+        row.li.scrollIntoView({ block: 'nearest' });
+        if (row.node !== null) nodeEls[row.node].focus({ preventScroll: true });
+        else graphBox.focus({ preventScroll: true });
       }
     } finally {
       quietFocus = false;
     }
+    // Always said in words ("Supported by: …"): a focused memory's own name
+    // carries no direction. Cleared first so the same row twice is said twice.
+    announce.textContent = '';
+    requestAnimationFrame(() => {
+      if (panelRows[rowAt] === row) announce.textContent = row.text;
+    });
   }
-  const afterReview = (e) => (out, text) => {
-    afterReviewPins.set(p.id, { node: e.src, text });
+  // `ids`: the memories to come back to, in order; the first still drawn
+  // after the reload is selected (a loser the review superseded is gone
+  // unless the Invalidated filter is on, so its other end takes over).
+  const afterReview = (ids) => (out, text) => {
+    afterReviewPins.set(p.id, { ids, text });
     setTimeout(() => ctx.refresh(), 900);
   };
+  const otherEnd = (e, id) => (e.dst_store ? null : e.src === id ? e.dst : e.src);
+  /** The review's result line: empty when inserted, its text set a moment
+   * later, so a screen reader announces it (a live region that arrives with
+   * its text already in it often is not). */
+  function noteEl(rn) {
+    const el = h('p', { class: 'review-status', role: 'status', 'aria-live': 'polite', tabindex: '-1' });
+    if (rn.said) el.textContent = rn.text;
+    else
+      setTimeout(() => {
+        if (!el.isConnected) return;
+        el.textContent = rn.text;
+        rn.said = true;
+      }, 120);
+    return el;
+  }
 
   /** The card shows the pinned memory or relation, or the graph summary. */
   function renderCard() {
@@ -1252,14 +1379,14 @@ export async function renderGraph(main, ctx) {
         e.state === 'dangling' ? h('p', { class: 'hint' }, 'The far end was deleted. The relation stays in the source file until someone unlinks it.') : null,
         e.state === 'unknown' ? h('p', { class: 'hint' }, 'The far end is in another store that this dashboard could not open, so it is unknown, not missing.') : null,
         e.status === 'proposed'
-          ? [h('div', { class: 'eyebrow' }, 'Review'), reviewControls({ ...e, src_summary: src && src.summary, dst_summary: dstNode && dstNode.summary }, ctx, { onDone: afterReview(e) })]
+          ? [h('div', { class: 'eyebrow' }, 'Review'), reviewControls({ ...e, src_summary: src && src.summary, dst_summary: dstNode && dstNode.summary }, ctx, { onDone: afterReview([e.src, otherEnd(e, e.src)].filter(Boolean)) })]
           : null,
       );
       return;
     }
     if (sel && sel.node !== undefined) {
       const n = g.nodes[sel.node];
-      const note = reviewNote && reviewNote.node === n.id ? h('p', { class: 'review-status', role: 'status' }, reviewNote.text) : null;
+      const note = reviewNote && reviewNote.node === n.id ? noteEl(reviewNote) : null;
       const panel = memoryPanel({
         g,
         byId,
@@ -1281,7 +1408,7 @@ export async function renderGraph(main, ctx) {
           const src = byId.has(e.src) ? g.nodes[byId.get(e.src)] : null;
           const dst = !e.dst_store && byId.has(e.dst) ? g.nodes[byId.get(e.dst)] : null;
           // After the reload, the selected memory comes back selected.
-          return reviewControls({ ...e, src_summary: src && src.summary, dst_summary: dst && dst.summary }, ctx, { viewer: n.id, onDone: afterReview({ src: n.id }) });
+          return reviewControls({ ...e, src_summary: src && src.summary, dst_summary: dst && dst.summary }, ctx, { viewer: n.id, onDone: afterReview([n.id, otherEnd(e, n.id)].filter(Boolean)) });
         },
       });
       panelRows = panel.rows;
@@ -1297,6 +1424,7 @@ export async function renderGraph(main, ctx) {
     mount(
       card,
       h('div', { class: 'eyebrow' }, 'Details'),
+      reviewNote && reviewNote.node === null ? noteEl(reviewNote) : null,
       h('h3', null, t('cardTitle')),
       h('p', { class: 'hint' }, t('cardHint')),
       h(
@@ -1429,9 +1557,16 @@ export async function renderGraph(main, ctx) {
   const back = afterReviewPins.get(p.id);
   if (back) {
     afterReviewPins.delete(p.id);
-    if (byId.has(back.node)) {
-      reviewNote = back;
-      pin({ node: byId.get(back.node) }, true);
+    const id = back.ids.find((x) => byId.has(x));
+    if (id === undefined) {
+      // Neither end is drawn now: the summary card carries the result.
+      reviewNote = { node: null, text: back.text };
+      renderCard();
+      const el = card.querySelector('.review-status');
+      if (el) el.focus();
+    } else {
+      reviewNote = { node: id, text: id === back.ids[0] ? back.text : `${back.text} ${t('reviewMoved')}` };
+      pin({ node: byId.get(id) }, true);
     }
   }
 }

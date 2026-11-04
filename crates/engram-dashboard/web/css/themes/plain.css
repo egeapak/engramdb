@@ -72,7 +72,10 @@
 /* No opacity transition: animating the fade on every memory and relation
    made each hover frame re-layerize all of them (measured 15.8 → 9.2 ms p50
    per frame at 800 memories). */
-[data-graph-style="plain"] .graph.has-focus .node:not(.on), [data-graph-style="plain"] .graph.has-focus .cx:not(.on), [data-graph-style="plain"] .graph.has-focus .lbl:not(.on) { opacity: .14; }
+[data-graph-style="plain"] .graph.has-focus .node:not(.on), [data-graph-style="plain"] .graph.has-focus .cx:not(.on) { opacity: .14; }
+/* Faded labels stay a little stronger than faded memories: on a phone the
+   rest of the graph would otherwise read as nothing. */
+[data-graph-style="plain"] .graph.has-focus .lbl:not(.on) { opacity: .24; }
 [data-graph-style="plain"] .graph.has-focus .cx.on { --zk: 1.5; }
 /* The focused memory (.on, not .nb) is outlined; its neighbours (.nb) keep
    their own look at full strength, and their labels show in a lighter weight. */
