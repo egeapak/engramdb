@@ -1,4 +1,4 @@
-// Graph view: memories are nodes, coloured by top scope and shaped by type;
+// Graph view: memories are nodes, shaped by type and grouped by top scope;
 // relations are the typed edges between them.
 //
 // **Core and styles.** This module is the core: data loading, the filters
@@ -502,6 +502,7 @@ export async function renderGraph(main, ctx) {
   // ---- relations (redrawn when the display filters change) ----------------
   function drawEdges() {
     const ks = visible();
+    const scale = view ? (graphBox.clientWidth || 1) / view.w : 1;
     edgeEls = new Array(g.edges.length).fill(null);
     adj = g.nodes.map(() => []);
     const frag = [];
@@ -512,7 +513,9 @@ export async function renderGraph(main, ctx) {
       adj[si].push(k);
       if (ti >= 0) adj[ti].push(k);
       const pts = lay.routes[k];
-      const drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0 });
+      // `scale`: screen px per layout unit now, for a style that sizes
+      // what it draws along a relation by the zoom.
+      const drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
       // The wide transparent hit path is the core's, drawn last (on top).
       const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
       const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
@@ -540,6 +543,9 @@ export async function renderGraph(main, ctx) {
     const scale = (graphBox.clientWidth || 1) / view.w;
     svg.classList.toggle('z-near', scale >= 0.8);
     svg.classList.toggle('z-mid', scale >= 0.5 && scale < 0.8);
+    // A style may follow the zoom with one write on the <svg> (Plain: its
+    // relations' width); never per relation, so pan / zoom stays cheap.
+    if (theme.zoomed) theme.zoomed(svg, scale);
     viewports.set(viewKey, { ...view });
     while (viewports.size > 8) viewports.delete(viewports.keys().next().value);
   }

@@ -3,7 +3,9 @@
 // A style is a module under themes/<id>/index.js exporting the interface
 // the core graph view calls (a Rust test checks every one does): `id`,
 // `name`, `strings`, `layout`, `drawBackdrop`, `drawNode`, `drawEdge`,
-// `edgeSample` and `legend`. The core keeps data, filters, the URL hash,
+// `edgeSample` and `legend`, plus an optional `zoomed(svg, scale)` the core
+// calls on every pan / zoom (one write on the <svg>, never per relation).
+// The core keeps data, filters, the URL hash,
 // selection, keyboard, the details card, the relations table and review.
 //
 // Precedence: the graph hash's `style=` (so a link shows what its author

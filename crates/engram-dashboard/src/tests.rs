@@ -1523,6 +1523,80 @@ fn every_graph_style_css_is_linked_and_scoped() {
     );
 }
 
+/// Plain draws relations with its own tapered shapes (phase D), not with the
+/// copy of Grid's arrowhead glyphs it started from: no `glyphs.js` under
+/// Plain, no import of one, and none of Grid's relation-glyph rules
+/// (`.cn` stroke, halo, chevron, ⊣ bar, ⚠ sign, stub caps) left in its CSS.
+/// Grid keeps its own glyphs, untouched.
+#[test]
+fn plain_draws_relations_without_grid_glyphs() {
+    for a in crate::assets::embedded() {
+        if a.path.starts_with("js/graph/themes/plain/") {
+            assert!(!a.path.ends_with("glyphs.js"), "{} is back", a.path);
+            let src = std::str::from_utf8(a.bytes).unwrap();
+            assert!(!src.contains("glyphs.js"), "{} imports glyphs", a.path);
+            assert!(
+                !src.contains("<marker") && !src.contains("'marker'"),
+                "{}: arrowhead marker",
+                a.path
+            );
+        }
+    }
+    let css = asset_text("css/themes/plain.css");
+    for sel in css_selectors(css) {
+        for glyph in [
+            " .cn", " .halo", " .chev", " .term", " .wsign", " .cap", ".cap ",
+        ] {
+            assert!(
+                !sel.contains(glyph),
+                "plain.css keeps Grid's {glyph:?}: {sel}"
+            );
+        }
+    }
+    assert!(asset_text("js/graph/themes/grid/index.js").contains("from './glyphs.js'"));
+}
+
+/// The legend can never drift from the graph: Plain's relation samples
+/// (legend, filter chips, tables, other pages) and its graph relations are
+/// all built by the one geometry function, `relationPath`, and the legend is
+/// handed exactly those samplers.
+#[test]
+fn plain_legend_swatches_share_the_relation_drawing() {
+    let rel = asset_text("js/graph/themes/plain/relations.js");
+    let body = |name: &str| {
+        let at = rel
+            .find(&format!("export function {name}("))
+            .unwrap_or_else(|| panic!("relations.js has no {name}"));
+        let rest = &rel[at..];
+        // Up to the next top-level declaration.
+        let end = rest[1..]
+            .find("\nexport ")
+            .or_else(|| rest[1..].find("\nfunction "))
+            .map_or(rest.len(), |e| e + 1);
+        &rest[..end]
+    };
+    for f in ["drawRelation", "relationSample", "stubSwatch"] {
+        assert!(
+            body(f).contains("relationPath("),
+            "{f} does not draw with relationPath"
+        );
+    }
+    let index = asset_text("js/graph/themes/plain/index.js");
+    for want in [
+        "export const edgeSample = relationSample;",
+        "edgeSample: relationSample,",
+        "stubSample: stubSwatch,",
+        "direction: true,",
+        "drawRelation(e, pts, ends)",
+    ] {
+        assert!(index.contains(want), "plain/index.js lacks {want:?}");
+    }
+    // The direction sentence is core wording, shown only for a tapered style.
+    assert!(asset_text("js/graph/strings.js").contains("legendDirection: 'Wide end = source"));
+    assert!(asset_text("js/graph/legend.js").contains("direction ? h('li'"));
+    assert!(!asset_text("js/graph/themes/grid/index.js").contains("direction: true"));
+}
+
 /// The selector of every style rule in `css` (comments dropped, `@media` /
 /// `@supports` blocks entered, other at-rules skipped).
 fn css_selectors(css: &str) -> Vec<String> {

@@ -13,8 +13,10 @@ import { KINDS, kindLabel } from '../relations.js';
  *   nodeSample(kind, type)    a legend memory (`kind`: hub, never, chal or null)
  *   edgeSample(kind, status)  a relation
  *   stubSample(state)         a relation ending at a `dangling` / `unknown` far end
+ * and `direction: true` for a style that shows direction by a tapered
+ * relation (wide at the source), which adds the core's sentence saying so.
  */
-export function buildLegend(g, t, { scopeSample, nodeSample, edgeSample, stubSample }) {
+export function buildLegend(g, t, { scopeSample, nodeSample, edgeSample, stubSample, direction }) {
   const types = [...new Set(g.nodes.map((n) => n.type))].sort();
   return [
     h(
@@ -49,6 +51,7 @@ export function buildLegend(g, t, { scopeSample, nodeSample, edgeSample, stubSam
       h(
         'ul',
         null,
+        direction ? h('li', { class: 'lg-dir' }, t('legendDirection')) : null,
         KINDS.map((k) => h('li', null, edgeSample(k, 'confirmed'), kindLabel(k))),
         h('li', null, edgeSample('contradicts', 'proposed'), t('legendProposedContradiction')),
         h('li', null, edgeSample('supports', 'proposed'), t('legendProposedOther')),

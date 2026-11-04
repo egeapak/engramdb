@@ -1,38 +1,58 @@
 // Plain: the neutral graph style, and the default. Memories are placed by
 // the core's scope-aware force layout (graph/scope-force.js): no grid, no
-// scope chains, no badges; relations are straight. Each top scope is a soft
-// region in its colour with one name, and memories keep their scope's
-// colour as a fill for now (shape follows type). Relations are drawn with a
-// copy of Grid's glyphs (./glyphs.js) until phase D gives Plain its own
-// (tapered strokes, no arrowheads).
+// scope chains, no badges; relations are straight.
+//
+// Memories are one neutral fill (shape follows type): colour belongs to the
+// relations, whose kind it names. Scopes are told apart by their soft
+// region and their name. The first seven top scopes (colour slots 0–6) get
+// seven tints; past seven the tints repeat, so slots 7–13 add a diagonal
+// hatch over the tint and slots 14+ a dot grid (the same rule as the
+// scope badges, whose shape changes past seven): two scopes that share a
+// tint never share a texture, and every region is also named.
+//
+// Relations are drawn by ./relations.js: tapered wedges (wide at the
+// source) instead of arrowheads, kind by colour and shape; see its docs.
 
 import { s } from '../../../dom.js';
 import { plural } from '../../../format.js';
-import { slot, typeShape } from '../../../scopes.js';
-import { DIRECTED } from '../../../relations.js';
-import { pathD, along, offset } from '../../geometry.js';
+import { slot, variant, typeShape } from '../../../scopes.js';
 import { buildLegend } from '../../legend.js';
 import { radius } from '../../radius.js';
-import { chevron, terminal, warnSign, stubCap, stubSample, edgeSample as sample } from './glyphs.js';
+import { drawRelation, fadeDefs, relationSample, stubSwatch, zoomFactor } from './relations.js';
 
 export const id = 'plain';
 export const name = 'Plain';
 
 export const strings = {
-  // The glyphs are Grid's for now (phase D), so is their wording.
-  legendProposedContradiction: 'Proposed contradiction (dashed, ⚠)',
-  noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory (end marked ⊗)`,
-  noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (drawn to “?”)`,
+  intro: () => ['Memories sit in shaded, named regions by top-level scope; shape follows type.', 'Size follows reads. A tapered relation runs from its wide end (the source) to its narrow end.'],
+  legendProposedContradiction: 'Proposed contradiction (dashed zigzag)',
+  legendProposedOther: 'Any other proposed relation: dashed, a chevron points to the target',
+  legendRejected: 'Rejected: faint and dotted',
+  noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory (fading, ends in a bar)`,
+  noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (fading out)`,
 };
 
 /** The core's scope-aware force layout (graph/scope-force.js), default options. */
 export const layout = { name: 'scope-force', options: {} };
 
+/** A region texture's pattern id: `v` the slot's variant (1 hatch, 2 dots), `c` its tint. */
+const patternId = (v, c) => `pl-pat-${v}-${c}`;
+
+function regionPattern(v, c) {
+  const mark =
+    v === 1
+      ? s('path', { class: ['tex', 'stroke-' + c], d: 'M0,0 V9' })
+      : s('circle', { class: ['tex', 'fill-' + c], cx: 4.5, cy: 4.5, r: 1.5 });
+  return s('pattern', { id: patternId(v, c), width: 9, height: 9, patternUnits: 'userSpaceOnUse', patternTransform: v === 1 ? 'rotate(45)' : null }, mark);
+}
+
 /**
  * Under the relations, each named top scope's soft region: one path per
  * scope, the union of a disc around each of its memories (`lay.region_r`;
- * one path, so overlapping discs never darken). Over the relations, one name
- * per top scope where the layout found it a free spot (`lay.scopes`).
+ * one path, so overlapping discs never darken), plus its texture past the
+ * seventh scope (module docs). Over the relations, one name per top scope
+ * where the layout found it a free spot (`lay.scopes`). The stub fade's
+ * mask rides along in the lower layer.
  */
 export function drawBackdrop(g, lay) {
   const rr = lay.region_r || 24;
@@ -49,9 +69,21 @@ export function drawBackdrop(g, lay) {
     if (!arcs.has(n.top_scope)) arcs.set(n.top_scope, { slot: n.color_slot, d: [] });
     arcs.get(n.top_scope).d.push(d);
   });
-  const below = s('g', { class: 'scope-regions', 'aria-hidden': 'true' });
+  const defs = fadeDefs();
+  const patterns = new Set();
+  const below = s('g', { class: 'scope-regions', 'aria-hidden': 'true' }, defs);
   for (const [, a] of [...arcs].sort((p, q) => (p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : 0))) {
-    below.appendChild(s('path', { class: ['region', 'fill-' + slot(a.slot)], d: a.d.join('') }));
+    const d = a.d.join('');
+    const c = slot(a.slot);
+    below.appendChild(s('path', { class: ['region', 'fill-' + c], d }));
+    const v = variant(a.slot);
+    if (v) {
+      if (!patterns.has(patternId(v, c))) {
+        patterns.add(patternId(v, c));
+        defs.appendChild(regionPattern(v, c));
+      }
+      below.appendChild(s('path', { class: 'region-tex', d, fill: `url(#${patternId(v, c)})` }));
+    }
   }
   const above = s('g', { class: 'scope-names', 'aria-hidden': 'true' });
   for (const nm of lay.scopes || []) {
@@ -66,54 +98,63 @@ export function drawBackdrop(g, lay) {
   return { below, above };
 }
 
+/** One neutral fill for every memory (module docs); shape follows type. */
 export function drawNode(n, r) {
   return {
-    cls: ['pl', 'fill-' + slot(n.color_slot)],
+    cls: ['pl'],
     parts: [n.challenged ? s('circle', { class: 'chal-ring', r: r + 3.5 }) : null, typeShape(n.type, r)],
   };
 }
 
-/** Today's relation drawing along the layout's path (see ./glyphs.js). */
+/** One `<path>` per relation (./relations.js); the core adds the hit path. */
 export function drawEdge(e, pts, ends) {
-  const d = pathD(pts);
-  const parts = [s('path', { class: 'halo', d }), s('path', { class: 'cn', d })];
-  if (e.kind === 'contradicts') {
-    const a = offset(pts, ends.rs);
-    parts.push(terminal(a.x, a.y, a.ang));
-    if (!ends.stub) {
-      const b = offset(pts, ends.rt, true);
-      parts.push(terminal(b.x, b.y, b.ang));
-    }
-    if (e.status === 'proposed') {
-      const m = along(pts, 0.5);
-      parts.push(warnSign(m.x, m.y, 0.85));
-    }
-  } else if (DIRECTED[e.kind]) {
-    const b = offset(pts, ends.rt + 2, true);
-    parts.push(chevron(b.x, b.y, b.ang + Math.PI));
-  }
-  if (ends.stub) {
-    const end = pts[pts.length - 1];
-    parts.push(stubCap(end[0], end[1], e.state === 'unknown' ? 'unknown' : 'dangling'));
-  }
-  return { cls: [], parts };
+  return { cls: [], parts: [drawRelation(e, pts, ends)] };
 }
 
-export const edgeSample = sample;
+let zw = null;
+
+/**
+ * The core calls this on every pan / zoom with the scale (screen px per
+ * layout unit): one custom property on the `<svg>`, written only when it
+ * moved, rescales every relation's width (./relations.js).
+ */
+export function zoomed(svg, scale) {
+  const z = zoomFactor(scale);
+  if (zw !== null && Math.abs(z - zw) / zw < 0.02 && svg.style.getPropertyValue('--zw')) return;
+  zw = z;
+  svg.style.setProperty('--zw', z.toFixed(3));
+}
+
+export const edgeSample = relationSample;
 
 function legendNode(kind, type) {
   return s(
     'svg',
     { width: 18, height: 18, viewBox: '-9 -9 18 18', 'aria-hidden': 'true', class: 'lg-node' },
-    s('g', { class: ['node', 'pl', 'fill-0', kind] }, kind === 'chal' ? s('circle', { class: 'chal-ring', r: 7.5 }) : null, type ? typeShape(type, 4.6) : s('circle', { class: 'sh', r: 5 })),
+    s('g', { class: ['node', 'pl', kind] }, kind === 'chal' ? s('circle', { class: 'chal-ring', r: 7.5 }) : null, type ? typeShape(type, 4.6) : s('circle', { class: 'sh', r: 5 })),
   );
+}
+
+/** A scope's region swatch: its tint, and its texture past the seventh scope (none for "No scope", which has no region). */
+function scopeSwatch(l) {
+  if (!l.name) return null;
+  const c = slot(l.slot);
+  const v = variant(l.slot);
+  const tex =
+    v === 1
+      ? s('path', { class: ['tex', 'stroke-' + c], d: 'M-6,2 L2,-6 M-6,8 L8,-6 M2,8 L8,2' })
+      : v === 2
+        ? [-3, 3].flatMap((x) => [-3, 3].map((y) => s('circle', { class: ['tex', 'fill-' + c], cx: x, cy: y, r: 1.4 })))
+        : null;
+  return s('svg', { width: 14, height: 14, viewBox: '-7 -7 14 14', 'aria-hidden': 'true', class: 'lg-region' }, s('rect', { class: ['region', 'fill-' + c], x: -6, y: -6, width: 12, height: 12, rx: 3 }), tex);
 }
 
 export function legend(g, t) {
   return buildLegend(g, t, {
-    scopeSample: (l) => s('svg', { width: 14, height: 14, viewBox: '-7 -7 14 14', 'aria-hidden': 'true' }, s('circle', { class: 'fill-' + slot(l.slot), r: 5 })),
+    scopeSample: scopeSwatch,
     nodeSample: legendNode,
-    edgeSample: sample,
-    stubSample,
+    edgeSample: relationSample,
+    stubSample: stubSwatch,
+    direction: true,
   });
 }

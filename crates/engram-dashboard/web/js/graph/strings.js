@@ -34,6 +34,8 @@ export const CORE = {
   legendChallenged: 'Challenged',
   legendSize: 'Size follows reads',
   legendRelations: 'Relations',
+  // Only for a style that tapers relations (buildLegend's `direction`).
+  legendDirection: 'Wide end = source, narrow end = target',
   legendProposedContradiction: 'Proposed contradiction',
   legendProposedOther: 'Any other proposed relation: faded',
   legendRejected: 'Rejected',
