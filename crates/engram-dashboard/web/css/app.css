@@ -383,8 +383,7 @@ dl.meta dd { overflow-wrap: anywhere; }
 .so-name { font-size: 12.5px; fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
 .so-name .nm { font-weight: 700; }
 .so-name .ct { fill: var(--ink-3); }
-.so-name.unplaced { display: none; }
-.so-scope.on .so-name.unplaced, .so-scope:focus .so-name.unplaced { display: inline; }
+.so-name.forced { font-size: 11.5px; }
 .so-pill rect { fill: var(--red); stroke: var(--bg); stroke-width: 1.5; }
 .so-pill text { fill: #fff; font-size: 10.5px; font-weight: 700; text-anchor: middle; }
 .so-graph.has-focus .so-pill { opacity: .35; }
@@ -393,7 +392,9 @@ dl.meta dd { overflow-wrap: anywhere; }
 .xs-stub { stroke: var(--ink-3); stroke-opacity: .3; }
 .xs-stub.contra { stroke: var(--red); stroke-opacity: .4; }
 .graph.has-focus .xs-stub { stroke-opacity: .08; }
-.graph .xs-stub.on { stroke-opacity: .8; }
+.xs-stubs.many .xs-stub { stroke-opacity: .09; }
+.xs-stubs.many .xs-stub.contra { stroke-opacity: .16; }
+.graph .xs-stub.on, .graph .xs-stubs.many .xs-stub.on { stroke-opacity: .8; }
 .xs-tag { cursor: pointer; }
 .xs-tag rect { fill: var(--bg); stroke: var(--ink-3); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .xs-tag.contra rect { stroke: var(--red); }

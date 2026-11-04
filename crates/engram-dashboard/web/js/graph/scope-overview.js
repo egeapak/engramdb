@@ -5,7 +5,9 @@
 //
 // Input (graph/layouts.js's shape, with one node per scope):
 //   { layout: 'scope-overview',
-//     nodes: [{ id: scope name ('' for none), count, label }],
+//     nodes: [{ id: scope name ('' for none), count, label, name }],
+//       (`label`: "name · count"; `name`: the shown name alone, the
+//       fallback when the full label has no room)
 //     edges: [{ s, t, n }]  one per related scope pair (s ≠ t), `n` its
 //                           relations under no display filter, so toggling
 //                           a kind never moves a disc,
@@ -17,8 +19,9 @@
 //   routes: per pair, [start, control, end]: from one disc's rim to the
 //           other's, bowed a little to one side so two bands leaving a disc
 //           in about the same direction part (draw it as a quadratic curve).
-//   labels: "name · count" above the disc, else below, right or left; one
-//           with no free spot is `placed: false` (shown while focused).
+//   labels: "name · count" above the disc, else below, right or left; else
+//           the name alone (`short`); else forced above it (`forced`), so
+//           every disc is named (`placed` is always true).
 //   bounds: the whole box.
 //
 // Packing reuses scope-force.js's `pack` (affinity first, compact for the
@@ -131,30 +134,44 @@ export function layout(input) {
     }
     return true;
   };
-  for (const i of order) {
-    const nd = nodes[i];
-    const text = nd.label || `${nd.id} · ${nd.count}`;
-    const w = Math.ceil(text.length * CHAR_W) + 6;
+  // A disc is never left nameless: the full "name · count" first, then the
+  // name alone, and failing both the full label above the disc (below when
+  // above would leave the box) even where it overlaps (`forced`).
+  const spotsFor = (i, w) => {
     const x = pos[2 * i];
     const y = pos[2 * i + 1];
     const rr = r[i];
     // [box left, box top, text x, text baseline y, anchor]
-    const spots = [
+    return [
       [x - w / 2, y - rr - 3 - LABEL_H, x, y - rr - 7, 'middle'],
       [x - w / 2, y + rr + 3, x, y + rr + 3 + LABEL_H - 5, 'middle'],
       [x + rr + 5, y - LABEL_H / 2, x + rr + 8, y + 4.5, 'start'],
       [x - rr - 5 - w, y - LABEL_H / 2, x - rr - 8, y + 4.5, 'end'],
     ];
-    let pick = null;
-    for (const sp of spots) {
-      if (free(sp[0], sp[1], w, i)) {
-        pick = sp;
-        break;
+  };
+  for (const i of order) {
+    const nd = nodes[i];
+    const full = nd.label || `${nd.id} · ${nd.count}`;
+    const short = nd.name || nd.id || full;
+    let done = null;
+    for (const [text, isShort] of [[full, false], [short, true]]) {
+      const w = Math.ceil(text.length * CHAR_W) + 6;
+      for (const sp of spotsFor(i, w)) {
+        if (free(sp[0], sp[1], w, i)) {
+          done = { sp, w, short: isShort };
+          break;
+        }
       }
+      if (done) break;
     }
-    const sp = pick || spots[0];
-    if (pick) boxes.push([sp[0], sp[1], w]);
-    labels[i] = { x: sp[2], y: sp[3], w, anchor: sp[4], placed: !!pick };
+    if (!done) {
+      const w = Math.ceil(full.length * CHAR_W) + 6;
+      const [above, below] = spotsFor(i, w);
+      done = { sp: above[1] >= 2 ? above : below, w, short: false, forced: true };
+    }
+    const sp = done.sp;
+    boxes.push([sp[0], sp[1], done.w]);
+    labels[i] = { x: sp[2], y: sp[3], w: done.w, anchor: sp[4], placed: true, short: done.short, forced: !!done.forced };
   }
   return { pos, r, routes, labels, bounds: { x: 0, y: 0, w: W, h: H } };
 }

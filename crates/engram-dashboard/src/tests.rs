@@ -2470,6 +2470,8 @@ async fn an_opened_scope_has_its_memories_and_one_stub_per_far_scope() {
     .await;
     assert_eq!(by_name(&v, "stub_scopes")[""]["count"], 2, "{v}");
     assert_eq!(by_name(&v, "stubs").len(), 2, "{v}");
+    // a's `d supersedes a` is in `stub_scopes` already: not hidden as well.
+    assert_eq!(v["counts"]["hidden"], 0, "{v}");
 
     // The other side: hooks sees c's two relations leave for storage and "".
     let (_, v) = get_json(
@@ -2486,6 +2488,79 @@ async fn an_opened_scope_has_its_memories_and_one_stub_per_far_scope() {
         stubs[&format!("{c}|")]["kinds"]["related_to"]["proposed"],
         1
     );
+}
+
+#[tokio::test]
+async fn scope_totals_keep_both_kinds_inside_a_scope_and_follow_invalidated() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // Inside storage: a symmetric (a ⊣ b, proposed) and a directed (a supports b) relation.
+    for (kind, status) in [
+        (LinkKind::Contradicts, LinkStatus::Proposed),
+        (LinkKind::Supports, LinkStatus::Confirmed),
+    ] {
+        ops_links::link(
+            &store,
+            LinkParams {
+                src: fx.ids[0].clone(),
+                kind,
+                dst: fx.ids[1].clone(),
+                dst_store: None,
+                confidence: Some(0.9),
+                origin: LinkOrigin::Human,
+                status: Some(status),
+                note: None,
+            },
+            Surface::Cli,
+        )
+        .await
+        .unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/graph", fx.id);
+    let (_, v) = get_json(&app, &base).await;
+    let pairs = by_name(&v, "scope_edges");
+    let sym = &pairs["storage|storage|false"];
+    assert_eq!(sym["kinds"]["contradicts"]["proposed"], 1, "{v}");
+    assert_eq!(sym["contradictions"], 1);
+    assert_eq!(
+        pairs["storage|storage|true"]["kinds"]["supports"]["confirmed"], 1,
+        "{v}"
+    );
+    // The invalidated `build` memory is counted only when admitted.
+    assert!(!by_name(&v, "scopes").contains_key("build"), "{v}");
+    let (_, v) = get_json(&app, &format!("{base}?include_invalidated=true")).await;
+    let scopes = by_name(&v, "scopes");
+    assert_eq!(scopes["build"]["count"], 1, "{v}");
+    assert_eq!(scopes["build"]["shown"], 1, "{v}");
+}
+
+#[tokio::test]
+async fn summary_over_answers_with_totals_only_above_the_threshold() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/graph", fx.id);
+    // Four admitted memories: over 2 is a summary, under 10 the ordinary graph.
+    let (s, v) = get_json(&app, &format!("{base}?summary_over=2")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["summary"], true);
+    assert_eq!(v["total_nodes"], 4);
+    assert!(
+        v["nodes"].as_array().unwrap().is_empty() && v["edges"].as_array().unwrap().is_empty(),
+        "{v}"
+    );
+    assert_eq!(by_name(&v, "scopes")["storage"]["count"], 2);
+    assert_eq!(
+        by_name(&v, "scope_edges")["hooks|storage|false"]["contradictions"],
+        1
+    );
+    let (_, v) = get_json(&app, &format!("{base}?summary_over=10")).await;
+    assert_eq!(v["summary"], false);
+    assert_eq!(v["shown_nodes"], 4);
+    let (s, _) = get_json(&app, &format!("{base}?summary_over=lots")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -2548,6 +2623,7 @@ async fn the_graph_and_detail_views_write_nothing() {
         ),
         format!("/api/projects/{}/graph?top_scope=storage", fx.id),
         format!("/api/projects/{}/graph?limit=1&top_scope=hooks,-", fx.id),
+        format!("/api/projects/{}/graph?summary_over=1", fx.id),
         format!("/api/projects/{}/memories/{}", fx.id, fx.ids[1]),
         format!("/api/projects/{}/stats", fx.id),
     ] {

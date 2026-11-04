@@ -24,7 +24,16 @@
 //! another top scope) is not dropped silently either: it is counted into
 //! `stubs`, one per (drawn memory, far top scope), and into `stub_scopes`,
 //! one per far top scope, over every memory of the opened scope (drawn or
-//! not, so a tag's total is the scope's, not the drawn part's).
+//! not, so a tag's total is the scope's, not the drawn part's). A dangling
+//! relation (its far end deleted) or one into another store has no far top
+//! scope, so neither total counts it: it is drawn as a stub off its memory
+//! as before, and counted in `counts.dangling` / `counts.external`.
+//!
+//! **Summary only.** `summary_over=N` answers a store with more than N
+//! admitted memories with the totals alone (`summary: true`, no nodes, no
+//! edges, no usage read and no far store probed): what the scope overview
+//! draws, without paying for the graph it does not draw. At or under N the
+//! answer is the ordinary graph, so one request both decides and serves.
 //!
 //! **Far ends.** A same-store edge whose target is gone is returned with
 //! `state: "dangling"` (drawn as a stub to a deleted-memory mark); one into
@@ -211,12 +220,15 @@ struct Counts {
     /// Edges left out because an end is a memory this response does not
     /// draw (over the limit, or outside the `top_scope` filter), while the
     /// other is one the filters admit; neither a relation with both ends
-    /// outside `top_scope=` nor one already counted in `stubs`.
+    /// outside `top_scope=` nor one counted in `stub_scopes` (drawn end or not).
     hidden: usize,
 }
 
 #[derive(Serialize)]
 struct GraphPage {
+    /// Totals only (`summary_over=`): no `nodes`, `edges` or stubs, and no
+    /// far store was probed.
+    summary: bool,
     /// Memories the filters admit, before the limit.
     total_nodes: usize,
     shown_nodes: usize,
@@ -393,10 +405,19 @@ pub(crate) async fn project_graph(
         None => DEFAULT_LIMIT,
     };
 
+    // `summary_over=N`: when more than N memories pass the filters, answer
+    // with the totals only (module docs).
+    let summary_over: Option<usize> = q
+        .get("summary_over")
+        .map(|n| {
+            n.parse::<usize>()
+                .map_err(|_| ApiError::bad_request("summary_over must be a number"))
+        })
+        .transpose()?;
+
     let (_, store) = open(&state, &id).await?;
     let all = store.list().await?;
     let graph = store.graph(&filter).await?;
-    let usage = store.usage_all().await?;
     let slots = color_slots(&all);
     let rows: HashMap<&str, &IndexFilterable> = all.iter().map(|e| (e.id.as_str(), e)).collect();
 
@@ -459,6 +480,27 @@ pub(crate) async fn project_graph(
             })
         })
         .collect();
+    if summary_over.is_some_and(|n| admitted.len() > n) {
+        return ok(&GraphPage {
+            summary: true,
+            total_nodes: admitted.len(),
+            shown_nodes: 0,
+            truncated: true,
+            limit,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            scopes: scopes_of(totals, &HashMap::new(), &slots),
+            scope_edges,
+            stubs: None,
+            stub_scopes: None,
+            counts: Counts {
+                dangling: graph.dangling,
+                external: graph.external,
+                ..Counts::default()
+            },
+        });
+    }
+    let usage = store.usage_all().await?;
     let admitted_ids: HashSet<&str> = admitted.iter().map(|e| e.id.as_str()).collect();
     let mut degree: HashMap<&str, usize> = HashMap::new();
     for e in graph.edges.iter().chain(graph.dangling_edges.iter()) {
@@ -539,22 +581,17 @@ pub(crate) async fn project_graph(
     };
 
     // Whether a relation left out of `edges` counts as `hidden`: one end is
-    // a memory this view admits, and it is not already a stub of an opened
-    // scope (a relation with both ends outside the view is not this view's).
+    // a memory this view admits, and it is not already counted in an opened
+    // scope's `stub_scopes` (a relation with both ends outside the view is
+    // not this view's).
     let touches_view = |e: &GraphEdge| -> bool {
         let src_in = admitted_ids.contains(e.src.as_str());
         let dst_in = e.dst_store.is_none() && admitted_ids.contains(e.dst.as_str());
         if !src_in && !dst_in {
             return false;
         }
-        let stubbed = scopes_wanted.is_some()
-            && src_in != dst_in
-            && scope_pair(e).is_some()
-            && shown.contains(if src_in {
-                e.src.as_str()
-            } else {
-                e.dst.as_str()
-            });
+        // Counted in `stub_scopes` (drawn end or not), so not hidden too.
+        let stubbed = scopes_wanted.is_some() && src_in != dst_in && scope_pair(e).is_some();
         !stubbed
     };
     // Edges between shown memories, plus stubs (dangling, external) from one.
@@ -674,6 +711,7 @@ pub(crate) async fn project_graph(
     let scopes = scopes_of(totals, &scope_count, &slots);
 
     ok(&GraphPage {
+        summary: false,
         total_nodes,
         shown_nodes: nodes.len(),
         truncated: nodes.len() < total_nodes,

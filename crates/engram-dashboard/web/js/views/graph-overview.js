@@ -12,7 +12,8 @@
 // the discs never move, because the layout's input is the unfiltered pairs.
 //
 // A band under max(2, 12% of the largest) relations is left out (the note
-// under the graph says how many); a pair's ⚠ is always drawn, band or not.
+// under the graph says how many); a left-out pair with a contradiction keeps
+// a dashed red hairline and its ⚠, so every ⚠ sits on a drawn line.
 // Click or Enter on a disc opens its scope (`top_scope=` in the hash); the
 // pairs table below is the keyboard and screen-reader way to every pair.
 
@@ -34,7 +35,13 @@ const BAND_SHARE = 0.12;
 /** Where along a band its ⚠ may go, best first. */
 const SPOTS = [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82];
 
+/** Pairs the table lists before "Show all". */
+const PAIRS_PAGE = 50;
+
 const overviewCache = new Map();
+
+/** The scope last opened from the overview, per project, so Back refocuses its disc. */
+const lastOpened = new Map();
 
 /** The overview layout for this input, cached by input (a few). */
 function layoutOf(input) {
@@ -73,7 +80,7 @@ export function overviewLayout(g, width, aspect) {
   const pairs = scopePairs(g).filter((p) => index.has(p.a) && index.has(p.b));
   const input = {
     layout: 'scope-overview',
-    nodes: scopes.map((l) => ({ id: l.name, count: l.count, label: `${scopeName(l.name)} · ${fmt(l.count)}` })),
+    nodes: scopes.map((l) => ({ id: l.name, count: l.count, label: `${scopeName(l.name)} · ${fmt(l.count)}`, name: scopeName(l.name) })),
     edges: pairs.map((p) => ({ s: index.get(p.a), t: index.get(p.b), n: p.tally.count })),
     aspect: Math.round(aspect * 20) / 20,
     width: Math.round(width / 40) * 40,
@@ -102,7 +109,13 @@ function kindWords(ft) {
 export function renderOverview(main, ctx, g, env) {
   const { t, f, hashOf } = env;
   const p = ctx.project;
-  const open = (name) => (location.hash = hashOf(ctx, { ...f, top_scope: name || '-', all: false }));
+  const open = (name) => {
+    lastOpened.set(p.id, name);
+    location.hash = hashOf(ctx, { ...f, top_scope: name || '-', all: false });
+  };
+  const returnTo = lastOpened.has(p.id) ? lastOpened.get(p.id) : undefined;
+  lastOpened.delete(p.id);
+  let allPairs = false;
   const alertBox = h('div');
   const filterBox = h('div');
   const notesBox = h('div');
@@ -111,6 +124,10 @@ export function renderOverview(main, ctx, g, env) {
   const legendBox = h('div', { class: 'legend so-legend' });
   const tableBox = h('div');
   const total = g.scopes.reduce((n, l) => n + l.count, 0);
+  // One rule for scope counts, in the note and the card: named scopes with
+  // memories; memories with no scope are counted apart.
+  const named = g.scopes.filter((l) => l.name && l.count > 0).length;
+  const unscoped = g.scopes.filter((l) => !l.name).reduce((n, l) => n + l.count, 0);
   mount(
     main,
     projHead('Graph', t('title', p.name), t('overviewIntro', total)),
@@ -151,7 +168,8 @@ export function renderOverview(main, ctx, g, env) {
   const pillsLayer = s('g', { class: 'so-pills', 'aria-hidden': 'true' });
   const discsLayer = s('g', { class: 'so-discs' });
   const inside = new Map();
-  for (const row of g.scope_edges || []) if (row.a === row.b) inside.set(row.a, row);
+  // A scope's own relations come as up to two rows (directed and not): sum them.
+  for (const row of g.scope_edges || []) if (row.a === row.b) inside.set(row.a, merge(inside.get(row.a) || { count: 0, kinds: {} }, row));
   scopes.forEach((l, i) => {
     const [x, y] = P(i);
     const lp = lay.labels[i];
@@ -159,7 +177,7 @@ export function renderOverview(main, ctx, g, env) {
       'g',
       { class: 'so-scope', tabindex: '0', role: 'link', 'data-i': i },
       s('circle', { class: ['so-disc', 'stroke-' + slot(l.slot)], cx: x.toFixed(1), cy: y.toFixed(1), r: lay.r[i].toFixed(1) }),
-      s('text', { class: ['so-name', !lp.placed && 'unplaced'], x: lp.x.toFixed(1), y: lp.y.toFixed(1), 'text-anchor': lp.anchor }, s('tspan', { class: 'nm' }, scopeName(l.name)), s('tspan', { class: 'ct' }, ` · ${fmt(l.count)}`)),
+      s('text', { class: ['so-name', lp.forced && 'forced'], x: lp.x.toFixed(1), y: lp.y.toFixed(1), 'text-anchor': lp.anchor }, s('tspan', { class: 'nm' }, scopeName(l.name)), lp.short ? null : s('tspan', { class: 'ct' }, ` · ${fmt(l.count)}`)),
     );
     el.addEventListener('click', () => open(l.name));
     el.addEventListener('keydown', (ev) => {
@@ -185,6 +203,15 @@ export function renderOverview(main, ctx, g, env) {
     for (const b of bandEls) b.el.classList.toggle('on', i !== null && (b.s === i || b.t === i));
   }
 
+  /** Whether `box` ([x, y, w, h]) overlaps any disc. */
+  function discHit(box) {
+    return scopes.some((l, j) => {
+      const dx = Math.max(box[0], Math.min(lay.pos[2 * j], box[0] + box[2])) - lay.pos[2 * j];
+      const dy = Math.max(box[1], Math.min(lay.pos[2 * j + 1], box[1] + box[3])) - lay.pos[2 * j + 1];
+      return dx * dx + dy * dy < lay.r[j] * lay.r[j];
+    });
+  }
+
   // ---- the parts that follow the display filters --------------------------
   function paint() {
     const counted = pairs.map((pr, k) => ({ pr, k, ft: filtered(pr.tally, f) })).filter((c) => c.ft.count > 0);
@@ -194,7 +221,8 @@ export function renderOverview(main, ctx, g, env) {
     // A pair left out with a contradiction keeps a hairline, so its ⚠ is
     // never a pill floating between unrelated discs.
     const hairs = counted.filter((c) => c.ft.count < cut && c.ft.contradictions > 0);
-    const hidden = counted.length - drawn.length;
+    // Hidden = neither a band nor a hairline.
+    const hidden = counted.length - drawn.length - hairs.length;
     bandEls = [];
     const bands = [];
     // Thin first, so a wide band is never hidden under a thin one.
@@ -225,42 +253,35 @@ export function renderOverview(main, ctx, g, env) {
     // spot along its curve that hits no name and no other ⚠.
     const taken = scopes.map((l, i) => {
       const lp = lay.labels[i];
-      if (!lp.placed) return [0, 0, 0, 0];
       const x0 = lp.anchor === 'middle' ? lp.x - lp.w / 2 : lp.anchor === 'end' ? lp.x - lp.w : lp.x;
       return [x0, lp.y - 13, lp.w, 17];
     });
     const pills = [];
+    const pillBoxes = [];
     for (const c of counted.filter((q) => q.ft.contradictions > 0).sort((a, b) => b.ft.contradictions - a.ft.contradictions)) {
       const rt = lay.routes[c.k];
       const text = `⚠ ${fmt(c.ft.contradictions)}`;
       const w = text.length * 6.4 + 10;
       let at = null;
-      // Free of names, discs and other ⚠ first; failing that, free of other ⚠ only.
-      const hitsPill = (box) => taken.some((b) => box[0] < b[0] + b[2] && box[0] + box[2] > b[0] && box[1] < b[1] + b[3] && box[1] + box[3] > b[1]);
-      for (const tt of SPOTS) {
-        const [x, y] = onCurve(rt, tt);
-        const box = [x - w / 2, y - 8, w, 16];
-        const overDisc = scopes.some((l, j) => {
-          const dx = Math.max(box[0], Math.min(lay.pos[2 * j], box[0] + box[2])) - lay.pos[2 * j];
-          const dy = Math.max(box[1], Math.min(lay.pos[2 * j + 1], box[1] + box[3])) - lay.pos[2 * j + 1];
-          return dx * dx + dy * dy < lay.r[j] * lay.r[j];
-        });
-        if (!overDisc && !taken.some((b) => box[0] < b[0] + b[2] && box[0] + box[2] > b[0] && box[1] < b[1] + b[3] && box[1] + box[3] > b[1])) {
-          at = [x, y];
-          taken.push(box);
-          break;
+      // Free of names, discs and other ⚠ first; failing that, free of discs
+      // and other ⚠ (over a name); failing that, the curve's middle.
+      const hitsBox = (box) => taken.some((b) => box[0] < b[0] + b[2] && box[0] + box[2] > b[0] && box[1] < b[1] + b[3] && box[1] + box[3] > b[1]);
+      const hitsPill = (box) => pillBoxes.some((b) => box[0] < b[0] + b[2] && box[0] + box[2] > b[0] && box[1] < b[1] + b[3] && box[1] + box[3] > b[1]);
+      for (const test of [(box) => !discHit(box) && !hitsBox(box), (box) => !discHit(box) && !hitsPill(box)]) {
+        for (const tt of SPOTS) {
+          const [x, y] = onCurve(rt, tt);
+          const box = [x - w / 2, y - 8, w, 16];
+          if (test(box)) {
+            at = [x, y];
+            break;
+          }
         }
-      }
-      for (const tt of at ? [] : SPOTS) {
-        const [x, y] = onCurve(rt, tt);
-        const box = [x - w / 2, y - 8, w, 16];
-        if (!hitsPill(box)) {
-          at = [x, y];
-          taken.push(box);
-          break;
-        }
+        if (at) break;
       }
       if (!at) at = onCurve(rt, 0.5);
+      const box = [at[0] - w / 2, at[1] - 8, w, 16];
+      taken.push(box);
+      pillBoxes.push(box);
       pills.push(
         s(
           'g',
@@ -299,7 +320,7 @@ export function renderOverview(main, ctx, g, env) {
   function renderNotes(drawn, hidden, cut) {
     mount(
       notesBox,
-      h('div', { class: 'note', role: 'status' }, t('overviewNote', total, scopes.length, OVERVIEW_MIN), hidden ? ` ${t('overviewHidden', hidden, cut)}` : ''),
+      h('div', { class: 'note', role: 'status' }, t('overviewNote', total, named, unscoped, OVERVIEW_MIN), hidden ? ` ${t('overviewHidden', hidden, cut)}` : ''),
     );
   }
 
@@ -339,7 +360,7 @@ export function renderOverview(main, ctx, g, env) {
         'dl',
         null,
         h('dt', null, 'Top-level scopes'),
-        h('dd', null, fmt(scopes.filter((l) => l.name).length)),
+        h('dd', null, fmt(named)),
         h('dt', null, 'Memories'),
         h('dd', null, fmt(total)),
         h('dt', null, 'Inside scopes'),
@@ -352,7 +373,7 @@ export function renderOverview(main, ctx, g, env) {
 
   function renderTable(counted) {
     const rows = counted.slice().sort((a, b) => b.ft.contradictions - a.ft.contradictions || b.ft.count - a.ft.count || (a.pr.a + '\0' + a.pr.b < b.pr.a + '\0' + b.pr.b ? -1 : 1));
-    const LIMIT = 50;
+    const shown = allPairs ? rows : rows.slice(0, PAIRS_PAGE);
     const scopeBtn = (name) => h('button', { type: 'button', class: 'linkish', onclick: () => open(name) }, scopeName(name));
     mount(
       tableBox,
@@ -369,7 +390,7 @@ export function renderOverview(main, ctx, g, env) {
               h(
                 'tbody',
                 null,
-                rows.slice(0, LIMIT).map((c) =>
+                shown.map((c) =>
                   h(
                     'tr',
                     { class: 'plain-row' },
@@ -385,7 +406,25 @@ export function renderOverview(main, ctx, g, env) {
             ),
           )
         : h('p', { class: 'muted' }, t('overviewNoPairs')),
-      rows.length > LIMIT ? h('p', { class: 'faint' }, t('overviewMorePairs', rows.length - LIMIT)) : null,
+      rows.length > PAIRS_PAGE
+        ? h(
+            'p',
+            null,
+            h(
+              'button',
+              {
+                type: 'button',
+                class: 'btn sm',
+                'aria-expanded': allPairs ? 'true' : 'false',
+                onclick: () => {
+                  allPairs = !allPairs;
+                  renderTable(counted);
+                },
+              },
+              allPairs ? t('overviewFewerPairs') : t('overviewAllPairs', rows.length),
+            ),
+          )
+        : null,
     );
   }
 
@@ -401,10 +440,15 @@ export function renderOverview(main, ctx, g, env) {
         h('li', null, s('svg', { width: 34, height: 22, viewBox: '0 0 34 22', 'aria-hidden': 'true', class: 'so-lg' }, s('circle', { class: 'so-disc stroke-none', cx: 11, cy: 11, r: 9 })), t('legendDisc')),
         h('li', null, s('svg', { width: 34, height: 22, viewBox: '0 0 34 22', 'aria-hidden': 'true', class: 'so-lg' }, s('path', { class: 'so-band', d: 'M2,15 Q17,5 32,15', 'stroke-width': 5 })), t('legendBand')),
         h('li', null, s('svg', { width: 34, height: 22, viewBox: '-17 -11 34 22', 'aria-hidden': 'true', class: 'so-lg' }, s('g', { class: 'so-pill' }, s('rect', { x: -15, y: -8, width: 30, height: 16, rx: 8 }), s('text', { y: 4 }, '⚠ 2'))), t('legendPill')),
+        h('li', null, s('svg', { width: 34, height: 22, viewBox: '0 0 34 22', 'aria-hidden': 'true', class: 'so-lg' }, s('path', { class: 'so-band hair', d: 'M2,15 Q17,5 32,15', 'stroke-width': 1 })), t('legendHair')),
       ),
     ),
   );
 
   env.filters(filterBox, paint);
   paint();
+  if (returnTo !== undefined && index.has(returnTo)) {
+    const el = discEls[index.get(returnTo)];
+    setTimeout(() => el.isConnected && el.focus(), 0);
+  }
 }

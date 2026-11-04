@@ -103,10 +103,37 @@ function hashKey(str) {
   return (a >>> 0).toString(16) + (b >>> 0).toString(16) + '.' + str.length;
 }
 
-/** Start the layout worker ahead of need (the overview does not use it, the scope it opens will). */
+/** The layout worker, started on first use (null when none can start). */
+function ensureWorker() {
+  if (workerBroken) return null;
+  if (worker) return worker;
+  try {
+    worker = new Worker(new URL('../graph/layout-worker.js', import.meta.url), { type: 'module' });
+  } catch (_) {
+    workerBroken = true;
+    return null;
+  }
+  worker.onmessage = (ev) => {
+    const w = waiting.get(ev.data.seq);
+    if (!w) return;
+    waiting.delete(ev.data.seq);
+    if (ev.data.error) w.reject(new Error(ev.data.error));
+    else w.resolve(ev.data.result);
+  };
+  worker.onerror = (ev) => {
+    ev.preventDefault();
+    failWorker();
+  };
+  return worker;
+}
+
+/**
+ * Start the layout worker ahead of need (the overview does not use it, the
+ * scope it opens will): it loads its modules now, and nothing is laid out
+ * or cached.
+ */
 function warmWorker() {
-  if (worker || workerBroken) return;
-  runLayout({ layout: 'scope-force', nodes: [], edges: [], aspect: 0.62, width: 800 }).catch(() => {});
+  ensureWorker();
 }
 
 function runLayout(input) {
@@ -127,26 +154,14 @@ function runLayout(input) {
           reject(e);
         }
       }, 0);
-    if (!workerBroken) {
+    const wk = ensureWorker();
+    if (wk) {
       try {
-        if (!worker) {
-          worker = new Worker(new URL('../graph/layout-worker.js', import.meta.url), { type: 'module' });
-          worker.onmessage = (ev) => {
-            const w = waiting.get(ev.data.seq);
-            if (!w) return;
-            waiting.delete(ev.data.seq);
-            if (ev.data.error) w.reject(new Error(ev.data.error));
-            else w.resolve(ev.data.result);
-          };
-          worker.onerror = (ev) => {
-            ev.preventDefault();
-            failWorker();
-          };
-        }
         waiting.set(seq, { resolve, reject, fallback });
-        worker.postMessage({ seq, input });
+        wk.postMessage({ seq, input });
         return;
       } catch (_) {
+        waiting.delete(seq);
         workerBroken = true;
       }
     }
@@ -200,6 +215,9 @@ function shows(f, e) {
 
 /** From this zoom (× the Fit scale) a big graph draws only on-screen relations whole. */
 const CUT_ZOOM = 3;
+
+/** Above this many far-scope stubs, they are drawn faint until highlighted. */
+const STUBS_FAINT = 50;
 
 /** A far scope's tag text, for sizing ("storage · 12  ⚠ 2"). */
 function tagText(name, count, contradictions) {
@@ -287,10 +305,9 @@ export async function renderGraph(main, ctx) {
   const p = ctx.project;
   const f = filtersOf(ctx.route.query);
   // The render path (module docs), chosen before any style hook runs: the
-  // overview is asked for with a limit of OVERVIEW_MIN + 1, so a store at or
-  // under it comes back whole (and is drawn exactly as before) while a
-  // larger one sends its totals and only a sliver of memories.
-  const opened = f.top_scope && !f.top_scope.includes(',') ? f.top_scope : null;
+  // overview asks with `summary_over=OVERVIEW_MIN`, so a store at or under
+  // it comes back whole (and is drawn exactly as before) while a larger one
+  // sends its totals only, in the same one request.
   const wantOverview = !f.top_scope && !f.all;
   const theme = useStyle(f.style);
   const t = makeT(theme);
@@ -307,7 +324,7 @@ export async function renderGraph(main, ctx) {
       include_rejected: 'true',
       include_invalidated: f.invalidated ? 'true' : 'false',
       top_scope: f.top_scope || undefined,
-      limit: wantOverview ? String(OVERVIEW_MIN + 1) : undefined,
+      summary_over: wantOverview ? String(OVERVIEW_MIN) : undefined,
     });
   } catch (e) {
     if (ctx.isStale()) return;
@@ -316,7 +333,7 @@ export async function renderGraph(main, ctx) {
   }
   if (ctx.isStale()) return;
 
-  if (wantOverview && g.total_nodes > OVERVIEW_MIN) {
+  if (g.summary) {
     renderOverview(main, ctx, g, {
       t,
       f,
@@ -343,17 +360,29 @@ export async function renderGraph(main, ctx) {
   // A big graph (an opened scope, or show-all past OVERVIEW_MIN) draws only
   // on-screen relations whole once zoomed in (module docs).
   const big = g.nodes.length > OVERVIEW_MIN;
-  // Where "back" goes: the overview when the store has one.
+  // The opened-scope path is the overview's drill-in, so only a store that
+  // has an overview gets it: a smaller one filtered by the picker keeps the
+  // style's own graph (Grid stays Grid).
   const storeTotal = g.scopes.reduce((n, l) => n + l.count, 0);
+  const opened = f.top_scope && !f.top_scope.includes(',') && storeTotal > OVERVIEW_MIN ? f.top_scope : null;
   // Show-all's way back sits in the tools row instead (one button), so the
   // full graph's box stays where it always was.
-  const backToOverview = !opened && f.all && storeTotal > OVERVIEW_MIN ? h('a', { class: 'btn sm', href: hashOf(ctx, { ...f, all: false }) }, t('crumbAll')) : null;
+  // Back to the overview keeps focus for the overview to put on the scope
+  // that was opened (views/graph-overview.js), not on the page heading.
+  function backTo(hash) {
+    return (ev) => {
+      if (ev.button || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+      ev.preventDefault();
+      ctx.navigate(hash, { keepFocus: true });
+    };
+  }
+  const backToOverview = !opened && f.all && storeTotal > OVERVIEW_MIN ? h('a', { class: 'btn sm', href: hashOf(ctx, { ...f, all: false }), onclick: backTo(hashOf(ctx, { ...f, all: false })) }, t('crumbAll')) : null;
   const crumbs =
     opened
       ? h(
           'nav',
           { class: 'g-crumbs', 'aria-label': t('crumbsAria') },
-          h('a', { href: hashOf(ctx, { ...f, top_scope: '', all: false }) }, storeTotal > OVERVIEW_MIN ? t('crumbAll') : t('crumbAllMemories')),
+          h('a', { href: hashOf(ctx, { ...f, top_scope: '', all: false }), onclick: backTo(hashOf(ctx, { ...f, top_scope: '', all: false })) }, t('crumbAll')),
           h('span', { class: 'sep', 'aria-hidden': 'true' }, ' › '),
           h('span', { 'aria-current': 'page' }, scopeName(opened === '-' ? '' : opened)),
         )
@@ -669,6 +698,9 @@ export async function renderGraph(main, ctx) {
       stubEls[i].push(el);
       lines.push(el);
     }
+    // Many stubs would veil the memories: past STUBS_FAINT they are drawn
+    // fainter and come up with their memory's highlight.
+    stubsLayer.classList.toggle('many', lines.length > STUBS_FAINT);
     mount(stubsLayer, lines);
     const tagEls = [];
     for (const sc of g.stub_scopes) {
@@ -716,9 +748,12 @@ export async function renderGraph(main, ctx) {
       const e = g.edges[k];
       const si = byId.get(e.src);
       const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
+      // Adjacency counts every visible relation, drawn whole, cut or not
+      // (the hub ring, tooltip and card must not change with the view).
+      adj[si].push(k);
+      if (ti >= 0) adj[ti].push(k);
       let pts = lay.routes[k];
-      let cut = false;
-      let near = si;
+      let drawn = null;
       if (cutMode && ti >= 0) {
         const a = P(si);
         const b = P(ti);
@@ -726,26 +761,27 @@ export async function renderGraph(main, ctx) {
         const inb = onScreen(b);
         if (!ina && !inb) continue;
         if (!ina || !inb) {
+          // A short piece at the end on screen, still drawn source → target
+          // so a style's direction cue (taper, chevron) keeps its meaning.
           const [p0, p1] = ina ? [a, b] : [b, a];
-          near = ina ? si : ti;
           const dx = p1[0] - p0[0];
           const dy = p1[1] - p0[1];
           const len = Math.sqrt(dx * dx + dy * dy) || 1;
           const reach = Math.min(len, 30 / scale);
-          pts = [p0, [p0[0] + (dx / len) * reach, p0[1] + (dy / len) * reach]];
-          cut = true;
+          const q = [p0[0] + (dx / len) * reach, p0[1] + (dy / len) * reach];
+          pts = ina ? [a, q] : [q, b];
+          drawn = ina
+            ? theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: 0, stub: true, scale })
+            : theme.drawEdge(e, pts, { rs: 0, rt: radius(g.nodes[ti]) + 4, stub: false, scale });
+          drawn = { ...drawn, cls: [...(drawn.cls || []), 'cut'] };
         }
       }
-      adj[si].push(k);
-      if (ti >= 0) adj[ti].push(k);
       // `scale`: screen px per layout unit now, for a style that sizes
       // what it draws along a relation by the zoom.
-      const drawn = cut
-        ? theme.drawEdge(e, pts, { rs: radius(g.nodes[near]) + 4, rt: 0, stub: true, scale })
-        : theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
+      if (!drawn) drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
       // The wide transparent hit path is the core's, drawn last (on top).
       const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
-      const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || []), cut && 'cut'], 'data-k': k }, parts);
+      const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
       el.addEventListener('mouseenter', () => hover({ edge: k }));
       el.addEventListener('mouseleave', () => hover(null));
       el.addEventListener('click', (ev) => {
@@ -1177,7 +1213,7 @@ export async function renderGraph(main, ctx) {
         h('dt', null, 'Proposed'),
         h('dd', null, `${fmt(proposed.length)}${proposed.some((e) => e.kind === 'contradicts') ? ` (${fmt(proposed.filter((e) => e.kind === 'contradicts').length)} contradictions)` : ''}`),
         tagByName.size ? [h('dt', null, 'To other scopes'), h('dd', null, `${plural(g.stub_scopes.reduce((n, sc) => n + filtered(sc, f).count, 0), 'relation')} (tags around the graph)`)] : null,
-        g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'relation')} to memories outside this view`)] : null,
+        g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'relation')} to memories not drawn here (past the memory limit)`)] : null,
       ),
     );
   }

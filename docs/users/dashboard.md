@@ -158,7 +158,9 @@ red **⚠ count** on every pair with a contradiction between them. Bands with
 fewer than 2 relations, or under 12% of the largest pair, are left out (the
 note above the graph says how many), but a pair's ⚠ is always shown, on a
 red dashed hairline when its band is left out. The counts cover the whole
-store, not the 800 memories a graph draws. The kind, *Proposed* and
+store, not the 800 memories a graph draws. A relation to a deleted memory,
+or into another store, belongs to no scope pair, so it is not counted here;
+the notes on a full graph count those. The kind, *Proposed* and
 *Rejected* filters re-count the bands in place. Below the overview, a table
 lists every scope pair, contradictions first.
 
@@ -170,7 +172,8 @@ graph's edge, one tag per other scope, placed in the direction that scope
 lies on the overview: "storage · 12 ⚠ 2" means 12 relations to `storage`, 2
 of them contradictions. Clicking a tag opens that scope; *All scopes* above
 the graph goes back. Picking a scope from the filter row opens it the same
-way, in any store. *Show all memories* on the overview draws the whole graph
+way; in a store of 150 memories or fewer it filters the usual graph to that
+scope instead. *Show all memories* on the overview draws the whole graph
 (still at most 800 memories), with an *All scopes* button to go back.
 
 On a graph of more than 150 memories zoomed in to three times *Fit* or
