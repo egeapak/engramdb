@@ -1,9 +1,20 @@
 // Graph view: memories are nodes, coloured by top scope and shaped by type;
 // relations are the typed edges between them.
 //
-// The server bounds the graph (`/graph?limit=`, "showing N of M"); the layout
-// (graph/layout.js) runs in a Web Worker so a large store never freezes the
-// page, and is deterministic, so the same store draws the same graph.
+// **Core and styles.** This module is the core: data loading, the filters
+// and their hash state, selection / pin / hover, the keyboard, the details
+// card, the relations table, review, counts and the core strings. How the
+// graph *looks* is the picked style's (graph/themes/<id>/index.js): its
+// layout, memory glyphs, relation drawing, backdrop, legend, CSS under
+// `[data-graph-style=<id>]` and optional flavour strings. Core text goes
+// through `t(key)` (graph/strings.js), the style's strings first. The core
+// builds each memory's `<g class="node">` and each relation's `<g>` (with
+// its handlers, aria and hit path) and asks the style for what goes inside.
+//
+// The server bounds the graph (`/graph?limit=`, "showing N of M"); the
+// style's layout (graph/layouts.js) runs in a Web Worker so a large store
+// never freezes the page, and is deterministic, so the same store draws the
+// same graph.
 //
 // **Steady graph.** The page asks the server for every edge kind and status
 // (only `invalidated` and `top_scope`, which change the memory set, go to the
@@ -25,9 +36,12 @@
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, plural, shortId, label } from '../format.js';
-import { badge, slot, scopeName, kindIcon, typeShape, variant, code, TYPE_LABEL } from '../scopes.js';
-import { layout } from '../graph/layout.js';
-import { KINDS, DIRECTED, kindLabel, edgeClass, edgeSample, chevron, terminal, warnSign, stubCap } from '../graph/glyphs.js';
+import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
+import { KINDS, kindLabel, edgeClass } from '../relations.js';
+import { runNamedLayout } from '../graph/layouts.js';
+import { along, pathD } from '../graph/geometry.js';
+import { makeT } from '../graph/strings.js';
+import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
 
@@ -69,7 +83,7 @@ function runLayout(input) {
     const fallback = () =>
       setTimeout(() => {
         try {
-          resolve(layout(input));
+          resolve(runNamedLayout(input));
         } catch (e) {
           reject(e);
         }
@@ -113,6 +127,8 @@ function filtersOf(query) {
     invalidated: query.get('invalidated') === '1',
     rejected: query.get('rejected') === '1',
     top_scope: query.get('top_scope') || '',
+    // Only a style named in the hash: none means this browser's stored pick.
+    style: styleById(query.get('style')) ? query.get('style') : '',
   };
 }
 
@@ -123,6 +139,7 @@ function filterQuery(f) {
   if (f.invalidated) q.set('invalidated', '1');
   if (f.rejected) q.set('rejected', '1');
   if (f.top_scope) q.set('top_scope', f.top_scope);
+  if (f.style) q.set('style', f.style);
   return q.toString();
 }
 
@@ -145,36 +162,6 @@ const FAR_END = { dangling: 'far end deleted', invalidated: 'far end invalidated
 // ---------------------------------------------------------------------------
 // Geometry and text helpers
 // ---------------------------------------------------------------------------
-
-function pathD(pts) {
-  return 'M' + pts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L');
-}
-
-function along(pts, t) {
-  let total = 0;
-  for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-  let want = total * t;
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1];
-    const b = pts[i];
-    const l = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    if (want <= l || i === pts.length - 1) {
-      const k = l ? Math.min(1, want / l) : 0;
-      return { x: a[0] + (b[0] - a[0]) * k, y: a[1] + (b[1] - a[1]) * k, ang: Math.atan2(b[1] - a[1], b[0] - a[0]) };
-    }
-    want -= l;
-  }
-  return { x: pts[0][0], y: pts[0][1], ang: 0 };
-}
-
-/** The point `d` along the first (or, with `fromEnd`, back along the last) segment. */
-function offset(pts, d, fromEnd) {
-  const [a, b] = fromEnd ? [pts[pts.length - 1], pts[pts.length - 2]] : [pts[0], pts[1]];
-  const l = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-  const k = Math.min(d, l / 2) / l;
-  const ang = Math.atan2(a[1] - b[1], a[0] - b[0]);
-  return { x: a[0] + (b[0] - a[0]) * k, y: a[1] + (b[1] - a[1]) * k, ang: fromEnd ? ang : ang + Math.PI };
-}
 
 const reads = (n) => n.usage.returned + n.usage.injected + n.usage.fetched;
 const radius = (n) => 5 + Math.min(6, Math.sqrt(reads(n)) * 0.55);
@@ -200,12 +187,14 @@ export function shortLabel(summary, max = 24) {
 
 export async function renderGraph(main, ctx) {
   const p = ctx.project;
+  const f = filtersOf(ctx.route.query);
+  const theme = useStyle(f.style);
+  const t = makeT(theme);
   if (!p.available) {
     mount(main, projHead('Graph', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
     return;
   }
-  const f = filtersOf(ctx.route.query);
-  mount(main, h('p', { class: 'loading' }, 'Loading graph…'));
+  mount(main, h('p', { class: 'loading' }, t('loading')));
   let g;
   try {
     // Every kind and status: the display filters apply here (module docs).
@@ -217,7 +206,7 @@ export async function renderGraph(main, ctx) {
     });
   } catch (e) {
     if (ctx.isStale()) return;
-    mount(main, projHead('Graph', `${p.name} graph`, []), errorBox(e));
+    mount(main, projHead('Graph', t('title', p.name), []), errorBox(e));
     return;
   }
   if (ctx.isStale()) return;
@@ -228,12 +217,12 @@ export async function renderGraph(main, ctx) {
   const byId = new Map(g.nodes.map((n, i) => [n.id, i]));
   const card = h('aside', { class: 'g-card', 'aria-label': 'Details' });
   const tip = h('div', { class: 'g-tip', role: 'presentation', hidden: true });
-  const hint = h('div', { class: 'g-hint', hidden: true }, 'Click the graph (or hold Ctrl/⌘) to zoom with the wheel');
+  const hint = h('div', { class: 'g-hint', hidden: true }, t('wheelHint'));
   const graphBox = h('div', {
     class: 'graph-box',
     tabindex: '0',
     role: 'group',
-    'aria-label': `Graph of ${p.name}: ${plural(g.shown_nodes, 'memory', 'memories')}. Arrow keys pan, plus and minus zoom, 0 fits, ] and [ step through memories, Enter pins one in the details card.`,
+    'aria-label': t('graphAria', p.name, g.shown_nodes),
   });
   const legendBox = h('div', { class: 'legend' });
   const tableBox = h('div');
@@ -243,7 +232,7 @@ export async function renderGraph(main, ctx) {
 
   mount(
     main,
-    projHead('Graph', `${p.name} graph`, ['Each memory is coloured by its top-level scope; shape follows type.', 'Size follows reads.']),
+    projHead('Graph', t('title', p.name), t('intro')),
     alertBox,
     filterBox,
     notesBox,
@@ -259,7 +248,8 @@ export async function renderGraph(main, ctx) {
           h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Zoom in', onclick: () => ctl.zoom(1 / 1.4) }, '+'),
           h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Zoom out', onclick: () => ctl.zoom(1.4) }, '−'),
           h('button', { type: 'button', class: 'btn sm', onclick: () => ctl.fit() }, 'Fit'),
-          h('span', { class: 'faint' }, 'Drag to pan · click a memory or relation to pin it'),
+          h('span', { class: 'faint' }, t('toolsHint')),
+          styleControl(),
         ),
         graphBox,
         legendBox,
@@ -268,6 +258,28 @@ export async function renderGraph(main, ctx) {
     ),
     tableBox,
   );
+
+  // The style picker: saved for this browser and named in the hash, so the
+  // link shows the same style; re-renders through the hash change (the
+  // layout and viewport caches keep a shared layout where it was).
+  function styleControl() {
+    return h(
+      'label',
+      { class: 'sel g-style' },
+      h('span', { class: 'faint' }, t('styleLabel')),
+      h(
+        'select',
+        {
+          'aria-label': t('styleAria'),
+          onchange: (ev) => {
+            storeStyle(ev.target.value);
+            location.hash = hashOf(ctx, { ...f, style: ev.target.value });
+          },
+        },
+        STYLES.map((st) => h('option', { value: st.id, selected: st.id === theme.id }, st.name)),
+      ),
+    );
+  }
 
   // ---- the parts that follow the display filters --------------------------
   const visible = () => g.edges.map((e, k) => k).filter((k) => shows(f, g.edges[k]));
@@ -281,7 +293,7 @@ export async function renderGraph(main, ctx) {
   function renderFilters() {
     const chip = (pressed, content, onclick, title) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(pressed), onclick, title }, content);
     const kindChips = KINDS.map((k) =>
-      chip(f.kinds.includes(k), [edgeSample(k, 'confirmed', 26), kindLabel(k)], () => {
+      chip(f.kinds.includes(k), [theme.edgeSample(k, 'confirmed', 26), kindLabel(k)], () => {
         const on = f.kinds.includes(k);
         // Never filter everything out: the last kind cannot be switched off.
         if (on && f.kinds.length === 1) return;
@@ -351,19 +363,19 @@ export async function renderGraph(main, ctx) {
   renderNotes(visible());
 
   if (!g.nodes.length) {
-    mount(graphBox, h('p', { class: 'graph-empty muted' }, f.top_scope ? 'No memories in this top-level scope with these filters.' : 'No memories to draw yet.'));
+    mount(graphBox, h('p', { class: 'graph-empty muted' }, f.top_scope ? t('emptyScope') : t('empty')));
     mount(card, h('div', { class: 'eyebrow' }, 'Details'), h('p', { class: 'hint' }, 'Nothing to show.'));
     return;
   }
-  mount(graphBox, h('p', { class: 'graph-empty muted' }, `Laying out ${plural(g.nodes.length, 'memory', 'memories')}…`));
+  mount(graphBox, h('p', { class: 'graph-empty muted' }, t('layingOut', g.nodes.length)));
 
-  // Layout input: edge ends as node indices (-1: a stub off the source).
-  // `line` is the layout module's own name for the top scope (phase B moves
-  // that module into the Grid theme).
+  // Layout input: edge ends as node indices (-1: a stub off the source),
+  // and the name of the style's layout (part of the cache key).
   const labels = g.nodes.map((n) => shortLabel(n.summary));
   const boxAspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / (graphBox.clientWidth || 800)));
   const res = await runLayout({
-    nodes: g.nodes.map((n, i) => ({ id: n.id, line: n.top_scope || '', slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
+    layout: theme.layout.name,
+    nodes: g.nodes.map((n, i) => ({ id: n.id, top_scope: n.top_scope || '', slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
     edges: g.edges.map((e) => ({ s: byId.get(e.src), t: e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst) })),
     aspect: Math.round(boxAspect * 20) / 20,
   }).catch((e) => {
@@ -372,7 +384,7 @@ export async function renderGraph(main, ctx) {
   });
   if (!res || ctx.isStale()) return;
   const lay = res.lay;
-  const viewKey = p.id + '|' + res.key.length + '|' + g.nodes.length;
+  const viewKey = p.id + '|' + theme.layout.name + '|' + res.key.length + '|' + g.nodes.length;
 
   // ---- static layers ---------------------------------------------------------
   const P = (i) => [lay.pos[2 * i], lay.pos[2 * i + 1]];
@@ -381,20 +393,9 @@ export async function renderGraph(main, ctx) {
   let edgeEls = [];
   let adj = [];
 
-  // The scope paths and badges are today's look (phase B: the Grid theme).
-  const scopePathsLayer = s('g', { class: 'scope-paths', 'aria-hidden': 'true' });
-  for (const l of lay.lines) {
-    if (!l.key || l.pts.length < 2) continue;
-    scopePathsLayer.appendChild(s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: pathD(l.pts) }));
-  }
-  const badges = s('g', { class: 'lbadges', 'aria-hidden': 'true' });
-  for (const l of lay.lines) {
-    if (!l.key) continue;
-    const [x, y] = l.pts[0];
-    badges.appendChild(
-      s('g', { class: 'lb', transform: `translate(${(x - 24).toFixed(1)},${(y - 22).toFixed(1)})` }, s('rect', { class: 'fill-' + slot(l.slot), x: -12, y: -12, width: 24, height: 24, rx: 5 }), s('text', { class: 'lbt-' + slot(l.slot) }, code(l.key))),
-    );
-  }
+  // The style's backdrop: under the relations and over them (Grid: scope
+  // lines and their badges).
+  const backdrop = theme.drawBackdrop(g, lay) || {};
   const edgesLayer = s('g', { class: 'edges', 'aria-hidden': 'true' });
   // Labels sit under the memories, so a label never hides one.
   const labelsLayer = s('g', { class: 'labels', 'aria-hidden': 'true' });
@@ -402,19 +403,20 @@ export async function renderGraph(main, ctx) {
   g.nodes.forEach((n, i) => {
     const [x, y] = P(i);
     const r = radius(n);
+    const drawn = theme.drawNode(n, r);
     const el = s(
       'g',
       {
-        class: ['node', 'stroke-' + slot(n.color_slot), n.degree >= 2 && 'hub', !reads(n) && 'never', n.challenged && 'chal', n.invalidated && 'inv'],
+        class: ['node', ...(drawn.cls || []), n.degree >= 2 && 'hub', !reads(n) && 'never', n.challenged && 'chal', n.invalidated && 'inv'],
         transform: `translate(${x},${y})`,
         'data-i': i,
         tabindex: '-1',
         role: 'button',
         'aria-label': `${n.summary} (${TYPE_LABEL[n.type] || n.type}, ${plural(n.degree, 'relation')})`,
       },
+      // The hover / focus ring is the core's; the rest is the style's.
       s('circle', { class: 'ring', r: r + 6 }),
-      n.challenged ? s('circle', { class: 'chal-ring', r: r + 3.5 }) : null,
-      typeShape(n.type, r),
+      drawn.parts,
     );
     el.addEventListener('mouseenter', () => hover({ node: i }));
     el.addEventListener('mouseleave', () => hover(null));
@@ -435,18 +437,18 @@ export async function renderGraph(main, ctx) {
     nodesLayer.appendChild(el);
     const lp = lay.labels[i];
     const major = n.degree >= 2 || n.proposed > 0 || n.challenged;
-    const t = lp ? s('text', { class: ['lbl', major && 'major'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]) : null;
-    labelEls.push(t);
-    if (t) labelsLayer.appendChild(t);
+    const lbl = lp ? s('text', { class: ['lbl', major && 'major'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]) : null;
+    labelEls.push(lbl);
+    if (lbl) labelsLayer.appendChild(lbl);
   });
 
   const svg = s(
     'svg',
     { class: 'graph', role: 'group', 'aria-label': 'Memories' },
     s('rect', { class: 'bg', x: -1e5, y: -1e5, width: 2e5, height: 2e5, 'aria-hidden': 'true' }),
-    scopePathsLayer,
+    backdrop.below || null,
     edgesLayer,
-    badges,
+    backdrop.above || null,
     labelsLayer,
     nodesLayer,
   );
@@ -465,31 +467,10 @@ export async function renderGraph(main, ctx) {
       adj[si].push(k);
       if (ti >= 0) adj[ti].push(k);
       const pts = lay.routes[k];
-      const d = pathD(pts);
-      const parts = [s('path', { class: 'halo', d }), s('path', { class: 'cn', d })];
-      const rs = radius(g.nodes[si]) + 4;
-      const rt = ti >= 0 ? radius(g.nodes[ti]) + 4 : 9;
-      if (e.kind === 'contradicts') {
-        const a = offset(pts, rs);
-        parts.push(terminal(a.x, a.y, a.ang));
-        if (ti >= 0) {
-          const b = offset(pts, rt, true);
-          parts.push(terminal(b.x, b.y, b.ang));
-        }
-        if (e.status === 'proposed') {
-          const m = along(pts, 0.5);
-          parts.push(warnSign(m.x, m.y, 0.85));
-        }
-      } else if (DIRECTED[e.kind]) {
-        const b = offset(pts, rt + 2, true);
-        parts.push(chevron(b.x, b.y, b.ang + Math.PI));
-      }
-      if (ti < 0) {
-        const end = pts[pts.length - 1];
-        parts.push(stubCap(end[0], end[1], e.state === 'unknown' ? 'unknown' : 'dangling'));
-      }
-      parts.push(s('path', { class: 'hit', d }));
-      const el = s('g', { class: edgeClass(e.kind, e.status, e.state), 'data-k': k }, parts);
+      const drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0 });
+      // The wide transparent hit path is the core's, drawn last (on top).
+      const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
+      const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
       el.addEventListener('mouseenter', () => hover({ edge: k }));
       el.addEventListener('mouseleave', () => hover(null));
       el.addEventListener('click', (ev) => {
@@ -797,7 +778,7 @@ export async function renderGraph(main, ctx) {
       mount(
         card,
         top('Relation'),
-        h('h3', null, edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind)),
+        h('h3', null, theme.edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind)),
         h(
           'dl',
           null,
@@ -832,7 +813,7 @@ export async function renderGraph(main, ctx) {
         return h(
           'li',
           null,
-          edgeSample(e.kind, e.status, 30),
+          theme.edgeSample(e.kind, e.status, 30),
           h('span', { class: 'muted' }, ` ${dir}${kindLabel(e.kind).toLowerCase()}${e.status === 'proposed' ? ' (proposed)' : e.status === 'rejected' ? ' (rejected)' : ''}`),
           h('br'),
           other ? h('button', { type: 'button', class: 'linkish cn-other', onclick: () => pin({ edge: k }, true) }, other.summary) : h('span', { class: 'faint' }, e.state === 'unknown' ? 'other store (unknown)' : 'deleted memory'),
@@ -867,8 +848,8 @@ export async function renderGraph(main, ctx) {
     mount(
       card,
       h('div', { class: 'eyebrow' }, 'Details'),
-      h('h3', null, 'Select a memory or relation'),
-      h('p', { class: 'hint' }, 'Hover a memory to highlight its relations. Click it, or a relation, to pin it here: a proposed relation is reviewed from this card.'),
+      h('h3', null, t('cardTitle')),
+      h('p', { class: 'hint' }, t('cardHint')),
       h(
         'dl',
         null,
@@ -885,53 +866,8 @@ export async function renderGraph(main, ctx) {
     );
   }
 
-  // ---- legend ---------------------------------------------------------------
-  const types = [...new Set(g.nodes.map((n) => n.type))].sort();
-  mount(
-    legendBox,
-    h(
-      'div',
-      null,
-      h('h4', null, 'Top-level scopes'),
-      h(
-        'ul',
-        null,
-        g.scopes.slice(0, 12).map((l) =>
-          h('li', null, badge(l.name, l.slot), s('svg', { width: 34, height: 10, 'aria-hidden': 'true' }, s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: 'M3,5 H31' })), `${scopeName(l.name)} · ${fmt(l.count)}`),
-        ),
-        g.scopes.length > 12 ? h('li', { class: 'faint' }, `and ${plural(g.scopes.length - 12, 'more scope')}`) : null,
-      ),
-    ),
-    h(
-      'div',
-      null,
-      h('h4', null, 'Memories (by type)'),
-      h(
-        'ul',
-        null,
-        types.map((t) => h('li', null, legendNode(null, t), TYPE_LABEL[t] || t)),
-        h('li', null, legendNode('hub'), '2+ relations'),
-        h('li', null, legendNode('never'), 'Never read'),
-        h('li', null, legendNode('chal'), 'Challenged'),
-        h('li', null, s('svg', { width: 34, height: 16, viewBox: '0 0 34 16', 'aria-hidden': 'true', class: 'lg-size' }, s('circle', { cx: 6, cy: 8, r: 3.5 }), s('circle', { cx: 23, cy: 8, r: 7 })), 'Size follows reads'),
-      ),
-    ),
-    h(
-      'div',
-      null,
-      h('h4', null, 'Relations'),
-      h(
-        'ul',
-        null,
-        KINDS.map((k) => h('li', null, edgeSample(k, 'confirmed'), kindLabel(k))),
-        h('li', null, edgeSample('contradicts', 'proposed'), 'Proposed contradiction (dashed, ⚠)'),
-        h('li', null, edgeSample('supports', 'proposed'), 'Any other proposed relation: faded'),
-        h('li', null, edgeSample('related_to', 'rejected'), 'Rejected'),
-        h('li', null, s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, 'dangling')), 'To a deleted memory'),
-        h('li', null, s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, 'unknown')), 'Into a store not checked here'),
-      ),
-    ),
-  );
+  // ---- legend (the style's) -------------------------------------------------
+  mount(legendBox, theme.legend(g, t));
 
   // ---- the relations table: proposed first, the rest on request -----------
   const PAGE = 100;
@@ -997,7 +933,7 @@ export async function renderGraph(main, ctx) {
               h(
                 'thead',
                 null,
-                h('tr', null, ['From', 'Relation', 'To', 'Status', 'Origin', 'Confidence', ''].map((t, i) => h('th', { scope: 'col', class: i === 5 ? 'n' : null }, t))),
+                h('tr', null, ['From', 'Relation', 'To', 'Status', 'Origin', 'Confidence', ''].map((col, i) => h('th', { scope: 'col', class: i === 5 ? 'n' : null }, col))),
               ),
               h(
                 'tbody',
@@ -1007,7 +943,7 @@ export async function renderGraph(main, ctx) {
                     'tr',
                     { class: 'plain-row' },
                     h('td', { class: 't' }, edgeEnd(e, 'src')),
-                    h('td', null, h('span', { class: 'kind' }, edgeSample(e.kind, e.status, 30), kindLabel(e.kind))),
+                    h('td', null, h('span', { class: 'kind' }, theme.edgeSample(e.kind, e.status, 30), kindLabel(e.kind))),
                     h('td', { class: 't' }, edgeEnd(e, 'dst')),
                     h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${FAR_END[e.state] || e.state}`) : null),
                     h('td', null, e.origin),
@@ -1046,14 +982,4 @@ export async function renderGraph(main, ctx) {
       pin({ node: byId.get(back.node) }, true);
     }
   }
-}
-
-/** A legend memory drawn like the graph's (hollow, scope-coloured outline). */
-function legendNode(kind, type) {
-  const cls = ['node', 'stroke-0', kind];
-  return s(
-    'svg',
-    { width: 18, height: 18, viewBox: '-9 -9 18 18', 'aria-hidden': 'true', class: 'lg-node' },
-    s('g', { class: cls }, kind === 'chal' ? s('circle', { class: 'chal-ring', r: 7.5 }) : null, type ? typeShape(type, 4.6) : s('circle', { class: 'sh', r: 5 })),
-  );
 }

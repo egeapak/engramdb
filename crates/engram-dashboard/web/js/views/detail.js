@@ -8,7 +8,8 @@ import { smallMultiples } from '../chart.js';
 import { renderMarkdown } from '../markdown.js';
 import { secHead, pill, statusPill, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
-import { edgeSample, kindLabel } from '../graph/glyphs.js';
+import { kindLabel } from '../relations.js';
+import { currentStyle } from '../graph/themes/index.js';
 
 const TIMELINE = {
   created: 'Created',
@@ -48,7 +49,7 @@ function edgeItem(e, ctx) {
       h(
         'div',
         { class: 'rt' },
-        edgeSample(e.kind, e.status, 40),
+        currentStyle().edgeSample(e.kind, e.status, 40),
         kindLabel(e.kind),
         h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)),
         e.state === 'invalidated' ? h('span', { class: 'ep invalidated' }, 'invalidated') : null,
@@ -100,7 +101,7 @@ function review(d, ctx) {
         return h(
           'li',
           null,
-          h('div', { class: 'ttl' }, edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
+          h('div', { class: 'ttl' }, currentStyle().edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
           h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`),
           reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => ctx.refresh(), 600) }),
         );

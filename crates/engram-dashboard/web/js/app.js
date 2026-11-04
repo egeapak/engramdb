@@ -18,6 +18,8 @@ import { renderGraph } from './views/graph.js';
 import { renderDoctor } from './views/doctor.js';
 import { renderProjects } from './views/projects.js';
 import { errorBox } from './views/common.js';
+import { currentStyle, onStyleChange, useStyle } from './graph/themes/index.js';
+import { makeT } from './graph/strings.js';
 
 const state = {
   session: null,
@@ -45,8 +47,10 @@ function applyTheme(t) {
   if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
   const btn = $('#theme-btn');
   const dark = effectiveTheme() === 'dark';
-  btn.textContent = dark ? 'Light' : 'Dark';
-  btn.setAttribute('aria-label', dark ? 'Switch to the light theme' : 'Switch to the dark theme');
+  // The label is a graph style's to flavour (graph/strings.js `schemeToggle`).
+  const say = makeT(currentStyle());
+  btn.textContent = say('schemeToggle', dark);
+  btn.setAttribute('aria-label', say('schemeToggleAria', dark));
 }
 
 function toggleTheme() {
@@ -163,6 +167,9 @@ async function route() {
     state.project = id;
     r.id = id;
   }
+  // A graph link's `style=` holds only while that graph is shown (the graph
+  // view applies it); every other view uses this browser's stored pick.
+  if (r.view !== 'graph') useStyle(null);
   renderSwitcher();
   renderNav(r);
   const main = $('#main');
@@ -205,6 +212,8 @@ async function route() {
 
 async function boot() {
   takeToken();
+  onStyleChange(() => applyTheme(null));
+  useStyle(null);
   applyTheme(storedTheme());
   $('#theme-btn').addEventListener('click', toggleTheme);
   $('#proj-select').addEventListener('change', (ev) => {

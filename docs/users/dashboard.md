@@ -68,8 +68,24 @@ default it follows your system.
 
 ## The graph
 
-Each memory is a node, coloured by its top-level scope; memories of one
-scope are joined by a path in its colour. The strokes between memories are
+The *Style* picker in the graph's toolbar changes how the graph is drawn,
+never what it shows: filters, selection, the details card and the relations
+table work the same in every style. Your choice is remembered in this
+browser and written into the address bar (`style=`), so a shared link opens
+in the style it was made in (without changing the other person's own
+choice). Two styles exist today:
+
+- **Grid** (the default for now) — the look described below: memories on a
+  grid, each top-level scope a coloured path through its memories with a
+  badge at its start. While Grid is picked, the header's light/dark button
+  reads *Night map* / *Day map* and the page is titled "*project* network".
+- **Plain** — an early version of the neutral style: the same positions and
+  relations with no scope paths or badges, memories filled with their
+  scope's colour. Its own layout and relation drawing are still to come;
+  it will then become the default.
+
+Each memory is a node, coloured by its top-level scope; in Grid, memories
+of one scope are joined by a path in its colour. The strokes between memories are
 relations (see [Linking memories](./links.md)):
 
 | Drawn as | Relation |

@@ -17,7 +17,7 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { shortId } from '../format.js';
-import { kindLabel } from '../graph/glyphs.js';
+import { kindLabel } from '../relations.js';
 
 /** Per edge: {state: 'pending' | 'done', text}. Lives as long as the page. */
 const reviews = new Map();

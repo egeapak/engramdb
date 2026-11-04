@@ -1,7 +1,9 @@
-// Relation (edge) drawing, shared by the graph view, its legend, the edge
-// table and the memory page, so a kind looks the same everywhere.
+// The Grid style's relation (edge) drawing, used by its graph, its legend
+// and, while Grid is the picked style, the samples on every other page (the
+// relations table, the memory page, the overview), so a kind looks the same
+// everywhere.
 //
-// Visual language (today's look; phase B moves it into the Grid theme):
+// Visual language:
 //   contradicts   red segment; dashed while proposed,
 //                 solid once confirmed; an inhibitory ⊣ bar at each end
 //   supersedes    heavy ink line, arrow toward the old memory
@@ -10,30 +12,8 @@
 //   related_to    thin grey line; duplicates thin grey dash-dot
 //   proposed      dashed (any kind); rejected: faint dotted
 
-import { s } from '../dom.js';
-
-export const KIND_LABEL = {
-  contradicts: 'Contradicts',
-  supersedes: 'Supersedes',
-  supports: 'Supports',
-  derived_from: 'Derived from',
-  related_to: 'Related to',
-  duplicates: 'Duplicates',
-};
-
-export const KINDS = ['contradicts', 'supersedes', 'supports', 'derived_from', 'related_to', 'duplicates'];
-
-/** Kinds drawn with an arrow at the target end. */
-export const DIRECTED = { supersedes: true, supports: true, derived_from: true };
-
-export function kindLabel(k) {
-  return KIND_LABEL[k] || String(k).replace(/_/g, ' ');
-}
-
-/** A drawn relation's classes: kind, status and far-end state. */
-export function edgeClass(kind, status, state) {
-  return ['cx', 'k-' + String(kind).replace(/[^a-z_]/g, ''), 's-' + String(status || 'confirmed').replace(/[^a-z_]/g, ''), state && state !== 'live' && 'x-' + state];
-}
+import { s } from '../../../dom.js';
+import { DIRECTED, edgeClass } from '../../../relations.js';
 
 /** A chevron pointing along angle `ang` (radians) at (x, y). */
 export function chevron(x, y, ang) {

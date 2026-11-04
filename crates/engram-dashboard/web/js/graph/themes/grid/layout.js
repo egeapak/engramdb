@@ -1,11 +1,15 @@
-// Route-map layout v2: a seeded force simulation snapped to a grid, with
-// collision-free station labels.
+// The Grid theme's layout (route-map layout v2): a seeded force simulation
+// snapped to a grid, with collision-free station labels. Theme-owned, so it
+// keeps its own words (stations, lines, routes); the core view only reads
+// `pos`, `routes`, `labels` and `bounds`, and the Grid theme's backdrop reads
+// `lines`.
 //
 // Pure functions over plain data, so the same module runs in the layout
-// worker (layout-worker.js) and, when a worker cannot start, on the main
-// thread. Deterministic: the only randomness is a PRNG seeded from the node
-// ids, and every loop walks nodes in id order, so the same store gives the
-// same map on every load (and in every browser).
+// worker (graph/layout-worker.js, through graph/layouts.js) and, when a
+// worker cannot start, on the main thread. Deterministic: the only
+// randomness is a PRNG seeded from the node ids, and every loop walks nodes
+// in id order, so the same store gives the same map on every load (and in
+// every browser).
 //
 // Steps:
 //   1. Lines (logical scopes) start as compact blocks, each line's stations
@@ -33,7 +37,7 @@
 // caller can keep a map steady across display filters by laying out one
 // fixed edge set and only drawing a subset of it.
 //
-// Input:  { nodes: [{ id, line, slot, scope, degree, r, label, weight }],
+// Input:  { nodes: [{ id, top_scope, slot, scope, degree, r, label, weight }],
 //           edges: [{ s, t }], aspect: box height / width }
 //         (`t` < 0: a stub — dangling or cross-store — drawn off `s`).
 // Output: { pos: [x0, y0, x1, y1, …], routes: [[[x, y], …], …] per edge,
@@ -74,7 +78,7 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 function linesOf(nodes, order) {
   const map = new Map();
   for (const i of order) {
-    const key = nodes[i].line || '';
+    const key = nodes[i].top_scope || '';
     if (!map.has(key)) map.set(key, { key, slot: nodes[i].slot ?? null, members: [] });
     map.get(key).members.push(i);
   }

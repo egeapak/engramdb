@@ -1,0 +1,9 @@
+/* Plain graph style. STUB until phases C and D: memories filled with their
+ * scope's colour (the fill-N class on the node), outlined in the page
+ * background so neighbours stay apart; no scope lines or badges. Scoped
+ * under [data-graph-style="plain"]. */
+[data-graph-style="plain"] .node.pl .sh { stroke: var(--bg); stroke-width: 1.5; }
+[data-graph-style="plain"] .node.pl .dot { fill: var(--bg); stroke: none; }
+[data-graph-style="plain"] .node.pl.hub .sh { stroke: var(--ink); stroke-width: 2; }
+[data-graph-style="plain"] .node.pl.never .sh { fill-opacity: .55; }
+[data-graph-style="plain"] .node.pl.inv .sh { fill: var(--bg-2); stroke: var(--ink-3); stroke-dasharray: 2 3; }

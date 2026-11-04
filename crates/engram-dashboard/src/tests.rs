@@ -1212,6 +1212,82 @@ fn every_import_resolves_to_an_embedded_file() {
     }
 }
 
+/// What the core graph view calls on a style (`js/graph/themes/index.js`).
+const GRAPH_STYLE_INTERFACE: &[&str] = &[
+    "id",
+    "name",
+    "strings",
+    "layout",
+    "drawBackdrop",
+    "drawNode",
+    "drawEdge",
+    "edgeSample",
+    "legend",
+];
+
+/// Every graph style is a folder `js/graph/themes/<id>/` whose `index.js`
+/// exports the whole interface as named exports (`export const` /
+/// `export function`), declares `id = '<id>'`, and is imported by the style
+/// registry. A missing export would only fail at run time, on the one page
+/// that picks the style.
+#[test]
+fn every_graph_style_exports_the_interface() {
+    const ROOT: &str = "js/graph/themes/";
+    let mut dirs: Vec<&str> = crate::assets::embedded()
+        .iter()
+        .filter_map(|a| a.path.strip_prefix(ROOT))
+        .filter_map(|rest| rest.split_once('/').map(|(dir, _)| dir))
+        .collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    assert!(
+        dirs.contains(&"grid") && dirs.contains(&"plain"),
+        "styles found: {dirs:?}"
+    );
+    let registry_path = format!("{ROOT}index.js");
+    let registry = crate::assets::find(&registry_path).expect("style registry embedded");
+    let registered = imports(&registry_path, std::str::from_utf8(registry.bytes).unwrap());
+    for dir in dirs {
+        let path = format!("{ROOT}{dir}/index.js");
+        let asset = crate::assets::find(&path)
+            .unwrap_or_else(|| panic!("style folder {dir} has no index.js"));
+        let src = std::str::from_utf8(asset.bytes).unwrap();
+        for name in GRAPH_STYLE_INTERFACE {
+            assert!(exports(src, name), "{path} does not export {name:?}");
+        }
+        assert!(
+            src.contains(&format!("export const id = '{dir}';")),
+            "{path}: `id` must be its folder name, {dir:?}"
+        );
+        assert!(
+            registered.contains(&path),
+            "{path} is not imported by {registry_path}: {registered:?}"
+        );
+    }
+    // The checker itself: a near-miss name is not an export.
+    let probe =
+        "export const identity = 1;\nexport function drawNodes() {}\n// export const legend = 1;\n";
+    assert!(!exports(probe, "id") && !exports(probe, "drawNode") && !exports(probe, "legend"));
+    assert!(exports("export const id = 'x';", "id"));
+    assert!(exports("export function legend(g, t) {", "legend"));
+}
+
+/// Whether `src` has a top-level named export `name` (`export const name …`
+/// or `export [async] function name(`).
+fn exports(src: &str, name: &str) -> bool {
+    src.lines().any(|l| {
+        [
+            "export const ",
+            "export function ",
+            "export async function ",
+        ]
+        .iter()
+        .filter_map(|kw| l.strip_prefix(kw))
+        .filter_map(|rest| rest.strip_prefix(name))
+        .any(|after| after.starts_with([' ', '(', '=']))
+    })
+}
+
 #[test]
 fn the_frontend_never_parses_html_or_inlines_script_or_style() {
     for a in crate::assets::embedded() {
@@ -1287,17 +1363,18 @@ const RETIRED_LINE_NAMES: &[&str] = &[
     "--l-",
 ];
 
-/// `x.line` / `x.lines` reads that are allowed in core JS: the layout
-/// module's own output (`lay.lines`, its scope paths). Every API object
-/// names the field `top_scope` / `scopes` now, so any other bare read is a
-/// stale one that would quietly draw "No scope" (or throw on `.filter`).
-/// The layout *input* key `line:` is not a read and is not matched.
-const LINE_READS_ALLOWED: &[&str] = &["lay.lines"];
+/// `x.line` / `x.lines` reads that are allowed in core JS. Every API object
+/// names the field `top_scope` / `scopes`, so a bare read is a stale one that
+/// would quietly draw "No scope" (or throw on `.filter`). The Grid layout's
+/// own `lay.lines` output is read only inside the Grid style, which the scan
+/// skips, so nothing is allowed in core today.
+const LINE_READS_ALLOWED: &[&str] = &[];
 
-/// Files the wording scan skips. Phase B moves `layout.js` into
-/// `themes/grid/`, the one place a theme may keep its own words; until then
-/// its internal names (stations, `routes`, `lines`) stay as they are.
-const WORDING_EXEMPT: &[&str] = &["js/graph/layout.js"];
+/// Folders the wording scan skips: the Grid graph style, the one place that
+/// may keep flavour words ("Night map", "<project> network") and its
+/// layout's internal names (stations, `routes`, `lines`). Every other style
+/// is core-scanned like the rest, so a new one starts neutral.
+const WORDING_EXEMPT: &[&str] = &["js/graph/themes/grid/"];
 
 /// Visible text where "line" means a line of text, not a scope.
 const LINE_TEXT_ALLOWED: &[&str] = &["usage log lines"];
@@ -1624,6 +1701,7 @@ fn the_wording_scan_reads_strings_not_code() {
     assert_eq!(
         reads,
         [
+            (1, "lay.lines".to_string()),
             (1, "n.line".to_string()),
             (1, "g.lines".to_string()),
             (3, "m.line".to_string())
@@ -1640,10 +1718,12 @@ fn the_wording_scan_reads_strings_not_code() {
 fn the_core_frontend_uses_neutral_words() {
     let mut problems = Vec::new();
     let mut scanned = 0;
+    let mut saw_plain = false;
     for a in crate::assets::embedded() {
-        if WORDING_EXEMPT.contains(&a.path) {
+        if WORDING_EXEMPT.iter().any(|dir| a.path.starts_with(dir)) {
             continue;
         }
+        saw_plain |= a.path.starts_with("js/graph/themes/plain/");
         let Ok(src) = std::str::from_utf8(a.bytes) else {
             continue;
         };
@@ -1682,6 +1762,7 @@ fn the_core_frontend_uses_neutral_words() {
         }
     }
     assert!(scanned >= 15, "the wording scan saw only {scanned} assets");
+    assert!(saw_plain, "the Plain graph style must be scanned like core");
     assert!(
         problems.is_empty(),
         "metaphor words in the core frontend (only a theme may use them):\n  {}",

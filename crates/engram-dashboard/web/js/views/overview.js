@@ -9,7 +9,8 @@ import { smallMultiples } from '../chart.js';
 import { projHead, secHead, alertBanner, schemaNote } from './common.js';
 import { projectCards } from './projects.js';
 import { reviewControls } from './review.js';
-import { edgeSample, kindLabel } from '../graph/glyphs.js';
+import { kindLabel } from '../relations.js';
+import { currentStyle } from '../graph/themes/index.js';
 
 /** "+12%" / "−40%" against the previous window, or why there is none. */
 function delta(now, before) {
@@ -60,7 +61,7 @@ function proposalItem(it, ctx) {
   return h(
     'li',
     null,
-    contra ? h('span', { class: 'ico' }, warnGlyph(22)) : h('span', { class: 'ico' }, edgeSample(e.kind, 'proposed', 22)),
+    contra ? h('span', { class: 'ico' }, warnGlyph(22)) : h('span', { class: 'ico' }, currentStyle().edgeSample(e.kind, 'proposed', 22)),
     h('div', { class: 'ttl' }, h('a', { href: ctx.href('detail', ctx.project.id, it.id) }, it.summary)),
     h(
       'div',

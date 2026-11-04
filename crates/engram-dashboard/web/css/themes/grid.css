@@ -1,0 +1,21 @@
+/* Grid graph style: the graph's original look (scope lines through their
+ * memories, two-letter badges, hollow memory outlines). Every rule is scoped
+ * under [data-graph-style="grid"] (set on <html> by graph/themes/index.js),
+ * so picking another style switches all of it off. The relation glyphs
+ * (.cx …) stay in app.css: every style shares them until phase D. */
+[data-graph-style="grid"] .graph .ln { fill: none; stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; opacity: .9; }
+[data-graph-style="grid"] .ln { fill: none; stroke-width: 6; stroke-linecap: round; }
+[data-graph-style="grid"] .ln.lv-1 { stroke-dasharray: 14 5; }
+[data-graph-style="grid"] .ln.lv-2 { stroke-dasharray: 3 4; }
+[data-graph-style="grid"] .graph .lb text { font-weight: 800; font-size: 11px; text-anchor: middle; dominant-baseline: central; }
+[data-graph-style="grid"] .lbt-0, [data-graph-style="grid"] .lbt-2, [data-graph-style="grid"] .lbt-3, [data-graph-style="grid"] .lbt-6 { fill: var(--f-0); }
+[data-graph-style="grid"] .lbt-1, [data-graph-style="grid"] .lbt-4, [data-graph-style="grid"] .lbt-5 { fill: var(--f-1); }
+[data-graph-style="grid"] .lbt-none { fill: var(--f-none); }
+[data-graph-style="grid"] .graph .ln, [data-graph-style="grid"] .graph .lb { transition: opacity .15s; }
+[data-graph-style="grid"] .node .sh { fill: var(--node-fill); stroke-width: 3; }
+[data-graph-style="grid"] .node .dot { fill: var(--ink); stroke: none; }
+[data-graph-style="grid"] .node.hub .sh { stroke: var(--ink); stroke-width: 3.4; }
+[data-graph-style="grid"] .node.never .sh { stroke-dasharray: 3 2.5; stroke-width: 2.2; }
+[data-graph-style="grid"] .node.inv .sh { stroke: var(--ink-3); stroke-dasharray: 2 3; fill: var(--bg-2); }
+[data-graph-style="grid"] .graph.has-focus .ln, [data-graph-style="grid"] .graph.has-focus .lb { opacity: .3; }
+[data-graph-style="grid"] .lg-node .sh { fill: var(--node-fill); }
