@@ -8,7 +8,7 @@ Playwright and reads the page's own `performance.mark` points plus
 `docs/contributors/dashboard-performance.md`.
 
 ```bash
-# 1. The stores (deterministic; 60 / 1k / 2k / 10k memories, ~1 min in debug)
+# 1. The stores (deterministic; 60 / 1k / 2k / 10k memories, about 10 s once the example is built)
 cargo run --example dashboard_bench_store -- /tmp/dash-bench
 
 # 2. A release binary (the budgets are release figures)
@@ -44,7 +44,8 @@ then `requestAnimationFrame`, then one task.
 | `show_all_ms` | `#…/graph?all=1` → painted (the full graph, up to the server's 800-memory limit); `show_all_layout_ms` its layout |
 | `relations_first_page_ms` | click on the Relations tab → painted (`relations:painted`) |
 | `filter_toggle_ms` | the Proposed chip → painted, median of 10 (once, on the opened scope or the whole graph) |
-| `hover_ms_p50/p95` | `mouseenter` on a memory → painted, over 60 memories |
+| `hover_ms_p50/p95` | `mouseenter` on a memory → painted, over 60 memories: latency, so it includes the wait for the next vsync (up to one 16.7 ms frame) |
+| `hover_frame_ms_p50/p95` | the hover's own frame: events dispatched at the start of a frame (in a rAF callback) → the task after that frame's paint, over 60 more memories; the main-thread work the 16 ms budget is about |
 | `frame_ms_p95/p99` | every frame's length while those hovers run |
 | `zoom_fps` | one wheel event per frame, 40 in and 40 out |
 | `pan_fps` | a 60-step mouse drag (real input through CDP) |

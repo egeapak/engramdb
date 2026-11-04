@@ -263,7 +263,9 @@ pub fn generate(n: usize) -> (Vec<Memory>, Vec<u32>) {
                 let target = mems[t].id.clone();
                 mems[s].supersedes.push(target);
                 mems[t].superseded_by = Some(mems[s].id.clone());
-                mems[t].invalidated_at.get_or_insert(at);
+                // Never before either memory existed.
+                let when = at.max(mems[t].created_at).max(mems[s].created_at);
+                mems[t].invalidated_at.get_or_insert(when);
                 continue;
             }
             kind = "derived_from";
@@ -279,7 +281,11 @@ pub fn generate(n: usize) -> (Vec<Memory>, Vec<u32>) {
         );
         link.status = status;
         link.confidence = 0.55 + (rng.next() * 45.0).round() / 100.0;
-        link.at = Some(at + Duration::minutes(made as i64));
+        link.at = Some(
+            (at + Duration::minutes(made as i64))
+                .max(mems[s].created_at)
+                .max(mems[t].created_at),
+        );
         mems[s].links.push(link);
     }
     // About 1% of relations end at a memory that was deleted.
@@ -290,7 +296,7 @@ pub fn generate(n: usize) -> (Vec<Memory>, Vec<u32>) {
             LinkKind::RelatedTo,
             LinkOrigin::parse_lenient("human"),
         );
-        link.at = Some(at);
+        link.at = Some(at.max(mems[s].created_at));
         mems[s].links.push(link);
     }
     (mems, reads)
@@ -305,6 +311,12 @@ pub fn use_machine_dir(machine: &Path) -> std::io::Result<()> {
     // Edition 2021: `set_var` is safe; this runs before any thread reads env.
     std::env::set_var("ENGRAMDB_DATA_DIR", machine.join("data"));
     std::env::set_var("ENGRAMDB_CONFIG_DIR", machine.join("conf"));
+    // The registry too, explicitly: an inherited ENGRAMDB_REGISTRY_PATH
+    // would otherwise register the bench stores in someone's real registry.
+    std::env::set_var(
+        "ENGRAMDB_REGISTRY_PATH",
+        machine.join("conf").join("registry.json"),
+    );
     std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", machine.join("models"));
     std::env::set_var("ENGRAMDB_OFFLINE", "1");
     Ok(())

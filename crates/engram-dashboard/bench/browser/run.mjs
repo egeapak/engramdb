@@ -50,11 +50,17 @@ const pct = (a, f) => {
 };
 
 /** Start the dashboard on one store; resolves to its token URL. */
+/** Every dashboard this run started, killed on any exit (see the end). */
+const children = new Set();
+
+/** Start the dashboard on one store; resolves to its token URL (30 s at most). */
 function startDashboard(size, port) {
   const env = {
     ...process.env,
     ENGRAMDB_DATA_DIR: join(stores, 'data'),
     ENGRAMDB_CONFIG_DIR: join(stores, 'conf'),
+    // The bench machine's own registry, whatever the shell exports: never a real one.
+    ENGRAMDB_REGISTRY_PATH: join(stores, 'conf', 'registry.json'),
     ENGRAMDB_MODEL_CACHE_DIR: join(stores, 'models'),
     ENGRAMDB_OFFLINE: '1',
     ENGRAMDB_IN_PROCESS: '1',
@@ -62,14 +68,30 @@ function startDashboard(size, port) {
   const argv = ['dashboard', '--no-open', '--json', '--port', String(port)];
   if (args.assets) argv.push('--assets-dir', resolve(args.assets));
   const child = spawn(bin, argv, { cwd: join(stores, size), env, stdio: ['ignore', 'pipe', 'inherit'] });
+  children.add(child);
+  child.on('exit', () => children.delete(child));
   return new Promise((res, rej) => {
     let out = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      rej(new Error(`dashboard printed no token URL within 30 s: ${out}`));
+    }, 30000);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      rej(e);
+    });
     child.stdout.on('data', (d) => {
       out += d;
       const m = out.match(/http[^"\s]*#token=[0-9a-f]+/);
-      if (m) res({ url: m[0], child });
+      if (m) {
+        clearTimeout(timer);
+        res({ url: m[0], child });
+      }
     });
-    child.on('exit', (c) => rej(new Error(`dashboard exited (${c}): ${out}`)));
+    child.on('exit', (c) => {
+      clearTimeout(timer);
+      rej(new Error(`dashboard exited (${c}): ${out}`));
+    });
   });
 }
 
@@ -181,8 +203,31 @@ async function hoverFrames(p) {
       await new Promise((r) => setTimeout(r, 30));
     }
     run = false;
+    // The hover's own frame: the events dispatched at the start of a frame
+    // (in a rAF callback), to the task after that frame's paint. That is
+    // the main-thread work the 16 ms budget is about, without the wait for
+    // the next vsync that `hover` above includes.
+    const work = [];
+    for (let i = 0; i < 60; i++) {
+      const el = nodes[(i * 104729 + 13) % nodes.length];
+      await window.__afterPaint();
+      work.push(
+        await new Promise((res) =>
+          requestAnimationFrame(() => {
+            const t0 = performance.now();
+            if (prev) prev.dispatchEvent(new MouseEvent('mouseleave'));
+            el.dispatchEvent(new MouseEvent('mouseenter'));
+            const ch = new MessageChannel();
+            ch.port1.onmessage = () => res(performance.now() - t0);
+            ch.port2.postMessage(0);
+          }),
+        ),
+      );
+      prev = el;
+      await new Promise((r) => setTimeout(r, 30));
+    }
     if (prev) prev.dispatchEvent(new MouseEvent('mouseleave'));
-    return { hover, gaps: gaps.slice(3) };
+    return { hover, work, gaps: gaps.slice(3) };
   });
 }
 
@@ -273,6 +318,8 @@ async function benchCombo(browser, url, size, style, theme, width) {
   const hv = await hoverFrames(p);
   row.hover_ms_p50 = pct(hv.hover, 0.5);
   row.hover_ms_p95 = pct(hv.hover, 0.95);
+  row.hover_frame_ms_p50 = pct(hv.work, 0.5);
+  row.hover_frame_ms_p95 = pct(hv.work, 0.95);
   row.frame_ms_p95 = pct(hv.gaps, 0.95);
   row.frame_ms_p99 = pct(hv.gaps, 0.99);
   row.zoom_fps = fps(await zoomFrames(p));
@@ -361,24 +408,29 @@ async function workerLayout(browser, url, size) {
 const browser = await chromium.launch(args.chrome ? { executablePath: args.chrome } : {});
 const rows = [];
 let port = Number(args.port || 7400);
-for (const size of sizes) {
-  const { url, child } = await startDashboard(size, port++);
-  try {
-    if (!args['no-layout']) {
-      const lay = await workerLayout(browser, url, size);
-      rows.push(lay);
-      console.log(JSON.stringify(lay, (k, v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : v)));
+try {
+  for (const size of sizes) {
+    const { url, child } = await startDashboard(size, port++);
+    try {
+      if (!args['no-layout']) {
+        const lay = await workerLayout(browser, url, size);
+        rows.push(lay);
+        console.log(JSON.stringify(lay, (k, v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : v)));
+      }
+      for (const style of styles)
+        for (const theme of themes)
+          for (const width of widths) {
+            const row = await benchCombo(browser, url, size, style, theme, width);
+            rows.push(row);
+            console.log(JSON.stringify(row, (k, v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : v)));
+          }
+    } finally {
+      child.kill();
     }
-    for (const style of styles)
-      for (const theme of themes)
-        for (const width of widths) {
-          const row = await benchCombo(browser, url, size, style, theme, width);
-          rows.push(row);
-          console.log(JSON.stringify(row, (k, v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : v)));
-        }
-  } finally {
-    child.kill();
   }
+} finally {
+  // A failed step must not leave a browser or a dashboard behind.
+  for (const c of children) c.kill();
+  await browser.close();
+  if (args.json) writeFileSync(args.json, JSON.stringify(rows, null, 1));
 }
-await browser.close();
-if (args.json) writeFileSync(args.json, JSON.stringify(rows, null, 1));

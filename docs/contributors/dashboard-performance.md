@@ -25,7 +25,7 @@ Three tools, from the server inward to the pixels:
 
 1. **The stores.** `cargo run --example dashboard_bench_store -- <dir>`
    writes four deterministic projects, `s60`, `s1k`, `s2k`, `s10k`, under
-   one machine dir (`<dir>/{data,conf,models}`), in about ten seconds. The
+   one machine dir (`<dir>/{data,conf,models}`), in about 10 s once the example is built (debug). The
    generator (`examples/support/dashboard_store.rs`) follows the layout
    harness's (`crates/engram-dashboard/bench/data.mjs`): ten top scopes with
    sub-scopes and Zipf-like sizes, 0.7 relations per memory, mostly inside a
@@ -70,29 +70,43 @@ Google Chrome for Testing 153, Node 22, release `engramdb` (fat LTO).
 ## Results
 
 Medians over the 8 combinations (2 styles × 2 themes × 2 widths, 3 cold
-loads each), with the worst combination in brackets (slowest time, lowest
+loads each, `--runs 3`; the script's default is 5), with the worst combination in brackets (slowest time, lowest
 fps). Before = branch head before phase H's fixes, after = with them, same
 binary, same stores.
 
 | p50 (worst) | s60 | s1k | s2k | s10k | budget |
 |---|---|---|---|---|---|
-| `/graph`, as the page sees it (fetch + parse) | 14 (17) | 16 (19) | 21 (22) | 47 (56) | 150 / 300 / 400 |
-| tab click → painted | 95 (100) | 52 (64) | 60 (71) | 104 (116) | 800 / 1500 / 800 |
-| layout cold in the worker, scope-force (Plain) | 16 | 111 | 166 | 179 (2000 of 10k) | 400 / 1000 |
-| layout cold in the worker, grid | 18 | 181 | 344 | 375 (2000 of 10k) | 400 / 1000 |
-| open the largest scope | – | 148 (182) | 194 (228) | 292 (346) | 300 / 500 / 500 |
-| show all (≤ 800 memories) | – | 325 (396) | 333 (442) | 347 (382) | (tab click) |
-| filter toggle, before → after | 18 → 19 | 22 → 22 | 26 → 24 | **47 (54) → 36 (40)** | 50 / 100 |
-| hover frame, p99 | 17 | 17 | 17 | 17 | 16 (one 60 Hz frame) |
-| zoom fps, before → after | 60 → 60 | 60 → 60 | 58 (54) → 60 (60) | **48 (33) → 59 (53)** | 60 (2k ≥ 45) |
-| pan fps | 60 | 60 | 60 (59) | 59 (58) | 60 |
-| relations, first page | 40 (44) | 72 (88) | 70 (96) | 120 (132) | 200 / 300 |
+| `/graph`, as the page sees it (fetch + parse) | 15 (16) | 16 (19) | 20 (23) | 48 (54) | 150 / 300 / 400 |
+| tab click → painted | 94 (113) | 49 (50) | 55 (71) | 105 (123) | 800 / 1500 / 800 |
+| layout cold in the worker, scope-force (Plain) | 17 | 111 | 179 | 188 (2000 of 10k) | 400 / 1000 |
+| layout cold in the worker, grid | 21 | 197 | 322 | 393 (2000 of 10k) | 400 / 1000 |
+| open the largest scope | – | 146 (177) | 176 (210) | 307 (355) | 300 / 500 / 500 |
+| show all (≤ 800 memories) | – | 314 (362) | 341 (386) | 346 (394) | (tab click) |
+| filter toggle, before → after | 18 (19) → 18 (19) | 22 (24) → 22 (23) | 26 (28) → 24 (24) | **47 (54) → 38 (40)** | 50 / 100 |
+| hover frame work, p95 (`hover_frame_ms_p95`) | 3 (4) | 6 (7) | 8 (11) | 12 (14) | 16 |
+| hover → painted latency, p95 (`hover_ms_p95`) | 19 (21) | 22 (23) | 24 (26) | 27 (31) | (see below) |
+| frame length during the hovers, p99 | 16.8 (16.8) | 16.8 (16.8) | 16.8 (16.8) | 16.8 (16.8) | one 60 Hz frame |
+| zoom fps, before → after | 60 (59) → 60 (60) | 60 (58) → 60 (60) | 58 (54) → 60 (60) | **48 (33) → 59 (56)** | 60 (2k ≥ 45) |
+| pan fps | 60 (57) | 60 (60) | 60 (60) | 59 (59) | 60 |
+| relations, first page | 41 (45) | 63 (70) | 72 (90) | 121 (141) | 200 / 300 |
 
 Rows without "before → after" did not move beyond run-to-run noise (the
-fixes touch neither the server, the layouts nor the first build). A hover
-frame of 16.7–16.8 ms is one 60 Hz frame: no hover dropped a frame. The
+fixes touch neither the server, the layouts nor the first build). The
 "tab click" at s60 is the whole graph (layout included); from s1k up it is
-the overview.
+the overview. The s10k interactive rows (toggle, hover, zoom, pan) are
+measured on the opened largest scope, which is 800 memories (the server's
+limit) and 487 drawn relations.
+
+**Hover.** The budget is the hover's own frame: `hover_frame_ms` dispatches
+the events at the start of a frame and stops at the task after that
+frame's paint, so it is the main-thread work (style, layout, paint)
+the change costs: at most 14 ms at p95, under 16. `hover_ms` is the
+latency a user sees and includes waiting for the next vsync (up to
+16.7 ms), so it is always above one frame and is not the budgeted figure.
+One earlier full run (`after.json`, before this metric existed) recorded a
+single 66.6 ms frame in the s2k Plain light 390 combination (its p99 over
+~200 frames); four reruns of that combination gave 16.8, so it is counted
+as a one-off (a GC or compositor stall), not as a hover cost.
 
 Server side (Criterion, in process, `--profile bench`):
 
@@ -115,13 +129,13 @@ whole index (`store.list` and `graph_of`), which every endpoint does first.
   the write removed. The core now calls a style's `zoomed` once for the
   first view and once each pan / zoom settles (the 160 ms settle timer that
   already decided redraws); mid-gesture, relations scale with the map and
-  take their width back on settle. Plain at 10k: 33–40 → 58–59 fps.
+  take their width back on settle. Plain at 10k: 33.2–40.3 → 56.4–60.0 fps.
 - **Filter toggle.** A display-filter chip rebuilt every drawn relation
   (path data, element, three listeners) and the browser restyled them all.
   `drawEdges` now keeps the elements it built (keyed by scale, and the view
   in cut mode) and a toggle only sets `hidden` on the ones it drops, built
   lazily the first time they are shown and kept in index order, so what
-  overlaps what never changes. 10k opened scope: 45–54 → 34–40 ms.
+  overlaps what never changes. 10k opened scope: 42.5–54.2 → 31.8–40.5 ms.
 
 Grid is pixel-identical before and after (light / dark, 1280 / 390, the
 full graph, show-all, an opened scope, after each toggle and after a zoom),
@@ -134,12 +148,18 @@ budget.
 
 ## Still over
 
-- **Grid zoom at 800 memories: 54–56 fps** (Plain 59). Frames drop only at
-  scales between Fit and about 3× Fit, where every glyph and its halo is on
-  screen at a larger raster scale; zoomed further in the frame rate is 60.
-  It is paint-bound in Chrome's software rasterizer (the sandbox has no
-  GPU) and within the 2k ≥ 45 fps budget; a GPU-rastered desktop should not
-  see it.
+- **Zoom on the 10k store's opened scope (800 memories): 56–60 fps.**
+  800 memories is fewer than the 2k store's graph, so the 60 fps row
+  applies, not the 2k ≥ 45 floor. Two full runs: Grid 53.2–59.2 and
+  56.4–60.0 fps, Plain 57.1–59.2 and 56.4–60.0 (before the fix Plain was
+  33.2–40.3). Both styles therefore miss 60 by up to 7 fps in the worst
+  combination; both clear 45. Frames drop only between Fit and about 3×
+  Fit, where every memory is on screen at a larger raster scale; zoomed
+  further in, the rate is 60. It is paint-bound in Chrome's software
+  rasterizer (the sandbox has no GPU); a GPU-rastered desktop should not see
+  it, but that is not measured here.
+- The 10k filter toggle (42.5–54.2 → 31.8–40.5 ms over the two runs) is
+  now under 50 in every combination; before, it was over in some.
 
 ## Rerun
 
@@ -148,7 +168,7 @@ cargo run --example dashboard_bench_store -- /tmp/dash-bench
 cargo bench -p engram-dashboard --bench dashboard_graph
 cargo build --release --bin engramdb
 cd crates/engram-dashboard
-NODE_PATH=$(npm root -g) node bench/browser/run.mjs --stores /tmp/dash-bench --json /tmp/dash-bench/results.json
+NODE_PATH=$(npm root -g) node bench/browser/run.mjs --stores /tmp/dash-bench --runs 3 --json /tmp/dash-bench/results.json
 ```
 
 Close other heavy work first: a parallel `cargo build` doubles every
