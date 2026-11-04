@@ -38,8 +38,9 @@ import { api } from '../api.js';
 import { fmt, ago, plural, shortId, label } from '../format.js';
 import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel, edgeClass } from '../relations.js';
-import { runNamedLayout } from '../graph/layouts.js';
+import { runNamedLayout, usesWidth } from '../graph/layouts.js';
 import { along, pathD } from '../graph/geometry.js';
+import { reads, radius } from '../graph/radius.js';
 import { makeT } from '../graph/strings.js';
 import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
@@ -74,6 +75,18 @@ function failWorker() {
 }
 
 /** Lay out off the main thread; on the main thread (deferred) if no worker starts. */
+/** FNV-1a over a layout's cache key: the zoom kept per laid-out graph. */
+function hashKey(str) {
+  let a = 0x811c9dc5;
+  let b = 0x01000193 ^ str.length;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x5bd1e995);
+  }
+  return (a >>> 0).toString(16) + (b >>> 0).toString(16) + '.' + str.length;
+}
+
 function runLayout(input) {
   const key = JSON.stringify(input);
   if (layoutCache.has(key)) return Promise.resolve({ key, lay: layoutCache.get(key) });
@@ -167,8 +180,6 @@ const FAR_END = { dangling: 'far end deleted', invalidated: 'far end invalidated
 // Geometry and text helpers
 // ---------------------------------------------------------------------------
 
-const reads = (n) => n.usage.returned + n.usage.injected + n.usage.fetched;
-const radius = (n) => 5 + Math.min(6, Math.sqrt(reads(n)) * 0.55);
 
 /**
  * A memory's short label: the summary up to its first clause break, cut on
@@ -394,7 +405,7 @@ export async function renderGraph(main, ctx) {
   // and the name of the style's layout (part of the cache key).
   const labels = g.nodes.map((n) => shortLabel(n.summary));
   const boxAspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / (graphBox.clientWidth || 800)));
-  const res = await runLayout({
+  const input = {
     layout: theme.layout.name,
     nodes: g.nodes.map((n, i) => ({ id: n.id, top_scope: n.top_scope || '', slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
     options: theme.layout.options || {},
@@ -405,16 +416,18 @@ export async function renderGraph(main, ctx) {
       return { s: byId.get(e.src), t: ti, kind: e.kind, far_scope: ti >= 0 ? g.nodes[ti].top_scope || '' : (e.far_scope ?? null) };
     }),
     aspect: Math.round(boxAspect * 20) / 20,
-    // The box's width in pixels, coarsely (so a resize rarely misses the
-    // cache): a layout may size what must stay readable at Fit by it.
-    width: Math.round((graphBox.clientWidth || 800) / 40) * 40,
-  }).catch((e) => {
+  };
+  // The box's width in pixels, coarsely (so a resize rarely misses the
+  // cache), only for a layout that sizes what must stay readable at Fit by
+  // it: any other would lay out again on every resize for nothing.
+  if (usesWidth(theme.layout.name)) input.width = Math.round((graphBox.clientWidth || 800) / 40) * 40;
+  const res = await runLayout(input).catch((e) => {
     if (!ctx.isStale()) mount(graphBox, errorBox(e));
     return null;
   });
   if (!res || ctx.isStale()) return;
   const lay = res.lay;
-  const viewKey = p.id + '|' + theme.layout.name + '|' + res.key.length + '|' + g.nodes.length;
+  const viewKey = p.id + '|' + hashKey(res.key);
 
   // ---- static layers ---------------------------------------------------------
   const P = (i) => [lay.pos[2 * i], lay.pos[2 * i + 1]];

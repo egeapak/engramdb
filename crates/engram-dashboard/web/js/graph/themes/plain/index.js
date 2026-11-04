@@ -12,6 +12,7 @@ import { slot, typeShape } from '../../../scopes.js';
 import { DIRECTED } from '../../../relations.js';
 import { pathD, along, offset } from '../../geometry.js';
 import { buildLegend } from '../../legend.js';
+import { radius } from '../../radius.js';
 import { chevron, terminal, warnSign, stubCap, stubSample, edgeSample as sample } from './glyphs.js';
 
 export const id = 'plain';
@@ -40,7 +41,11 @@ export function drawBackdrop(g, lay) {
     if (!n.top_scope) return;
     const x = lay.pos[2 * i];
     const y = lay.pos[2 * i + 1];
-    const d = `M${(x - rr).toFixed(1)},${y.toFixed(1)}a${rr.toFixed(1)},${rr.toFixed(1)} 0 1,0 ${(2 * rr).toFixed(1)},0a${rr.toFixed(1)},${rr.toFixed(1)} 0 1,0 ${(-2 * rr).toFixed(1)},0`;
+    // At least the memory's own disc and outline, so a large one is never
+    // wider than its region.
+    const q = Math.max(radius(n) + 6, rr);
+    const qs = q.toFixed(1);
+    const d = `M${(x - q).toFixed(1)},${y.toFixed(1)}a${qs},${qs} 0 1,0 ${(2 * q).toFixed(1)},0a${qs},${qs} 0 1,0 ${(-2 * q).toFixed(1)},0`;
     if (!arcs.has(n.top_scope)) arcs.set(n.top_scope, { slot: n.color_slot, d: [] });
     arcs.get(n.top_scope).d.push(d);
   });
@@ -51,6 +56,11 @@ export function drawBackdrop(g, lay) {
   const above = s('g', { class: 'scope-names', 'aria-hidden': 'true' });
   for (const nm of lay.scopes || []) {
     if (!nm.placed) continue;
+    // A name over memories gets a faint backing box, so it reads between them.
+    if (nm.backed) {
+      const w = nm.w || nm.key.length * nm.size * 0.62;
+      above.appendChild(s('rect', { class: 'scope-name-bg', x: (nm.x - w / 2).toFixed(1), y: (nm.y - nm.size * 0.96).toFixed(1), width: w.toFixed(1), height: (nm.size * 1.2).toFixed(1), rx: (nm.size * 0.3).toFixed(1) }));
+    }
     above.appendChild(s('text', { class: 'scope-name', x: nm.x.toFixed(1), y: nm.y.toFixed(1), 'font-size': nm.size.toFixed(1), 'text-anchor': 'middle' }, nm.key));
   }
   return { below, above };

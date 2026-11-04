@@ -79,9 +79,11 @@ choice. Two styles exist today:
 - **Plain** (the default) — memories placed by their relations and gathered
   by scope: related memories sit close together, each top-level scope is a
   soft tinted region with its name, and relations are straight lines. The
-  same store always draws the same graph. Small graphs are spread out so
-  every memory's label has room; in a large one, zoom in for labels or hover
-  a memory to name it.
+  same store always draws the same graph in a box of the same shape (the
+  window's width changes only how large the scope names are drawn). Small
+  graphs are spread out so every memory's label has room at Fit on a
+  desktop-sized window; on a phone, or in a large graph, zoom in for labels
+  or hover a memory to name it.
 - **Grid** — the original look: memories on a grid, each top-level scope a
   coloured path through its memories with a badge at its start. On the
   graph page with Grid picked, the header's light/dark button reads

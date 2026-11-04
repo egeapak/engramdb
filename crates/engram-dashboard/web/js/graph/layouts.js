@@ -13,7 +13,9 @@
 //   { layout: name, options: the style's layout options (or {}),
 //     nodes: [{ id, top_scope, slot, scope, degree, r, label, weight }],
 //     edges: [{ s, t, kind, far_scope }], aspect: box height / width,
-//     width: the box's width in CSS pixels, rounded to 40 }
+//     width: the box's width in CSS pixels, rounded to 40 — sent only to
+//     a layout listed in WIDTH_LAYOUTS, so any other's input (and cache
+//     key) does not change when the box is resized }
 //   `t` < 0 is a stub (dangling or cross-store) drawn off `s`; `far_scope`
 //   is the far end's top scope ('' for none, null when unknown, as for every
 //   stub today).
@@ -34,6 +36,12 @@ import { layout as grid } from './themes/grid/layout.js';
 import { layout as scopeForce } from './scope-force.js';
 
 export const LAYOUTS = Object.freeze({ grid, 'scope-force': scopeForce });
+
+/** The layouts that read `input.width` (Grid does not). */
+const WIDTH_LAYOUTS = Object.freeze({ 'scope-force': true });
+
+/** Whether layout `name` reads `input.width`. */
+export const usesWidth = (name) => Object.hasOwn(WIDTH_LAYOUTS, name);
 
 /** Run the layout `input.layout` names; an unknown name is an error, never a silent fallback. */
 export function runNamedLayout(input) {

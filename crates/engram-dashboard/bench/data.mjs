@@ -37,7 +37,7 @@ const EDGE_KINDS = [
   ['contradicts', 0.06],
 ];
 
-export function generate(n, seed = 7) {
+export function generate(n, seed = 7, relations = Math.round(n * 0.7)) {
   const rand = prng(seed * 1000003 + n);
   const pick = (arr) => arr[Math.floor(rand() * arr.length)];
   // Zipf weights over top scopes, skewed.
@@ -90,7 +90,7 @@ export function generate(n, seed = 7) {
     byScope.get(nd.scope).push(i);
   });
   // Edge sources: a skewed subset (hubs), so many memories stay isolated.
-  const m = Math.round(n * 0.7);
+  const m = Math.min(relations, (n * (n - 1)) >> 1);
   const edges = [];
   const seen = new Set();
   let guard = 0;

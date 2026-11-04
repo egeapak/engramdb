@@ -3,7 +3,7 @@
 // deterministic synthetic graphs. A dev tool, not part of the binary (see
 // README.md).
 //
-//   node bench/layout.mjs                 # n = 60, 1000, 2000; every layout
+//   node bench/layout.mjs                 # n = 60, 1000, 2000, 300x8000, 2000x10000; every layout
 //   node bench/layout.mjs --n 1000 --layouts scope-force --runs 9
 //   node bench/layout.mjs --json          # one JSON row per (layout, n)
 //   node bench/layout.mjs --graph g.json  # a saved /api/projects/{id}/graph response
@@ -60,7 +60,13 @@ export function fromApi(api) {
   return { nodes, edges };
 }
 
-const graphOf = (spec) => (/^\d+$/.test(String(spec)) ? generate(Number(spec)) : fromApi(JSON.parse(readFileSync(spec, 'utf8'))));
+// `N` is a generated graph of N memories (0.7 N relations), `NxE` one with E
+// relations (the dense small graph: 300x8000), anything else a saved file.
+const graphOf = (spec) => {
+  const m = /^(\d+)(?:x(\d+))?$/.exec(String(spec));
+  if (!m) return fromApi(JSON.parse(readFileSync(spec, 'utf8')));
+  return m[2] ? generate(Number(m[1]), 7, Number(m[2])) : generate(Number(m[1]));
+};
 
 /** Every layout under test: name → (graph) → { x, y, labels? } plus the raw output. */
 const RUNNERS = {
@@ -119,7 +125,7 @@ function main(argv) {
     console.log((performance.now() - t0).toFixed(1));
     return;
   }
-  const ns = arg('--graph', null) ? arg('--graph').split(',') : arg('--n', '60,1000,2000').split(',');
+  const ns = arg('--graph', null) ? arg('--graph').split(',') : arg('--n', '60,1000,2000,300x8000,2000x10000').split(',');
   const names = arg('--layouts', Object.keys(RUNNERS).join(',')).split(',');
   const runs = Number(arg('--runs', '5'));
   const colds = Number(arg('--cold', '3'));
@@ -150,10 +156,10 @@ function main(argv) {
     return;
   }
   const f = (v, d = 0) => (v === null || v === undefined ? '-' : v.toFixed(d));
-  console.log('| layout | n | cold ms | warm ms | crossings | edge/NN | overlap % | same scope % | labels placed | deterministic | contract |');
-  console.log('|---|---|---|---|---|---|---|---|---|---|---|');
+  console.log('| layout | n | relations | cold ms | warm ms | crossings | edge/NN | overlap % | same scope % | labels placed | deterministic | contract |');
+  console.log('|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const r of rows) {
-    console.log(`| ${r.layout} | ${r.n} | ${f(r.cold)} | ${f(r.warm)} | ${r.crossings} | ${f(r.meanEdgeNN, 1)} | ${f(r.overlapPct, 1)} | ${f(r.scopePurity)} | ${r.labels === null ? '-' : `${r.labels}/${r.n}`} | ${r.deterministic ? 'yes' : 'NO'} | ${r.contract.length ? r.contract.join(' ') : 'ok'} |`);
+    console.log(`| ${r.layout} | ${r.n} | ${r.edges} | ${f(r.cold)} | ${f(r.warm)} | ${r.crossings} | ${f(r.meanEdgeNN, 1)} | ${f(r.overlapPct, 1)} | ${f(r.scopePurity)} | ${r.labels === null ? '-' : `${r.labels}/${r.n}`} | ${r.deterministic ? 'yes' : 'NO'} | ${r.contract.length ? r.contract.join(' ') : 'ok'} |`);
   }
 }
 

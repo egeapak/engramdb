@@ -1409,19 +1409,56 @@ fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
         "Math.exp",
         "Math.log",
         "Math.random",
+        "Math.asin",
+        "Math.acos",
+        "Math.cbrt",
         "**",
     ];
-    for path in ["js/graph/scope-force.js", "js/graph/labels.js"] {
+    // Code only: `//` comments and tracked `/* … */` blocks (which may span
+    // lines and need not start a line) are blanked, nothing else is skipped.
+    for path in [
+        "js/graph/scope-force.js",
+        "js/graph/labels.js",
+        "js/graph/radius.js",
+    ] {
+        let mut in_block = false;
         for (n, line) in asset_text(path).lines().enumerate() {
-            let code = line.split("//").next().unwrap_or("");
-            let t = code.trim_start();
-            if t.starts_with('*') || t.starts_with("/*") {
-                continue;
+            let mut code = String::new();
+            let mut rest = line;
+            loop {
+                if in_block {
+                    match rest.find("*/") {
+                        Some(end) => {
+                            rest = &rest[end + 2..];
+                            in_block = false;
+                        }
+                        None => break,
+                    }
+                } else {
+                    let block = rest.find("/*");
+                    let comment = rest.find("//");
+                    match (block, comment) {
+                        (Some(b), c) if c.is_none_or(|c| b < c) => {
+                            code.push_str(&rest[..b]);
+                            rest = &rest[b + 2..];
+                            in_block = true;
+                        }
+                        (_, Some(c)) => {
+                            code.push_str(&rest[..c]);
+                            break;
+                        }
+                        _ => {
+                            code.push_str(rest);
+                            break;
+                        }
+                    }
+                }
             }
             for b in banned {
                 assert!(!code.contains(b), "{path}:{}: {b} in {line:?}", n + 1);
             }
         }
+        assert!(!in_block, "{path}: unclosed /* comment");
     }
     let layouts = object_keys(
         asset_text("js/graph/layouts.js"),
@@ -1434,8 +1471,13 @@ fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
     );
 }
 
-/// The layout bench (`crates/engram-dashboard/bench/`) is a developer tool:
-/// nothing of it may reach the binary (build.rs embeds `web/` only).
+/// The layout bench (`crates/engram-dashboard/bench/`) is a developer tool
+/// that must not ship. build.rs embeds `web/` only, so today this cannot
+/// fail by itself: it is a tripwire for the two ways that could change — the
+/// embed root widening to the crate (a `bench/` path, or any `.mjs`, would
+/// then be embedded) and the bench moving under `web/` (where every file is
+/// embedded and scanned) — and it checks the bench is still where the docs
+/// say.
 #[test]
 fn the_layout_bench_is_not_embedded() {
     for a in crate::assets::embedded() {

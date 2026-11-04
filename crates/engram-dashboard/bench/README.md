@@ -7,7 +7,8 @@ frontend tests (wording, imports, CSP) never scan it. Needs Node 22 or newer
 
 ```bash
 cd crates/engram-dashboard
-node bench/layout.mjs                                  # n = 60, 1000, 2000; every layout
+node bench/layout.mjs                                  # n = 60, 1000, 2000, 300x8000, 2000x10000; every layout
+node bench/layout.mjs --n 300x8000                     # N memories with E relations (the dense small graph)
 node bench/layout.mjs --n 1000 --layouts scope-force --runs 9 --cold 5
 node bench/layout.mjs --graph saved-graph.json         # a real store (see below)
 node bench/layout.mjs --json                           # one JSON row per (layout, n)

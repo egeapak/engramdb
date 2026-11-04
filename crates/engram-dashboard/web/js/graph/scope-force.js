@@ -24,7 +24,12 @@
 //      pushed apart.
 //   4. Scope names: one per top scope, near its centre on a spot over no
 //      memory and no other scope's name, sized for the whole graph.
-//   5. Memory labels: graph/labels.js, with the scope names as obstacles.
+//   5. Memory labels: graph/labels.js, with the scope names as obstacles;
+//      a memory of a small graph whose label has no spot may be nudged
+//      (at most 1.5 spacings, never toward another scope's centre, never
+//      adding a crossing, on a bounded budget). Then the names are placed
+//      again at the size they are drawn, which depends on the box's width
+//      (readable at Fit on a phone) — the only output that does.
 //   6. Relations are straight two-point routes. A stub (the far end is not
 //      drawn: deleted, or another store) is a short segment toward its far
 //      scope when that scope is on the graph, otherwise away from the
@@ -36,18 +41,22 @@
 // Math.sqrt, which are exact-rounded in every engine (Math.cos / sin / hypot
 // / pow are implementation-approximated and could round differently in
 // another browser; the few angles needed are literal constants). Positions
-// depend only on the nodes and edges given, so the caller can keep a graph
+// depend only on the nodes, the edges and the box's aspect, never on its
+// width (only the drawn scope names do, step 5), so a store draws the same
+// graph on every screen of one shape, and the caller can keep a graph
 // steady across display filters by laying out one fixed edge set.
 //
 // Pure functions over plain data: it runs in the layout worker and, when a
 // worker cannot start, on the main thread.
 //
 // Input / output: the contract in graph/layouts.js. Extra output, read by
-// the style's backdrop: `scopes: [{ key, slot, x, y, size, placed }]` (one
-// name per named top scope, `size` its font size in layout units, `placed`
-// false when no free spot was found, so the style may skip it) and
-// `region_r` (a radius around each memory that, unioned per scope, draws a
-// soft region).
+// the style's backdrop: `scopes: [{ key, slot, x, y, w, size, placed,
+// backed }]` (one name per named top scope, `size` its font size and `w` its
+// estimated width in layout units, `placed` false when no free spot was
+// found, so the style may skip it, `backed` when it covers memories and
+// wants a faint backing box) and `region_r` (a radius around each memory,
+// at least its own r + 6, that unioned per scope draws a soft region; the
+// bounds already cover it).
 
 import { placeLabels } from './labels.js';
 
@@ -69,11 +78,17 @@ const DIRS = [
   [-1, 0], [-R3, -0.5], [-0.5, -R3], [0, -1], [0.5, -R3], [R3, -0.5],
 ];
 /** Above this many scopes to pack, a sunflower by size replaces the affinity packing (O(m²) per scope). */
-const PACK_MAX = 150;
+const PACK_MAX = 100;
+/** At most this many (group, other top) pairs weigh a top scope's turn. */
+const TURN_MAX = 96;
 /** The width a small graph is spread toward (see step 3). */
 const SPREAD_TO = 860;
 /** Up to this many memories, a label with no free spot may move its memory (step 5). */
 const NUDGE_MAX = 300;
+/** A memory with more relations than this is never nudged (see nudgeTest). */
+const NUDGE_DEGREE = 24;
+/** The crossing tests all nudges of one layout may spend (see nudgeTest). */
+const NUDGE_WORK = 300000;
 /** Cell-index cap per axis for the repulsion grid (positions are bounded; this only guards the allocation). */
 const GRID_MAX = 1024;
 
@@ -136,8 +151,19 @@ function pack(rad, aff, aspect, pad) {
     let best = Infinity;
     let bx = 0;
     let by = 0;
-    // Anchor on every placed disc while few; then on the last 40 and the related ones.
-    const anchors = order.length <= 40 ? order : order.filter((q, k) => k >= order.length - 40 || (aff && aff[j * m + q] > 0));
+    // Anchor on every placed disc while few; then on the last 24 and the 12
+    // most related (all related would make a densely related pack cubic).
+    let anchors = order;
+    if (order.length > 36) {
+      anchors = order.slice(order.length - 24);
+      if (aff) {
+        const rel = order
+          .slice(0, order.length - 24)
+          .filter((q) => aff[j * m + q] > 0)
+          .sort((p, q) => aff[j * m + q] - aff[j * m + p] || p - q);
+        anchors = anchors.concat(rel.slice(0, 12));
+      }
+    }
     for (const p of anchors) {
       const reach = rad[p] + rad[j] + pad;
       for (const [dx, dy] of DIRS) {
@@ -477,6 +503,7 @@ function step(st, temp) {
 
 /** Push apart memories closer than their radii plus `gap` (grid-bucketed, a few passes). */
 function separate(n, x, y, r, gap) {
+  if (!n) return;
   let maxR = 0;
   for (let i = 0; i < n; i++) if (r[i] > maxR) maxR = r[i];
   const cell = maxR * 2 + gap;
@@ -551,13 +578,13 @@ const nameWidth = (text, size) => text.length * size * 0.62 + size * 0.4;
 /**
  * One name per named top scope, largest first, near where most of its
  * memories are (`t.cx`, `t.cy`): the nearest spot (rings of offsets, out to
- * half the scope's reach) whose box covers no memory, else the one covering
- * fewest — names are drawn under the memories, so a covered one stays
- * readable between them. Names never overlap each other; one with no spot
- * left at all comes back `placed: false`. Returns the names and their boxes
- * (memory-label obstacles).
+ * half the scope's reach but at most six name heights) whose box covers no
+ * memory, else the one covering fewest (`backed`: the style gives it a faint
+ * backing box). Names never overlap each other nor an `avoid` box; one with
+ * no spot left at all comes back `placed: false`. Returns the names and
+ * their boxes (memory-label obstacles).
  */
-function placeScopeNames(tops, n, x, y, r, size) {
+function placeScopeNames(tops, n, x, y, r, size, avoid = []) {
   const out = [];
   const boxes = [];
   // Memories by grid cell, for "how many does this box cover".
@@ -581,12 +608,36 @@ function placeScopeNames(tops, n, x, y, r, size) {
     }
     return c;
   };
-  const onName = (b) => boxes.some((o) => b.x0 < o.x1 + 6 && o.x0 - 6 < b.x1 && b.y0 < o.y1 + 4 && o.y0 - 4 < b.y1);
+  const hits = (b, o) => b.x0 < o.x1 + 6 && o.x0 - 6 < b.x1 && b.y0 < o.y1 + 4 && o.y0 - 4 < b.y1;
+  // Placed names and `avoid` boxes by the grid cells they touch (+ margin).
+  const taken = new Map();
+  const spanOf = (b, f) => {
+    for (let cx = Math.floor((b.x0 - 6) / cell); cx <= Math.floor((b.x1 + 6) / cell); cx++) {
+      for (let cy = Math.floor((b.y0 - 4) / cell); cy <= Math.floor((b.y1 + 4) / cell); cy++) f(cx * 65536 + cy);
+    }
+  };
+  const take = (b) =>
+    spanOf(b, (key) => {
+      let list = taken.get(key);
+      if (!list) taken.set(key, (list = []));
+      list.push(b);
+    });
+  for (const b of avoid) take(b);
+  const onName = (b) => {
+    let hit = false;
+    spanOf(b, (key) => {
+      if (!hit) for (const o of taken.get(key) || []) if (hits(b, o)) hit = true;
+    });
+    return hit;
+  };
   for (const t of tops) {
     if (!t.key) continue;
     const w = nameWidth(t.key, size);
     const h = size * 1.2;
-    const limit = Math.max(size * 3, t.reach * 0.5);
+    // Bounded from the centre: on a dense graph the only free spots are at
+    // the rim, and a name there labels nothing; a covered spot near the
+    // centre (drawn on a faint backing box) reads better.
+    const limit = Math.max(size * 2, Math.min(t.reach * 0.5, size * 6));
     const step = Math.max(size * 0.7, limit / 12);
     const rings = Math.ceil(limit / step);
     let best = null;
@@ -612,9 +663,12 @@ function placeScopeNames(tops, n, x, y, r, size) {
     const cx = best ? best.cx : t.cx;
     const cy = best ? best.cy : t.cy;
     const b = best ? best.b : { x0: cx - w / 2, y0: cy - h / 2, x1: cx + w / 2, y1: cy + h / 2 };
-    if (best) boxes.push(b);
+    if (best) {
+      boxes.push(b);
+      take(b);
+    }
     // `y` is the text baseline (dominant-baseline is left alone, for every browser).
-    out.push({ key: t.key, slot: t.slot, x: cx, y: cy + size * 0.36, size, w, placed: !!best, box: b });
+    out.push({ key: t.key, slot: t.slot, x: cx, y: cy + size * 0.36, size, w, placed: !!best, backed: !!best && best.c > 0, box: b });
   }
   return { names: out, boxes };
 }
@@ -626,12 +680,22 @@ function crosses(ax, ay, bx, by, cx, cy, dx, dy) {
 }
 
 /**
- * The label nudge's test (labels.js `accept`): memory `i` may move to
- * (x, y) only if its relations then cross no more relations than they do
- * now, so making room for a name never tangles the graph. O(degree ×
- * relations) per try, which is why nudging stops at NUDGE_MAX memories.
+ * The label nudge's test (labels.js `accept` / `moved`). Memory `i` may move
+ * to (x, y) only if
+ *   - it is not a hub (more than NUDGE_DEGREE relations: its moves are the
+ *     costliest and the least needed, a hub's label is placed first);
+ *   - it does not end nearer another top scope's centre than its own,
+ *     unless it already was and the move takes it no deeper, so a move
+ *     never carries it into a neighbour's region;
+ *   - its relations then cross no more relations than they do now.
+ * Crossings are tested only against relations whose box shares a grid cell
+ * with the moved relation's (the grid is kept up to date through `moved`),
+ * the current count is worked out once per memory, and every crossing test
+ * draws on one budget (NUDGE_WORK): once it is spent, no further move is
+ * accepted, so a dense small graph costs bounded time (the declared loss:
+ * some labels that a move could have placed stay hover-only).
  */
-function keepsCrossings(nodes, edges, pos) {
+function nudgeTest(nodes, edges, pos, cell, topOfNode, tops) {
   const n = nodes.length;
   const segs = [];
   const adj = Array.from({ length: n }, () => []);
@@ -641,17 +705,87 @@ function keepsCrossings(nodes, edges, pos) {
     adj[e.t].push(e.s);
     segs.push([e.s, e.t]);
   }
+  const grid = new Map();
+  const cellsOf = (ax, ay, bx, by, f) => {
+    const cx0 = Math.floor(Math.min(ax, bx) / cell);
+    const cx1 = Math.floor(Math.max(ax, bx) / cell);
+    const cy0 = Math.floor(Math.min(ay, by) / cell);
+    const cy1 = Math.floor(Math.max(ay, by) / cell);
+    for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) f(cx * 65536 + cy);
+  };
+  const file = (k) => {
+    const [a, b] = segs[k];
+    cellsOf(pos[2 * a], pos[2 * a + 1], pos[2 * b], pos[2 * b + 1], (key) => {
+      let list = grid.get(key);
+      if (!list) grid.set(key, (list = []));
+      list.push(k);
+    });
+  };
+  const segsOf = Array.from({ length: n }, () => []);
+  segs.forEach(([a, b], k) => {
+    segsOf[a].push(k);
+    segsOf[b].push(k);
+    file(k);
+  });
+  const stamp = new Int32Array(segs.length);
+  let query = 0;
+  let work = 0;
   const count = (i, x, y) => {
     let c = 0;
     for (const j of adj[i]) {
-      for (const [a, b] of segs) {
-        if (a === i || b === i || a === j || b === j) continue;
-        if (crosses(x, y, pos[2 * j], pos[2 * j + 1], pos[2 * a], pos[2 * a + 1], pos[2 * b], pos[2 * b + 1])) c++;
-      }
+      const jx = pos[2 * j];
+      const jy = pos[2 * j + 1];
+      query++;
+      cellsOf(x, y, jx, jy, (key) => {
+        for (const k of grid.get(key) || []) {
+          if (stamp[k] === query) continue;
+          stamp[k] = query;
+          const [a, b] = segs[k];
+          if (a === i || b === i || a === j || b === j) continue;
+          work++;
+          if (crosses(x, y, jx, jy, pos[2 * a], pos[2 * a + 1], pos[2 * b], pos[2 * b + 1])) c++;
+        }
+      });
     }
     return c;
   };
-  return (i, x, y) => !adj[i].length || count(i, x, y) <= count(i, pos[2 * i], pos[2 * i + 1]);
+  // How far (x, y) is inside another named scope's territory: the squared
+  // distance to its own centre minus that to the nearest other one
+  // (> 0: nearer another scope's centre than its own).
+  const intrusion = (own, x, y) => {
+    let other = Infinity;
+    for (let t = 0; t < tops.length; t++) {
+      if (t === own || !tops[t].key) continue;
+      const dx = x - tops[t].cx;
+      const dy = y - tops[t].cy;
+      if (dx * dx + dy * dy < other) other = dx * dx + dy * dy;
+    }
+    const dx = x - tops[own].cx;
+    const dy = y - tops[own].cy;
+    return dx * dx + dy * dy - other;
+  };
+  let baseOf = -1;
+  let base = 0;
+  return {
+    accept(i, x, y) {
+      if (work > NUDGE_WORK || adj[i].length > NUDGE_DEGREE) return false;
+      const own = topOfNode[i];
+      if (own >= 0 && tops[own].key) {
+        const after = intrusion(own, x, y);
+        if (after > 0 && after > intrusion(own, pos[2 * i], pos[2 * i + 1])) return false;
+      }
+      if (!adj[i].length) return true;
+      if (baseOf !== i) {
+        baseOf = i;
+        base = count(i, pos[2 * i], pos[2 * i + 1]);
+      }
+      return count(i, x, y) <= base;
+    },
+    moved(i) {
+      // Re-file the moved memory's relations (stale cells only cost a test).
+      for (const k of segsOf[i]) file(k);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -772,28 +906,37 @@ export function layout(input) {
         topAff[tb * nTop + ta]++;
       }
     }
+    // Per top scope: its groups' affinities, and each group's relations to
+    // other tops (group → (other top → relations)). One pass over the relations.
+    for (const t of tops) {
+      const m = t.groups.length;
+      t.aff = m > 1 ? new Float64Array(m * m) : null;
+      t.ext = new Map();
+    }
+    for (let e = 0; e < ea.length; e++) {
+      const a = ea[e];
+      const b = eb[e];
+      const ta = topOf[a];
+      const tb = topOf[b];
+      if (ta === tb) {
+        const t = tops[ta];
+        if (t.aff && groupOf[a] !== groupOf[b]) {
+          const m = t.groups.length;
+          t.aff[groupOf[a] * m + groupOf[b]]++;
+          t.aff[groupOf[b] * m + groupOf[a]]++;
+        }
+      } else {
+        const ka = groupOf[a] * nTop + tb;
+        tops[ta].ext.set(ka, (tops[ta].ext.get(ka) || 0) + 1);
+        const kb = groupOf[b] * nTop + ta;
+        tops[tb].ext.set(kb, (tops[tb].ext.get(kb) || 0) + 1);
+      }
+    }
     for (const t of tops) {
       const m = t.groups.length;
       const rad = new Float64Array(m);
       t.groups.forEach((gr, gi) => (rad[gi] = SEED * Math.sqrt(gr.members.length) + S * 0.3));
-      const aff = m > 1 ? new Float64Array(m * m) : null;
-      t.ext = new Map(); // group → (other top → relations)
-      for (let e = 0; e < ea.length; e++) {
-        const a = ea[e];
-        const b = eb[e];
-        for (const [p, q] of [[a, b], [b, a]]) {
-          if (topOf[p] !== t.index) continue;
-          if (topOf[q] === t.index) {
-            if (aff && p < q && groupOf[p] !== groupOf[q]) {
-              aff[groupOf[p] * m + groupOf[q]]++;
-              aff[groupOf[q] * m + groupOf[p]]++;
-            }
-          } else {
-            const key = groupOf[p] * nTop + topOf[q];
-            t.ext.set(key, (t.ext.get(key) || 0) + 1);
-          }
-        }
-      }
+      const aff = t.aff;
       t.local = pack(rad, aff, aspect, pad * 0.5);
       // The group's centroid at the top's centre, and its reach (radius).
       let cx = 0;
@@ -828,18 +971,35 @@ export function layout(input) {
       const ty = centres[2 * ti + 1];
       let bestTurn = 0;
       if (t.groups.length > 1 && t.ext.size) {
+        // The heaviest TURN_MAX (group, other top) pairs decide the turn;
+        // with many scopes all related the rest change it little and cost
+        // 12 distances each.
+        let ext = [...t.ext];
+        if (ext.length > TURN_MAX) ext = ext.sort((p, q) => q[1] - p[1] || p[0] - q[0]).slice(0, TURN_MAX);
+        const ne = ext.length;
+        const elx = new Float64Array(ne);
+        const ely = new Float64Array(ne);
+        const eux = new Float64Array(ne);
+        const euy = new Float64Array(ne);
+        const ew = new Float64Array(ne);
+        let q = 0;
+        for (const [key, w] of ext) {
+          const gi = Math.floor(key / nTop);
+          const u = key - gi * nTop;
+          elx[q] = t.local[2 * gi];
+          ely[q] = t.local[2 * gi + 1];
+          eux[q] = centres[2 * u] - tx;
+          euy[q] = centres[2 * u + 1] - ty;
+          ew[q++] = w;
+        }
         let best = Infinity;
         for (let turn = 0; turn < 12; turn++) {
           const [c, sn] = DIRS[turn];
           let cost = 0;
-          for (const [key, w] of t.ext) {
-            const gi = Math.floor(key / nTop);
-            const u = key - gi * nTop;
-            const lx = t.local[2 * gi];
-            const ly = t.local[2 * gi + 1];
-            const dx = tx + lx * c - ly * sn - centres[2 * u];
-            const dy = ty + lx * sn + ly * c - centres[2 * u + 1];
-            cost += w * Math.sqrt(dx * dx + dy * dy);
+          for (let e = 0; e < ne; e++) {
+            const dx = elx[e] * c - ely[e] * sn - eux[e];
+            const dy = elx[e] * sn + ely[e] * c - euy[e];
+            cost += ew[e] * Math.sqrt(dx * dx + dy * dy);
           }
           if (cost < best - 1e-9) {
             best = cost;
@@ -882,13 +1042,17 @@ export function layout(input) {
       if (y[k] > h1) h1 = y[k];
     }
     const wide = Math.max(w1 - w0, (h1 - h0) / aspect, S);
-    spread = Math.max(1, Math.min(3, SPREAD_TO / wide));
+    // A short, wide box (aspect under 0.62) gets a wider target: Fit there
+    // is bound by the height, and the y-gravity has already made the graph
+    // flat, so at SPREAD_TO its labels would crowd.
+    const target = SPREAD_TO * Math.max(1, Math.sqrt(0.62 / aspect));
+    spread = Math.max(1, Math.min(3, target / wide));
     if (spread > 1) {
       // Fill the box's shape: labels are wide, so a graph that fills the
       // width as well as the height keeps more of them apart. A stretch
       // is affine, so it adds no crossing; bounded so shapes stay true.
-      const sx = Math.min(spread * 1.35, Math.max(spread, SPREAD_TO / Math.max(S, w1 - w0)));
-      const sy = Math.min(spread, Math.max(spread / 1.35, (SPREAD_TO * aspect) / Math.max(S, h1 - h0)));
+      const sx = Math.min(spread * 1.35, Math.max(spread, target / Math.max(S, w1 - w0)));
+      const sy = Math.min(spread, Math.max(spread / 1.35, (target * aspect) / Math.max(S, h1 - h0)));
       for (let k = 0; k < n; k++) {
         x[k] *= sx;
         y[k] *= sy;
@@ -908,12 +1072,12 @@ export function layout(input) {
     ey0 = Math.min(ey0, y[k]);
     ey1 = Math.max(ey1, y[k]);
   }
-  // Sized for the whole graph: about 1/70 of the width Fit maps to the box,
-  // and at least 12 px on screen at Fit in a box `input.width` wide (a
-  // phone), so a name stays readable at Fit whatever the store's size.
+  // Sized for the whole graph: about 1/70 of the width Fit maps to the box.
+  // This size, which does not depend on the box's width, is the one the
+  // memory labels (and their nudges) avoid, so positions never depend on
+  // the width; the drawn size (step 5b) may be larger.
   const extent = n ? Math.max(ex1 - ex0, (ey1 - ey0) / aspect) : 0;
-  const boxW = Math.max(200, input.width || 900);
-  const nameSize = Math.min(120, Math.max(15, extent / 70, (12 * (extent + 200)) / boxW));
+  const nameSize = Math.min(120, Math.max(15, extent / 70));
   // Each scope's name goes where most of its memories are: the centre of
   // its members in the densest 3 × 3 block of BLOCK-sized cells (a scope
   // the relations pulled apart has no useful mean), and its reach is how far
@@ -968,12 +1132,33 @@ export function layout(input) {
     pos[2 * i + 1] = y[rank[i]];
   }
   // A label with no free spot may move its memory up to about a spacing
-  // (labels.js `nudge`); read the moved positions back.
-  const nudge = n <= NUDGE_MAX ? S * 2 * spread : 0;
-  const labels = placeLabels(nodes, pos, boxes, { corners: true, nudge, accept: nudge ? keepsCrossings(nodes, edges, pos) : null });
+  // (labels.js `nudge`, bounded by `nudgeTest`); read the moved positions back.
+  const nudge = n <= NUDGE_MAX ? S * Math.min(spread, 1.5) : 0;
+  let test = null;
+  if (nudge) {
+    const topOfNode = new Int32Array(n);
+    for (let i = 0; i < n; i++) topOfNode[i] = topOf[rank[i]];
+    test = nudgeTest(nodes, edges, pos, S * 2 * spread, topOfNode, tops);
+  }
+  const labels = placeLabels(nodes, pos, boxes, { corners: true, nudge, accept: test && test.accept, moved: test && test.moved });
   for (let i = 0; i < n; i++) {
     x[rank[i]] = pos[2 * i];
     y[rank[i]] = pos[2 * i + 1];
+  }
+
+  // ---- 5b. the drawn scope names: at least 12 px on screen at Fit in a box
+  // `input.width` wide (a phone), so a name stays readable at Fit whatever
+  // the store's size. Only the names move with the width: placed again at
+  // that size clear of the placed labels, each keeping its step-4 spot
+  // when no new one is free.
+  const boxW = Math.max(200, input.width || 900);
+  const drawSize = Math.min(120, Math.max(nameSize, (12 * (extent + 200)) / boxW));
+  let shown = names;
+  if (n && drawSize > nameSize * 1.01) {
+    const avoid = [];
+    for (const l of labels) if (l.placed) avoid.push(l.box);
+    const big = placeScopeNames(tops, n, x, y, r, drawSize, avoid).names;
+    shown = big.map((nm, k) => (nm.placed ? nm : names[k]));
   }
 
   // ---- 6. routes: straight; stubs toward their far scope, else away from neighbours
@@ -1090,7 +1275,7 @@ export function layout(input) {
     grow(l.box.x0, l.box.y0);
     grow(l.box.x1, l.box.y1);
   }
-  for (const nm of names) {
+  for (const nm of shown) {
     if (!nm.placed) continue;
     grow(nm.box.x0, nm.box.y0);
     grow(nm.box.x1, nm.box.y1);
@@ -1105,7 +1290,7 @@ export function layout(input) {
     routes,
     labels: labels.map((l) => ({ x: l.x, y: l.y, w: l.w, anchor: l.anchor, placed: l.placed })),
     bounds: { x: minX - padB, y: minY - padB, w: maxX - minX + padB * 2, h: maxY - minY + padB * 2 },
-    scopes: names.map((nm) => ({ key: nm.key, slot: nm.slot, x: nm.x, y: nm.y, size: nm.size, placed: nm.placed })),
+    scopes: shown.map((nm) => ({ key: nm.key, slot: nm.slot, x: nm.x, y: nm.y, w: nm.w, size: nm.size, placed: nm.placed, backed: nm.backed })),
     region_r: regionR,
   };
 }

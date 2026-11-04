@@ -31,7 +31,9 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
  * (layout units, 16 tries) to one where a spot is, writing its new position
  * into `pos` — for a layout that has no grid to keep. Off by default.
  * `opts.accept(i, x, y)`: whether memory `i` may move there (the layout's
- * own test, e.g. that it crosses no more relations than before).
+ * own test, e.g. that it crosses no more relations than before), asked only
+ * for a move that would place the label; `opts.moved(i, x, y)` is told of
+ * each move made, after `pos` is updated.
  * Returns one `{ x, y, w, anchor, placed, box }` per node.
  */
 export function placeLabels(nodes, pos, obstacles = [], opts = {}) {
@@ -107,13 +109,17 @@ export function placeLabels(nodes, pos, obstacles = [], opts = {}) {
         const nx = x + ux * opts.nudge;
         const ny = y + uy * opts.nudge;
         const disc = { x0: nx - rd, y0: ny - rd, x1: nx + rd, y1: ny + rd };
-        if (hits(disc) || (opts.accept && !opts.accept(i, nx, ny))) continue;
+        if (hits(disc)) continue;
+        // The caller's test runs last (it may be the costly one), and only
+        // for a move that would place the label.
         free = spotsAt(nx, ny, r, w).find((sp) => !hits(sp.b)) || null;
+        if (free && opts.accept && !opts.accept(i, nx, ny)) free = null;
         if (free) {
           pos[2 * i] = nx;
           pos[2 * i + 1] = ny;
           discs[i] = disc;
           add(disc);
+          if (opts.moved) opts.moved(i, nx, ny);
           break;
         }
       }
