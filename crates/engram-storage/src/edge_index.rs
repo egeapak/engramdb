@@ -252,7 +252,11 @@ fn status_rank(s: &LinkStatus) -> u8 {
 
 /// Fold rows that describe the same logical edge (module docs), preferring
 /// the row the *source* declared — it carries the edge's real metadata — and
-/// otherwise the first seen. Order of first appearance is kept.
+/// between two copies of a symmetric edge the more decided status, then the
+/// copy whose owner id sorts first. That last tie-break makes the pick
+/// independent of scan order (a rewrite of either file reorders the scan),
+/// so a reader keying on the kept row — the dashboard's relation ids and
+/// paging — sees the same row every time. Order of first appearance is kept.
 pub fn dedupe(rows: Vec<EdgeRow>) -> Vec<EdgeRow> {
     let mut index: HashMap<(String, String, String, Option<String>), usize> = HashMap::new();
     let mut out: Vec<EdgeRow> = Vec::new();
@@ -262,9 +266,10 @@ pub fn dedupe(rows: Vec<EdgeRow>) -> Vec<EdgeRow> {
                 // Prefer the source-declared row (it carries the metadata);
                 // between two copies of a symmetric edge, the more decided
                 // review state (confirmed > rejected > proposed) wins.
+                let (new, old) = (status_rank(&row.status), status_rank(&out[i].status));
                 let better = (out[i].owner_id != out[i].src_id && row.owner_id == row.src_id)
                     || (row.kind.is_symmetric()
-                        && status_rank(&row.status) > status_rank(&out[i].status));
+                        && (new > old || (new == old && row.owner_id < out[i].owner_id)));
                 if better {
                     out[i] = row;
                 }
@@ -658,6 +663,24 @@ mod tests {
         let folded = dedupe(b_rows.into_iter().chain(rows).collect());
         assert_eq!(folded.len(), 1);
         assert_eq!(folded[0].owner_id, "a");
+    }
+
+    /// Two copies of one symmetric edge with the same status fold to the
+    /// same row whichever the scan returns first.
+    #[test]
+    fn symmetric_copies_fold_to_the_same_row_in_any_order() {
+        let mut a = mem("a");
+        a.links
+            .push(Link::new("b", LinkKind::RelatedTo, LinkOrigin::Human));
+        let mut b = mem("b");
+        b.links
+            .push(Link::new("a", LinkKind::RelatedTo, LinkOrigin::Human));
+        let (ra, rb) = (edges_of(&a), edges_of(&b));
+        let one = dedupe(ra.iter().cloned().chain(rb.iter().cloned()).collect());
+        let two = dedupe(rb.into_iter().chain(ra).collect());
+        assert_eq!((one.len(), two.len()), (1, 1));
+        assert_eq!(one[0].owner_id, "a");
+        assert_eq!(two[0].owner_id, "a");
     }
 
     /// Review p3-storage #4: `MemoryUpdate.supersedes` replaces the field

@@ -480,6 +480,7 @@ footer { margin-top: 56px; border-top: 1px solid var(--rule); padding-top: 12px;
 /* Sub-scopes: a matrix too wide to sit beside the list; it goes on top. */
 .rel-grid.one { grid-template-columns: minmax(0, 1fr); }
 .rel-grid.one .mx-box { max-width: 100%; }
+.rel-grid.one .rel-skip { display: inline-flex; }
 .rel-level { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 10px; font-size: 13px; }
 .rel-level .chip, .rel-filters .chip { padding: 3px 9px; }
 .mx-box { overflow: auto; max-width: min(100%, 560px); max-height: 70vh; -webkit-overflow-scrolling: touch; }
@@ -512,6 +513,11 @@ table.mx tbody tr:hover { background: none; }
 .mx-key .mx-dot { position: static; display: inline-block; vertical-align: -1px; }
 .mx-ramp { display: inline-flex; gap: 1px; }
 .mx-ramp i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; }
+.rel-level .chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.rel-skip { display: none; margin-bottom: 8px; }
+.rel-hint { font-size: 12.5px; margin: -8px 0 10px; }
+.rel-done { margin: 8px 0 0; }
+.rel-done-at { list-style: none; padding: 6px 0; border-bottom: 1px solid var(--rule); }
 .rel-pair { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .rel-pair .x { font-weight: 800; margin-left: 4px; }
 .rel-main .cnt { margin: 0 0 8px; }
@@ -534,9 +540,11 @@ table.mx tbody tr:hover { background: none; }
 @media (max-width: 1100px) {
   .rel-grid { grid-template-columns: minmax(0, 1fr); }
   .mx-box { max-width: 100%; max-height: 60vh; }
+  .rel-skip { display: inline-flex; }
 }
 @media (max-width: 640px) {
   .mx-c { width: 24px; height: 24px; font-size: 9.5px; }
+  .mx-box { max-height: 44vh; }
   .mx-rh { max-width: 110px; }
   .rel-meta .btn { margin-left: 0; }
 }

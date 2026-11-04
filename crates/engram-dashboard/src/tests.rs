@@ -3438,6 +3438,7 @@ async fn relations_page_by_keyset_without_repeats_or_gaps() {
     let mut got = Vec::new();
     let mut cursor: Option<String> = None;
     let mut pages = 0;
+    let mut reviewed: Option<String> = None;
     loop {
         let uri = match &cursor {
             Some(c) => format!("{base}?limit=7&cursor={c}"),
@@ -3455,6 +3456,24 @@ async fn relations_page_by_keyset_without_repeats_or_gaps() {
         }
         pages += 1;
         if pages == 1 {
+            // A review of a relation already listed: the ones that stayed
+            // are still listed once each (the reviewed one may come again).
+            let first = &v["items"][0];
+            reviewed = Some(first["id"].as_str().unwrap().to_string());
+            ops_links::set_link_status(
+                &store,
+                ops_links::EdgeRef {
+                    src: first["src"].as_str().unwrap().to_string(),
+                    kind: LinkKind::parse_known(first["kind"].as_str().unwrap()).unwrap(),
+                    dst: first["dst"].as_str().unwrap().to_string(),
+                    dst_store: None,
+                },
+                LinkStatus::Confirmed,
+                None,
+                Surface::Cli,
+            )
+            .await
+            .unwrap();
             ops_links::link(
                 &store,
                 link(&ids[1], LinkKind::Supports, &ids[23], LinkStatus::Proposed),
@@ -3468,8 +3487,14 @@ async fn relations_page_by_keyset_without_repeats_or_gaps() {
             None => break,
         }
     }
-    assert_eq!(got, want, "pages concatenate to the whole list, in order");
-    assert_eq!(pages, want.len().div_ceil(7));
+    let reviewed = reviewed.unwrap();
+    let stayed: Vec<&String> = got.iter().filter(|id| **id != reviewed).collect();
+    let want_stayed: Vec<&String> = want.iter().filter(|id| **id != reviewed).collect();
+    assert_eq!(
+        stayed, want_stayed,
+        "the relations that stayed are listed once each, in order"
+    );
+    assert!(got.contains(&reviewed));
 
     // A cursor is bound to its filters.
     let (_, v) = get_json(&app, &format!("{base}?limit=3")).await;
@@ -3497,4 +3522,140 @@ async fn relations_page_by_keyset_without_repeats_or_gaps() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
+}
+
+/// Review pG-server #1 and #4: a symmetric relation stored in both files is
+/// one row with one id however it is read, a newer binary's status is listed
+/// by default and with `status=all` but not under an explicit list, and a
+/// cross-store relation is `live` or `unknown`, never `dangling` for a store
+/// that could not be checked.
+#[tokio::test]
+async fn relations_fold_both_copies_keep_unknown_statuses_and_probe_far_stores() {
+    use engramdb::types::Link;
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // The pair, each file naming the other (a hand edit, or pre-dedupe).
+    let mut m1 = memory(MemoryType::Decision, "Pair one", &["storage"], &[]);
+    let mut m2 = memory(MemoryType::Decision, "Pair two", &["hooks"], &[]);
+    let mut l = Link::new(m2.id.clone(), LinkKind::RelatedTo, LinkOrigin::Similarity);
+    l.status = LinkStatus::Proposed;
+    m1.links.push(l);
+    let mut l = Link::new(m1.id.clone(), LinkKind::RelatedTo, LinkOrigin::Similarity);
+    l.status = LinkStatus::Proposed;
+    m2.links.push(l);
+    // A status this binary does not know.
+    let mut m3 = memory(MemoryType::Decision, "From a newer binary", &["hooks"], &[]);
+    let mut l = Link::new(m1.id.clone(), LinkKind::Supports, LinkOrigin::Human);
+    l.status = LinkStatus::Other("held".into());
+    m3.links.push(l);
+    // Into a store that cannot be opened, and into a group store.
+    let mut ext = Link::new(
+        memory(MemoryType::Context, "never stored", &[], &[]).id,
+        LinkKind::DerivedFrom,
+        LinkOrigin::Human,
+    );
+    ext.store = Some("0123456789abcdef".into());
+    m1.links.push(ext);
+    let name = "rel-test";
+    let gid = paths::compute_group_id(name);
+    let group = MemoryStore::open_group(&gid).await.unwrap();
+    let g = memory(MemoryType::Decision, "In the group", &[], &[]);
+    group.create(&g).await.unwrap();
+    let mut gl = Link::new(g.id.clone(), LinkKind::Supports, LinkOrigin::Human);
+    gl.store = Some(gid.clone());
+    m2.links.push(gl);
+    for m in [&m1, &m2, &m3] {
+        store.create(m).await.unwrap();
+    }
+
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/relations?limit=500", fx.id);
+    let ids_of = |v: &serde_json::Value, kind: &str| -> Vec<String> {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| r["kind"] == kind)
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (lo, hi) = if m1.id < m2.id {
+        (&m1.id, &m2.id)
+    } else {
+        (&m2.id, &m1.id)
+    };
+    let want = format!("{lo}|related_to|{hi}|");
+    let (s, v) = get_json(&app, &base).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        ids_of(&v, "related_to"),
+        std::slice::from_ref(&want),
+        "one row, sorted id: {v}"
+    );
+
+    // A review rewrites both files; the id and the row stay.
+    ops_links::set_link_status(
+        &store,
+        ops_links::EdgeRef {
+            src: m2.id.clone(),
+            kind: LinkKind::RelatedTo,
+            dst: m1.id.clone(),
+            dst_store: None,
+        },
+        LinkStatus::Confirmed,
+        None,
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    for _ in 0..3 {
+        let (_, v) = get_json(&app, &base).await;
+        assert_eq!(ids_of(&v, "related_to"), std::slice::from_ref(&want), "{v}");
+    }
+
+    // Unknown status: default and `all` list it, an explicit list does not.
+    let held = |v: &serde_json::Value| {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["status"] == "held")
+    };
+    assert!(held(&get_json(&app, &base).await.1));
+    assert!(held(&get_json(&app, &format!("{base}&status=all")).await.1));
+    assert!(!held(
+        &get_json(&app, &format!("{base}&status=proposed,confirmed"))
+            .await
+            .1
+    ));
+
+    // Far stores: the unopenable one is unknown, the group's memory live.
+    let (_, v) = get_json(&app, &base).await;
+    let state = |kind: &str| -> String {
+        v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["kind"] == kind && r.get("dst_store").is_some())
+            .unwrap_or_else(|| panic!("no external {kind}: {v}"))["state"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(state("derived_from"), "unknown");
+    assert_eq!(state("supports"), "live");
+    // Only the page's rows are probed: a page without the external rows
+    // answers them nowhere, and the matrix leaves them unplaced.
+    assert_eq!(v["matrix"]["unplaced"], 2, "{v}");
+    let (_, v) = get_json(&app, &format!("{base}&kind=related_to")).await;
+    assert!(v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r.get("dst_store").is_none()));
+
+    // A q= past the cap is refused.
+    let long = "x".repeat(257);
+    let (s, _) = get_json(&app, &format!("{base}&q={long}")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
 }

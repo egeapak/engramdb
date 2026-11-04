@@ -264,7 +264,10 @@ for review — at any store size, on a phone, and with a screen reader.
   memories' summaries and the note), and invalidated memories. With
   `--allow-writes`, every proposed relation has the review controls (see
   [below](#reviewing-proposed-relations)); after a review the list reloads
-  and the result is named at the top.
+  as many rows as you had loaded and puts the result on the reviewed
+  relation's row (or at the top, if it is no longer listed). Supersedes
+  relations always point at an invalidated memory, so they are listed only
+  with *Invalidated* on.
 
 Every filter and the picked cell are in the address, so a view can be
 linked. The graph's relations table links here with its filters (*Open in
@@ -296,9 +299,14 @@ matches either order), `touches=` (either end in a scope), `subs=1`, `limit=`
 ```
 
 Paging is keyed, not by offset: the cursor is the last row's place in the
-order, so a relation reviewed or added between two pages never makes a page
-repeat or skip one. A cursor belongs to the filters it was made with; sent
-with others it is refused (`400`).
+order, so relations that stay as they were are never repeated or skipped
+when others are reviewed or added between two pages. The relation that
+changed is the exception: a reviewed one moves out of *proposed* and can show
+up again further down among the confirmed ones, and one added ahead of the
+cursor appears only when the list starts over. The page reloads its list
+after a review for that reason. A cursor belongs to the filters it was made
+with; sent with others it is refused (`400`). `q` is at most 256
+characters.
 
 ## Reviewing proposed relations
 

@@ -226,7 +226,7 @@ function filterQuery(f) {
 function relationsQuery(f) {
   const q = new URLSearchParams();
   if (f.kinds.length !== KINDS.length) q.set('kind', f.kinds.join(','));
-  if (f.rejected && !f.proposed) q.set('status', 'rejected');
+  if (f.rejected && !f.proposed) q.set('status', 'confirmed,rejected');
   else if (f.rejected) q.set('status', 'all');
   else if (!f.proposed) q.set('status', 'confirmed');
   if (f.invalidated) q.set('include_invalidated', '1');

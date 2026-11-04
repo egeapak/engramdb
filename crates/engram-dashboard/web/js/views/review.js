@@ -53,9 +53,11 @@ function short(text, n = 32) {
   return t.length > n ? t.slice(0, n - 1) + '…' : t || 'this memory';
 }
 
-/** A memory named in a choice: its summary plus a short id, so two
+/** A memory named in a choice: its summary plus the end of its id, so two
  * summaries with the same opening still differ. */
-const named = (summary, id) => `“${short(summary)}” (${shortId(id).slice(0, 8)})`;
+// The id's *tail*: ids are UUIDv7, whose first digits are a timestamp that
+// memories created weeks apart share, so a head prefix told nothing apart.
+const named = (summary, id) => `“${short(summary)}” (…${String(id).slice(-6)})`;
 
 /** The choices for one edge, as {label, consequence, send}. */
 function choices(edge, viewer, pid) {

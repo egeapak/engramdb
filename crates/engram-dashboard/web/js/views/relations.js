@@ -17,8 +17,9 @@
 // memory in the graph, and, for a proposed relation, the review controls
 // every page uses (views/review.js: shown only with --allow-writes, in-page
 // confirm, CSRF, one send per relation). After a review the view reloads
-// and says what was done at the top, since the reviewed relation may move
-// off the first page.
+// as many rows as were shown and says what was done on the reviewed
+// relation's row (it moves to the confirmed ones), or at the top when that
+// row is no longer listed, scrolled into view and focused.
 //
 // Every filter and the picked cell live in the hash, so a view can be
 // linked and reloaded.
@@ -51,13 +52,21 @@ const STATUS = [
   ['proposed', 'Proposed'],
   ['confirmed', 'Confirmed'],
   ['rejected', 'Rejected'],
+  ['confirmed,rejected', 'Confirmed and rejected'],
   ['all', 'Every status'],
 ];
 
 const FAR_END = { dangling: 'far end deleted', invalidated: 'far end invalidated', unknown: 'far end not checked' };
 
-/** One review result carried across the reload that follows it. */
+/**
+ * One review result carried across the reload that follows it: the
+ * project, the relation's id (to put the note on its row), how many rows
+ * were shown (the reload lists as many, so the user keeps their place) and
+ * when, so a reload that never rendered (the user left meanwhile) cannot
+ * surface it on a later visit.
+ */
 let reviewNote = null;
+const REVIEW_NOTE_MS = 15000;
 
 /** Hash ⇄ filters. `-` names "no scope", as on every endpoint. */
 function filtersOf(query) {
@@ -96,6 +105,9 @@ function apiParams(f) {
     limit: PAGE,
   };
 }
+
+/** A same-store end's scope at the matrix level (`-`: none). */
+const groupKey = (end) => (end && end.group !== undefined ? keyOf(end.group) : null);
 
 /** A cell's number in its 28 px: 1.6k past 999 (the label says it in full). */
 const compact = (n) => (n < 1000 ? String(n) : n < 10000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : Math.round(n / 1000) + 'k');
@@ -138,12 +150,19 @@ export async function renderRelations(main, ctx) {
   }
   const f = filtersOf(ctx.route.query);
   const t0 = performance.now();
+  // A review's note, taken once: fresh and for this project, or dropped.
+  const done = reviewNote && reviewNote.pid === p.id && Date.now() - reviewNote.at < REVIEW_NOTE_MS ? reviewNote : null;
+  reviewNote = null;
 
   const status = h('p', { class: 'cnt num', role: 'status', 'aria-live': 'polite' });
   const noteBox = h('div');
   const matrixBox = h('div', { class: 'mx-wrap' });
   const filterBox = h('div', { class: 'filters rel-filters' });
   const kindBox = h('div', { class: 'chips', role: 'group', 'aria-label': 'Relation kinds shown' });
+  // A supersedes relation's target is invalidated by definition, and a
+  // relation with an invalidated end is listed only with Invalidated on.
+  const supersedesHidden = !f.include_invalidated && f.kind.includes('supersedes');
+  const kindNote = supersedesHidden ? h('p', { class: 'faint rel-hint' }, 'Supersedes relations point at an invalidated memory: turn on Invalidated to list them.') : null;
   const listBox = h('ol', { class: 'rel-list', 'aria-label': 'Relations' }, h('li', { class: 'empty' }, 'Loading relations…'));
   const moreBox = h('div', { class: 'more' });
   const err = h('div');
@@ -152,15 +171,20 @@ export async function renderRelations(main, ctx) {
     main,
     projHead('Relations', p.name, ['Proposed relations first, then contradictions, then the newest.', 'Pick a cell of the matrix to list the relations between two scopes.']),
     noteBox,
-    h('div', { class: ['rel-grid', f.subs && 'one'] }, h('section', { class: 'rel-mx', 'aria-label': 'Relations by scope' }, matrixBox), h('section', { class: 'rel-main', 'aria-label': 'Relation list' }, filterBox, kindBox, status, err, listBox, moreBox)),
+    h(
+      'div',
+      { class: ['rel-grid', f.subs && 'one'] },
+      h(
+        'section',
+        { class: 'rel-mx', 'aria-label': 'Relations by scope' },
+        // Stacked layouts put the list below a tall matrix: one step there.
+        h('button', { type: 'button', class: 'btn sm rel-skip', onclick: () => (listBox.querySelector('a, button') || status).focus() }, 'Skip to the relation list'),
+        matrixBox,
+      ),
+      h('section', { class: 'rel-main', 'aria-label': 'Relation list' }, filterBox, kindBox, kindNote, status, err, listBox, moreBox),
+    ),
   );
-
-  if (reviewNote && reviewNote.pid === p.id) {
-    const n = h('p', { class: 'note', role: 'status', tabindex: '-1' }, reviewNote.text);
-    reviewNote = null;
-    mount(noteBox, n);
-    n.focus();
-  }
+  status.setAttribute('tabindex', '-1');
 
   // A filter change re-renders the view through the hash; `focus` names the
   // control (its data-focus) that gets focus back afterwards.
@@ -207,7 +231,10 @@ export async function renderRelations(main, ctx) {
           type: 'button',
           class: 'chip on rel-pair',
           'aria-label': `Scope filter: ${pair}. Clear it`,
-          onclick: () => go({ from_scope: '', to_scope: '', touches: '' }, 'cell'),
+          onclick: () => {
+            if (f.from_scope && f.to_scope) ctx.state.relCell = [f.from_scope, f.to_scope];
+            go({ from_scope: '', to_scope: '', touches: '' }, 'cell');
+          },
         },
         pair,
         h('span', { class: 'x', 'aria-hidden': 'true' }, '×'),
@@ -244,7 +271,8 @@ export async function renderRelations(main, ctx) {
   // ---- data ------------------------------------------------------------------
   let page;
   try {
-    page = await api.relations(p.id, apiParams(f));
+    // After a review: as many rows as were shown, so the place is kept.
+    page = await api.relations(p.id, { ...apiParams(f), limit: done ? Math.min(500, Math.max(PAGE, done.shown)) : PAGE });
   } catch (e) {
     if (!ctx.isStale()) mount(err, errorBox(e));
     return;
@@ -252,7 +280,7 @@ export async function renderRelations(main, ctx) {
   if (ctx.isStale()) return;
   const serverMs = performance.now() - t0;
 
-  renderMatrix(matrixBox, page.matrix, f, go);
+  renderMatrix(matrixBox, page.matrix, f, go, ctx);
 
   // Read-only: one note instead of a disabled control box on every row.
   const writes = !!(ctx.state.session && ctx.state.session.allow_writes);
@@ -310,13 +338,25 @@ export async function renderRelations(main, ctx) {
         'li',
         { class: 'empty' },
         page.matrix && page.matrix.relations
-          ? 'No relation matches these filters. Clear the scope filter, the text, or turn a kind back on.'
+          ? `No relation matches these filters. Clear the scope filter, the text, or turn a kind back on.${supersedesHidden ? ' Supersedes relations also need Invalidated on.' : ''}`
           : 'This store has no relations with these filters yet. Agents add relations with the link tool; NLI and embedding similarity propose them as memories are created.',
       ),
     );
     status.textContent = plural(0, 'relation');
   } else addRows(page);
-  refocus();
+  if (done) {
+    // On the reviewed relation's row when it is still among the rows
+    // listed; else where that row was (it moved to the confirmed ones,
+    // further down), so the user stays at their place in the queue.
+    const note = h('p', { class: 'note rel-done', role: 'status', tabindex: '-1' }, done.text);
+    const rows = [...listBox.children];
+    const row = rows.find((li) => li.dataset.relId === done.id);
+    if (row) row.append(note);
+    else if (rows[done.index]) listBox.insertBefore(h('li', { class: 'rel-done-at' }, note), rows[done.index]);
+    else listBox.append(h('li', { class: 'rel-done-at' }, note));
+    note.scrollIntoView({ block: 'center' });
+    note.focus({ preventScroll: true });
+  } else refocus();
 
   // Paint marks, for the dashboard benchmark.
   requestAnimationFrame(() => {
@@ -327,6 +367,10 @@ export async function renderRelations(main, ctx) {
   });
 
   function rowEl(r, ctx, p, memories) {
+    // In a picked cell, a symmetric relation reads from the row scope's end,
+    // as the chip and the matrix ("rows: source scope") do.
+    const flip = r.symmetric && !r.dst_store && f.from_scope && groupKey(r.from) !== f.from_scope && groupKey(r.to) === f.from_scope;
+    const [left, right] = flip ? ['to', 'from'] : ['from', 'to'];
     const end = (which) => {
       const id = which === 'from' ? r.src : r.dst;
       const e = r[which];
@@ -351,27 +395,28 @@ export async function renderRelations(main, ctx) {
     const review = r.status === 'proposed' && writes ? reviewControls(r, ctx, { onDone: (out, text) => {
       // Named, since the relation may now be off this page.
       const cut = (x) => { const v = String(x || shortId(r.dst)); return v.length > 48 ? v.slice(0, 47) + '…' : v; };
-      reviewNote = { pid: p.id, text: `“${cut(r.src_summary)}” ${phrase(r.kind)} “${cut(r.dst_summary)}”: ${text}` };
-      ctx.refresh();
+      const index = [...listBox.children].findIndex((li) => li.dataset.relId === r.id);
+      reviewNote = { pid: p.id, id: r.id, index, shown, at: Date.now(), text: `“${cut(r.src_summary)}” ${phrase(r.kind)} “${cut(r.dst_summary)}”: ${text}` };
+      ctx.refresh({ scroll: false });
     } }) : null;
     return h(
       'li',
-      { class: ['rel-row', 'st-' + String(r.status).replace(/[^a-z_]/g, '')] },
+      { class: ['rel-row', 'st-' + String(r.status).replace(/[^a-z_]/g, '')], 'data-rel-id': r.id },
       h(
         'p',
         { class: 'rel-says' },
-        end('from'),
+        end(left),
         ' ',
         h('span', { class: 'rel-kind' }, currentStyle().edgeSample(r.kind, r.status, 28), h('b', null, phrase(r.kind))),
         ' ',
-        end('to'),
+        end(right),
       ),
       h(
         'div',
         { class: 'rel-meta' },
-        scopeOf(r.from),
+        scopeOf(r[left]),
         r.to && r.to.summary ? h('span', { class: 'faint', 'aria-hidden': 'true' }, r.symmetric ? '↔' : '→') : null,
-        scopeOf(r.to),
+        scopeOf(r[right]),
       ),
       h(
         'div',
@@ -388,7 +433,7 @@ export async function renderRelations(main, ctx) {
 }
 
 /** The matrix, with its level toggle and key. */
-function renderMatrix(box, m, f, go) {
+function renderMatrix(box, m, f, go, ctx) {
   if (!m) return;
   const toggle = h(
     'div',
@@ -408,7 +453,9 @@ function renderMatrix(box, m, f, go) {
   const n = m.scopes.length;
   const btns = [];
   let tabAt = 0;
-  const head = (sc) => [badge(sc.top, sc.slot), h('span', { class: 'mx-name' }, headName(sc, f.subs))];
+  // The visible header is short (a sub-scope without its top, which the
+  // badge shows); assistive tech reads the full name instead.
+  const head = (sc) => [h('span', { 'aria-hidden': 'true' }, badge(sc.top, sc.slot), h('span', { class: 'mx-name' }, headName(sc, f.subs))), h('span', { class: 'sr-only' }, scopeName(sc.name))];
   const rows = m.scopes.map((a, i) =>
     h(
       'tr',
@@ -430,6 +477,7 @@ function renderMatrix(box, m, f, go) {
             title: cellText(a.name, b.name, c),
             onclick: () => {
               if (!c) return;
+              ctx.state.relCell = [keyOf(a.name), keyOf(b.name)];
               if (on) go({ from_scope: '', to_scope: '', touches: '' }, 'cell');
               else go({ from_scope: keyOf(a.name), to_scope: keyOf(b.name), touches: '' }, 'cell');
             },
@@ -442,7 +490,14 @@ function renderMatrix(box, m, f, go) {
       }),
     ),
   );
-  if (!picked) tabAt = Math.max(0, m.cells.length ? btns.findIndex((b) => !b.hasAttribute('aria-disabled')) : 0);
+  // No cell picked: the stop is the cell last picked (so un-picking keeps
+  // focus where it was), else the first one with relations.
+  if (!picked) {
+    const last = ctx.state.relCell;
+    const li = last ? m.scopes.findIndex((s) => keyOf(s.name) === last[0]) : -1;
+    const lj = last ? m.scopes.findIndex((s) => keyOf(s.name) === last[1]) : -1;
+    tabAt = li >= 0 && lj >= 0 ? li * n + lj : Math.max(0, btns.findIndex((b) => !b.hasAttribute('aria-disabled')));
+  }
   btns[tabAt].setAttribute('tabindex', '0');
   btns[tabAt].setAttribute('data-focus', 'cell');
   const table = h(

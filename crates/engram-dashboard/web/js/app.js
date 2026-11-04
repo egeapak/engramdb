@@ -199,10 +199,13 @@ async function route() {
       if (opts && opts.keepFocus) keepFocus = true;
       location.hash = hash;
     },
-    refresh: () => {
+    // `{ scroll: false }`: the view places the scroll itself.
+    refresh: (opts) => {
       const y = window.scrollY;
       keepFocus = true;
-      route().then(() => window.scrollTo(0, y));
+      route().then(() => {
+        if (!(opts && opts.scroll === false)) window.scrollTo(0, y);
+      });
     },
   };
   try {

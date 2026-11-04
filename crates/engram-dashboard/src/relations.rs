@@ -26,14 +26,21 @@
 //! filter on that end does not match it.
 //!
 //! **Order and paging.** Proposed first, then contradictions, then newest
-//! `at`, then the relation's id — a total order. Keyset paging as on
-//! `/memories`: `next_cursor` is the last row's position in that order, and
-//! the next page starts strictly after it, so a relation reviewed (moved
-//! out of "proposed") or created between two pages never makes a page repeat
-//! or skip one that stayed. The cursor names the filters it was made under:
-//! passed with different ones it is a 400, never a page of another list.
-//! `limit=` is 100 by default, at most 500; `next_cursor` is `null` on the
-//! last page.
+//! `at`, then the relation's id — a total order (a same-store symmetric
+//! relation's id is built from its sorted endpoints, and the edge read keeps
+//! the same one of its two copies every time, so neither its id nor its
+//! place moves between reads). Keyset paging as on `/memories`:
+//! `next_cursor` is the last row's position in that order, and the next page
+//! starts strictly after it, so a relation reviewed or created between two
+//! pages never makes a later page repeat or skip one that *stayed*. The
+//! relation that changed is the declared exception: a review stamps `at` and
+//! moves it out of "proposed", so it can be listed again among the confirmed
+//! ones, and one created ahead of the cursor is not listed until the walk
+//! starts over (the page reloads its list after a review for that reason).
+//! The cursor carries a digest of the filters it was made under: passed with
+//! different ones it is a 400, never a page of another list. `limit=` is 100
+//! by default, at most 500; `q=` at most [`MAX_QUERY_CHARS`] characters;
+//! `next_cursor` is `null` on the last page.
 //!
 //! **The matrix** (first page only, i.e. without `cursor`) counts the
 //! relations the kind, status, text and invalidated filters admit, *ignoring*
@@ -66,6 +73,8 @@ use crate::{ApiError, AppState};
 pub const DEFAULT_LIMIT: usize = 100;
 /// The most rows one page carries.
 pub const MAX_LIMIT: usize = 500;
+/// The longest `q=` accepted, in characters.
+pub const MAX_QUERY_CHARS: usize = 256;
 
 /// Every value of `key` in the query string, repeated or comma-separated.
 fn values(raw: Option<&str>, key: &str) -> Vec<String> {
@@ -144,7 +153,14 @@ impl Filter {
             from: scope_param(q, "from_scope"),
             to: scope_param(q, "to_scope"),
             touches: scope_param(q, "touches"),
-            text: q.get("q").map(|s| s.to_lowercase()),
+            text: match q.get("q") {
+                Some(t) if t.chars().count() > MAX_QUERY_CHARS => {
+                    return Err(ApiError::bad_request(format!(
+                        "q is longer than {MAX_QUERY_CHARS} characters"
+                    )))
+                }
+                t => t.map(|s| s.to_lowercase()),
+            },
             subs: flag(q, "subs", false)?,
         })
     }
@@ -200,6 +216,7 @@ impl Filter {
 /// `next_cursor`: the last row's sort key and the filters it belongs to.
 #[derive(Serialize, Deserialize)]
 struct Cursor {
+    /// [`digest`] of the filters.
     f: String,
     key: Key,
 }
@@ -230,6 +247,11 @@ struct End {
     #[serde(skip_serializing_if = "Option::is_none")]
     color_slot: Option<u32>,
     invalidated: bool,
+    /// Its scope at the asked level (`subs=1`: the sub-scope), as the
+    /// matrix and the pair filter name it, so a page can orient a
+    /// symmetric relation to a picked cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -315,14 +337,32 @@ struct RelationsPage {
     memories: usize,
 }
 
+/// `a|kind|b|store`. A same-store symmetric relation is named by its
+/// sorted endpoints (as `EdgeRow::edge_key` keys it), so the id does not
+/// depend on which of its two files' copies the read kept.
 fn relation_id(e: &GraphEdge) -> String {
+    let (a, b) = if e.symmetric && e.dst_store.is_none() && e.dst < e.src {
+        (&e.dst, &e.src)
+    } else {
+        (&e.src, &e.dst)
+    };
     format!(
-        "{}|{}|{}|{}",
-        e.src,
+        "{a}|{}|{b}|{}",
         e.kind.as_str(),
-        e.dst,
         e.dst_store.as_deref().unwrap_or("")
     )
+}
+
+/// A short, stable digest of [`Filter::canonical`] for the cursor (FNV-1a,
+/// 64 bits): a cursor carries this, not the filter text, so its length does
+/// not grow with `q=` or the scope names.
+fn digest(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 fn key_of(e: &GraphEdge) -> Key {
@@ -348,7 +388,7 @@ pub(crate) async fn project_relations(
             .clamp(1, MAX_LIMIT),
         None => DEFAULT_LIMIT,
     };
-    let canonical = f.canonical();
+    let canonical = digest(&f.canonical());
     let after: Option<Key> = match q.get("cursor") {
         Some(c) => {
             let cur: Cursor = unhex_json(c)
@@ -397,9 +437,17 @@ pub(crate) async fn project_relations(
     };
 
     // The matrix set: every filter but the scope ones.
+    // Each summary lowercased once per request, not once per relation end.
+    let lower: HashMap<&str, String> = match &f.text {
+        Some(_) => all
+            .iter()
+            .map(|e| (e.id.as_str(), e.summary.to_lowercase()))
+            .collect(),
+        None => HashMap::new(),
+    };
     let text_ok = |e: &GraphEdge| -> bool {
         let Some(t) = &f.text else { return true };
-        let summary = |id: &str| rows.get(id).map(|r| r.summary.to_lowercase());
+        let summary = |id: &str| lower.get(id);
         e.note
             .as_ref()
             .is_some_and(|n| n.to_lowercase().contains(t))
@@ -472,6 +520,7 @@ pub(crate) async fn project_relations(
                     color_slot: top_scope.as_ref().and_then(|t| slots.get(t).copied()),
                     top_scope,
                     invalidated: r.invalidated_at.is_some_and(|t| t <= now),
+                    group: groups.get(id).cloned(),
                 }
             }
             None => End {
@@ -480,6 +529,7 @@ pub(crate) async fn project_relations(
                 top_scope: None,
                 color_slot: None,
                 invalidated: false,
+                group: None,
             },
         }
     };
