@@ -117,6 +117,7 @@ export const api = {
   memory: (id, mid) => get(`/api/projects/${enc(id)}/memories/${enc(mid)}`),
   doctor: (id) => get(`/api/projects/${enc(id)}/doctor`),
   graph: (id, params) => get(`/api/projects/${enc(id)}/graph`, params),
+  relations: (id, params) => get(`/api/projects/${enc(id)}/relations`, params),
   confirmEdge: (id, body) => post(`/api/projects/${enc(id)}/edges/confirm`, body),
   rejectEdge: (id, body) => post(`/api/projects/${enc(id)}/edges/reject`, body),
 };

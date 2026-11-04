@@ -58,6 +58,8 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   listed as unavailable with the reason rather than hidden.
 - **Graph** — the store's memories and the relations between them
   (below).
+- **Relations** — every relation as a scope × scope matrix and a list that
+  doubles as the review queue ([below](#the-relations-tab)).
 
 Each top-level logical scope (`storage` in `storage.paths`) has its own
 colour and two-letter badge, and each memory is drawn with a shape for its
@@ -233,6 +235,71 @@ single end on screen is a short stub from that end, so long relations
 crossing the view do not bury the local ones. A store of 150 memories or
 fewer is always drawn whole, as above.
 
+## The Relations tab
+
+The Relations tab answers the questions the graph is bad at: exact counts,
+which scopes are coupled, every relation of one kind, and what is waiting
+for review — at any store size, on a phone, and with a screen reader.
+
+- **The matrix** counts relations between top-level scopes (*Sub-scopes*
+  switches to `storage.lock`-level rows and columns). Rows are the source
+  scope, columns the target: a directed relation (`supports`, `supersedes`,
+  `derived_from`) counts in its (source, target) cell, a symmetric one
+  (`contradicts`, `related_to`, `duplicates`) in both, so a cell's number is
+  exactly what clicking it lists. A red dot marks a cell with
+  contradictions. The cells are one Tab stop: arrow keys move between them,
+  Home/End go to the row's ends, Enter picks a cell (again to clear it); each
+  cell is read out in words ("storage to hooks: 12 relations, 2
+  contradictions"). The matrix follows the kind, status and text filters but
+  not the picked cell, so picking one never empties it. A relation to a
+  deleted memory or into another store has no far scope and is counted under
+  the matrix instead.
+- **The list** shows each relation as a sentence ("*A* supports *B*"), each
+  end's scope, its status, origin, confidence and age, links to both
+  memories and a *Show in graph* link that opens the graph with the source
+  memory selected (in its scope, above 150 memories). Proposed relations come
+  first, then contradictions, then the newest; 100 at a time, *Load more*
+  for the next 100. Filter by kind, status (proposed and confirmed by
+  default; *Rejected* or *Every status* to see rejected ones), text (both
+  memories' summaries and the note), and invalidated memories. With
+  `--allow-writes`, every proposed relation has the review controls (see
+  [below](#reviewing-proposed-relations)); after a review the list reloads
+  and the result is named at the top.
+
+Every filter and the picked cell are in the address, so a view can be
+linked. The graph's relations table links here with its filters (*Open in
+Relations*).
+
+The API behind it, `GET /api/projects/{id}/relations`, takes `kind=`
+(repeatable or a comma list), `status=` (`proposed`, `confirmed`,
+`rejected`, `all`; default every status but rejected, or add
+`include_rejected=true`), `q=`, `include_invalidated=`, the scope pair
+`from_scope=`/`to_scope=` (exact names, `-` for no scope; a symmetric kind
+matches either order), `touches=` (either end in a scope), `subs=1`, `limit=`
+(100, at most 500) and `cursor=`. It answers `total`, `items`, `counts`,
+`next_cursor` (`null` on the last page) and, on the first page, `matrix`:
+
+```json
+{"total": 28, "limit": 100, "next_cursor": null, "memories": 1000,
+ "counts": {"proposed": 7, "contradictions": 2},
+ "items": [{"id": "…|contradicts|…|", "src": "…", "dst": "…", "kind": "contradicts",
+            "symmetric": true, "status": "proposed", "origin": "nli", "confidence": 0.91,
+            "at": "2026-11-03T14:05:15Z", "state": "live",
+            "src_summary": "…", "dst_summary": "…",
+            "from": {"summary": "…", "scope": "storage.paths", "top_scope": "storage",
+                     "color_slot": 0, "invalidated": false},
+            "to": {"…": "…"}}],
+ "matrix": {"level": "top", "relations": 700, "unplaced": 3,
+            "scopes": [{"name": "storage", "top": "storage", "slot": 0}],
+            "cells": [{"from": "storage", "to": "hooks", "count": 12, "contradictions": 2,
+                       "proposed": 4, "kinds": {"contradicts": {"proposed": 2}}}]}}
+```
+
+Paging is keyed, not by offset: the cursor is the last row's place in the
+order, so a relation reviewed or added between two pages never makes a page
+repeat or skip one. A cursor belongs to the filters it was made with; sent
+with others it is refused (`400`).
+
 ## Reviewing proposed relations
 
 Proposed relations come from `challenge --against` and from the automatic
@@ -270,8 +337,9 @@ Only a relation that is still proposed can be reviewed. Sending the same
 review twice (a double click, a second tab) changes nothing and the page says
 "Already done"; a different review of a relation someone already settled is
 refused with `409 not_proposed`. Reviews happen in the selected memory's
-panel (each proposed row), in a pinned relation's panel, and on the memory
-page. Without `--allow-writes` the memory panel shows no buttons, only a
+panel (each proposed row), in a pinned relation's panel, on the memory
+page, and in the Relations tab's list (which, read-only, shows one note
+instead of controls). Without `--allow-writes` the memory panel shows no buttons, only a
 note, and the other two show them disabled, with the command to restart.
 After a review the graph reloads to show the new status, with the same
 memory selected and the result read out; if that memory was just

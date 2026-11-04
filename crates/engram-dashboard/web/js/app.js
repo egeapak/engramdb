@@ -6,6 +6,7 @@
 //   #/p/<id>/memories?…     memory list (filters in the hash query)
 //   #/p/<id>/m/<memory id>  memory detail
 //   #/p/<id>/graph?…        memory graph (filters in the hash query)
+//   #/p/<id>/relations?…    relation matrix and list (filters in the hash query)
 //   #/p/<id>/doctor         store health
 //   #/projects              every store on the machine
 
@@ -15,6 +16,7 @@ import { renderOverview } from './views/overview.js';
 import { renderMemories } from './views/memories.js';
 import { renderDetail } from './views/detail.js';
 import { renderGraph } from './views/graph.js';
+import { renderRelations } from './views/relations.js';
 import { renderDoctor } from './views/doctor.js';
 import { renderProjects } from './views/projects.js';
 import { errorBox } from './views/common.js';
@@ -79,6 +81,7 @@ export function parseRoute() {
     if (parts[2] === 'memories') return { view: 'memories', id, query };
     if (parts[2] === 'm' && parts[3]) return { view: 'detail', id, mid: parts[3], query };
     if (parts[2] === 'graph') return { view: 'graph', id, query };
+    if (parts[2] === 'relations') return { view: 'relations', id, query };
     if (parts[2] === 'doctor') return { view: 'doctor', id, query };
     return { view: 'overview', id, query };
   }
@@ -96,6 +99,8 @@ export function href(view, id, extra) {
       return `#/p/${e(id)}/m/${e(extra)}`;
     case 'graph':
       return `#/p/${e(id)}/graph${extra ? '?' + extra : ''}`;
+    case 'relations':
+      return `#/p/${e(id)}/relations${extra ? '?' + extra : ''}`;
     case 'doctor':
       return `#/p/${e(id)}/doctor`;
     default:
@@ -207,6 +212,7 @@ async function route() {
     else if (r.view === 'memories') await renderMemories(main, ctx);
     else if (r.view === 'detail') await renderDetail(main, ctx);
     else if (r.view === 'graph') await renderGraph(main, ctx);
+    else if (r.view === 'relations') await renderRelations(main, ctx);
     else if (r.view === 'doctor') await renderDoctor(main, ctx);
     else await renderOverview(main, ctx);
   } catch (e) {

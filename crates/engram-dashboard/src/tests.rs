@@ -505,6 +505,10 @@ async fn projects_lists_every_store_with_links_and_the_current_one() {
     let (s, v) = get_json(&app, "/api/projects/nope/stats").await;
     assert_eq!(s, StatusCode::NOT_FOUND);
     assert_eq!(v["error"]["code"], "unknown_project");
+    let (s, v) = get_json(&app, "/api/projects/gone-id-0000001/relations").await;
+    assert_eq!(s, StatusCode::CONFLICT, "{v}");
+    let (s, v) = get_json(&app, "/api/projects/nope/relations").await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "{v}");
     let (s, _) = get_json(
         &app,
         &format!("/api/projects/{}/stats", paths::GLOBAL_PROJECT_ID),
@@ -1089,6 +1093,8 @@ async fn no_endpoint_writes_anything() {
         format!("/api/projects/{id}/doctor"),
         format!("/api/projects/{id}/graph"),
         format!("/api/projects/{id}/graph?include_invalidated=true&kinds=contradicts"),
+        format!("/api/projects/{id}/relations"),
+        format!("/api/projects/{id}/relations?subs=1&status=all&include_invalidated=true"),
         format!("/api/projects/{}/stats", paths::GLOBAL_PROJECT_ID),
     ] {
         let r = send(&app, authed(&uri)).await;
@@ -2800,6 +2806,15 @@ async fn the_graph_and_detail_views_write_nothing() {
         format!("/api/projects/{}/graph?top_scope=storage", fx.id),
         format!("/api/projects/{}/graph?limit=1&top_scope=hooks,-", fx.id),
         format!("/api/projects/{}/graph?summary_over=1", fx.id),
+        format!("/api/projects/{}/relations", fx.id),
+        format!(
+            "/api/projects/{}/relations?status=all&subs=1&include_invalidated=true&q=a",
+            fx.id
+        ),
+        format!(
+            "/api/projects/{}/relations?from_scope=storage&to_scope=hooks&kind=contradicts&limit=1",
+            fx.id
+        ),
         format!("/api/projects/{}/memories/{}", fx.id, fx.ids[1]),
         format!("/api/projects/{}/stats", fx.id),
     ] {
@@ -3120,4 +3135,366 @@ async fn both_stand_confirms_the_contradiction() {
     )
     .await;
     assert_eq!(r.status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// /relations
+// ---------------------------------------------------------------------------
+
+/// `(kind, status)` of each listed relation, in order.
+fn rel_kinds(v: &serde_json::Value) -> Vec<(String, String)> {
+    v["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no items in {v}"))
+        .iter()
+        .map(|r| {
+            (
+                r["kind"].as_str().unwrap().to_string(),
+                r["status"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn rel_kind_set(v: &serde_json::Value) -> Vec<String> {
+    let mut k: Vec<String> = rel_kinds(v).into_iter().map(|(k, _)| k).collect();
+    k.sort();
+    k
+}
+
+#[tokio::test]
+async fn relations_list_in_review_order_with_ends_and_states() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/relations", fx.id);
+    let (s, v) = get_json(&app, &base).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // Proposed first, contradictions first among them, then the rest.
+    let got = rel_kinds(&v);
+    assert_eq!(got.len(), 5, "{v}");
+    assert_eq!(got[0], ("contradicts".into(), "proposed".into()));
+    assert_eq!(got[1], ("related_to".into(), "proposed".into()));
+    assert!(got[2..].iter().all(|(_, s)| s == "confirmed"), "{got:?}");
+    // Plus supports, the dangling derived_from and the supersedes mirror.
+    assert_eq!(v["total"], 5, "{v}");
+    assert_eq!(v["counts"]["proposed"], 2);
+    assert_eq!(v["counts"]["contradictions"], 1);
+    assert_eq!(v["next_cursor"], serde_json::Value::Null);
+
+    let (_, all) = get_json(&app, &format!("{base}?limit=500")).await;
+    let items = all["items"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    let c = &items[0];
+    assert_eq!(c["src_summary"], "Never compare paths textually");
+    assert_eq!(c["from"]["top_scope"], "storage");
+    assert_eq!(c["from"]["scope"], "storage.paths");
+    assert!(c["from"]["color_slot"].is_u64(), "{c}");
+    assert_eq!(c["to"]["top_scope"], "hooks");
+    assert_eq!(c["origin"], "nli");
+    assert_eq!(c["state"], "live");
+    let dangling = items.iter().find(|r| r["kind"] == "derived_from").unwrap();
+    assert_eq!(dangling["state"], "dangling");
+    assert_eq!(dangling["dst"], ef.gone.as_str());
+    assert!(dangling.get("dst_summary").is_none(), "{dangling}");
+    // Ids are unique.
+    let mut ids: Vec<&str> = items.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 5);
+
+    // The matrix: a directed relation in its (source, target) cell, a
+    // symmetric one in both; the dangling one is unplaced.
+    let m = &v["matrix"];
+    assert_eq!(m["level"], "top");
+    assert_eq!(m["relations"], 5);
+    assert_eq!(m["unplaced"], 1);
+    let cells: BTreeMap<String, serde_json::Value> = m["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                format!(
+                    "{}>{}",
+                    c["from"].as_str().unwrap(),
+                    c["to"].as_str().unwrap()
+                ),
+                c.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cells.keys().map(String::as_str).collect::<Vec<_>>(),
+        [
+            ">hooks",
+            ">storage",
+            "hooks>",
+            "hooks>storage",
+            "storage>",
+            "storage>hooks"
+        ],
+        "{m}"
+    );
+    assert_eq!(cells["storage>hooks"]["contradictions"], 1);
+    assert_eq!(cells["hooks>storage"]["count"], 1);
+    assert_eq!(cells["storage>"]["kinds"]["supports"]["confirmed"], 1);
+    assert_eq!(cells[">storage"]["kinds"]["supersedes"]["confirmed"], 1);
+    let names: Vec<&str> = m["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.last(), Some(&""), "no scope sorts last: {m}");
+}
+
+#[tokio::test]
+async fn relations_filter_by_kind_status_text_and_scope_pair() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    // A rejected relation, hidden unless asked for.
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    ops_links::link(
+        &store,
+        LinkParams {
+            src: fx.ids[0].clone(),
+            kind: LinkKind::Duplicates,
+            dst: fx.ids[2].clone(),
+            dst_store: None,
+            confidence: Some(0.97),
+            origin: LinkOrigin::Similarity,
+            status: Some(LinkStatus::Rejected),
+            note: Some("not the same rule".into()),
+        },
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    drop(store);
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/relations?limit=500", fx.id);
+    let get = |qs: &str| {
+        let app = app.clone();
+        let uri = format!("{base}&{qs}");
+        async move {
+            let (s, v) = get_json(&app, &uri).await;
+            assert_eq!(s, StatusCode::OK, "{uri}: {v}");
+            v
+        }
+    };
+
+    // Kinds: repeatable or a comma list.
+    let v = get("kind=supports&kind=contradicts").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts", "supports"]);
+    let v = get("kind=supports,contradicts").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts", "supports"]);
+
+    // Status: rejected only when asked for.
+    let v = get("").await;
+    assert!(!rel_kind_set(&v).contains(&"duplicates".to_string()), "{v}");
+    let v = get("include_rejected=true").await;
+    assert_eq!(v["total"], 6);
+    let v = get("status=rejected").await;
+    assert_eq!(rel_kinds(&v), [("duplicates".into(), "rejected".into())]);
+    let v = get("status=proposed").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts", "related_to"]);
+    let v = get("status=confirmed,proposed").await;
+    assert_eq!(v["total"], 5);
+    let v = get("status=all").await;
+    assert_eq!(v["total"], 6);
+
+    // Text: both ends' summaries and the note.
+    let v = get("q=FLOCK").await;
+    assert_eq!(rel_kind_set(&v), ["supersedes"], "a's summary, any case");
+    let v = get("q=same%20rule&include_rejected=1").await;
+    assert_eq!(rel_kind_set(&v), ["duplicates"], "the note");
+    let v = get("q=hooks%20fail").await;
+    assert_eq!(
+        rel_kind_set(&v),
+        ["contradicts", "related_to"],
+        "the far end"
+    );
+
+    // Scope pair: a symmetric kind in either order, a directed one only
+    // source → target. The matrix ignores it.
+    let v = get("from_scope=storage&to_scope=hooks").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts"]);
+    assert_eq!(v["matrix"]["relations"], 5, "the matrix ignores the pair");
+    let v = get("from_scope=hooks&to_scope=storage").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts"]);
+    let v = get("from_scope=storage&to_scope=-").await;
+    assert_eq!(rel_kind_set(&v), ["supports"]);
+    let v = get("from_scope=-&to_scope=storage").await;
+    assert_eq!(rel_kind_set(&v), ["supersedes"]);
+    let v = get("from_scope=storage").await;
+    assert_eq!(
+        rel_kind_set(&v),
+        ["contradicts", "derived_from", "supports"]
+    );
+    let v = get("touches=hooks").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts", "related_to"]);
+    // Sub-scopes, for the pair and the matrix alike.
+    let v = get("subs=1&from_scope=hooks&to_scope=storage.paths").await;
+    assert_eq!(rel_kind_set(&v), ["contradicts"]);
+    assert_eq!(v["matrix"]["level"], "sub");
+    let cells: Vec<String> = v["matrix"]["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            format!(
+                "{}>{}",
+                c["from"].as_str().unwrap(),
+                c["to"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert!(
+        cells.contains(&"hooks>storage.paths".to_string()),
+        "{cells:?}"
+    );
+    assert!(
+        cells.contains(&"storage.paths>hooks".to_string()),
+        "{cells:?}"
+    );
+    let v = get("subs=1&from_scope=storage&to_scope=hooks").await;
+    assert_eq!(
+        v["total"], 0,
+        "at the sub level `storage` is no memory's scope"
+    );
+
+    for bad in [
+        "kind=nope",
+        "status=maybe",
+        "limit=many",
+        "include_rejected=perhaps",
+        "subs=2",
+        "cursor=zz",
+        "cursor=7b7d",
+    ] {
+        let (s, v) = get_json(&app, &format!("{base}&{bad}")).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{bad}: {v}");
+    }
+}
+
+#[tokio::test]
+async fn relations_page_by_keyset_without_repeats_or_gaps() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // 24 memories over three scopes, 30 relations, a third of them proposed.
+    let mut ids = Vec::new();
+    for i in 0..24 {
+        let scope = ["storage.lock", "hooks", "retrieval.rank"][i % 3];
+        let m = memory(MemoryType::Decision, &format!("Rule {i:02}"), &[scope], &[]);
+        store.create(&m).await.unwrap();
+        ids.push(m.id.clone());
+    }
+    let link = |src: &str, kind, dst: &str, status| LinkParams {
+        src: src.to_string(),
+        kind,
+        dst: dst.to_string(),
+        dst_store: None,
+        confidence: Some(0.8),
+        origin: LinkOrigin::Similarity,
+        status: Some(status),
+        note: None,
+    };
+    for i in 0..30 {
+        let (a, b) = (&ids[i % 24], &ids[(i * 7 + 5) % 24]);
+        if a == b {
+            continue;
+        }
+        let kind = [
+            LinkKind::Supports,
+            LinkKind::RelatedTo,
+            LinkKind::Contradicts,
+        ][i % 3]
+            .clone();
+        let status = if i % 3 == 0 {
+            LinkStatus::Proposed
+        } else {
+            LinkStatus::Confirmed
+        };
+        // A pair linked twice is refused or folded; either way the list
+        // below is the reference.
+        let _ = ops_links::link(&store, link(a, kind, b, status), Surface::Cli).await;
+    }
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/relations", fx.id);
+    let (_, whole) = get_json(&app, &format!("{base}?limit=500")).await;
+    let want: Vec<String> = whole["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(want.len() > 20, "{whole}");
+    assert_eq!(whole["total"].as_u64().unwrap() as usize, want.len());
+
+    // Page by 7. Between the first and second page a new proposed
+    // relation appears; it sorts before the cursor, so the rest of the walk
+    // is unchanged.
+    let mut got = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let uri = match &cursor {
+            Some(c) => format!("{base}?limit=7&cursor={c}"),
+            None => format!("{base}?limit=7"),
+        };
+        let (s, v) = get_json(&app, &uri).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(
+            v.get("matrix").is_some(),
+            cursor.is_none(),
+            "matrix on page one only"
+        );
+        for r in v["items"].as_array().unwrap() {
+            got.push(r["id"].as_str().unwrap().to_string());
+        }
+        pages += 1;
+        if pages == 1 {
+            ops_links::link(
+                &store,
+                link(&ids[1], LinkKind::Supports, &ids[23], LinkStatus::Proposed),
+                Surface::Cli,
+            )
+            .await
+            .unwrap();
+        }
+        match v["next_cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(got, want, "pages concatenate to the whole list, in order");
+    assert_eq!(pages, want.len().div_ceil(7));
+
+    // A cursor is bound to its filters.
+    let (_, v) = get_json(&app, &format!("{base}?limit=3")).await;
+    let c = v["next_cursor"].as_str().unwrap();
+    let (s, _) = get_json(&app, &format!("{base}?limit=3&cursor={c}")).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = get_json(&app, &format!("{base}?limit=50&cursor={c}")).await;
+    assert_eq!(s, StatusCode::OK, "the limit is not a filter");
+    for other in [
+        "status=proposed",
+        "q=rule",
+        "from_scope=hooks",
+        "subs=1",
+        "kind=supports",
+    ] {
+        let (s, v) = get_json(&app, &format!("{base}?limit=3&{other}&cursor={c}")).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{other}: {v}");
+    }
+    // Spelled differently, the same filters keep the cursor.
+    let (_, v) = get_json(&app, &format!("{base}?limit=3&kind=supports,related_to")).await;
+    let c = v["next_cursor"].as_str().unwrap();
+    let (s, _) = get_json(
+        &app,
+        &format!("{base}?limit=3&kind=related_to&kind=supports&cursor={c}"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
 }

@@ -35,6 +35,7 @@ pub mod assets;
 mod error;
 mod graph;
 pub mod projects;
+mod relations;
 pub mod security;
 pub mod stores;
 mod writes;

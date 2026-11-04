@@ -1806,20 +1806,32 @@ pub struct StoreGraph {
 /// knows which stores it is showing, to resolve.
 pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<StoreGraph> {
     let rows = store.list_filterable().await?;
+    Ok(graph_of(&rows, store.list_edges().await?, filter))
+}
+
+/// [`load_graph`] over rows the caller already read: the memories projection
+/// (`MemoryStore::list_filterable`, invalidated rows included) and the
+/// deduplicated edges (`MemoryStore::list_edges`). Pure, so a reader that
+/// needs the projection anyway (the dashboard) reads it once, not twice.
+pub fn graph_of(
+    rows: &[crate::storage::lance_index::IndexFilterable],
+    edges: Vec<EdgeRow>,
+    filter: &GraphFilter,
+) -> StoreGraph {
     let now = Utc::now();
-    let mut all_ids: HashSet<String> = HashSet::new();
-    let mut shown: HashSet<String> = HashSet::new();
+    let mut all_ids: HashSet<&str> = HashSet::new();
+    let mut shown: HashSet<&str> = HashSet::new();
     let mut nodes = Vec::new();
     for r in rows {
         let invalidated = r.invalidated_at.is_some_and(|t| now >= t);
-        all_ids.insert(r.id.clone());
+        all_ids.insert(r.id.as_str());
         if invalidated && !filter.include_invalidated {
             continue;
         }
-        shown.insert(r.id.clone());
+        shown.insert(r.id.as_str());
         nodes.push(GraphNode {
-            id: r.id,
-            summary: r.summary,
+            id: r.id.clone(),
+            summary: r.summary.clone(),
             type_: r.type_,
             status: r.status,
             visibility: r.visibility,
@@ -1833,7 +1845,7 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
         dangling_edges: Vec::new(),
         external: 0,
     };
-    for row in store.list_edges().await? {
+    for row in edges {
         if let Some(kinds) = &filter.kinds {
             if !kinds.contains(&row.kind) {
                 continue;
@@ -1844,18 +1856,19 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
             LinkStatus::Rejected if !filter.include_rejected => continue,
             _ => {}
         }
-        if !all_ids.contains(&row.src_id) {
+        if !all_ids.contains(row.src_id.as_str()) {
             graph.dangling += 1;
             continue;
         }
-        if row.dst_store.is_none() && !all_ids.contains(&row.dst_id) {
+        if row.dst_store.is_none() && !all_ids.contains(row.dst_id.as_str()) {
             graph.dangling += 1;
-            if shown.contains(&row.src_id) {
+            if shown.contains(row.src_id.as_str()) {
                 graph.dangling_edges.push(GraphEdge::from_row(row));
             }
             continue;
         }
-        if !shown.contains(&row.src_id) || (row.dst_store.is_none() && !shown.contains(&row.dst_id))
+        if !shown.contains(row.src_id.as_str())
+            || (row.dst_store.is_none() && !shown.contains(row.dst_id.as_str()))
         {
             continue; // an end is invalidated and hidden
         }
@@ -1864,7 +1877,7 @@ pub async fn load_graph(store: &MemoryStore, filter: &GraphFilter) -> Result<Sto
         }
         graph.edges.push(GraphEdge::from_row(row));
     }
-    Ok(graph)
+    graph
 }
 
 impl GraphEdge {

@@ -203,17 +203,18 @@ impl ReadStore {
             .map_err(ApiError::internal)
     }
 
-    /// The store's edges and node set ([`ops::links::load_graph`]): reads the
-    /// index only and creates nothing, so a store without an `edges` table
-    /// (not yet on schema 0.9.0) answers with no edges.
-    pub async fn graph(
+    /// The store's edges and node set ([`ops::links::graph_of`], i.e.
+    /// `load_graph`) over memory rows already read with [`Self::list`]
+    /// (invalidated included, as `list` returns them), so a handler that
+    /// needs the rows anyway reads the memories table once. Reads the index
+    /// only and creates nothing: a store without an `edges` table (not yet
+    /// on schema 0.9.0) answers with no edges.
+    pub async fn graph_of(
         &self,
+        rows: &[IndexFilterable],
         filter: &ops::links::GraphFilter,
     ) -> Result<ops::links::StoreGraph, ApiError> {
-        match ops::links::load_graph(&self.inner, filter).await {
-            Ok(v) => Ok(v),
-            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
-        }
+        Ok(ops::links::graph_of(rows, self.edges().await?, filter))
     }
 
     /// Every edge of the store, deduplicated (one row per logical edge).

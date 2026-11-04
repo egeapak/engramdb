@@ -203,6 +203,9 @@ function filtersOf(query) {
     all: query.get('all') === '1',
     // Only a style named in the hash: none means this browser's stored pick.
     style: styleById(query.get('style')) ? query.get('style') : '',
+    // A memory to select once drawn (a link from the Relations tab); taken
+    // out of the hash once used, so a later click is not undone by it.
+    memory: query.get('memory') || '',
   };
 }
 
@@ -215,6 +218,19 @@ function filterQuery(f) {
   if (f.top_scope) q.set('top_scope', f.top_scope);
   if (f.all) q.set('all', '1');
   if (f.style) q.set('style', f.style);
+  if (f.memory) q.set('memory', f.memory);
+  return q.toString();
+}
+
+/** The Relations tab's hash query for the graph's filters. */
+function relationsQuery(f) {
+  const q = new URLSearchParams();
+  if (f.kinds.length !== KINDS.length) q.set('kind', f.kinds.join(','));
+  if (f.rejected && !f.proposed) q.set('status', 'rejected');
+  else if (f.rejected) q.set('status', 'all');
+  else if (!f.proposed) q.set('status', 'confirmed');
+  if (f.invalidated) q.set('include_invalidated', '1');
+  if (f.top_scope && !f.top_scope.includes(',')) q.set('touches', f.top_scope);
   return q.toString();
 }
 
@@ -352,6 +368,8 @@ export async function renderGraph(main, ctx) {
   if (ctx.isStale()) return;
 
   if (g.summary) {
+    // The overview draws no memory to select.
+    f.memory = '';
     renderOverview(main, ctx, g, {
       t,
       f,
@@ -1500,6 +1518,7 @@ export async function renderGraph(main, ctx) {
         'Relations',
         h('span', { class: 'faint num' }, showAll ? plural(rows.length, 'relation') : `${plural(proposed.length, 'proposed relation')} of ${fmt(rows.length)}`),
         toggle,
+        h('a', { class: 'btn sm', href: ctx.href('relations', p.id, relationsQuery(f)) }, t('openInRelations')),
       ),
       listed.length
         ? h(
@@ -1568,5 +1587,12 @@ export async function renderGraph(main, ctx) {
       reviewNote = { node: id, text: id === back.ids[0] ? back.text : `${back.text} ${t('reviewMoved')}` };
       pin({ node: byId.get(id) }, true);
     }
+  }
+  if (f.memory) {
+    const want = f.memory;
+    f.memory = '';
+    history.replaceState(null, '', hashOf(ctx, f));
+    if (!byId.has(want)) notesBox.append(h('div', { class: 'note', role: 'status' }, t('noteMemoryNotDrawn')));
+    else if (!back) pin({ node: byId.get(want) }, true);
   }
 }

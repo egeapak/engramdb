@@ -112,6 +112,9 @@ export const CORE = {
   // Notes above the graph: a style that marks these ends says how.
   noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory`,
   noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here`,
+  // A `memory=` link (from the Relations tab) to a memory not drawn here.
+  noteMemoryNotDrawn: 'The memory that link names is not drawn here: it is past the memory limit, or outside these filters.',
+  openInRelations: 'Open in Relations',
 };
 
 /** `t(key, …args)` for a style: its own string when it has one, else the core's. */

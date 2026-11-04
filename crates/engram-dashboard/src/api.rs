@@ -69,6 +69,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{id}/doctor", get(project_doctor))
         .route("/api/projects/{id}/graph", get(crate::graph::project_graph))
         .route(
+            "/api/projects/{id}/relations",
+            get(crate::relations::project_relations),
+        )
+        .route(
             "/api/projects/{id}/edges/confirm",
             post(crate::writes::confirm_edge),
         )
@@ -593,23 +597,34 @@ struct Cursor {
 
 impl Cursor {
     fn encode(&self) -> String {
-        serde_json::to_vec(self)
-            .unwrap_or_default()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        hex_json(self)
     }
 
     fn decode(s: &str) -> Option<Self> {
-        if !s.len().is_multiple_of(2) || s.len() > 4096 {
-            return None;
-        }
-        let bytes: Option<Vec<u8>> = (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
-            .collect();
-        serde_json::from_slice(&bytes?).ok()
+        unhex_json(s)
     }
+}
+
+/// An opaque paging cursor: `v` as hex-encoded JSON (URL-safe, and opaque
+/// to the frontend). Shared by `/memories` and `/relations`.
+pub(crate) fn hex_json<T: Serialize>(v: &T) -> String {
+    serde_json::to_vec(v)
+        .unwrap_or_default()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The inverse of [`hex_json`]; `None` for anything it did not produce.
+pub(crate) fn unhex_json<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
+    if !s.len().is_multiple_of(2) || s.len() > 4096 {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect();
+    serde_json::from_slice(&bytes?).ok()
 }
 
 // ---------------------------------------------------------------------------

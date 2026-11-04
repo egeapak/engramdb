@@ -144,18 +144,18 @@ struct SubScope {
 /// totals the overview marks. A display filter (kinds, proposed, rejected)
 /// recomputes from `kinds`.
 #[derive(Serialize, Default)]
-struct Tally {
-    count: usize,
+pub(crate) struct Tally {
+    pub(crate) count: usize,
     /// kind → status → relations.
-    kinds: BTreeMap<String, BTreeMap<String, usize>>,
+    pub(crate) kinds: BTreeMap<String, BTreeMap<String, usize>>,
     /// `contradicts` relations not rejected.
-    contradictions: usize,
+    pub(crate) contradictions: usize,
     /// `proposed` relations of any kind.
-    proposed: usize,
+    pub(crate) proposed: usize,
 }
 
 impl Tally {
-    fn add(&mut self, e: &GraphEdge) {
+    pub(crate) fn add(&mut self, e: &GraphEdge) {
         self.count += 1;
         *self
             .kinds
@@ -255,7 +255,7 @@ struct GraphPage {
 
 /// A memory's sub-scope: the first two segments of its first logical scope,
 /// when it has two.
-fn sub_scope_of(logical: &[String]) -> Option<String> {
+pub(crate) fn sub_scope_of(logical: &[String]) -> Option<String> {
     let first = logical.first()?;
     let mut parts = first.splitn(3, '.');
     let top = parts.next().filter(|s| !s.is_empty())?;
@@ -287,7 +287,11 @@ fn scopes_of(
     scopes
 }
 
-fn flag(q: &HashMap<String, String>, name: &str, default: bool) -> Result<bool, ApiError> {
+pub(crate) fn flag(
+    q: &HashMap<String, String>,
+    name: &str,
+    default: bool,
+) -> Result<bool, ApiError> {
     match q.get(name).map(String::as_str) {
         None => Ok(default),
         Some("1" | "true" | "yes" | "on") => Ok(true),
@@ -307,7 +311,9 @@ fn flag(q: &HashMap<String, String>, name: &str, default: bool) -> Result<bool, 
 /// whole step takes one timeout at most, not one per store. A probe that
 /// times out is `None` (its edges are `unknown`) and its blocking thread is
 /// left to finish on its own, as `projects` does.
-async fn foreign_states(edges: &[&GraphEdge]) -> HashMap<String, Option<HashSet<String>>> {
+pub(crate) async fn foreign_states(
+    edges: &[&GraphEdge],
+) -> HashMap<String, Option<HashSet<String>>> {
     let mut by_store: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for e in edges {
         if let Some(s) = &e.dst_store {
@@ -417,7 +423,7 @@ pub(crate) async fn project_graph(
 
     let (_, store) = open(&state, &id).await?;
     let all = store.list().await?;
-    let graph = store.graph(&filter).await?;
+    let graph = store.graph_of(&all, &filter).await?;
     let slots = color_slots(&all);
     let rows: HashMap<&str, &IndexFilterable> = all.iter().map(|e| (e.id.as_str(), e)).collect();
 
