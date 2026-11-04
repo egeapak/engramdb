@@ -79,9 +79,11 @@ choice. Two styles exist today:
 - **Plain** (the default) — memories placed by their relations and gathered
   by scope: related memories sit close together, and each top-level scope is
   a soft tinted region with its name. Memories are all one neutral colour, so
-  colour is left to the relations; the first seven scopes get seven tints,
-  scopes eight to fourteen add a diagonal hatch over the tint and later ones
-  a dot texture, and every region is named. The same store always draws the
+  colour is left to the relations (a memory nothing has read yet is drawn
+  hollow); the first seven scopes get seven tints, scopes eight to fourteen
+  add a diagonal hatch over the tint, fifteen to twenty-one a dot texture
+  and twenty-two to twenty-eight a cross-hatch. Every region is named, which
+  is what tells scopes apart past twenty-eight. The same store always draws the
   same graph in a box of the same shape (the window's width changes only how
   large the scope names are drawn). Small graphs are spread out so every
   memory's label has room at Fit on a desktop-sized window; on a phone, or in
@@ -95,26 +97,31 @@ choice. Two styles exist today:
 The shapes between memories are relations (see [Linking
 memories](./links.md)). The legend under the graph shows each one exactly as
 the picked style draws it. In **Plain** there are no arrowheads: a relation
-with a direction is a **tapered** shape, **wide at the source** (the memory
-that supports, supersedes or derives) and narrow at the target. Kind is told
+with a direction is a **tapered** shape, **wide at the memory that
+supports, supersedes or is derived from the other**, and narrow at the
+memory it points to. A directed relation too short on screen to show its
+taper (under about 40 pixels) also carries a small chevron in the middle
+pointing the same way. Kind is told
 by colour *and* by shape, so it reads without telling colours apart:
 
 | Plain draws | Relation |
 |---|---|
 | Red zigzag | `contradicts` (no direction) |
-| Dark, heavy tapered | `supersedes` — wide at the newer memory |
+| The heaviest taper, in the text colour (dark on light, light on dark) | `supersedes` — wide at the newer memory |
 | Green tapered | `supports` — wide at the supporting memory |
-| Blue tapered with cross ribs | `derived_from` — wide at the derived memory |
+| Blue taper with cross ribs standing out of it, like a comb | `derived_from` — wide at the derived memory |
 | Violet double stroke | `duplicates` (no direction) |
 | Thin grey | `related_to` (no direction) |
 | Dashed | proposed, not yet reviewed; a directed one has one chevron in the middle pointing at the target |
 | Faint and dotted | rejected (drawn only with the *Rejected* filter on) |
-| Fading out toward its far end | the far end is not on the graph: ending in a short bar, it was deleted (dangling); without one, it is in a store that could not be opened here |
+| Fading out toward its far end | the far end is not on the graph: ending in a short bar (and fading less), it was deleted (dangling); without one, it is a memory in another store, or in a store that could not be opened here |
 
 Relations keep a readable width at any zoom: they thicken a little as you
-zoom in, but much less than the memories do. In Grid, a contradiction is red
+zoom in, but much less than the memories do, and once a zoom comes to rest
+their dashes, ribs and zigzags are redrawn at a size that suits it. In Grid, a contradiction is red
 with a ⊣ bar at each end, the directed kinds end in an arrow, a deleted far
-end is a crossed-out circle (⊗) and an unreadable one a `?`.
+end is a crossed-out circle (⊗) and an unreadable one a `?` (a live memory
+in another store has no end mark).
 
 Memory size follows reads, so a memory nothing reads is small; a memory with
 two or more relations has a heavier outline. Labels are the start of each

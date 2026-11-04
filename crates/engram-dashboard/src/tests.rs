@@ -1592,7 +1592,8 @@ fn plain_legend_swatches_share_the_relation_drawing() {
         assert!(index.contains(want), "plain/index.js lacks {want:?}");
     }
     // The direction sentence is core wording, shown only for a tapered style.
-    assert!(asset_text("js/graph/strings.js").contains("legendDirection: 'Wide end = source"));
+    assert!(asset_text("js/graph/strings.js")
+        .contains("legendDirection: 'Wide end: the memory that supports"));
     assert!(asset_text("js/graph/legend.js").contains("direction ? h('li'"));
     assert!(!asset_text("js/graph/themes/grid/index.js").contains("direction: true"));
 }

@@ -21,7 +21,9 @@ export const name = 'Grid';
 export const strings = {
   schemeToggle: (dark) => (dark ? 'Day map' : 'Night map'),
   title: (project) => `${project} network`,
+  intro: () => ['Each memory is coloured by its top-level scope; shape follows type.', 'Size follows reads.'],
   // How this style's glyphs look, in the legend and the notes.
+  legendProposedOther: 'Any other proposed relation: faded',
   legendProposedContradiction: 'Proposed contradiction (dashed, ⚠)',
   noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory (end marked ⊗)`,
   noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (drawn to “?”)`,
@@ -80,9 +82,11 @@ export function drawEdge(e, pts, ends) {
     const b = offset(pts, ends.rt + 2, true);
     parts.push(chevron(b.x, b.y, b.ang + Math.PI));
   }
-  if (ends.stub) {
+  // A cap names a far end that is gone (⊗) or not checked (?); a live
+  // memory in another store gets none.
+  if (ends.stub && (e.state === 'dangling' || e.state === 'unknown')) {
     const end = pts[pts.length - 1];
-    parts.push(stubCap(end[0], end[1], e.state === 'unknown' ? 'unknown' : 'dangling'));
+    parts.push(stubCap(end[0], end[1], e.state));
   }
   return { cls: [], parts };
 }

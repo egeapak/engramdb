@@ -15,8 +15,15 @@ export const KIND_LABEL = {
 
 export const KINDS = ['contradicts', 'supersedes', 'supports', 'derived_from', 'related_to', 'duplicates'];
 
-/** Kinds that point from one memory to another. */
-export const DIRECTED = { supersedes: true, supports: true, derived_from: true };
+/**
+ * Kinds that point from one memory to another. No prototype: a kind is any
+ * string a newer binary (or a hand edit) wrote, and `constructor` or
+ * `toString` must not read as directed.
+ */
+export const DIRECTED = Object.freeze({ __proto__: null, supersedes: true, supports: true, derived_from: true });
+
+/** Whether relation kind `k` has a direction (own keys of DIRECTED only). */
+export const isDirected = (k) => Object.hasOwn(DIRECTED, k);
 
 export function kindLabel(k) {
   return KIND_LABEL[k] || String(k).replace(/_/g, ' ');

@@ -52,3 +52,15 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 Node is a proxy for the browser. To time the real thing, post the same input
 to `js/graph/layout-worker.js` in a fresh Chromium worker (Playwright), once
 with a one-memory input first so the timing excludes module loading.
+
+## Relation geometry check
+
+`node bench/relations.mjs` imports the Plain style's relation drawing
+(`web/js/graph/themes/plain/relations.js`) and checks, over every kind
+(unknown names and inherited-property names such as `constructor`
+included), status, length and zoom unit: no NaN / Infinity / undefined in
+the path data, directed kinds wide at the source, the chevron pointing to
+the target, path data bounded per relation, and an inherited-property kind
+drawn like an unknown one. It then times building 2,000 relations at Fit and
+at maximum zoom against the 100 ms filter-toggle budget (JS share only).
+Exits 1 on a failed check.

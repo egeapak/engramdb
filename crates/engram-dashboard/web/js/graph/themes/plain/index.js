@@ -5,20 +5,21 @@
 // Memories are one neutral fill (shape follows type): colour belongs to the
 // relations, whose kind it names. Scopes are told apart by their soft
 // region and their name. The first seven top scopes (colour slots 0–6) get
-// seven tints; past seven the tints repeat, so slots 7–13 add a diagonal
-// hatch over the tint and slots 14+ a dot grid (the same rule as the
-// scope badges, whose shape changes past seven): two scopes that share a
-// tint never share a texture, and every region is also named.
+// seven tints; past seven the tints repeat with a texture over them: slots
+// 7–13 a diagonal hatch, 14–20 a dot grid, 21–27 a cross-hatch. Within the
+// first 28 scopes two that share a tint never share a texture; past that
+// textures repeat too and only the region's name tells them apart (every
+// region is named).
 //
 // Relations are drawn by ./relations.js: tapered wedges (wide at the
 // source) instead of arrowheads, kind by colour and shape; see its docs.
 
 import { s } from '../../../dom.js';
 import { plural } from '../../../format.js';
-import { slot, variant, typeShape } from '../../../scopes.js';
+import { slot, typeShape } from '../../../scopes.js';
 import { buildLegend } from '../../legend.js';
 import { radius } from '../../radius.js';
-import { drawRelation, fadeDefs, relationSample, stubSwatch, zoomFactor } from './relations.js';
+import { drawRelation, fadeDefs, relationSample, stubSwatch, zoomFactor, redrawOnZoom as redrawAt } from './relations.js';
 
 export const id = 'plain';
 export const name = 'Plain';
@@ -26,7 +27,7 @@ export const name = 'Plain';
 export const strings = {
   intro: () => ['Memories sit in shaded, named regions by top-level scope; shape follows type.', 'Size follows reads. A tapered relation runs from its wide end (the source) to its narrow end.'],
   legendProposedContradiction: 'Proposed contradiction (dashed zigzag)',
-  legendProposedOther: 'Any other proposed relation: dashed, a chevron points to the target',
+  legendProposedOther: 'Any other proposed relation: dashed; a directed one has a chevron pointing to the target',
   legendRejected: 'Rejected: faint and dotted',
   noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory (fading, ends in a bar)`,
   noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (fading out)`,
@@ -35,15 +36,18 @@ export const strings = {
 /** The core's scope-aware force layout (graph/scope-force.js), default options. */
 export const layout = { name: 'scope-force', options: {} };
 
-/** A region texture's pattern id: `v` the slot's variant (1 hatch, 2 dots), `c` its tint. */
+/** A scope's texture past the seventh scope: 0 none, 1 hatch, 2 dots, 3 cross-hatch (module docs). */
+const texture = (n) => (n === null || n === undefined ? 0 : Math.min(3, Math.floor(n / 7)));
+
+/** A region texture's pattern id: `v` the texture, `c` its tint. */
 const patternId = (v, c) => `pl-pat-${v}-${c}`;
 
 function regionPattern(v, c) {
   const mark =
-    v === 1
-      ? s('path', { class: ['tex', 'stroke-' + c], d: 'M0,0 V9' })
-      : s('circle', { class: ['tex', 'fill-' + c], cx: 4.5, cy: 4.5, r: 1.5 });
-  return s('pattern', { id: patternId(v, c), width: 9, height: 9, patternUnits: 'userSpaceOnUse', patternTransform: v === 1 ? 'rotate(45)' : null }, mark);
+    v === 2
+      ? s('circle', { class: ['tex', 'fill-' + c], cx: 4.5, cy: 4.5, r: 1.5 })
+      : s('path', { class: ['tex', 'stroke-' + c], d: v === 1 ? 'M0,0 V9' : 'M0,0 V9 M0,0 H9' });
+  return s('pattern', { id: patternId(v, c), width: 9, height: 9, patternUnits: 'userSpaceOnUse', patternTransform: v === 2 ? null : 'rotate(45)' }, mark);
 }
 
 /**
@@ -76,7 +80,7 @@ export function drawBackdrop(g, lay) {
     const d = a.d.join('');
     const c = slot(a.slot);
     below.appendChild(s('path', { class: ['region', 'fill-' + c], d }));
-    const v = variant(a.slot);
+    const v = texture(a.slot);
     if (v) {
       if (!patterns.has(patternId(v, c))) {
         patterns.add(patternId(v, c));
@@ -125,6 +129,9 @@ export function zoomed(svg, scale) {
   svg.style.setProperty('--zw', z.toFixed(3));
 }
 
+/** After a zoom settles: redraw the relations when it moved far from the drawn one (./relations.js). */
+export const redrawOnZoom = redrawAt;
+
 export const edgeSample = relationSample;
 
 function legendNode(kind, type) {
@@ -139,13 +146,16 @@ function legendNode(kind, type) {
 function scopeSwatch(l) {
   if (!l.name) return null;
   const c = slot(l.slot);
-  const v = variant(l.slot);
+  const v = texture(l.slot);
+  const hatch = 'M-6,2 L2,-6 M-6,8 L8,-6 M2,8 L8,2';
   const tex =
     v === 1
-      ? s('path', { class: ['tex', 'stroke-' + c], d: 'M-6,2 L2,-6 M-6,8 L8,-6 M2,8 L8,2' })
+      ? s('path', { class: ['tex', 'stroke-' + c], d: hatch })
       : v === 2
         ? [-3, 3].flatMap((x) => [-3, 3].map((y) => s('circle', { class: ['tex', 'fill-' + c], cx: x, cy: y, r: 1.4 })))
-        : null;
+        : v === 3
+          ? s('path', { class: ['tex', 'stroke-' + c], d: hatch + ' M-6,-2 L2,6 M-6,-8 L8,6 M2,-8 L8,-2' })
+          : null;
   return s('svg', { width: 14, height: 14, viewBox: '-7 -7 14 14', 'aria-hidden': 'true', class: 'lg-region' }, s('rect', { class: ['region', 'fill-' + c], x: -6, y: -6, width: 12, height: 12, rx: 3 }), tex);
 }
 

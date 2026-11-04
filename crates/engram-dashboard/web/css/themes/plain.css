@@ -7,26 +7,42 @@
  * the subject. Relations (js/graph/themes/plain/relations.js) are filled
  * shapes, one path each, coloured by kind.
  *
- * Colours: light-dark() follows the page's color-scheme (app.css sets it
- * for both the system preference and the explicit light/dark pick). Every
- * relation colour and the memory fill meet WCAG 1.4.11 (3:1) against the
- * page background in both schemes, and against the faintest region tint:
+ * Colours: tokens in app.css's three-block pattern (light; the system's
+ * dark unless the page was set to light; the page set to dark). The
+ * selectors keep the [data-graph-style="plain"] prefix every rule here
+ * needs and test <html>'s data-theme through :is(… *) on <body>.
+ * Every relation colour and the memory fill meet WCAG 1.4.11 (3:1) against
+ * the page background in both schemes, and against the faintest region tint
+ * (≥ 3.08):
  *   light (#fff)    contradicts 5.2  supersedes 15.6  supports 4.7
  *                   derived_from 5.4  duplicates 6.1  related_to 3.5  memory 4.7
  *   dark (#0f1822)  contradicts 5.9  supersedes 14.9  supports 8.0
  *                   derived_from 6.9  duplicates 7.1  related_to 5.0  memory 5.7
+ * Declared exceptions: a rejected relation is drawn faint on purpose (.55:
+ * 1.9–3.3:1; it is shown only with the Rejected filter and is also dotted),
+ * and where a relation crosses a region's texture stripe the stripe lowers
+ * its local contrast (about 2.1:1 for related_to over a stripe). A
+ * never-read memory is hollow, so its outline keeps the full contrast.
  * Blue/violet and red/green pairs merge under deutan/protan vision, which
  * is why each kind also has its own shape (relations.js). */
 [data-graph-style="plain"] body {
-  --pl-contradicts: light-dark(#d1242f, #ff5d5d);
-  --pl-supersedes: light-dark(#1d2430, #e6ebf0);
-  --pl-supports: light-dark(#11845b, #2fc488);
-  --pl-derived_from: light-dark(#2368c9, #5aa2ff);
-  --pl-duplicates: light-dark(#7c3fcf, #ae93f7);
-  --pl-related_to: light-dark(#7f8a96, #7b8995);
-  --pl-node: light-dark(#6b7480, #8593a0);
+  --pl-contradicts: #d1242f; --pl-supersedes: #1d2430; --pl-supports: #11845b;
+  --pl-derived_from: #2368c9; --pl-duplicates: #7c3fcf; --pl-related_to: #7f8a96;
+  --pl-node: #6b7480; --pl-region-a: .065;
 }
-[data-graph-style="plain"] .scope-regions .region { fill-opacity: .065; stroke: none; }
+@media (prefers-color-scheme: dark) {
+  [data-graph-style="plain"] body:is(:root:not([data-theme="light"]) *) {
+    --pl-contradicts: #ff5d5d; --pl-supersedes: #e6ebf0; --pl-supports: #2fc488;
+    --pl-derived_from: #5aa2ff; --pl-duplicates: #ae93f7; --pl-related_to: #7b8995;
+    --pl-node: #8593a0; --pl-region-a: .11;
+  }
+}
+[data-graph-style="plain"] body:is([data-theme="dark"] *) {
+  --pl-contradicts: #ff5d5d; --pl-supersedes: #e6ebf0; --pl-supports: #2fc488;
+  --pl-derived_from: #5aa2ff; --pl-duplicates: #ae93f7; --pl-related_to: #7b8995;
+  --pl-node: #8593a0; --pl-region-a: .11;
+}
+[data-graph-style="plain"] .scope-regions .region { fill-opacity: var(--pl-region-a); stroke: none; }
 [data-graph-style="plain"] .scope-regions .tex { fill-opacity: .28; stroke-opacity: .28; stroke-width: 1.6; }
 [data-graph-style="plain"] .scope-names .scope-name-bg { fill: var(--bg); fill-opacity: .72; stroke: none; pointer-events: none; }
 [data-graph-style="plain"] .scope-names .scope-name { font-weight: 700; letter-spacing: .02em; fill: var(--ink-2); fill-opacity: .8; paint-order: stroke; stroke: var(--bg); stroke-width: .25em; stroke-linejoin: round; pointer-events: none; }
@@ -36,7 +52,7 @@
 [data-graph-style="plain"] .node.pl .sh { fill: var(--pl-node); stroke: var(--bg); stroke-width: 1.5; }
 [data-graph-style="plain"] .node.pl .dot { fill: var(--bg); stroke: none; }
 [data-graph-style="plain"] .node.pl.hub .sh { stroke: var(--ink); stroke-width: 1.6; }
-[data-graph-style="plain"] .node.pl.never .sh { fill-opacity: .55; }
+[data-graph-style="plain"] .node.pl.never .sh { fill: var(--bg); stroke: var(--pl-node); stroke-width: 1.6; }
 [data-graph-style="plain"] .node.pl.inv .sh { fill: var(--bg-2); stroke: var(--ink-3); stroke-dasharray: 2 3; }
 /* Relations: .cx carries kind k-*, status s-*, far end x-*. One filled
    path (.rel) each; the core's .hit path is the click target, kept a
@@ -47,7 +63,6 @@
 [data-graph-style="plain"] .cx.k-supports .rel { fill: var(--pl-supports); }
 [data-graph-style="plain"] .cx.k-derived_from .rel { fill: var(--pl-derived_from); }
 [data-graph-style="plain"] .cx.k-duplicates .rel { fill: var(--pl-duplicates); }
-[data-graph-style="plain"] .cx.s-proposed .rel { fill-opacity: .9; }
 [data-graph-style="plain"] .cx.s-rejected .rel { fill-opacity: .55; }
 [data-graph-style="plain"] .graph .cx .hit { stroke-width: 12px; vector-effect: non-scaling-stroke; }
 /* Highlighting: the core toggles .has-focus on the graph and .on on what

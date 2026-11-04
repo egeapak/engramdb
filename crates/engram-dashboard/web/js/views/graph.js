@@ -503,6 +503,7 @@ export async function renderGraph(main, ctx) {
   function drawEdges() {
     const ks = visible();
     const scale = view ? (graphBox.clientWidth || 1) / view.w : 1;
+    drawnScale = scale;
     edgeEls = new Array(g.edges.length).fill(null);
     adj = g.nodes.map(() => []);
     const frag = [];
@@ -538,6 +539,8 @@ export async function renderGraph(main, ctx) {
 
   // ---- pan / zoom -----------------------------------------------------------
   let view = viewports.get(viewKey) || null;
+  let drawnScale = null;
+  let settleTimer = null;
   function apply() {
     svg.setAttribute('viewBox', `${view.x.toFixed(1)} ${view.y.toFixed(1)} ${view.w.toFixed(1)} ${view.h.toFixed(1)}`);
     const scale = (graphBox.clientWidth || 1) / view.w;
@@ -546,6 +549,21 @@ export async function renderGraph(main, ctx) {
     // A style may follow the zoom with one write on the <svg> (Plain: its
     // relations' width); never per relation, so pan / zoom stays cheap.
     if (theme.zoomed) theme.zoomed(svg, scale);
+    // A style that sizes detail along a relation by the zoom may ask for the
+    // relations to be redrawn once a zoom settles far enough from the one
+    // they were drawn at (Plain: dashes, chevrons, zigzags). Only then, and
+    // only the relations: never per frame.
+    if (theme.redrawOnZoom) {
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        if (!svg.isConnected || drawnScale === null) return;
+        const now = (graphBox.clientWidth || 1) / view.w;
+        if (theme.redrawOnZoom(drawnScale, now)) {
+          drawEdges();
+          highlight(hovered || pinned);
+        }
+      }, 160);
+    }
     viewports.set(viewKey, { ...view });
     while (viewports.size > 8) viewports.delete(viewports.keys().next().value);
   }
@@ -715,6 +733,7 @@ export async function renderGraph(main, ctx) {
   // ---- highlighting, the tooltip and the card -----------------------------
   let lit = [];
   let pinned = null; // {edge: k} | {node: i}
+  let hovered = null; // the same, while hovered or focused
   function highlight(sel) {
     for (const el of lit) el.classList.remove('on');
     lit = [];
@@ -745,6 +764,7 @@ export async function renderGraph(main, ctx) {
 
   /** Hover / focus: highlight and a tooltip. Never touches the card. */
   function hover(sel) {
+    hovered = sel;
     highlight(sel || pinned);
     if (!sel) {
       tip.hidden = true;
