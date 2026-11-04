@@ -36,7 +36,7 @@
 // px, which the transform scales back). A relation is ONE `<path>`: its
 // dashes, chevron and end bar are subpaths of the same path data. On the
 // graph the path is placed by a CSS transform, `translate rotate
-// scale(1/UNIT, 1/UNIT × var(--zw) × var(--zk))`, where `--zw` is set once per zoom on the
+// scale(1/UNIT, 1/UNIT × var(--zw) × var(--zk))`, where `--zw` is set once per settled zoom on the
 // `<svg>` (see `zoomFactor`), so a zoom rescales every relation's width with
 // no per-relation work in JS, and `--zk` thickens a highlighted one. Lengths
 // along the relation (dash, zigzag period, ribs, chevron) are sized for the

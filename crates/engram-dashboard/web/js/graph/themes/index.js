@@ -4,7 +4,9 @@
 // the core graph view calls (a Rust test checks every one does): `id`,
 // `name`, `strings`, `layout`, `drawBackdrop`, `drawNode`, `drawEdge`,
 // `edgeSample` and `legend`, plus an optional `zoomed(svg, scale)` the core
-// calls on every pan / zoom (one write on the <svg>, never per relation)
+// calls for the first view and once each pan / zoom settles (one write on
+// the <svg>, never per relation; not per frame, since even one property
+// every relation reads restyles them all)
 // and an optional `redrawOnZoom(drawnScale, scale)`: once a zoom settles,
 // true redraws just the relations.
 // The core keeps data, filters, the URL hash,

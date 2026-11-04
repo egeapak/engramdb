@@ -118,9 +118,10 @@ export function drawEdge(e, pts, ends) {
 let zw = null;
 
 /**
- * The core calls this on every pan / zoom with the scale (screen px per
- * layout unit): one custom property on the `<svg>`, written only when it
- * moved, rescales every relation's width (./relations.js).
+ * The core calls this for the first view and once each pan / zoom settles,
+ * with the scale (screen px per layout unit): one custom property on the
+ * `<svg>`, written only when it moved, rescales every relation's width
+ * (./relations.js). Mid-gesture the widths follow the map.
  */
 export function zoomed(svg, scale) {
   const z = zoomFactor(scale);

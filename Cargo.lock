@@ -2268,6 +2268,7 @@ dependencies = [
  "anyhow",
  "axum",
  "chrono",
+ "criterion",
  "ctor",
  "engram-test-support",
  "engramdb",

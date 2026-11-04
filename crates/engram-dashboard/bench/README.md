@@ -39,6 +39,9 @@ Files:
   nested sub-scopes, skewed sizes, 0.7 relations per memory, mostly inside a
   scope).
 - `metrics.mjs`: the quality metrics.
+- `browser/`: the Playwright bench of the real page (`browser/README.md`);
+  its cold-layout figure posts `toInput(fromApi(…))` to a fresh worker, as
+  described below.
 - `prototype.mjs`, `prototype-common.mjs`: the reviewer's `force-scoped`
   prototype, kept as a baseline only.
 

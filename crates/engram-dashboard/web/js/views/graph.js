@@ -366,6 +366,9 @@ export async function renderGraph(main, ctx) {
     return;
   }
   if (ctx.isStale()) return;
+  // Timing marks for the browser bench (bench/browser/); a mark is a few
+  // hundred nanoseconds and nothing reads them otherwise.
+  performance.mark('graph:data');
 
   if (g.summary) {
     // The overview draws no memory to select.
@@ -391,6 +394,7 @@ export async function renderGraph(main, ctx) {
       if (sel) sel.focus();
     }
     warmWorker();
+    performance.mark('graph:overview-built');
     return;
   }
   // A big graph (an opened scope, or show-all past OVERVIEW_MIN) draws only
@@ -585,6 +589,7 @@ export async function renderGraph(main, ctx) {
     return null;
   });
   if (!res || ctx.isStale()) return;
+  performance.mark('graph:layout');
   const lay = res.lay;
   const viewKey = p.id + '|' + hashKey(res.key);
 
@@ -770,6 +775,58 @@ export async function renderGraph(main, ctx) {
   }
 
   // ---- relations (redrawn when the display filters change) ----------------
+  // Built relation elements by index, kept while what they were drawn for
+  // (`builtKey`: the scale, and the view in cut mode) holds. A display
+  // filter then only hides and shows them (`hidden`) instead of building
+  // and styling every drawn relation again: at 487 relations that was half
+  // of a toggle. They stay in index order, as a rebuild would put them, so
+  // a toggle never changes what overlaps what. A relation is built the
+  // first time it is shown (`undefined`: not yet; `null`: nothing to draw).
+  let built = [];
+  let builtKey = null;
+  function buildEdge(k, scale, onScreen) {
+    const e = g.edges[k];
+    const si = byId.get(e.src);
+    const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
+    let pts = lay.routes[k];
+    let drawn = null;
+    if (cutMode && ti >= 0) {
+      const a = P(si);
+      const b = P(ti);
+      const ina = onScreen(a);
+      const inb = onScreen(b);
+      if (!ina && !inb) return null;
+      if (!ina || !inb) {
+        // A short piece at the end on screen, still drawn source → target
+        // so a style's direction cue (taper, chevron) keeps its meaning.
+        const [p0, p1] = ina ? [a, b] : [b, a];
+        const dx = p1[0] - p0[0];
+        const dy = p1[1] - p0[1];
+        const len = Math.sqrt(dx * dx + dy * dy) || 1;
+        const reach = Math.min(len, 30 / scale);
+        const q = [p0[0] + (dx / len) * reach, p0[1] + (dy / len) * reach];
+        pts = ina ? [a, q] : [q, b];
+        drawn = ina
+          ? theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: 0, stub: true, scale })
+          : theme.drawEdge(e, pts, { rs: 0, rt: radius(g.nodes[ti]) + 4, stub: false, scale });
+        drawn = { ...drawn, cls: [...(drawn.cls || []), 'cut'] };
+      }
+    }
+    // `scale`: screen px per layout unit now, for a style that sizes
+    // what it draws along a relation by the zoom.
+    if (!drawn) drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
+    // The wide transparent hit path is the core's, drawn last (on top).
+    const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
+    const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
+    el.addEventListener('mouseenter', () => hover({ edge: k }));
+    el.addEventListener('mouseleave', () => hover(null));
+    el.addEventListener('click', (ev) => {
+      if (dragged) return;
+      ev.stopPropagation();
+      pin({ edge: k }, false);
+    });
+    return el;
+  }
   function drawEdges() {
     const ks = visible();
     const scale = view ? (graphBox.clientWidth || 1) / view.w : 1;
@@ -780,9 +837,15 @@ export async function renderGraph(main, ctx) {
     cutMode = big && !!view && fitView().w / view.w >= CUT_ZOOM;
     const pad = 8 / scale;
     const onScreen = (q) => q[0] >= view.x - pad && q[0] <= view.x + view.w + pad && q[1] >= view.y - pad && q[1] <= view.y + view.h + pad;
+    const key = cutMode ? `cut|${scale}|${view.x}|${view.y}|${view.w}|${view.h}` : `${scale}`;
+    if (key !== builtKey) {
+      builtKey = key;
+      built = new Array(g.edges.length);
+      edgesLayer.replaceChildren();
+    }
     edgeEls = new Array(g.edges.length).fill(null);
     adj = g.nodes.map(() => []);
-    const frag = [];
+    const want = new Uint8Array(g.edges.length);
     for (const k of ks) {
       const e = g.edges[k];
       const si = byId.get(e.src);
@@ -791,47 +854,22 @@ export async function renderGraph(main, ctx) {
       // (the hub ring, tooltip and card must not change with the view).
       adj[si].push(k);
       if (ti >= 0) adj[ti].push(k);
-      let pts = lay.routes[k];
-      let drawn = null;
-      if (cutMode && ti >= 0) {
-        const a = P(si);
-        const b = P(ti);
-        const ina = onScreen(a);
-        const inb = onScreen(b);
-        if (!ina && !inb) continue;
-        if (!ina || !inb) {
-          // A short piece at the end on screen, still drawn source → target
-          // so a style's direction cue (taper, chevron) keeps its meaning.
-          const [p0, p1] = ina ? [a, b] : [b, a];
-          const dx = p1[0] - p0[0];
-          const dy = p1[1] - p0[1];
-          const len = Math.sqrt(dx * dx + dy * dy) || 1;
-          const reach = Math.min(len, 30 / scale);
-          const q = [p0[0] + (dx / len) * reach, p0[1] + (dy / len) * reach];
-          pts = ina ? [a, q] : [q, b];
-          drawn = ina
-            ? theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: 0, stub: true, scale })
-            : theme.drawEdge(e, pts, { rs: 0, rt: radius(g.nodes[ti]) + 4, stub: false, scale });
-          drawn = { ...drawn, cls: [...(drawn.cls || []), 'cut'] };
-        }
+      if (built[k] === undefined) built[k] = buildEdge(k, scale, onScreen);
+      if (built[k]) {
+        edgeEls[k] = built[k];
+        want[k] = 1;
       }
-      // `scale`: screen px per layout unit now, for a style that sizes
-      // what it draws along a relation by the zoom.
-      if (!drawn) drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
-      // The wide transparent hit path is the core's, drawn last (on top).
-      const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
-      const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
-      el.addEventListener('mouseenter', () => hover({ edge: k }));
-      el.addEventListener('mouseleave', () => hover(null));
-      el.addEventListener('click', (ev) => {
-        if (dragged) return;
-        ev.stopPropagation();
-        pin({ edge: k }, false);
-      });
-      edgeEls[k] = el;
-      frag.push(el);
     }
-    mount(edgesLayer, frag);
+    // Index order, back to front: each element goes before the one after it.
+    let next = null;
+    for (let k = built.length - 1; k >= 0; k--) {
+      const el = built[k];
+      if (!el) continue;
+      if (want[k]) el.removeAttribute('hidden');
+      else el.setAttribute('hidden', '');
+      if (el.parentNode !== edgesLayer || el.nextSibling !== next) edgesLayer.insertBefore(el, next);
+      next = el;
+    }
     for (let i = 0; i < g.nodes.length; i++) {
       nodeEls[i].classList.toggle('hub', adj[i].length >= 2);
     }
@@ -842,6 +880,7 @@ export async function renderGraph(main, ctx) {
   let view = viewports.get(viewKey) || null;
   let drawnScale = null;
   let settleTimer = null;
+  let zoomedOnce = false;
   let cutMode = false;
   function apply() {
     svg.setAttribute('viewBox', `${view.x.toFixed(1)} ${view.y.toFixed(1)} ${view.w.toFixed(1)} ${view.h.toFixed(1)}`);
@@ -849,8 +888,14 @@ export async function renderGraph(main, ctx) {
     svg.classList.toggle('z-near', scale >= 0.8);
     svg.classList.toggle('z-mid', scale >= 0.5 && scale < 0.8);
     // A style may follow the zoom with one write on the <svg> (Plain: its
-    // relations' width); never per relation, so pan / zoom stays cheap.
-    if (theme.zoomed) theme.zoomed(svg, scale);
+    // relations' width); never per relation. Even that one write restyles
+    // every relation that reads it (measured: 58 → 30 fps zooming 534
+    // relations), so it is made once the view settles, and once now for the
+    // first view; mid-gesture relations scale with the map.
+    if (theme.zoomed && !zoomedOnce) {
+      zoomedOnce = true;
+      theme.zoomed(svg, scale);
+    }
     // A style that sizes detail along a relation by the zoom may ask for the
     // relations to be redrawn once a zoom settles far enough from the one
     // they were drawn at (Plain: dashes, chevrons, zigzags). Only then, and
@@ -858,11 +903,13 @@ export async function renderGraph(main, ctx) {
     // A big graph also redraws when a view settles in (or out of) the
     // zoomed-in cut mode, and on every settle while in it, since what is on
     // screen moved.
-    if (theme.redrawOnZoom || big) {
+    if (theme.zoomed || theme.redrawOnZoom || big) {
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
-        if (!svg.isConnected || drawnScale === null) return;
+        if (!svg.isConnected) return;
         const now = (graphBox.clientWidth || 1) / view.w;
+        if (theme.zoomed) theme.zoomed(svg, now);
+        if (drawnScale === null) return;
         const cutNow = big && fitView().w / view.w >= CUT_ZOOM;
         if (cutNow || cutNow !== cutMode || (theme.redrawOnZoom && theme.redrawOnZoom(drawnScale, now))) {
           drawEdges();
@@ -1573,6 +1620,7 @@ export async function renderGraph(main, ctx) {
   ctl.pinEdge = (k, focus) => pin({ edge: k }, focus);
   ctl.redraw = redraw;
   redraw();
+  performance.mark('graph:built');
   const back = afterReviewPins.get(p.id);
   if (back) {
     afterReviewPins.delete(p.id);
