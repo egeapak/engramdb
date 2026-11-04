@@ -47,6 +47,19 @@ debug = 1
 opt-level = 1
 debug = false
 
+# `lance` alone still reached 8.9 GB of RSS at opt-level 1 (CI run
+# 41810687398: the 13G build cgroup OOM-killed it at 3 jobs, and the build
+# only finished on the one-job retry). These crates are linked but never run
+# by a target, so skip their optimizer entirely.
+[profile.release.package.lance]
+opt-level = 0
+
+[profile.release.package.lance-index]
+opt-level = 0
+
+[profile.release.package.lancedb]
+opt-level = 0
+
 [profile.release.package.engramdb]
 opt-level = 3
 
