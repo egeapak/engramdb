@@ -4826,7 +4826,12 @@ const ABANDONED_PROBE_WINDOW: std::time::Duration = std::time::Duration::from_mi
 /// A stdio transport wrapper that drops a `server/discover` probe the client
 /// has already given up on.
 ///
-/// **This works around rmcp 3.4.0 behavior.** When the first request on a
+/// **This worked around rmcp 3.4.0 behavior**, which rmcp 3.8 fixed (see
+/// `rmcp_answers_an_abandoned_discover_probe`): the session lock described
+/// next is gone, but rmcp still *answers* the stale probe, and that response
+/// alone makes Claude Code drop the connection — so the filter stays.
+///
+/// Under rmcp 3.4.0, when the first request on a
 /// connection is anything but `initialize`, rmcp's `serve_server` marks the
 /// whole session as the 2026-07-28 inline lifecycle
 /// (`Peer::require_request_metadata`), and nothing clears that mark. A later

@@ -38,8 +38,8 @@ ollama = ["reqwest", "engram-models/ollama"]
 coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # XNNPACK portable CPU-kernel EP (per-node MLAS fallback). Off by default;
 # for A/B benchmarking. Under `load-dynamic` it needs a runtime built with the
-# XNNPACK EP. It does NOT combine with `bundled-onnxruntime`: ort 2.0.0-rc.13
-# publishes no prebuilt with XNNPACK (nor did rc.12), and rc.13's `ort-sys`
+# XNNPACK EP. It does NOT combine with `bundled-onnxruntime`: ort 2.0.0-rc.15
+# publishes no prebuilt with XNNPACK (nor did rc.12 or rc.13), and `ort-sys`
 # refuses that feature set, so the build fails at link time.
 xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 # --- ONNX Runtime linking strategy ---------------------------------------
@@ -80,7 +80,7 @@ test-support = ["engram-storage/test-support"]
 # `std::arch` backends. Zero dependencies, sub-second build, and no `unsafe`
 # left in EngramDB's own logic. It needs an optimizer to earn its keep — see
 # `[profile.release]` below and `docs/contributors/parallelization-simd.md`.
-fearless_simd = "1.0.0"
+fearless_simd = "1.2.0"
 # Workspace sub-crates (extracted layers; re-exported from lib.rs so the
 # `engramdb::<module>` and `crate::<module>` paths stay stable in the core).
 engram-types = { path = "crates/engram-types" }
@@ -151,7 +151,7 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # `tls-rustls` pairs with `download-binaries` (the `ort-sys` build script's
 # download path needs a TLS provider on `ureq`); see the note in
 # `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.13", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
 # Must match `engram-models`' pin (which tracks fastembed's `^0.23.2`) —
 # otherwise the examples pull a second, non-unifying `tokenizers` build.
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
