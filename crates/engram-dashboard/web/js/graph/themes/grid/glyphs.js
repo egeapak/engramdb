@@ -65,3 +65,8 @@ export function stubCap(x, y, state) {
     s('path', { d: 'M-3.5,-3.5 L3.5,3.5 M3.5,-3.5 L-3.5,3.5' }),
   );
 }
+
+/** A legend sample of a relation ending at a `dangling` or `unknown` far end. */
+export function stubSample(state) {
+  return s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, state));
+}

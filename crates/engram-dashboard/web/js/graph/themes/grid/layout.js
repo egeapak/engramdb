@@ -28,10 +28,9 @@
 //      vertical and diagonal segments (straight–diagonal–straight for lines,
 //      diagonal–straight for edges, so an edge rarely hides under its line).
 //      True octilinear metro routing (no crossings) is out of scope.
-//   6. Labels: most important station first (degree, then reads), each label
-//      takes the first free spot of below / above / right / left that hits
-//      no station and no label already placed; a label with no free spot is
-//      dropped (the page shows it on hover and focus instead).
+//   6. Labels: the core's graph/labels.js, with each line's badge as an
+//      obstacle; a label with no free spot comes back `placed: false` (the
+//      page draws it hidden and shows it on hover and focus).
 //
 // Positions depend on the nodes and edges given and nothing else, so the
 // caller can keep a map steady across display filters by laying out one
@@ -42,16 +41,15 @@
 //         (`t` < 0: a stub — dangling or cross-store — drawn off `s`).
 // Output: { pos: [x0, y0, x1, y1, …], routes: [[[x, y], …], …] per edge,
 //           lines: [{ key, slot, pts: [[x, y], …] }],
-//           labels: [{ x, y, w, anchor } | null] per node, bounds: {x, y, w, h} }
+//           labels: [{ x, y, w, anchor, placed }] per node, bounds: {x, y, w, h} }
+//         (the contract every layout meets is in graph/layouts.js).
+
+import { placeLabels } from '../../labels.js';
 
 export const GRID = 48;
 /** Grid pitch after snapping: columns are wider than rows (labels). */
 export const GX = 104;
 export const GY = 60;
-/** Label metrics in map units (CSS: .map .lbl, 11.5px, weight 600). */
-export const LABEL_H = 14;
-const CHAR_W = 6.6;
-export const labelWidth = (text) => Math.ceil(String(text).length * CHAR_W) + 4;
 
 function fnv(str) {
   let h = 0x811c9dc5;
@@ -307,68 +305,14 @@ function orderLines(lines, px, py) {
 }
 
 /** Step 6: greedy, collision-free label placement. */
-function placeLabels(nodes, px, py, lines) {
-  const n = nodes.length;
-  const out = new Array(n).fill(null);
-  const boxes = [];
-  const CELL = 120;
-  const grid = new Map();
-  const keyOf = (cx, cy) => cx + ',' + cy;
-  const add = (b) => {
-    boxes.push(b);
-    for (let cx = Math.floor(b.x0 / CELL); cx <= Math.floor(b.x1 / CELL); cx++) {
-      for (let cy = Math.floor(b.y0 / CELL); cy <= Math.floor(b.y1 / CELL); cy++) {
-        const k = keyOf(cx, cy);
-        if (!grid.has(k)) grid.set(k, []);
-        grid.get(k).push(b);
-      }
-    }
-  };
-  const hits = (b) => {
-    for (let cx = Math.floor(b.x0 / CELL); cx <= Math.floor(b.x1 / CELL); cx++) {
-      for (let cy = Math.floor(b.y0 / CELL); cy <= Math.floor(b.y1 / CELL); cy++) {
-        for (const o of grid.get(keyOf(cx, cy)) || []) {
-          if (b.x0 < o.x1 && o.x0 < b.x1 && b.y0 < o.y1 && o.y0 < b.y1) return true;
-        }
-      }
-    }
-    return false;
-  };
-  // Every station is an obstacle first.
-  for (let i = 0; i < n; i++) {
-    const r = (nodes[i].r || 6) + 3;
-    add({ x0: px[i] - r, y0: py[i] - r, x1: px[i] + r, y1: py[i] + r });
-  }
-  // So is each line's badge (views/graph.js draws it 24 × 24, centred up
-  // and left of the line's first station).
+/** Each line's badge (the Grid backdrop draws it 24 × 24, up and left of
+ * the line's first station): a label obstacle. */
+function badgeBoxes(lines, px, py) {
+  const out = [];
   for (const l of lines || []) {
     if (!l.key || !l.members.length) continue;
     const i = l.members[0];
-    add({ x0: px[i] - 38, y0: py[i] - 36, x1: px[i] - 10, y1: py[i] - 8 });
-  }
-  const order = [...Array(n).keys()].sort(
-    (a, b) => (nodes[b].degree || 0) - (nodes[a].degree || 0) || (nodes[b].weight || 0) - (nodes[a].weight || 0) || cmp(nodes[a].id, nodes[b].id),
-  );
-  for (const i of order) {
-    const text = nodes[i].label;
-    if (!text) continue;
-    const w = labelWidth(text);
-    const r = (nodes[i].r || 6) + 4;
-    const x = px[i];
-    const y = py[i];
-    const spots = [
-      { x, y: y + r + LABEL_H - 2, anchor: 'middle', b: { x0: x - w / 2, y0: y + r, x1: x + w / 2, y1: y + r + LABEL_H } },
-      { x, y: y - r - 4, anchor: 'middle', b: { x0: x - w / 2, y0: y - r - LABEL_H, x1: x + w / 2, y1: y - r } },
-      { x: x + r + 2, y: y + 4, anchor: 'start', b: { x0: x + r, y0: y - LABEL_H / 2, x1: x + r + 2 + w, y1: y + LABEL_H / 2 } },
-      { x: x - r - 2, y: y + 4, anchor: 'end', b: { x0: x - r - 2 - w, y0: y - LABEL_H / 2, x1: x - r, y1: y + LABEL_H / 2 } },
-    ];
-    for (const sp of spots) {
-      if (!hits(sp.b)) {
-        add(sp.b);
-        out[i] = { x: sp.x, y: sp.y, w, anchor: sp.anchor, box: sp.b };
-        break;
-      }
-    }
+    out.push({ x0: px[i] - 38, y0: py[i] - 36, x1: px[i] - 10, y1: py[i] - 8 });
   }
   return out;
 }
@@ -422,7 +366,12 @@ export function layout(input) {
   if (n > 1) simulate(nodes, edges, lines, px, py);
   const taken = snap(nodes, px, py, input.aspect);
   orderLines(lines, px, py);
-  const labels = placeLabels(nodes, px, py, lines);
+  const flat = new Array(n * 2);
+  for (let i = 0; i < n; i++) {
+    flat[2 * i] = px[i];
+    flat[2 * i + 1] = py[i];
+  }
+  const labels = placeLabels(nodes, flat, badgeBoxes(lines, px, py));
 
   const P = (i) => [px[i], py[i]];
   const routes = edges.map((e, k) => {
@@ -469,7 +418,7 @@ export function layout(input) {
   }
   for (const r of routes) for (const p of r) grow(p[0], p[1]);
   for (const l of labels) {
-    if (!l) continue;
+    if (!l.placed) continue;
     grow(l.box.x0, l.box.y0);
     grow(l.box.x1, l.box.y1);
   }
@@ -481,10 +430,10 @@ export function layout(input) {
   }
   const pad = 16;
   return {
-    pos: Array.from({ length: n * 2 }, (_, k) => (k % 2 ? py[k >> 1] : px[k >> 1])),
+    pos: flat,
     routes,
     lines: lineOut,
-    labels: labels.map((l) => (l ? { x: l.x, y: l.y, w: l.w, anchor: l.anchor } : null)),
+    labels: labels.map((l) => ({ x: l.x, y: l.y, w: l.w, anchor: l.anchor, placed: l.placed })),
     bounds: { x: minX - pad, y: minY - pad, w: maxX - minX + pad * 2, h: maxY - minY + pad * 2 },
   };
 }

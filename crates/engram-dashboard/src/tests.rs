@@ -1227,31 +1227,32 @@ const GRAPH_STYLE_INTERFACE: &[&str] = &[
 
 /// Every graph style is a folder `js/graph/themes/<id>/` whose `index.js`
 /// exports the whole interface as named exports (`export const` /
-/// `export function`), declares `id = '<id>'`, and is imported by the style
-/// registry. A missing export would only fail at run time, on the one page
+/// `export function`, never `= undefined` / `= null`), declares
+/// `id = '<id>'`, names a layout that `graph/layouts.js` has, and is listed in
+/// the registry's `STYLES` (imported is not enough: only a listed style can
+/// be picked). A missing export would only fail at run time, on the one page
 /// that picks the style.
 #[test]
 fn every_graph_style_exports_the_interface() {
-    const ROOT: &str = "js/graph/themes/";
-    let mut dirs: Vec<&str> = crate::assets::embedded()
-        .iter()
-        .filter_map(|a| a.path.strip_prefix(ROOT))
-        .filter_map(|rest| rest.split_once('/').map(|(dir, _)| dir))
-        .collect();
-    dirs.sort_unstable();
-    dirs.dedup();
+    let dirs = style_dirs();
     assert!(
         dirs.contains(&"grid") && dirs.contains(&"plain"),
         "styles found: {dirs:?}"
     );
-    let registry_path = format!("{ROOT}index.js");
-    let registry = crate::assets::find(&registry_path).expect("style registry embedded");
-    let registered = imports(&registry_path, std::str::from_utf8(registry.bytes).unwrap());
-    for dir in dirs {
-        let path = format!("{ROOT}{dir}/index.js");
-        let asset = crate::assets::find(&path)
-            .unwrap_or_else(|| panic!("style folder {dir} has no index.js"));
-        let src = std::str::from_utf8(asset.bytes).unwrap();
+    let registry_path = format!("{STYLE_ROOT}index.js");
+    let registry = asset_text(&registry_path);
+    let listed = registered_styles(&registry_path, registry);
+    let layouts = object_keys(
+        asset_text("js/graph/layouts.js"),
+        "export const LAYOUTS = Object.freeze({",
+    );
+    assert!(
+        layouts.contains(&"grid".to_string()),
+        "layouts: {layouts:?}"
+    );
+    for dir in &dirs {
+        let path = format!("{STYLE_ROOT}{dir}/index.js");
+        let src = asset_text(&path);
         for name in GRAPH_STYLE_INTERFACE {
             assert!(exports(src, name), "{path} does not export {name:?}");
         }
@@ -1259,21 +1260,65 @@ fn every_graph_style_exports_the_interface() {
             src.contains(&format!("export const id = '{dir}';")),
             "{path}: `id` must be its folder name, {dir:?}"
         );
+        let layout = quoted_after(src, "export const layout = { name: ")
+            .unwrap_or_else(|| panic!("{path}: `layout` must start `{{ name: '<layout>'`"));
         assert!(
-            registered.contains(&path),
-            "{path} is not imported by {registry_path}: {registered:?}"
+            layouts.contains(&layout),
+            "{path} names layout {layout:?}, which graph/layouts.js does not have ({layouts:?})"
+        );
+        assert!(
+            listed.contains(&path),
+            "{path} is not listed in STYLES in {registry_path}: {listed:?}"
         );
     }
-    // The checker itself: a near-miss name is not an export.
-    let probe =
-        "export const identity = 1;\nexport function drawNodes() {}\n// export const legend = 1;\n";
-    assert!(!exports(probe, "id") && !exports(probe, "drawNode") && !exports(probe, "legend"));
+    assert_eq!(
+        listed.len(),
+        dirs.len(),
+        "STYLES lists a style with no folder: {listed:?}"
+    );
+    // The checkers themselves.
+    let probe = "export const identity = 1;\nexport function drawNodes() {}\n\
+                 // export const legend = 1;\nexport const name = undefined;\nexport const strings = null;\n";
+    for name in ["id", "drawNode", "legend", "name", "strings"] {
+        assert!(!exports(probe, name), "{name}");
+    }
     assert!(exports("export const id = 'x';", "id"));
     assert!(exports("export function legend(g, t) {", "legend"));
+    assert_eq!(
+        object_keys(
+            "export const LAYOUTS = Object.freeze({ grid, 'force-scoped': f });",
+            "export const LAYOUTS = Object.freeze({"
+        ),
+        ["grid", "force-scoped"]
+    );
+    let reg = "import * as a from './a/index.js';\nimport * as b from './b/index.js';\nexport const STYLES = [a];\n";
+    assert_eq!(
+        registered_styles("js/graph/themes/index.js", reg),
+        ["js/graph/themes/a/index.js"]
+    );
+}
+
+const STYLE_ROOT: &str = "js/graph/themes/";
+
+/// The style folders under [`STYLE_ROOT`], sorted.
+fn style_dirs() -> Vec<&'static str> {
+    let mut dirs: Vec<&str> = crate::assets::embedded()
+        .iter()
+        .filter_map(|a| a.path.strip_prefix(STYLE_ROOT))
+        .filter_map(|rest| rest.split_once('/').map(|(dir, _)| dir))
+        .collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs
+}
+
+fn asset_text(path: &str) -> &'static str {
+    let a = crate::assets::find(path).unwrap_or_else(|| panic!("{path} is not embedded"));
+    std::str::from_utf8(a.bytes).unwrap()
 }
 
 /// Whether `src` has a top-level named export `name` (`export const name …`
-/// or `export [async] function name(`).
+/// or `export [async] function name(`) that is not `undefined` / `null`.
 fn exports(src: &str, name: &str) -> bool {
     src.lines().any(|l| {
         [
@@ -1284,8 +1329,131 @@ fn exports(src: &str, name: &str) -> bool {
         .iter()
         .filter_map(|kw| l.strip_prefix(kw))
         .filter_map(|rest| rest.strip_prefix(name))
-        .any(|after| after.starts_with([' ', '(', '=']))
+        .any(|after| {
+            let value = after.trim_start().strip_prefix('=').map(str::trim_start);
+            after.starts_with([' ', '(', '='])
+                && !value.is_some_and(|v| {
+                    v.starts_with("undefined") || v.starts_with("null") || v.starts_with("void")
+                })
+        })
     })
+}
+
+/// The first single-quoted string after `prefix` in `src`.
+fn quoted_after(src: &str, prefix: &str) -> Option<String> {
+    let rest = &src[src.find(prefix)? + prefix.len()..];
+    let rest = rest.strip_prefix('\'')?;
+    Some(rest[..rest.find('\'')?].to_string())
+}
+
+/// The keys of the object literal that follows `opener` (`{ a, 'b-c': f }`
+/// gives `a`, `b-c`); flat objects only.
+fn object_keys(src: &str, opener: &str) -> Vec<String> {
+    let at = src.find(opener).unwrap_or_else(|| panic!("no {opener:?}")) + opener.len();
+    let body = &src[at..at + src[at..].find('}').expect("unclosed object")];
+    body.split(',')
+        .map(|part| {
+            part.split(':')
+                .next()
+                .unwrap()
+                .trim()
+                .trim_matches(['\'', '"'])
+        })
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The style modules `STYLES` lists, resolved through the registry's
+/// `import * as <alias> from '…'` lines.
+fn registered_styles(path: &str, src: &str) -> Vec<String> {
+    let dir = &path[..path.rfind('/').unwrap()];
+    let aliases: std::collections::HashMap<&str, String> = src
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("import * as "))
+        .filter_map(|rest| rest.split_once(" from "))
+        .map(|(alias, spec)| {
+            let spec = spec.trim().trim_end_matches(';').trim_matches(['\'', '"']);
+            (alias.trim(), resolve(dir, spec))
+        })
+        .collect();
+    let at =
+        src.find("export const STYLES = [").expect("no STYLES") + "export const STYLES = [".len();
+    let body = &src[at..at + src[at..].find(']').expect("unclosed STYLES")];
+    body.split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(|a| {
+            aliases
+                .get(a)
+                .unwrap_or_else(|| panic!("STYLES names {a}, not an imported style"))
+                .clone()
+        })
+        .collect()
+}
+
+/// Each style's CSS is `css/themes/<id>.css`, linked from index.html, and
+/// every rule in it is under `[data-graph-style="<id>"]`, so picking another
+/// style switches all of it off and two styles can never fight over a rule.
+#[test]
+fn every_graph_style_css_is_linked_and_scoped() {
+    let index = asset_text("index.html");
+    for dir in style_dirs() {
+        let path = format!("css/themes/{dir}.css");
+        let css = asset_text(&path);
+        assert!(
+            index.contains(&format!("href=\"{path}\"")),
+            "index.html does not link {path}"
+        );
+        let scope = format!("[data-graph-style=\"{dir}\"] ");
+        let selectors = css_selectors(css);
+        assert!(!selectors.is_empty(), "{path} has no rules");
+        for sel in selectors {
+            for part in sel.split(',') {
+                assert!(
+                    part.trim().starts_with(&scope),
+                    "{path}: selector {:?} is not under {scope:?}",
+                    part.trim()
+                );
+            }
+        }
+    }
+    assert_eq!(
+        css_selectors("/* a { } */ .a, .b { x: 1 } @media (max-width: 9px) { .c { y: 2 } }"),
+        [".a, .b", ".c"]
+    );
+}
+
+/// The selector of every style rule in `css` (comments dropped, `@media` /
+/// `@supports` blocks entered, other at-rules skipped).
+fn css_selectors(css: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut rest = css;
+    while let Some(i) = rest.find("/*") {
+        text.push_str(&rest[..i]);
+        rest = rest[i..].find("*/").map_or("", |j| &rest[i + j + 2..]);
+    }
+    text.push_str(rest);
+    let mut out = Vec::new();
+    let mut s = text.as_str();
+    while let Some(open) = s.find('{') {
+        let close_before = s.find('}').filter(|c| *c < open);
+        if let Some(c) = close_before {
+            // The end of an @media block.
+            s = &s[c + 1..];
+            continue;
+        }
+        let prelude = s[..open].trim();
+        s = &s[open + 1..];
+        if prelude.starts_with("@media") || prelude.starts_with("@supports") {
+            continue;
+        }
+        if !prelude.starts_with('@') {
+            out.push(prelude.to_string());
+        }
+        s = &s[s.find('}').map_or(s.len(), |c| c + 1)..];
+    }
+    out
 }
 
 #[test]

@@ -327,31 +327,9 @@ dl.meta dd { overflow-wrap: anywhere; }
 .graph { display: block; width: 100%; height: 100%; cursor: grab; user-select: none; -webkit-user-select: none; }
 .graph:active { cursor: grabbing; }
 .graph .bg { fill: transparent; }
-/* relations */
-.cx .cn { fill: none; stroke: var(--ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
-.cx .halo { fill: none; stroke: var(--bg); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+/* relations: the core draws only the click target; each style's
+ * css/themes/<id>.css draws the rest */
 .cx .hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; pointer-events: stroke; }
-.cx .chev { fill: none; stroke: var(--ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
-.cx .term { stroke: var(--red); stroke-width: 3.6; stroke-linecap: round; }
-.cx.k-supersedes .cn { stroke-width: 3.4; }
-.cx.k-derived_from .cn { stroke-dasharray: .5 5.5; stroke-width: 3.2; }
-.cx.k-related_to .cn, .cx.k-duplicates .cn { stroke: var(--ink-3); stroke-width: 1.8; }
-.cx.k-duplicates .cn { stroke-dasharray: 9 3 2 3; }
-.cx.k-contradicts .cn { stroke: var(--red); stroke-width: 4; }
-/* Proposed: each kind keeps its own pattern, faded, so a proposed
-   "derived from" still reads as dotted. A contradiction stays red and gains
-   a dash, since it is the one proposal that asks for attention. */
-.cx.s-proposed:not(.k-contradicts) .cn, .cx.s-proposed:not(.k-contradicts) .chev { opacity: .5; }
-.cx.s-proposed.k-supports .cn, .cx.s-proposed.k-supersedes .cn { stroke-dasharray: 6 5; }
-.cx.s-proposed.k-contradicts .cn { stroke-dasharray: 11 6; }
-.cx.s-rejected .cn { stroke: var(--ink-3); stroke-dasharray: 1.5 5; stroke-width: 2; }
-.cx.s-rejected .term { stroke: var(--ink-3); }
-.cx.x-dangling .cn, .cx.x-unknown .cn { stroke-dasharray: 3 3; }
-.cx .wsign .tri { fill: var(--red); stroke: var(--bg); stroke-width: 2; stroke-linejoin: round; }
-.cx .wsign .mark { fill: #fff; }
-.cap circle { fill: var(--bg); stroke: var(--ink-2); stroke-width: 2; }
-.cap path { stroke: var(--ink-2); stroke-width: 2; stroke-linecap: round; }
-.cap text { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink-2); text-anchor: middle; dominant-baseline: central; }
 /* memories (nodes): the core's ring and challenge ring; each style's
    css/themes/<id>.css draws the shape */
 .graph .node { cursor: pointer; }
@@ -361,7 +339,8 @@ dl.meta dd { overflow-wrap: anywhere; }
 .graph .lbl { font-size: 11.5px; font-weight: 600; fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; pointer-events: none; display: none; }
 .graph.z-mid .lbl.major, .graph.z-near .lbl { display: inline; }
 .graph .lbl.on { display: inline; }
-.graph .node, .graph .cx { transition: opacity .15s; }
+/* A label the layout could not place: hidden unless its memory is highlighted. */
+.graph text.lbl.unplaced:not(.on) { display: none; }
 .graph .node:focus { outline: none; }
 .graph .node:focus .ring, .graph .node:focus-visible .ring { stroke: var(--focus); stroke-width: 3.4; }
 .g-tip { position: absolute; z-index: 2; max-width: min(320px, calc(100% - 16px)); padding: 6px 9px; background: var(--bg); color: var(--ink); border: 1.5px solid var(--rule-2); border-radius: 4px; font-size: 12.5px; line-height: 1.35; pointer-events: none; overflow-wrap: anywhere; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
@@ -370,8 +349,6 @@ dl.meta dd { overflow-wrap: anywhere; }
 .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--ink); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
 .linkish:hover { color: var(--ink-2); }
 .linkish:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
-.graph.has-focus .node:not(.on), .graph.has-focus .cx:not(.on) { opacity: .14; }
-.graph.has-focus .cx.on .cn { stroke-width: 3.4; }
 /* details card */
 .g-card { border-top: 5px solid var(--rule-2); padding-top: 12px; font-size: 14px; min-width: 0; position: sticky; top: 12px; }
 .g-card h3 { font-size: 19px; line-height: 1.2; margin: 4px 0 10px; overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

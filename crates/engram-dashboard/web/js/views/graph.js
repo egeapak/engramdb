@@ -60,6 +60,10 @@ const viewports = new Map();
 /** Per project: what to pin, and say, when the graph comes back after a review
  * (the page reloads to show the new status): {node: memory id, text}. */
 const afterReviewPins = new Map();
+/** Set when the Style select changed: the re-render puts focus back on it. */
+let refocusStyle = false;
+/** The live graph box's resize observer; a new render disconnects the old one. */
+let resizeObs = null;
 
 function failWorker() {
   workerBroken = true;
@@ -186,8 +190,17 @@ export function shortLabel(summary, max = 24) {
 // ---------------------------------------------------------------------------
 
 export async function renderGraph(main, ctx) {
+  if (resizeObs) {
+    resizeObs.disconnect();
+    resizeObs = null;
+  }
   const p = ctx.project;
   const f = filtersOf(ctx.route.query);
+  // The render path. Today there is one: every memory the server sent, laid
+  // out by the style. Phase E adds a second, core-owned path for a large
+  // store (the scope overview: discs and bands, with its own entry in
+  // graph/layouts.js and neutral CSS), chosen here before any style hook
+  // runs; styles keep drawing only memories and relations.
   const theme = useStyle(f.style);
   const t = makeT(theme);
   if (!p.available) {
@@ -258,10 +271,17 @@ export async function renderGraph(main, ctx) {
     ),
     tableBox,
   );
+  if (refocusStyle) {
+    refocusStyle = false;
+    const sel = main.querySelector('.g-style select');
+    if (sel) sel.focus();
+  }
 
-  // The style picker: saved for this browser and named in the hash, so the
-  // link shows the same style; re-renders through the hash change (the
-  // layout and viewport caches keep a shared layout where it was).
+  // The style picker: saved for this browser and named in the hash, so a
+  // link copied now shows the same style; re-renders through the hash change
+  // (the layout and viewport caches keep a shared layout where it was) and
+  // keeps keyboard focus on the select, since a select fires `change` on
+  // each arrow key.
   function styleControl() {
     return h(
       'label',
@@ -273,7 +293,8 @@ export async function renderGraph(main, ctx) {
           'aria-label': t('styleAria'),
           onchange: (ev) => {
             storeStyle(ev.target.value);
-            location.hash = hashOf(ctx, { ...f, style: ev.target.value });
+            refocusStyle = true;
+            ctx.navigate(hashOf(ctx, { ...f, style: ev.target.value }), { keepFocus: true });
           },
         },
         STYLES.map((st) => h('option', { value: st.id, selected: st.id === theme.id }, st.name)),
@@ -352,8 +373,8 @@ export async function renderGraph(main, ctx) {
     const unknown = shown.filter((e) => e.state === 'unknown').length;
     if (dangling || unknown) {
       const bits = [];
-      if (dangling) bits.push(`${plural(dangling, 'relation')} to a deleted memory (end marked ⊗)`);
-      if (unknown) bits.push(`${plural(unknown, 'relation')} into a store that cannot be checked here (drawn to “?”)`);
+      if (dangling) bits.push(t('noteDangling', dangling));
+      if (unknown) bits.push(t('noteUnknown', unknown));
       notes.push(h('div', { class: 'note' }, bits.join('; ') + '.'));
     }
     mount(notesBox, notes);
@@ -376,7 +397,13 @@ export async function renderGraph(main, ctx) {
   const res = await runLayout({
     layout: theme.layout.name,
     nodes: g.nodes.map((n, i) => ({ id: n.id, top_scope: n.top_scope || '', slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
-    edges: g.edges.map((e) => ({ s: byId.get(e.src), t: e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst) })),
+    options: theme.layout.options || {},
+    edges: g.edges.map((e) => {
+      const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
+      // A stub's far end is not in the node set, so its scope is unknown
+      // (null) unless the server names it.
+      return { s: byId.get(e.src), t: ti, kind: e.kind, far_scope: ti >= 0 ? g.nodes[ti].top_scope || '' : (e.far_scope ?? null) };
+    }),
     aspect: Math.round(boxAspect * 20) / 20,
   }).catch((e) => {
     if (!ctx.isStale()) mount(graphBox, errorBox(e));
@@ -437,7 +464,9 @@ export async function renderGraph(main, ctx) {
     nodesLayer.appendChild(el);
     const lp = lay.labels[i];
     const major = n.degree >= 2 || n.proposed > 0 || n.challenged;
-    const lbl = lp ? s('text', { class: ['lbl', major && 'major'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]) : null;
+    // An unplaced label (no free spot) is drawn hidden and shows only while
+    // its memory is highlighted (CSS: .lbl.unplaced).
+    const lbl = lp ? s('text', { class: ['lbl', major && 'major', !lp.placed && 'unplaced'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]) : null;
     labelEls.push(lbl);
     if (lbl) labelsLayer.appendChild(lbl);
   });
@@ -646,12 +675,19 @@ export async function renderGraph(main, ctx) {
   else fit();
   if (typeof ResizeObserver === 'function') {
     let lastW = graphBox.clientWidth;
-    new ResizeObserver(() => {
-      if (graphBox.isConnected && Math.abs(graphBox.clientWidth - lastW) > 2) {
+    const obs = new ResizeObserver(() => {
+      if (!graphBox.isConnected) {
+        obs.disconnect();
+        if (resizeObs === obs) resizeObs = null;
+        return;
+      }
+      if (Math.abs(graphBox.clientWidth - lastW) > 2) {
         lastW = graphBox.clientWidth;
         fit();
       }
-    }).observe(graphBox);
+    });
+    obs.observe(graphBox);
+    resizeObs = obs;
   }
 
   // ---- highlighting, the tooltip and the card -----------------------------

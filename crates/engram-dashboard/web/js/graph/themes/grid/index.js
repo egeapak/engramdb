@@ -4,15 +4,16 @@
 // relations are routed in horizontal, vertical and diagonal segments.
 //
 // Only a style may use flavour words, and this one keeps its own: the
-// header's light/dark button reads "Night map" / "Day map" while Grid is
-// picked, and the page title is "<project> network".
+// header's light/dark button reads "Night map" / "Day map" on the graph
+// view while Grid is picked, and the page title is "<project> network".
 
 import { s } from '../../../dom.js';
+import { plural } from '../../../format.js';
 import { slot, variant, code, typeShape } from '../../../scopes.js';
 import { DIRECTED } from '../../../relations.js';
 import { pathD, along, offset } from '../../geometry.js';
-import { chevron, terminal, warnSign, stubCap, edgeSample as sample } from './glyphs.js';
-import { buildLegend } from './legend.js';
+import { buildLegend } from '../../legend.js';
+import { chevron, terminal, warnSign, stubCap, stubSample, edgeSample as sample } from './glyphs.js';
 
 export const id = 'grid';
 export const name = 'Grid';
@@ -20,10 +21,14 @@ export const name = 'Grid';
 export const strings = {
   schemeToggle: (dark) => (dark ? 'Day map' : 'Night map'),
   title: (project) => `${project} network`,
+  // How this style's glyphs look, in the legend and the notes.
+  legendProposedContradiction: 'Proposed contradiction (dashed, ⚠)',
+  noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory (end marked ⊗)`,
+  noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (drawn to “?”)`,
 };
 
-/** Laid out by ./layout.js (named in graph/layouts.js, so the worker can run it). */
-export const layout = { name: 'grid' };
+/** Laid out by ./layout.js (named in graph/layouts.js, so the worker can run it); no options. */
+export const layout = { name: 'grid', options: {} };
 
 /** Each scope's line through its memories (under the relations), and its badge (over them). */
 export function drawBackdrop(g, lay) {
@@ -97,5 +102,7 @@ export function legend(g, t) {
   return buildLegend(g, t, {
     scopeSample: (l) => s('svg', { width: 34, height: 10, 'aria-hidden': 'true' }, s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: 'M3,5 H31' })),
     nodeSample: legendNode,
+    edgeSample: sample,
+    stubSample,
   });
 }

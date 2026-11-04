@@ -29,6 +29,9 @@ const state = {
 
 const THEME_KEY = 'engramdb.dashboard.theme';
 
+/** Whether the graph view is shown: only there may a style flavour the header. */
+let onGraph = false;
+
 function storedTheme() {
   try {
     return localStorage.getItem(THEME_KEY);
@@ -47,8 +50,9 @@ function applyTheme(t) {
   if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
   const btn = $('#theme-btn');
   const dark = effectiveTheme() === 'dark';
-  // The label is a graph style's to flavour (graph/strings.js `schemeToggle`).
-  const say = makeT(currentStyle());
+  // The label is a graph style's to flavour (graph/strings.js
+  // `schemeToggle`), but only on the graph view: every other page is core.
+  const say = makeT(onGraph ? currentStyle() : null);
   btn.textContent = say('schemeToggle', dark);
   btn.setAttribute('aria-label', say('schemeToggleAria', dark));
 }
@@ -169,7 +173,9 @@ async function route() {
   }
   // A graph link's `style=` holds only while that graph is shown (the graph
   // view applies it); every other view uses this browser's stored pick.
-  if (r.view !== 'graph') useStyle(null);
+  onGraph = r.view === 'graph';
+  if (!onGraph) useStyle(null);
+  applyTheme(null);
   renderSwitcher();
   renderNav(r);
   const main = $('#main');
@@ -181,6 +187,13 @@ async function route() {
     href,
     project: project(r.id),
     isStale: () => seq !== renderSeq,
+    // Go to `hash`; with keepFocus the new view leaves focus where the
+    // caller puts it rather than moving it to the heading.
+    navigate: (hash, opts) => {
+      if (location.hash === hash) return;
+      if (opts && opts.keepFocus) keepFocus = true;
+      location.hash = hash;
+    },
     refresh: () => {
       const y = window.scrollY;
       keepFocus = true;
@@ -207,7 +220,9 @@ async function route() {
     title.focus({ preventScroll: false });
   }
   firstRender = false;
-  keepFocus = false;
+  // Only the newest render consumes the flag: a stale one finishing late
+  // must not clear it under the render it was set for.
+  if (seq === renderSeq) keepFocus = false;
 }
 
 async function boot() {

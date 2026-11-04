@@ -1,19 +1,20 @@
-// The Grid style's legend, parameterised by how a scope and a memory are
-// sampled, so the Plain stub can reuse it until phase D gives Plain its own
-// (legend swatches there share its drawing code).
+// The graph legend's structure and words (core); every swatch is drawn by
+// the style, so a legend always shows exactly what that style draws.
 
-import { h, s } from '../../../dom.js';
-import { fmt } from '../../../format.js';
-import { badge, scopeName, TYPE_LABEL } from '../../../scopes.js';
-import { KINDS, kindLabel } from '../../../relations.js';
-import { edgeSample, stubCap } from './glyphs.js';
+import { h, s } from '../dom.js';
+import { fmt } from '../format.js';
+import { badge, scopeName, TYPE_LABEL } from '../scopes.js';
+import { KINDS, kindLabel } from '../relations.js';
 
 /**
- * Three legend sections: scopes, memories by type, relations.
- * `scopeSample(scope)` draws what follows a scope's badge (or null);
- * `nodeSample(kind, type)` draws a legend memory (`kind`: hub, never, chal or null).
+ * Three legend sections: scopes, memories by type, relations. The style's
+ * samplers:
+ *   scopeSample(scope)        what follows a scope's badge (or null)
+ *   nodeSample(kind, type)    a legend memory (`kind`: hub, never, chal or null)
+ *   edgeSample(kind, status)  a relation
+ *   stubSample(state)         a relation ending at a `dangling` / `unknown` far end
  */
-export function buildLegend(g, t, { scopeSample, nodeSample }) {
+export function buildLegend(g, t, { scopeSample, nodeSample, edgeSample, stubSample }) {
   const types = [...new Set(g.nodes.map((n) => n.type))].sort();
   return [
     h(
@@ -52,8 +53,8 @@ export function buildLegend(g, t, { scopeSample, nodeSample }) {
         h('li', null, edgeSample('contradicts', 'proposed'), t('legendProposedContradiction')),
         h('li', null, edgeSample('supports', 'proposed'), t('legendProposedOther')),
         h('li', null, edgeSample('related_to', 'rejected'), t('legendRejected')),
-        h('li', null, s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, 'dangling')), t('legendDeleted')),
-        h('li', null, s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, 'unknown')), t('legendUnknown')),
+        h('li', null, stubSample('dangling'), t('legendDeleted')),
+        h('li', null, stubSample('unknown'), t('legendUnknown')),
       ),
     ),
   ];

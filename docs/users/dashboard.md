@@ -71,14 +71,16 @@ default it follows your system.
 The *Style* picker in the graph's toolbar changes how the graph is drawn,
 never what it shows: filters, selection, the details card and the relations
 table work the same in every style. Your choice is remembered in this
-browser and written into the address bar (`style=`), so a shared link opens
-in the style it was made in (without changing the other person's own
-choice). Two styles exist today:
+browser. Picking a style also writes it into the address bar (`style=`): a
+link that carries `style=` opens in that style (without changing the other
+person's own choice), and a link without it opens in each person's own
+choice. Two styles exist today:
 
 - **Grid** (the default for now) — the look described below: memories on a
   grid, each top-level scope a coloured path through its memories with a
-  badge at its start. While Grid is picked, the header's light/dark button
-  reads *Night map* / *Day map* and the page is titled "*project* network".
+  badge at its start. On the graph page with Grid picked, the header's
+  light/dark button reads *Night map* / *Day map* and the page is titled
+  "*project* network"; every other page keeps *Dark* / *Light*.
 - **Plain** — an early version of the neutral style: the same positions and
   relations with no scope paths or badges, memories filled with their
   scope's colour. Its own layout and relation drawing are still to come;

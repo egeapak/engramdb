@@ -10,9 +10,10 @@
 // saw), then this browser's choice in localStorage `engramdb.graphStyle`,
 // then the default. The pick is page-wide: `data-graph-style` on <html>
 // scopes each style's CSS (`data-theme` is already light/dark), and the
-// relation samples on other pages and the header's light/dark label follow
-// it. A `style=` in a graph link applies while that graph is shown; other
-// views go back to the stored choice.
+// relation samples on other pages follow it. A style's flavour strings reach
+// the header's light/dark label only while the graph view is shown. A
+// `style=` in a graph link applies while that graph is shown; other views
+// go back to the stored choice.
 
 import * as grid from './grid/index.js';
 import * as plain from './plain/index.js';

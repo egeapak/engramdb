@@ -34,11 +34,14 @@ export const CORE = {
   legendChallenged: 'Challenged',
   legendSize: 'Size follows reads',
   legendRelations: 'Relations',
-  legendProposedContradiction: 'Proposed contradiction (dashed, ⚠)',
+  legendProposedContradiction: 'Proposed contradiction',
   legendProposedOther: 'Any other proposed relation: faded',
   legendRejected: 'Rejected',
   legendDeleted: 'To a deleted memory',
   legendUnknown: 'Into a store not checked here',
+  // Notes above the graph: a style that marks these ends says how.
+  noteDangling: (n) => `${plural(n, 'relation')} to a deleted memory`,
+  noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here`,
 };
 
 /** `t(key, …args)` for a style: its own string when it has one, else the core's. */

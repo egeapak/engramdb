@@ -7,3 +7,33 @@
 [data-graph-style="plain"] .node.pl.hub .sh { stroke: var(--ink); stroke-width: 2; }
 [data-graph-style="plain"] .node.pl.never .sh { fill-opacity: .55; }
 [data-graph-style="plain"] .node.pl.inv .sh { fill: var(--bg-2); stroke: var(--ink-3); stroke-dasharray: 2 3; }
+/* Relations (.cx: kind k-*, status s-*, far end x-*) and stub caps, a copy of
+   Grid's until phase D gives Plain its own drawing. */
+[data-graph-style="plain"] .cx .cn { fill: none; stroke: var(--ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+[data-graph-style="plain"] .cx .halo { fill: none; stroke: var(--bg); stroke-width: 7; stroke-linecap: round; stroke-linejoin: round; }
+[data-graph-style="plain"] .cx .chev { fill: none; stroke: var(--ink); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+[data-graph-style="plain"] .cx .term { stroke: var(--red); stroke-width: 3.6; stroke-linecap: round; }
+[data-graph-style="plain"] .cx.k-supersedes .cn { stroke-width: 3.4; }
+[data-graph-style="plain"] .cx.k-derived_from .cn { stroke-dasharray: .5 5.5; stroke-width: 3.2; }
+[data-graph-style="plain"] .cx.k-related_to .cn, [data-graph-style="plain"] .cx.k-duplicates .cn { stroke: var(--ink-3); stroke-width: 1.8; }
+[data-graph-style="plain"] .cx.k-duplicates .cn { stroke-dasharray: 9 3 2 3; }
+[data-graph-style="plain"] .cx.k-contradicts .cn { stroke: var(--red); stroke-width: 4; }
+/* Proposed: each kind keeps its own pattern, faded, so a proposed
+   "derived from" still reads as dotted. A contradiction stays red and gains
+   a dash, since it is the one proposal that asks for attention. */
+[data-graph-style="plain"] .cx.s-proposed:not(.k-contradicts) .cn, [data-graph-style="plain"] .cx.s-proposed:not(.k-contradicts) .chev { opacity: .5; }
+[data-graph-style="plain"] .cx.s-proposed.k-supports .cn, [data-graph-style="plain"] .cx.s-proposed.k-supersedes .cn { stroke-dasharray: 6 5; }
+[data-graph-style="plain"] .cx.s-proposed.k-contradicts .cn { stroke-dasharray: 11 6; }
+[data-graph-style="plain"] .cx.s-rejected .cn { stroke: var(--ink-3); stroke-dasharray: 1.5 5; stroke-width: 2; }
+[data-graph-style="plain"] .cx.s-rejected .term { stroke: var(--ink-3); }
+[data-graph-style="plain"] .cx.x-dangling .cn, [data-graph-style="plain"] .cx.x-unknown .cn { stroke-dasharray: 3 3; }
+[data-graph-style="plain"] .cx .wsign .tri { fill: var(--red); stroke: var(--bg); stroke-width: 2; stroke-linejoin: round; }
+[data-graph-style="plain"] .cx .wsign .mark { fill: #fff; }
+[data-graph-style="plain"] .cap circle { fill: var(--bg); stroke: var(--ink-2); stroke-width: 2; }
+[data-graph-style="plain"] .cap path { stroke: var(--ink-2); stroke-width: 2; stroke-linecap: round; }
+[data-graph-style="plain"] .cap text { font-family: var(--mono); font-size: 10px; font-weight: 700; fill: var(--ink-2); text-anchor: middle; dominant-baseline: central; }
+/* Highlighting: the core toggles .has-focus on the graph and .on on what
+   is lit; how that looks is the style's. */
+[data-graph-style="plain"] .graph .node, [data-graph-style="plain"] .graph .cx { transition: opacity .15s; }
+[data-graph-style="plain"] .graph.has-focus .node:not(.on), [data-graph-style="plain"] .graph.has-focus .cx:not(.on) { opacity: .14; }
+[data-graph-style="plain"] .graph.has-focus .cx.on .cn { stroke-width: 3.4; }
