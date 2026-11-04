@@ -65,11 +65,18 @@
 [data-graph-style="plain"] .cx.k-duplicates .rel { fill: var(--pl-duplicates); }
 [data-graph-style="plain"] .cx.s-rejected .rel { fill-opacity: .55; }
 [data-graph-style="plain"] .graph .cx .hit { stroke-width: 12px; vector-effect: non-scaling-stroke; }
-/* Highlighting: the core toggles .has-focus on the graph and .on on what
-   is lit; a lit relation is drawn half as wide again (--zk, read by its
+/* Highlighting: the core toggles .has-focus on the graph, .on on what is lit
+   and .nb on the focused memory's neighbours (lit too); faded = not .on;
+   a lit relation is drawn half as wide again (--zk, read by its
    transform), the rest fade. */
-[data-graph-style="plain"] .graph .node, [data-graph-style="plain"] .graph .cx { transition: opacity .15s; }
-[data-graph-style="plain"] .graph.has-focus .node:not(.on), [data-graph-style="plain"] .graph.has-focus .cx:not(.on) { opacity: .14; }
+/* No opacity transition: animating the fade on every memory and relation
+   made each hover frame re-layerize all of them (measured 15.8 → 9.2 ms p50
+   per frame at 800 memories). */
+[data-graph-style="plain"] .graph.has-focus .node:not(.on), [data-graph-style="plain"] .graph.has-focus .cx:not(.on), [data-graph-style="plain"] .graph.has-focus .lbl:not(.on) { opacity: .14; }
 [data-graph-style="plain"] .graph.has-focus .cx.on { --zk: 1.5; }
-[data-graph-style="plain"] .graph.has-focus .node.pl.on .sh { stroke: var(--ink); stroke-width: 1.8; }
+/* The focused memory (.on, not .nb) is outlined; its neighbours (.nb) keep
+   their own look at full strength, and their labels show in a lighter weight. */
+[data-graph-style="plain"] .graph.has-focus .node.pl.on:not(.nb) .sh { stroke: var(--ink); stroke-width: 1.8; }
+[data-graph-style="plain"] .graph.has-focus .lbl.on:not(.nb) { font-weight: 700; }
+[data-graph-style="plain"] .graph.has-focus .lbl.nb { font-weight: 500; }
 [data-graph-style="plain"] .legend .lg-dir { color: var(--ink-2); }

@@ -24,13 +24,22 @@
 // the viewport per project, so a reload after a review lands where it was.
 //
 // **Interaction.** Hover (or keyboard focus) shows a small tooltip and
-// highlights a memory's relations; a click pins the memory or relation in
-// the details card, which is never rebuilt by a hover — review controls in
-// it keep their state, and the card links to the memory. Drag pans; the
-// wheel zooms only once the graph is engaged (clicked or focused) or with
-// Ctrl/⌘ held, so the page still scrolls past it. Keys on the focused graph:
-// arrows pan, +/- zoom, 0 fits, ] and [ step through memories, Enter pins,
-// Escape unpins. The relations table below lists the proposed relations and
+// focuses a memory: `.has-focus` on the <svg> fades everything (one class,
+// so a hover never walks every memory), `.on` lights the memory, its
+// relations and its neighbours, and `.nb` marks the neighbours (their labels
+// show even where the layout placed none). Only those elements are touched,
+// through the adjacency drawEdges keeps; each style's CSS says what faded and
+// lit look like. A click selects the memory (or pins a relation): the
+// details panel (../graph/details.js) replaces the summary card and states
+// its relations in words, proposed ones with their review controls. The
+// panel is never rebuilt by a hover, so a review in it keeps its state.
+// Drag pans; the wheel zooms only once the graph is engaged (clicked or
+// focused) or with Ctrl/⌘ held, so the page still scrolls past it. Keys on
+// the focused graph: arrows pan, +/- zoom, 0 fits, ] and [ step through the
+// memories — or, with a memory selected, through its panel's rows, focusing
+// each neighbour — Enter selects the focused memory (or opens the focused
+// row's scope), Escape clears the selection (a second Escape returns focus
+// to the graph). The relations table below lists the proposed relations and
 // expands to all of them: the keyboard and screen-reader way to every edge.
 //
 // **Three render paths.** A store with more than OVERVIEW_MIN memories (after
@@ -58,6 +67,7 @@ import { makeT } from '../graph/strings.js';
 import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.js';
 import { filtered } from '../graph/tally.js';
 import { subKey, drawRegions, placeTags } from '../graph/opened.js';
+import { memoryPanel } from '../graph/details.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
 import { OVERVIEW_MIN, renderOverview, overviewLayout } from './graph-overview.js';
@@ -597,7 +607,10 @@ export async function renderGraph(main, ctx) {
     );
     el.addEventListener('mouseenter', () => hover({ node: i }));
     el.addEventListener('mouseleave', () => hover(null));
-    el.addEventListener('focus', () => hover({ node: i }));
+    // A neighbour focused by ] / [ keeps the selection's highlight (stepRow).
+    el.addEventListener('focus', () => {
+      if (!quietFocus) hover({ node: i });
+    });
     el.addEventListener('blur', () => hover(null));
     el.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -947,7 +960,9 @@ export async function renderGraph(main, ctx) {
     if (!dragged) unpin();
   });
 
-  // Keyboard: the graph is one tab stop; ] and [ walk the memories.
+  // Keyboard: the graph is one tab stop; ] and [ walk the memories, or the
+  // selected memory's panel rows (stepRow).
+  const selectedRows = () => !!(pinned && pinned.node !== undefined && panelRows.length);
   const walk = [...g.nodes.keys()].sort((a, b) => P(a)[1] - P(b)[1] || P(a)[0] - P(b)[0]);
   let walkAt = -1;
   function stepNode(dir) {
@@ -975,13 +990,27 @@ export async function renderGraph(main, ctx) {
     } else if (ev.key === '+' || ev.key === '=') zoom(1 / 1.3);
     else if (ev.key === '-' || ev.key === '_') zoom(1.3);
     else if (ev.key === '0') fit();
+    else if ((ev.key === ']' || ev.key === '[') && selectedRows()) stepRow(ev.key === ']' ? 1 : -1);
     else if (ev.key === ']') stepNode(1);
     else if (ev.key === '[') stepNode(-1);
+    else if (ev.key === 'Enter' && !onNode && selectedRows() && rowAt >= 0 && panelRows[rowAt].go) panelRows[rowAt].go();
     else if (ev.key === 'Escape') {
       unpin();
       graphBox.focus();
     } else return;
     ev.preventDefault();
+  });
+  // The panel takes ] / [ and Escape too, so stepping goes on from a row
+  // (a review's own confirm step keeps its Escape: it stops it there).
+  card.addEventListener('keydown', (ev) => {
+    if ((ev.key === ']' || ev.key === '[') && selectedRows()) {
+      ev.preventDefault();
+      stepRow(ev.key === ']' ? 1 : -1);
+    } else if (ev.key === 'Escape' && pinned) {
+      ev.preventDefault();
+      unpin();
+      graphBox.focus();
+    }
   });
   if (view) apply();
   else fit();
@@ -1004,10 +1033,12 @@ export async function renderGraph(main, ctx) {
 
   // ---- highlighting, the tooltip and the card -----------------------------
   let lit = [];
+  // Set while ] / [ moves focus to a neighbour: its focus is not a hover.
+  let quietFocus = false;
   let pinned = null; // {edge: k} | {node: i}
   let hovered = null; // the same, while hovered or focused
   function highlight(sel) {
-    for (const el of lit) el.classList.remove('on');
+    for (const el of lit) el.classList.remove('on', 'nb');
     lit = [];
     svg.classList.toggle('has-focus', !!sel);
     if (!sel) return;
@@ -1016,18 +1047,26 @@ export async function renderGraph(main, ctx) {
       el.classList.add('on');
       lit.push(el);
     };
-    const markNode = (i) => {
+    const markNode = (i, nb) => {
       mark(nodeEls[i]);
       mark(labelEls[i]);
+      if (nb) {
+        for (const el of [nodeEls[i], labelEls[i]]) {
+          if (!el) continue;
+          el.classList.add('nb');
+          lit.push(el);
+        }
+      }
     };
     if (sel.node !== undefined) {
-      markNode(sel.node);
       for (const el of stubEls[sel.node]) mark(el);
       for (const k of adj[sel.node]) {
         mark(edgeEls[k]);
         const e = g.edges[k];
-        for (const id of [e.src, e.dst]) if (byId.has(id) && !(id === e.dst && e.dst_store)) markNode(byId.get(id));
+        for (const id of [e.src, e.dst]) if (byId.has(id) && !(id === e.dst && e.dst_store) && byId.get(id) !== sel.node) markNode(byId.get(id), true);
       }
+      // Last, so a self-relation never marks the focused memory a neighbour.
+      markNode(sel.node, false);
     } else {
       const e = g.edges[sel.edge];
       mark(edgeEls[sel.edge]);
@@ -1035,8 +1074,33 @@ export async function renderGraph(main, ctx) {
     }
   }
 
-  /** Hover / focus: highlight and a tooltip. Never touches the card. */
+  /**
+   * Hover / focus: highlight and a tooltip. Never touches the card.
+   *
+   * Leaving is applied a frame later and cancelled by the next enter: moving
+   * from one memory to the next fires leave then enter in one task, and
+   * taking `.has-focus` off the <svg> and putting it back costs Blink an
+   * invalidation walk over every memory and relation each time (measured
+   * ~8 ms at 800 memories, against ~1 ms for the enter alone).
+   */
+  let leaveFrame = 0;
   function hover(sel) {
+    if (!sel) {
+      if (!leaveFrame) {
+        leaveFrame = requestAnimationFrame(() => {
+          leaveFrame = 0;
+          showHover(null);
+        });
+      }
+      return;
+    }
+    if (leaveFrame) {
+      cancelAnimationFrame(leaveFrame);
+      leaveFrame = 0;
+    }
+    showHover(sel);
+  }
+  function showHover(sel) {
     hovered = sel;
     highlight(sel || pinned);
     if (!sel) {
@@ -1058,13 +1122,23 @@ export async function renderGraph(main, ctx) {
       mount(tip, h('strong', null, kindLabel(e.kind)), h('span', { class: 'muted' }, ` (${label(e.status)}) · ${name(e.src)} ${e.symmetric ? '↔' : '→'} ${name(e.dst)}`));
     }
     const [sx, sy] = toScreen(x, y);
+    // Measured in the next frame, not here: reading its size now would force
+    // the style recalc the focus classes just queued, inside the handler, and
+    // then the frame recalculates again (graph.js module docs: hover cost).
     tip.hidden = false;
-    const w = graphBox.clientWidth;
-    tip.style.maxWidth = Math.min(320, w - 16) + 'px';
-    const tw = tip.offsetWidth;
-    tip.style.left = Math.max(8, Math.min(w - tw - 8, sx - tw / 2)) + 'px';
-    tip.style.top = Math.max(8, sy - tip.offsetHeight - 14) + 'px';
+    tip.classList.add('measuring');
+    const at = ++tipSeq;
+    requestAnimationFrame(() => {
+      if (at !== tipSeq || tip.hidden) return;
+      const w = graphBox.clientWidth;
+      tip.style.maxWidth = Math.min(320, w - 16) + 'px';
+      const tw = tip.offsetWidth;
+      tip.style.left = Math.max(8, Math.min(w - tw - 8, sx - tw / 2)) + 'px';
+      tip.style.top = Math.max(8, sy - tip.offsetHeight - 14) + 'px';
+      tip.classList.remove('measuring');
+    });
   }
+  let tipSeq = 0;
 
   function pin(sel, focusCard) {
     pinned = sel;
@@ -1111,8 +1185,36 @@ export async function renderGraph(main, ctx) {
   }
 
   // The review's result stays readable across the reload that shows the new
-  // status: the reloaded graph pins the edge's source memory and repeats it.
+  // status: the reloaded graph pins the edge's source memory (from the
+  // panel: the selected memory) and repeats it.
   let reviewNote = null;
+  // The selected memory's panel rows, in panel order, and the one ] / [
+  // last moved to (-1: none). A live region says which row that is when it
+  // is not a memory on the graph (focus then stays on the graph box).
+  let panelRows = [];
+  let rowAt = -1;
+  const announce = h('p', { class: 'sr-only', 'aria-live': 'polite' });
+  function stepRow(dir) {
+    if (rowAt >= 0 && panelRows[rowAt]) panelRows[rowAt].li.classList.remove('cur');
+    rowAt = rowAt < 0 ? (dir > 0 ? 0 : panelRows.length - 1) : (rowAt + dir + panelRows.length) % panelRows.length;
+    const row = panelRows[rowAt];
+    row.li.classList.add('cur');
+    row.li.scrollIntoView({ block: 'nearest' });
+    quietFocus = true;
+    try {
+      if (row.node !== null) {
+        const [x, y] = P(row.node);
+        if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
+        nodeEls[row.node].focus({ preventScroll: true });
+        announce.textContent = '';
+      } else {
+        graphBox.focus({ preventScroll: true });
+        announce.textContent = row.text;
+      }
+    } finally {
+      quietFocus = false;
+    }
+  }
   const afterReview = (e) => (out, text) => {
     afterReviewPins.set(p.id, { node: e.src, text });
     setTimeout(() => ctx.refresh(), 900);
@@ -1123,6 +1225,8 @@ export async function renderGraph(main, ctx) {
     const sel = pinned;
     const top = (what) => h('div', { class: 'card-top' }, h('div', { class: 'eyebrow' }, `${what} · pinned`), h('button', { type: 'button', class: 'btn sm ghost', onclick: () => unpin() }, 'Unpin'));
     if (sel && sel.edge !== undefined) {
+      panelRows = [];
+      rowAt = -1;
       const e = g.edges[sel.edge];
       const src = g.nodes[byId.get(e.src)];
       const dstNode = !e.dst_store && byId.has(e.dst) ? g.nodes[byId.get(e.dst)] : null;
@@ -1156,43 +1260,37 @@ export async function renderGraph(main, ctx) {
     if (sel && sel.node !== undefined) {
       const n = g.nodes[sel.node];
       const note = reviewNote && reviewNote.node === n.id ? h('p', { class: 'review-status', role: 'status' }, reviewNote.text) : null;
-      const items = adj[sel.node].slice(0, 12).map((k) => {
-        const e = g.edges[k];
-        const oid = e.src === n.id ? e.dst : e.src;
-        const other = byId.has(oid) && !(oid === e.dst && e.dst_store) ? g.nodes[byId.get(oid)] : null;
-        const dir = e.symmetric ? '' : e.src === n.id ? '→ ' : '← ';
-        return h(
-          'li',
-          null,
-          theme.edgeSample(e.kind, e.status, 30),
-          h('span', { class: 'muted' }, ` ${dir}${kindLabel(e.kind).toLowerCase()}${e.status === 'proposed' ? ' (proposed)' : e.status === 'rejected' ? ' (rejected)' : ''}`),
-          h('br'),
-          other ? h('button', { type: 'button', class: 'linkish cn-other', onclick: () => pin({ edge: k }, true) }, other.summary) : h('span', { class: 'faint' }, e.state === 'unknown' ? 'other store (unknown)' : 'deleted memory'),
-        );
-      });
-      mount(
-        card,
-        top('Memory'),
+      const panel = memoryPanel({
+        g,
+        byId,
+        i: sel.node,
+        ks: adj[sel.node],
+        f,
+        t,
+        theme,
+        ctx,
+        writes: !!(ctx.state.session && ctx.state.session.allow_writes),
         note,
-        h('div', { class: 'sign sm' }, badge(n.top_scope, n.color_slot), h('span', { class: 'sc' }, n.scope || 'No logical scope')),
-        h('h3', null, n.summary),
-        h('div', { class: 'mono faint small' }, n.id),
-        h(
-          'dl',
-          null,
-          h('dt', null, 'Type'),
-          h('dd', null, h('span', { class: 'kind' }, kindIcon(n.type, n.color_slot), TYPE_LABEL[n.type] || n.type)),
-          h('dt', null, 'Status'),
-          h('dd', null, n.invalidated ? 'invalidated' : label(n.status)),
-          h('dt', null, 'Reads'),
-          h('dd', null, `${fmt(n.usage.returned)} retrieved · ${fmt(n.usage.injected)} injected · ${fmt(n.usage.fetched)} fetched`),
-        ),
-        h('a', { class: 'btn solid', href: ctx.href('detail', p.id, n.id) }, 'Open memory →'),
-        h('div', { class: 'eyebrow' }, `Relations (${fmt(adj[sel.node].length)})`),
-        items.length ? h('ul', null, items) : h('p', { class: 'hint' }, 'No relations shown. Check the filters.'),
-      );
+        onClear: () => {
+          unpin();
+          graphBox.focus();
+        },
+        onSelect: (j) => pin({ node: j }, true),
+        onOpenScope: (name) => (location.hash = hashOf(ctx, { ...f, top_scope: name || '-' })),
+        review: (e) => {
+          const src = byId.has(e.src) ? g.nodes[byId.get(e.src)] : null;
+          const dst = !e.dst_store && byId.has(e.dst) ? g.nodes[byId.get(e.dst)] : null;
+          // After the reload, the selected memory comes back selected.
+          return reviewControls({ ...e, src_summary: src && src.summary, dst_summary: dst && dst.summary }, ctx, { viewer: n.id, onDone: afterReview({ src: n.id }) });
+        },
+      });
+      panelRows = panel.rows;
+      rowAt = -1;
+      mount(card, panel.parts, announce);
       return;
     }
+    panelRows = [];
+    rowAt = -1;
     const ks = visible();
     const shown = ks.map((k) => g.edges[k]);
     const proposed = shown.filter((e) => e.status === 'proposed');

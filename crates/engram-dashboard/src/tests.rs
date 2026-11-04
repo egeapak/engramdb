@@ -1674,6 +1674,103 @@ fn the_frontend_never_parses_html_or_inlines_script_or_style() {
     }
 }
 
+/// The single-quoted strings in the array literal that follows `opener`.
+fn quoted_list(src: &str, opener: &str) -> Vec<String> {
+    let at = src.find(opener).unwrap_or_else(|| panic!("no {opener:?}")) + opener.len();
+    let body = &src[at..at + src[at..].find(']').expect("unclosed array")];
+    body.split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The details panel (graph/details.js) states every relation kind in words,
+/// both directions of a directed one, contradictions first, through keys
+/// graph/strings.js defines (a missing key would print the key itself).
+#[test]
+fn the_details_panel_words_every_relation_kind() {
+    let kinds = quoted_list(asset_text("js/relations.js"), "export const KINDS = [");
+    assert!(kinds.len() >= 6, "KINDS: {kinds:?}");
+    let details = asset_text("js/graph/details.js");
+    let table_at = details
+        .find("export const PANEL_GROUPS = Object.freeze([")
+        .expect("PANEL_GROUPS");
+    let table = &details[table_at..table_at + details[table_at..].find("]);").unwrap()];
+    let rows: Vec<(String, String, String)> = table
+        .lines()
+        .filter_map(|l| {
+            let kind = quoted_after(l, "kind: ")?;
+            let out = quoted_after(l, "out: ")?;
+            let inn = quoted_after(l, "in: ")?;
+            Some((kind, out, inn))
+        })
+        .collect();
+    let listed: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    for k in &kinds {
+        assert!(
+            listed.contains(&k.as_str()),
+            "PANEL_GROUPS has no row for {k:?}"
+        );
+    }
+    assert_eq!(
+        listed.first(),
+        Some(&"contradicts"),
+        "contradictions come first"
+    );
+    let strings = asset_text("js/graph/strings.js");
+    let words = |key: &str| {
+        quoted_after(strings, &format!("\n  {key}: "))
+            .unwrap_or_else(|| panic!("graph/strings.js has no {key:?}"))
+    };
+    let mut table_words = BTreeMap::new();
+    for (kind, out, inn) in &rows {
+        table_words.insert(kind.as_str(), (words(out), words(inn)));
+    }
+    let want = [
+        ("contradicts", "Contradicts", "Contradicts"),
+        ("supports", "Supports", "Supported by"),
+        ("supersedes", "Supersedes", "Superseded by"),
+        ("derived_from", "Derived from", "Source of"),
+        ("duplicates", "Duplicates", "Duplicates"),
+        ("related_to", "Related to", "Related to"),
+    ];
+    for (kind, out, inn) in want {
+        assert_eq!(
+            table_words.get(kind),
+            Some(&(out.to_string(), inn.to_string())),
+            "{kind}"
+        );
+    }
+    assert!(
+        strings.contains("\n  relOther: "),
+        "a kind with no words is named"
+    );
+}
+
+/// A confirm step is in the page (views/review.js), never a browser dialog:
+/// `window.confirm` / `alert` / `prompt` block the page, cannot be styled or
+/// read back by tests, and a browser may suppress them.
+#[test]
+fn the_frontend_never_opens_a_browser_dialog() {
+    for a in crate::assets::embedded() {
+        if !a.path.ends_with(".js") {
+            continue;
+        }
+        let code = js_scan(std::str::from_utf8(a.bytes).unwrap()).code;
+        for name in ["confirm(", "alert(", "prompt("] {
+            for (at, _) in code.match_indices(name) {
+                let before = code[..at].chars().next_back();
+                assert!(
+                    before.is_some_and(|c| c.is_alphanumeric() || c == '_'),
+                    "{} calls {name}",
+                    a.path
+                );
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Neutral wording: the core speaks of graph, memory, relation and scope
 // ---------------------------------------------------------------------------

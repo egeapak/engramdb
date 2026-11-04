@@ -135,10 +135,59 @@ it all. The wheel zooms only once you have clicked into the graph (or while
 holding Ctrl/⌘), so scrolling the page past it never zooms by accident. `]`
 and `[` step through the memories.
 
-Hovering (or focusing) a memory or relation shows a short tooltip.
-Clicking it pins it in the details card beside the graph (below it on a
-phone, which scrolls to it): a memory's card lists its relations and has an
-*Open memory* link; a proposed relation's card is where it is reviewed.
+### Selecting a memory
+
+Hovering (or focusing) a memory **focuses** it: its own relations are drawn
+at full strength, its neighbours (the memories at their other ends) are
+labelled, even where the layout had no room for a label, and everything
+else fades. A short tooltip names it. Hovering a relation lights it and its
+two ends the same way.
+
+Clicking a memory **selects** it: the fade stays, and the details panel
+beside the graph (below it on a phone, which scrolls to it) shows the
+memory — summary, type, scope, criticality, status and reads, with an *Open
+memory* link — and then its relations **in words**, read from the selected
+memory, so direction never depends on reading a shape:
+
+| Group | Means |
+|---|---|
+| Contradicts | the two disagree (listed first) |
+| Supports / Supported by | this memory supports the other / the other supports this one |
+| Supersedes / Superseded by | this memory replaces the other / the other replaces this one |
+| Derived from / Source of | this memory was derived from the other / the other was derived from this one |
+| Duplicates | the two say the same thing |
+| Related to | the two are related |
+| any other kind | by its name |
+
+A line above the groups sums them up ("contradicts 1 · supported by 2 ·
+related to 5"). Each row names the other memory (click it to select that
+memory instead), its scope or *same scope*, a **Proposed** badge for a
+relation awaiting review and **Rejected** for a rejected one (shown with the
+*Rejected* filter on), and a note when the other end is not on the graph:
+*dangling* (it was deleted) or *not checked* (in a store this dashboard
+could not open). In an opened scope, the relations to other scopes come
+last, one row per scope ("dashboard · 2 relations", with ⚠ for
+contradictions); clicking one opens that scope. The panel follows the
+filters, like the graph.
+
+With `--allow-writes`, each proposed relation is reviewed right in its row
+(see [Reviewing proposed relations](#reviewing-proposed-relations)); on a
+read-only dashboard the panel shows no review controls, only a note saying
+how to enable them. Clicking a relation in the graph (or *Review* in the
+table below) still pins that one relation in the panel, with its origin,
+confidence and note.
+
+Keys, with the graph focused:
+
+| Key | Does |
+|---|---|
+| `]` / `[` | with nothing selected, step through the memories; with a memory selected, step through its panel's rows in order, focusing each neighbour in the graph |
+| `Enter` | select the focused memory; on a row for another scope, open it |
+| `Escape` | clear the selection; a second `Escape` returns focus to the graph |
+| arrows, `+` / `-`, `0` | pan, zoom, fit |
+
+`]`, `[` and `Escape` also work from inside the panel.
+
 Below the graph, a table lists the proposed relations; *Show all relations*
 expands it to every one, for keyboard and screen-reader use.
 
@@ -218,8 +267,12 @@ to `active`.
 Only a relation that is still proposed can be reviewed. Sending the same
 review twice (a double click, a second tab) changes nothing and the page says
 "Already done"; a different review of a relation someone already settled is
-refused with `409 not_proposed`. Without `--allow-writes` the buttons are
-shown disabled, with the command to restart. Nothing else on the page writes.
+refused with `409 not_proposed`. Reviews happen in the selected memory's
+panel (each proposed row), in a pinned relation's panel, and on the memory
+page. Without `--allow-writes` the memory panel shows no buttons, only a
+note, and the other two show them disabled, with the command to restart.
+After a review the graph reloads to show the new status, with the same
+memory selected. Nothing else on the page writes.
 
 ## What it reads, and what it never does
 
