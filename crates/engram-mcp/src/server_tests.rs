@@ -6934,12 +6934,15 @@ async fn abandoned_discover_probe_leaves_a_working_legacy_session() {
     );
 }
 
-/// Pins the rmcp 3.4.0 behavior `DiscoverProbeFilter` works around: without
-/// the filter, the stale probe is answered and the legacy `tools/list` that
-/// follows is rejected for missing `_meta`. If this starts failing, rmcp
-/// fixed it — check whether the filter can go.
+/// Pins what rmcp does without `DiscoverProbeFilter`. rmcp 3.4.0 also locked
+/// a discover-opened session into the per-request `_meta` lifecycle, so the
+/// legacy `tools/list` after the fallback `initialize` was rejected; rmcp 3.8
+/// fixed that, and this asserts it stays fixed. What rmcp still does is
+/// answer the stale probe — the response Claude Code drops the connection on
+/// — which is why the filter stays. If the first assertion starts failing,
+/// rmcp stopped answering abandoned probes: check whether the filter can go.
 #[tokio::test]
-async fn rmcp_locks_a_discover_opened_session_into_modern_meta() {
+async fn rmcp_answers_an_abandoned_discover_probe() {
     let (_dir, server) = setup().await;
     let replies = replies_to_abandoned_probe(3, |io| {
         tokio::spawn(async move {
@@ -6950,10 +6953,11 @@ async fn rmcp_locks_a_discover_opened_session_into_modern_meta() {
     .await;
     assert_eq!(replies[0]["id"], json!("server-discover-probe-1"));
     assert_eq!(replies[1]["id"], json!(0), "initialize is still answered");
-    let rest = format!("{}", replies[2]);
+    assert_eq!(replies[2]["id"], json!(1), "third reply: {}", replies[2]);
     assert!(
-        rest.contains("request _meta is missing"),
-        "expected rmcp to reject legacy requests after a discover opener, got {rest}"
+        replies[2]["result"]["tools"].is_array(),
+        "rmcp >= 3.8 serves a legacy request after a discover opener: {}",
+        replies[2]
     );
 }
 

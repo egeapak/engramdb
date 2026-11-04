@@ -614,7 +614,6 @@ async fn bench_lever_e_t5(intra: usize, cores: usize) {
 async fn bench_prepacked_ab() {
     use ort::session::builder::GraphOptimizationLevel;
     use ort::session::builder::PrepackedWeights;
-    use ort::session::Session;
 
     let intra = engramdb::onnx_ep::intra_threads();
     println!(
@@ -657,7 +656,7 @@ async fn bench_prepacked_ab() {
 
     // NLI session WITHOUT prepacked weights (mirrors src/nli/onnx.rs).
     let nli_without = {
-        let session = Session::builder()
+        let session = engramdb::onnx_ep::session_builder()
             .expect("session builder")
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .expect("opt level")
@@ -673,7 +672,7 @@ async fn bench_prepacked_ab() {
     // NLI session WITH prepacked weights (the variant under test).
     let nli_with = {
         let weights = PrepackedWeights::new();
-        let session = Session::builder()
+        let session = engramdb::onnx_ep::session_builder()
             .expect("session builder")
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .expect("opt level")
@@ -872,7 +871,7 @@ async fn bench_prepacked_ab() {
 
     // T5 WITHOUT prepacked (mirrors src/title/t5.rs).
     let t5_enc_without = Arc::new(Mutex::new(
-        Session::builder()
+        engramdb::onnx_ep::session_builder()
             .expect("sb")
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .expect("opt")
@@ -882,7 +881,7 @@ async fn bench_prepacked_ab() {
             .expect("enc without prepacked"),
     ));
     let t5_dec_without = Arc::new(Mutex::new(
-        Session::builder()
+        engramdb::onnx_ep::session_builder()
             .expect("sb")
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .expect("opt")
@@ -895,7 +894,7 @@ async fn bench_prepacked_ab() {
     // T5 WITH prepacked (the variant under test).
     let enc_weights = PrepackedWeights::new();
     let t5_enc_with = Arc::new(Mutex::new(
-        Session::builder()
+        engramdb::onnx_ep::session_builder()
             .expect("sb")
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .expect("opt")
@@ -908,7 +907,7 @@ async fn bench_prepacked_ab() {
     ));
     let dec_weights = PrepackedWeights::new();
     let t5_dec_with = Arc::new(Mutex::new(
-        Session::builder()
+        engramdb::onnx_ep::session_builder()
             .expect("sb")
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .expect("opt")

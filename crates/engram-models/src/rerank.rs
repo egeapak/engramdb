@@ -157,7 +157,8 @@ impl LocalReranker {
         ensure_cached_when_offline(model_name, &TextRerank::get_model_info(&model).model_code)?;
         let mut options = RerankInitOptions::new(model)
             .with_cache_dir(cache_dir)
-            .with_show_download_progress(false);
+            .with_show_download_progress(false)
+            .with_environment(engram_onnx::environment()?);
         let eps = engram_onnx::execution_providers();
         if !eps.is_empty() {
             options = options.with_execution_providers(eps);
@@ -202,7 +203,8 @@ impl LocalReranker {
         };
 
         let model = UserDefinedRerankingModel::new(OnnxSource::Memory(onnx_file), tokenizer_files);
-        let mut options = RerankInitOptionsUserDefined::default();
+        let mut options =
+            RerankInitOptionsUserDefined::default().with_environment(engram_onnx::environment()?);
         let eps = engram_onnx::execution_providers();
         if !eps.is_empty() {
             options = options.with_execution_providers(eps);
@@ -282,7 +284,7 @@ fn resolve_reranker_model(name: &str) -> RerankerModel {
     match name {
         "bge-reranker-v2-m3" => RerankerModel::BGERerankerV2M3,
         "jina-reranker-v1-turbo-en" => RerankerModel::JINARerankerV1TurboEn,
-        "jina-reranker-v2-base-multilingual" => RerankerModel::JINARerankerV2BaseMultiligual,
+        "jina-reranker-v2-base-multilingual" => RerankerModel::JINARerankerV2BaseMultilingual,
         "bge-reranker-base" => RerankerModel::BGERerankerBase,
         // Unreachable via `load` (gated by `FASTEMBED_RERANKERS`); defensive
         // only, and pinned by `fastembed_registry_list_matches_match_arms`.

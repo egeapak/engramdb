@@ -146,7 +146,7 @@ impl OnnxNliProvider {
     ) -> Result<Self> {
         let (model_path, tokenizer_path) = download_model_files(repo, model_file, tokenizer_file)?;
 
-        let builder = engram_onnx::apply_backend(Session::builder()?, backend)?;
+        let builder = engram_onnx::apply_backend(engram_onnx::session_builder()?, backend)?;
         let session = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(crate::erase_builder_err)?
