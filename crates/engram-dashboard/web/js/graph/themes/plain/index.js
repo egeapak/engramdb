@@ -1,9 +1,10 @@
-// Plain: the neutral graph style. STUB — selectable and sane, nothing more:
-// it draws the Grid layout's positions and relation paths (through the
-// core's layout table) with no scope chains or badges, memories filled with
-// their scope's colour (shape still follows type), and relations with a copy
-// of Grid's glyphs (./glyphs.js). Phase C gives it its own scope-aware force
-// layout; phase D its own relation drawing (tapered strokes, no arrowheads).
+// Plain: the neutral graph style, and the default. Memories are placed by
+// the core's scope-aware force layout (graph/scope-force.js): no grid, no
+// scope chains, no badges; relations are straight. Each top scope is a soft
+// region in its colour with one name, and memories keep their scope's
+// colour as a fill for now (shape follows type). Relations are drawn with a
+// copy of Grid's glyphs (./glyphs.js) until phase D gives Plain its own
+// (tapered strokes, no arrowheads).
 
 import { s } from '../../../dom.js';
 import { plural } from '../../../format.js';
@@ -23,12 +24,36 @@ export const strings = {
   noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (drawn to “?”)`,
 };
 
-/** Phase C: its own layout (`force-scoped`). Until then, the Grid layout's output. */
-export const layout = { name: 'grid', options: {} };
+/** The core's scope-aware force layout (graph/scope-force.js), default options. */
+export const layout = { name: 'scope-force', options: {} };
 
-/** Nothing behind the memories: no scope chains, no badges. */
-export function drawBackdrop() {
-  return { below: null, above: null };
+/**
+ * Under the relations, each named top scope's soft region: one path per
+ * scope, the union of a disc around each of its memories (`lay.region_r`;
+ * one path, so overlapping discs never darken). Over the relations, one name
+ * per top scope where the layout found it a free spot (`lay.scopes`).
+ */
+export function drawBackdrop(g, lay) {
+  const rr = lay.region_r || 24;
+  const arcs = new Map();
+  g.nodes.forEach((n, i) => {
+    if (!n.top_scope) return;
+    const x = lay.pos[2 * i];
+    const y = lay.pos[2 * i + 1];
+    const d = `M${(x - rr).toFixed(1)},${y.toFixed(1)}a${rr.toFixed(1)},${rr.toFixed(1)} 0 1,0 ${(2 * rr).toFixed(1)},0a${rr.toFixed(1)},${rr.toFixed(1)} 0 1,0 ${(-2 * rr).toFixed(1)},0`;
+    if (!arcs.has(n.top_scope)) arcs.set(n.top_scope, { slot: n.color_slot, d: [] });
+    arcs.get(n.top_scope).d.push(d);
+  });
+  const below = s('g', { class: 'scope-regions', 'aria-hidden': 'true' });
+  for (const [, a] of [...arcs].sort((p, q) => (p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : 0))) {
+    below.appendChild(s('path', { class: ['region', 'fill-' + slot(a.slot)], d: a.d.join('') }));
+  }
+  const above = s('g', { class: 'scope-names', 'aria-hidden': 'true' });
+  for (const nm of lay.scopes || []) {
+    if (!nm.placed) continue;
+    above.appendChild(s('text', { class: 'scope-name', x: nm.x.toFixed(1), y: nm.y.toFixed(1), 'font-size': nm.size.toFixed(1), 'text-anchor': 'middle' }, nm.key));
+  }
+  return { below, above };
 }
 
 export function drawNode(n, r) {

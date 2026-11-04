@@ -1,7 +1,10 @@
-/* Plain graph style. STUB until phases C and D: memories filled with their
- * scope's colour (the fill-N class on the node), outlined in the page
- * background so neighbours stay apart; no scope lines or badges. Scoped
- * under [data-graph-style="plain"]. */
+/* Plain graph style (the default): memories filled with their scope's
+ * colour (the fill-N class on the node), outlined in the page background so
+ * neighbours stay apart; each top scope a soft region (one path per scope)
+ * and one name, both light so the relations stay the subject. Scoped under
+ * [data-graph-style="plain"]. */
+[data-graph-style="plain"] .scope-regions .region { fill-opacity: .065; stroke: none; }
+[data-graph-style="plain"] .scope-names .scope-name { font-weight: 700; letter-spacing: .02em; fill: var(--ink-2); fill-opacity: .8; paint-order: stroke; stroke: var(--bg); stroke-width: .25em; stroke-linejoin: round; pointer-events: none; }
 [data-graph-style="plain"] .node.pl .sh { stroke: var(--bg); stroke-width: 1.5; }
 [data-graph-style="plain"] .node.pl .dot { fill: var(--bg); stroke: none; }
 [data-graph-style="plain"] .node.pl.hub .sh { stroke: var(--ink); stroke-width: 2; }

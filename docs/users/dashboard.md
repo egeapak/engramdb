@@ -76,15 +76,17 @@ link that carries `style=` opens in that style (without changing the other
 person's own choice), and a link without it opens in each person's own
 choice. Two styles exist today:
 
-- **Grid** (the default for now) — the look described below: memories on a
-  grid, each top-level scope a coloured path through its memories with a
-  badge at its start. On the graph page with Grid picked, the header's
-  light/dark button reads *Night map* / *Day map* and the page is titled
-  "*project* network"; every other page keeps *Dark* / *Light*.
-- **Plain** — an early version of the neutral style: the same positions and
-  relations with no scope paths or badges, memories filled with their
-  scope's colour. Its own layout and relation drawing are still to come;
-  it will then become the default.
+- **Plain** (the default) — memories placed by their relations and gathered
+  by scope: related memories sit close together, each top-level scope is a
+  soft tinted region with its name, and relations are straight lines. The
+  same store always draws the same graph. Small graphs are spread out so
+  every memory's label has room; in a large one, zoom in for labels or hover
+  a memory to name it.
+- **Grid** — the original look: memories on a grid, each top-level scope a
+  coloured path through its memories with a badge at its start. On the
+  graph page with Grid picked, the header's light/dark button reads
+  *Night map* / *Day map* and the page is titled "*project* network"; every
+  other page keeps *Dark* / *Light*.
 
 Each memory is a node, coloured by its top-level scope; in Grid, memories
 of one scope are joined by a path in its colour. The strokes between memories are

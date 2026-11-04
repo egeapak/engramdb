@@ -20,8 +20,8 @@ import * as plain from './plain/index.js';
 
 export const STYLES = [grid, plain];
 
-/** Grid for now: phase C gives Plain its own layout and makes it the default. */
-export const DEFAULT_STYLE = 'grid';
+/** Plain (the scope-aware force layout); Grid, the original look, is a pick away. */
+export const DEFAULT_STYLE = 'plain';
 
 export const STYLE_KEY = 'engramdb.graphStyle';
 

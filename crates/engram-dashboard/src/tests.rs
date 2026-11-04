@@ -1392,6 +1392,63 @@ fn registered_styles(path: &str, src: &str) -> Vec<String> {
         .collect()
 }
 
+/// The scope-force layout promises the same positions in every browser, which
+/// holds only while its arithmetic is exactly rounded everywhere: `+ − × ÷`
+/// and `Math.sqrt`, never the implementation-approximated `Math.cos` / `sin`
+/// / `hypot` / `pow` / `exp` / `log` / `atan*` / `**`, and no `Math.random`.
+/// Checked on the layout and the label placement it calls (comments skipped).
+#[test]
+fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
+    let banned = [
+        "Math.cos",
+        "Math.sin",
+        "Math.tan",
+        "Math.atan",
+        "Math.hypot",
+        "Math.pow",
+        "Math.exp",
+        "Math.log",
+        "Math.random",
+        "**",
+    ];
+    for path in ["js/graph/scope-force.js", "js/graph/labels.js"] {
+        for (n, line) in asset_text(path).lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            let t = code.trim_start();
+            if t.starts_with('*') || t.starts_with("/*") {
+                continue;
+            }
+            for b in banned {
+                assert!(!code.contains(b), "{path}:{}: {b} in {line:?}", n + 1);
+            }
+        }
+    }
+    let layouts = object_keys(
+        asset_text("js/graph/layouts.js"),
+        "export const LAYOUTS = Object.freeze({",
+    );
+    assert!(layouts.contains(&"scope-force".to_string()), "{layouts:?}");
+    assert!(
+        asset_text("js/graph/themes/index.js").contains("export const DEFAULT_STYLE = 'plain';"),
+        "Plain is the default style"
+    );
+}
+
+/// The layout bench (`crates/engram-dashboard/bench/`) is a developer tool:
+/// nothing of it may reach the binary (build.rs embeds `web/` only).
+#[test]
+fn the_layout_bench_is_not_embedded() {
+    for a in crate::assets::embedded() {
+        assert!(
+            !a.path.starts_with("bench/") && !a.path.ends_with(".mjs"),
+            "{} is embedded",
+            a.path
+        );
+    }
+    let bench = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bench/layout.mjs");
+    assert!(bench.is_file(), "{} is missing", bench.display());
+}
+
 /// Each style's CSS is `css/themes/<id>.css`, linked from index.html, and
 /// every rule in it is under `[data-graph-style="<id>"]`, so picking another
 /// style switches all of it off and two styles can never fight over a rule.

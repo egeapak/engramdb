@@ -12,7 +12,8 @@
 // **Input** (built by views/graph.js):
 //   { layout: name, options: the style's layout options (or {}),
 //     nodes: [{ id, top_scope, slot, scope, degree, r, label, weight }],
-//     edges: [{ s, t, kind, far_scope }], aspect: box height / width }
+//     edges: [{ s, t, kind, far_scope }], aspect: box height / width,
+//     width: the box's width in CSS pixels, rounded to 40 }
 //   `t` < 0 is a stub (dangling or cross-store) drawn off `s`; `far_scope`
 //   is the far end's top scope ('' for none, null when unknown, as for every
 //   stub today).
@@ -30,8 +31,9 @@
 // `drawBackdrop(g, lay)`.
 
 import { layout as grid } from './themes/grid/layout.js';
+import { layout as scopeForce } from './scope-force.js';
 
-export const LAYOUTS = Object.freeze({ grid });
+export const LAYOUTS = Object.freeze({ grid, 'scope-force': scopeForce });
 
 /** Run the layout `input.layout` names; an unknown name is an error, never a silent fallback. */
 export function runNamedLayout(input) {

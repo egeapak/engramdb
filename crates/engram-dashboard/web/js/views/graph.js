@@ -405,6 +405,9 @@ export async function renderGraph(main, ctx) {
       return { s: byId.get(e.src), t: ti, kind: e.kind, far_scope: ti >= 0 ? g.nodes[ti].top_scope || '' : (e.far_scope ?? null) };
     }),
     aspect: Math.round(boxAspect * 20) / 20,
+    // The box's width in pixels, coarsely (so a resize rarely misses the
+    // cache): a layout may size what must stay readable at Fit by it.
+    width: Math.round((graphBox.clientWidth || 800) / 40) * 40,
   }).catch((e) => {
     if (!ctx.isStale()) mount(graphBox, errorBox(e));
     return null;
