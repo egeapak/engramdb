@@ -3,11 +3,11 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, daysSince, shortId } from '../format.js';
-import { badge, kindIcon, lineName, TYPE_LABEL } from '../lines.js';
+import { badge, kindIcon, scopeName, TYPE_LABEL } from '../scopes.js';
 import { projHead, statusPill, errorBox } from './common.js';
 
 const COLS = [
-  { k: 'line', label: 'Line' },
+  { k: 'scope', label: 'Scope' },
   { k: 'summary', label: 'Memory' },
   { k: 'type', label: 'Kind' },
   { k: 'returned', label: 'Retr.', n: true, title: 'Times it survived ranking in a query answer' },
@@ -17,7 +17,7 @@ const COLS = [
   { k: 'last_read', label: 'Last read', n: true },
   { k: 'criticality', label: 'Crit.', n: true },
 ];
-const TEXT_SORT = new Set(['summary', 'type', 'line']);
+const TEXT_SORT = new Set(['summary', 'type', 'scope']);
 const PAGE = 100;
 
 export async function renderMemories(main, ctx) {
@@ -31,7 +31,7 @@ export async function renderMemories(main, ctx) {
     q: q.get('q') || '',
     kind: q.get('kind') || '',
     status: q.get('status') || '',
-    line: q.get('line') || '',
+    scope: q.get('scope') || '',
     sort: q.get('sort') || 'criticality',
     dir: q.get('dir') || '',
   };
@@ -53,7 +53,7 @@ export async function renderMemories(main, ctx) {
   // Announced politely: the one change a filter makes that a screen-reader
   // user cannot see.
   const count = h('span', { class: 'cnt num', role: 'status', 'aria-live': 'polite' });
-  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by line' });
+  const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Filter by scope' });
   const thead = h('thead');
   const tbody = h('tbody', null, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'Loading memories…')));
   const more = h('div', { class: 'more' });
@@ -119,13 +119,13 @@ export async function renderMemories(main, ctx) {
     );
   };
 
-  const renderChips = (lines) => {
+  const renderChips = (scopes) => {
     // '-' names "no logical scope" in the URL, so an empty name survives a join.
     const key = (name) => name || '-';
-    const on = new Set(f.line ? f.line.split(',') : lines.map((l) => key(l.name)));
+    const on = new Set(f.scope ? f.scope.split(',') : scopes.map((l) => key(l.name)));
     mount(
       chips,
-      lines.map((l) =>
+      scopes.map((l) =>
         h(
           'button',
           {
@@ -135,14 +135,14 @@ export async function renderMemories(main, ctx) {
             onclick: () => {
               if (on.has(key(l.name))) on.delete(key(l.name));
               else on.add(key(l.name));
-              f.line = on.size === lines.length ? '' : Array.from(on).join(',') || '\u2205';
+              f.scope = on.size === scopes.length ? '' : Array.from(on).join(',') || '\u2205';
               writeUrl();
-              renderChips(lines);
+              renderChips(scopes);
               load(false);
             },
           },
           badge(l.name, l.slot),
-          lineName(l.name),
+          scopeName(l.name),
           h('span', { class: 'c' }, fmt(l.count)),
         ),
       ),
@@ -161,9 +161,9 @@ export async function renderMemories(main, ctx) {
           location.hash = open;
         },
       },
-      h('td', null, badge(m.line, m.line_slot)),
+      h('td', null, badge(m.top_scope, m.color_slot)),
       h('td', { class: 't' }, h('a', { href: open }, m.summary), h('span', { class: 'mid mono' }, `${shortId(m.id)}${m.logical.length ? ' · ' + m.logical.join(', ') : ''}`)),
-      h('td', null, h('span', { class: 'kind' }, kindIcon(m.type, m.line_slot), TYPE_LABEL[m.type] || m.type), ' ', statusPill(m) || h('span', { class: 'ep' }, m.epistemic)),
+      h('td', null, h('span', { class: 'kind' }, kindIcon(m.type, m.color_slot), TYPE_LABEL[m.type] || m.type), ' ', statusPill(m) || h('span', { class: 'ep' }, m.epistemic)),
       h('td', { class: 'n' }, fmt(m.usage.returned)),
       h('td', { class: 'n' }, fmt(m.usage.injected)),
       h('td', { class: 'n' }, fmt(m.usage.fetched)),
@@ -179,7 +179,8 @@ export async function renderMemories(main, ctx) {
     if (ctx.isStale()) return;
     const mine = ++seq;
     const params = { q: f.q, kind: f.kind, status: f.status, sort: f.sort, dir: f.dir, limit: PAGE };
-    if (f.line) params.line = f.line;
+    // The API's `scope=` is a substring filter; the top-scope chips are `top_scope=`.
+    if (f.scope) params.top_scope = f.scope;
     if (append && cursor) params.cursor = cursor;
     let page;
     try {
@@ -192,7 +193,7 @@ export async function renderMemories(main, ctx) {
     mount(err);
     if (!facetsShown) {
       facetsShown = true;
-      renderChips(page.facets.lines);
+      renderChips(page.facets.scopes);
       const types = page.facets.types;
       mount(
         kindSel,
@@ -205,7 +206,7 @@ export async function renderMemories(main, ctx) {
     if (append) tbody.append(...rows);
     else if (rows.length) mount(tbody, rows);
     else if (!page.total) mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, page.rebuilding ? 'The index is being rebuilt (a reindex is running); reload in a moment.' : 'This store has no memories yet.')));
-    else mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'No memories match. Clear the filter or turn a line back on.')));
+    else mount(tbody, h('tr', null, h('td', { colspan: COLS.length, class: 'empty' }, 'No memories match. Clear the filter or turn a scope back on.')));
     cursor = page.next_cursor || null;
     count.textContent = `${fmt(shown)} of ${fmt(page.matched)} shown · ${fmt(page.total)} in store`;
     mount(

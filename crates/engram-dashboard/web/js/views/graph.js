@@ -1,34 +1,34 @@
-// Route map: lines are logical scopes, stations are memories, connectors are
-// typed edges.
+// Graph view: memories are nodes, coloured by top scope and shaped by type;
+// relations are the typed edges between them.
 //
 // The server bounds the graph (`/graph?limit=`, "showing N of M"); the layout
 // (graph/layout.js) runs in a Web Worker so a large store never freezes the
-// page, and is deterministic, so the same store draws the same map.
+// page, and is deterministic, so the same store draws the same graph.
 //
-// **Steady map.** The page asks the server for every edge kind and status
-// (only `invalidated` and `line`, which change the station set, go to the
+// **Steady graph.** The page asks the server for every edge kind and status
+// (only `invalidated` and `scope`, which change the memory set, go to the
 // server) and lays out that one fixed set; the kind / proposed / rejected
-// chips only change which connectors are *drawn*, in place, so toggling them
-// never moves a station or the viewport. Layouts are cached per input and
+// chips only change which relations are *drawn*, in place, so toggling them
+// never moves a memory or the viewport. Layouts are cached per input and
 // the viewport per project, so a reload after a review lands where it was.
 //
-// **Interaction.** Hover (or keyboard focus) shows a small tooltip and lights
-// a station's connections; a click pins the station or connector in the
-// card, which is never rebuilt by a hover — review controls in it keep their
-// state, and the card links to the memory. Drag pans; the wheel zooms only
-// once the map is engaged (clicked or focused) or with Ctrl/⌘ held, so the
-// page still scrolls past it. Keys on the focused map: arrows pan, +/- zoom,
-// 0 fits, ] and [ step through stations, Enter pins, Escape unpins.
-// The connections table below lists the proposed connectors and expands to
-// all of them: the keyboard and screen-reader way to every edge.
+// **Interaction.** Hover (or keyboard focus) shows a small tooltip and
+// highlights a memory's relations; a click pins the memory or relation in
+// the details card, which is never rebuilt by a hover — review controls in
+// it keep their state, and the card links to the memory. Drag pans; the
+// wheel zooms only once the graph is engaged (clicked or focused) or with
+// Ctrl/⌘ held, so the page still scrolls past it. Keys on the focused graph:
+// arrows pan, +/- zoom, 0 fits, ] and [ step through memories, Enter pins,
+// Escape unpins. The relations table below lists the proposed relations and
+// expands to all of them: the keyboard and screen-reader way to every edge.
 
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, plural, shortId, label } from '../format.js';
-import { badge, slot, lineName, kindIcon, stationShape, variant, code, TYPE_LABEL } from '../lines.js';
+import { badge, slot, scopeName, kindIcon, typeShape, variant, code, TYPE_LABEL } from '../scopes.js';
 import { layout } from '../graph/layout.js';
-import { KINDS, DIRECTED, kindLabel, connectorClass, connectorSample, chevron, terminal, warnSign, stubCap } from '../graph/glyphs.js';
-import { projHead, secHead, disruption, errorBox } from './common.js';
+import { KINDS, DIRECTED, kindLabel, edgeClass, edgeSample, chevron, terminal, warnSign, stubCap } from '../graph/glyphs.js';
+import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
 
 // ---------------------------------------------------------------------------
@@ -39,11 +39,11 @@ let worker = null;
 let workerBroken = false;
 let layoutSeq = 0;
 const waiting = new Map();
-/** Layout results by input (a few: one per recently viewed map). */
+/** Layout results by input (a few: one per recently viewed graph). */
 const layoutCache = new Map();
 /** The last viewport per project + layout, so a re-render keeps it. */
 const viewports = new Map();
-/** Per project: what to pin, and say, when the map comes back after a review
+/** Per project: what to pin, and say, when the graph comes back after a review
  * (the page reloads to show the new status): {node: memory id, text}. */
 const afterReviewPins = new Map();
 
@@ -112,7 +112,7 @@ function filtersOf(query) {
     proposed: query.get('proposed') !== '0',
     invalidated: query.get('invalidated') === '1',
     rejected: query.get('rejected') === '1',
-    line: query.get('line') || '',
+    scope: query.get('scope') || '',
   };
 }
 
@@ -122,7 +122,7 @@ function filterQuery(f) {
   if (!f.proposed) q.set('proposed', '0');
   if (f.invalidated) q.set('invalidated', '1');
   if (f.rejected) q.set('rejected', '1');
-  if (f.line) q.set('line', f.line);
+  if (f.scope) q.set('scope', f.scope);
   return q.toString();
 }
 
@@ -131,7 +131,7 @@ function hashOf(ctx, f) {
   return ctx.href('graph', ctx.project.id) + (qs ? '?' + qs : '');
 }
 
-/** Whether connector `e` is drawn under the display filters. */
+/** Whether relation `e` is drawn under the display filters. */
 function shows(f, e) {
   if (!f.kinds.includes(e.kind)) return false;
   if (e.status === 'proposed' && !f.proposed) return false;
@@ -177,9 +177,9 @@ const reads = (n) => n.usage.returned + n.usage.injected + n.usage.fetched;
 const radius = (n) => 5 + Math.min(6, Math.sqrt(reads(n)) * 0.55);
 
 /**
- * A station's short name: the summary up to its first clause break, cut on
+ * A memory's short label: the summary up to its first clause break, cut on
  * a word boundary. (Titles are not in the index, so the summary is what a
- * map read can show.)
+ * graph read can show.)
  */
 export function shortLabel(summary, max = 24) {
   let t = String(summary || '').trim();
@@ -198,11 +198,11 @@ export function shortLabel(summary, max = 24) {
 export async function renderGraph(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, projHead('Route map', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
+    mount(main, projHead('Graph', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
     return;
   }
   const f = filtersOf(ctx.route.query);
-  mount(main, h('p', { class: 'loading' }, 'Loading route map…'));
+  mount(main, h('p', { class: 'loading' }, 'Loading graph…'));
   let g;
   try {
     // Every kind and status: the display filters apply here (module docs).
@@ -210,38 +210,38 @@ export async function renderGraph(main, ctx) {
       include_proposed: 'true',
       include_rejected: 'true',
       include_invalidated: f.invalidated ? 'true' : 'false',
-      line: f.line || undefined,
+      scope: f.scope || undefined,
     });
   } catch (e) {
     if (ctx.isStale()) return;
-    mount(main, projHead('Route map', `${p.name} network`, []), errorBox(e));
+    mount(main, projHead('Graph', `${p.name} graph`, []), errorBox(e));
     return;
   }
   if (ctx.isStale()) return;
 
   // Controls rendered before the layout is ready call through here; they do
-  // nothing until the map exists.
+  // nothing until the graph exists.
   const ctl = { zoom() {}, fit() {}, pinEdge() {}, redraw() {} };
   const byId = new Map(g.nodes.map((n, i) => [n.id, i]));
-  const card = h('aside', { class: 'g-card', 'aria-label': 'Station card' });
+  const card = h('aside', { class: 'g-card', 'aria-label': 'Details' });
   const tip = h('div', { class: 'g-tip', role: 'presentation', hidden: true });
-  const hint = h('div', { class: 'g-hint', hidden: true }, 'Click the map (or hold Ctrl/⌘) to zoom with the wheel');
-  const mapbox = h('div', {
-    class: 'mapbox',
+  const hint = h('div', { class: 'g-hint', hidden: true }, 'Click the graph (or hold Ctrl/⌘) to zoom with the wheel');
+  const graphBox = h('div', {
+    class: 'graph-box',
     tabindex: '0',
     role: 'group',
-    'aria-label': `Route map of ${p.name}: ${plural(g.shown_nodes, 'station')}. Arrow keys pan, plus and minus zoom, 0 fits, ] and [ step through stations, Enter pins one in the card.`,
+    'aria-label': `Graph of ${p.name}: ${plural(g.shown_nodes, 'memory', 'memories')}. Arrow keys pan, plus and minus zoom, 0 fits, ] and [ step through memories, Enter pins one in the details card.`,
   });
   const legendBox = h('div', { class: 'legend' });
   const tableBox = h('div');
-  const disruptBox = h('div');
+  const alertBox = h('div');
   const notesBox = h('div');
   const filterBox = h('div');
 
   mount(
     main,
-    projHead('Route map', `${p.name} network`, ['Lines are logical scopes. Stations are memories.', 'Station size follows reads; shape follows kind.']),
-    disruptBox,
+    projHead('Graph', `${p.name} graph`, ['Each memory is coloured by its top scope; shape follows type.', 'Size follows reads.']),
+    alertBox,
     filterBox,
     notesBox,
     h(
@@ -252,13 +252,13 @@ export async function renderGraph(main, ctx) {
         { class: 'g-main' },
         h(
           'div',
-          { class: 'map-tools' },
+          { class: 'graph-tools' },
           h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Zoom in', onclick: () => ctl.zoom(1 / 1.4) }, '+'),
           h('button', { type: 'button', class: 'btn sm', 'aria-label': 'Zoom out', onclick: () => ctl.zoom(1.4) }, '−'),
           h('button', { type: 'button', class: 'btn sm', onclick: () => ctl.fit() }, 'Fit'),
-          h('span', { class: 'faint' }, 'Drag to pan · click a station or connector to pin it'),
+          h('span', { class: 'faint' }, 'Drag to pan · click a memory or relation to pin it'),
         ),
-        mapbox,
+        graphBox,
         legendBox,
       ),
       card,
@@ -278,7 +278,7 @@ export async function renderGraph(main, ctx) {
   function renderFilters() {
     const chip = (pressed, content, onclick, title) => h('button', { type: 'button', class: 'chip', 'aria-pressed': String(pressed), onclick, title }, content);
     const kindChips = KINDS.map((k) =>
-      chip(f.kinds.includes(k), [connectorSample(k, 'confirmed', 26), kindLabel(k)], () => {
+      chip(f.kinds.includes(k), [edgeSample(k, 'confirmed', 26), kindLabel(k)], () => {
         const on = f.kinds.includes(k);
         // Never filter everything out: the last kind cannot be switched off.
         if (on && f.kinds.length === 1) return;
@@ -288,14 +288,14 @@ export async function renderGraph(main, ctx) {
     const toggles = [
       chip(f.proposed, 'Proposed', () => setFilters({ proposed: !f.proposed }), 'Edges awaiting review'),
       chip(f.rejected, 'Rejected', () => setFilters({ rejected: !f.rejected }), 'Edges a reviewer rejected'),
-      // These two change the stations, so they reload the map.
+      // These two change the memories, so they reload the graph.
       chip(f.invalidated, 'Invalidated', () => (location.hash = hashOf(ctx, { ...f, invalidated: !f.invalidated })), 'Memories whose validity window closed'),
     ];
     const sel = h(
       'select',
-      { 'aria-label': 'Line shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, line: ev.target.value })) },
-      h('option', { value: '' }, 'All lines'),
-      g.all_lines.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.line }, `${lineName(l.name)} (${fmt(l.count)})`)),
+      { 'aria-label': 'Scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, scope: ev.target.value })) },
+      h('option', { value: '' }, 'All scopes'),
+      g.all_scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
     );
     // Keep keyboard focus on the chip that was pressed.
     const active = document.activeElement;
@@ -305,7 +305,7 @@ export async function renderGraph(main, ctx) {
       h(
         'div',
         { class: 'filt' },
-        h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Connector kinds shown' }, h('span', { class: 'eyebrow lab' }, 'Show'), kindChips),
+        h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Relation kinds shown' }, h('span', { class: 'eyebrow lab' }, 'Show'), kindChips),
         h('div', { class: 'filt-row', role: 'group', 'aria-label': 'Also show' }, h('span', { class: 'eyebrow lab' }, 'Include'), toggles, h('label', { class: 'sel' }, sel)),
       ),
     );
@@ -317,27 +317,28 @@ export async function renderGraph(main, ctx) {
 
   function renderNotes(ks) {
     const shown = ks.map((k) => g.edges[k]);
-    const disruptions = ks.filter((k) => g.edges[k].kind === 'contradicts' && g.edges[k].status === 'proposed');
+    const contradictions = ks.filter((k) => g.edges[k].kind === 'contradicts' && g.edges[k].status === 'proposed');
     mount(
-      disruptBox,
-      disruptions.length
-        ? disruption(
-            `${plural(disruptions.length, 'proposed contradiction')} awaiting review.`,
+      alertBox,
+      contradictions.length
+        ? alertBanner(
+            'Attention',
+            `${plural(contradictions.length, 'proposed contradiction')} awaiting review.`,
             null,
-            h('button', { type: 'button', class: 'btn sm solid', onclick: () => ctl.pinEdge(disruptions[0], true) }, 'Review first'),
+            h('button', { type: 'button', class: 'btn sm solid', onclick: () => ctl.pinEdge(contradictions[0], true) }, 'Review first'),
           )
         : null,
     );
     const notes = [];
     if (g.truncated) {
-      notes.push(h('div', { class: 'note', role: 'status' }, `Showing ${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)} stations: the most connected first, then the most read. Pick a line to see the rest.`));
+      notes.push(h('div', { class: 'note', role: 'status' }, `Showing ${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)} memories: the most connected first, then the most read. Pick a scope to see the rest.`));
     }
     const dangling = shown.filter((e) => e.state === 'dangling' && (e.dst_store || !byId.has(e.dst))).length;
     const unknown = shown.filter((e) => e.state === 'unknown').length;
     if (dangling || unknown) {
       const bits = [];
-      if (dangling) bits.push(`${plural(dangling, 'connector')} to a deleted memory (drawn to a closed station ⊗)`);
-      if (unknown) bits.push(`${plural(unknown, 'connector')} into a store that cannot be checked here (drawn to “?”)`);
+      if (dangling) bits.push(`${plural(dangling, 'relation')} to a deleted memory (end marked ⊗)`);
+      if (unknown) bits.push(`${plural(unknown, 'relation')} into a store that cannot be checked here (drawn to “?”)`);
       notes.push(h('div', { class: 'note' }, bits.join('; ') + '.'));
     }
     mount(notesBox, notes);
@@ -347,21 +348,23 @@ export async function renderGraph(main, ctx) {
   renderNotes(visible());
 
   if (!g.nodes.length) {
-    mount(mapbox, h('p', { class: 'map-empty muted' }, f.line ? 'No stations on this line with these filters.' : 'No memories to draw yet.'));
-    mount(card, h('div', { class: 'eyebrow' }, 'Station card'), h('p', { class: 'hint' }, 'Nothing to show.'));
+    mount(graphBox, h('p', { class: 'graph-empty muted' }, f.scope ? 'No memories in this scope with these filters.' : 'No memories to draw yet.'));
+    mount(card, h('div', { class: 'eyebrow' }, 'Details'), h('p', { class: 'hint' }, 'Nothing to show.'));
     return;
   }
-  mount(mapbox, h('p', { class: 'map-empty muted' }, `Laying out ${plural(g.nodes.length, 'station')}…`));
+  mount(graphBox, h('p', { class: 'graph-empty muted' }, `Laying out ${plural(g.nodes.length, 'memory', 'memories')}…`));
 
-  // Layout input: edge ends as station indices (-1: a stub off the source).
+  // Layout input: edge ends as node indices (-1: a stub off the source).
+  // `line` is the layout module's own name for the top scope (phase B moves
+  // that module into the Grid theme).
   const labels = g.nodes.map((n) => shortLabel(n.summary));
-  const boxAspect = Math.min(3, Math.max(0.3, (mapbox.clientHeight || 500) / (mapbox.clientWidth || 800)));
+  const boxAspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / (graphBox.clientWidth || 800)));
   const res = await runLayout({
-    nodes: g.nodes.map((n, i) => ({ id: n.id, line: n.line || '', slot: n.line_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
+    nodes: g.nodes.map((n, i) => ({ id: n.id, line: n.top_scope || '', slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
     edges: g.edges.map((e) => ({ s: byId.get(e.src), t: e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst) })),
     aspect: Math.round(boxAspect * 20) / 20,
   }).catch((e) => {
-    if (!ctx.isStale()) mount(mapbox, errorBox(e));
+    if (!ctx.isStale()) mount(graphBox, errorBox(e));
     return null;
   });
   if (!res || ctx.isStale()) return;
@@ -375,10 +378,11 @@ export async function renderGraph(main, ctx) {
   let edgeEls = [];
   let adj = [];
 
-  const linesLayer = s('g', { class: 'lines', 'aria-hidden': 'true' });
+  // The scope paths and badges are today's look (phase B: the Grid theme).
+  const scopePathsLayer = s('g', { class: 'scope-paths', 'aria-hidden': 'true' });
   for (const l of lay.lines) {
     if (!l.key || l.pts.length < 2) continue;
-    linesLayer.appendChild(s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: pathD(l.pts) }));
+    scopePathsLayer.appendChild(s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: pathD(l.pts) }));
   }
   const badges = s('g', { class: 'lbadges', 'aria-hidden': 'true' });
   for (const l of lay.lines) {
@@ -389,25 +393,25 @@ export async function renderGraph(main, ctx) {
     );
   }
   const edgesLayer = s('g', { class: 'edges', 'aria-hidden': 'true' });
-  // Labels sit under the stations, so a label never hides one.
+  // Labels sit under the memories, so a label never hides one.
   const labelsLayer = s('g', { class: 'labels', 'aria-hidden': 'true' });
-  const stationsLayer = s('g', { class: 'stations' });
+  const nodesLayer = s('g', { class: 'nodes' });
   g.nodes.forEach((n, i) => {
     const [x, y] = P(i);
     const r = radius(n);
     const el = s(
       'g',
       {
-        class: ['st', 'stroke-' + slot(n.line_slot), n.degree >= 2 && 'ix', !reads(n) && 'never', n.challenged && 'chal', n.invalidated && 'inv'],
+        class: ['node', 'stroke-' + slot(n.color_slot), n.degree >= 2 && 'hub', !reads(n) && 'never', n.challenged && 'chal', n.invalidated && 'inv'],
         transform: `translate(${x},${y})`,
         'data-i': i,
         tabindex: '-1',
         role: 'button',
-        'aria-label': `${n.summary} (${TYPE_LABEL[n.type] || n.type}, ${plural(n.degree, 'connection')})`,
+        'aria-label': `${n.summary} (${TYPE_LABEL[n.type] || n.type}, ${plural(n.degree, 'relation')})`,
       },
       s('circle', { class: 'ring', r: r + 6 }),
       n.challenged ? s('circle', { class: 'chal-ring', r: r + 3.5 }) : null,
-      stationShape(n.type, r),
+      typeShape(n.type, r),
     );
     el.addEventListener('mouseenter', () => hover({ node: i }));
     el.addEventListener('mouseleave', () => hover(null));
@@ -425,7 +429,7 @@ export async function renderGraph(main, ctx) {
       }
     });
     nodeEls.push(el);
-    stationsLayer.appendChild(el);
+    nodesLayer.appendChild(el);
     const lp = lay.labels[i];
     const major = n.degree >= 2 || n.proposed > 0 || n.challenged;
     const t = lp ? s('text', { class: ['lbl', major && 'major'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]) : null;
@@ -435,17 +439,17 @@ export async function renderGraph(main, ctx) {
 
   const svg = s(
     'svg',
-    { class: 'map', role: 'group', 'aria-label': 'Stations' },
+    { class: 'graph', role: 'group', 'aria-label': 'Memories' },
     s('rect', { class: 'bg', x: -1e5, y: -1e5, width: 2e5, height: 2e5, 'aria-hidden': 'true' }),
-    linesLayer,
+    scopePathsLayer,
     edgesLayer,
     badges,
     labelsLayer,
-    stationsLayer,
+    nodesLayer,
   );
-  mount(mapbox, svg, tip, hint);
+  mount(graphBox, svg, tip, hint);
 
-  // ---- connectors (redrawn when the display filters change) ---------------
+  // ---- relations (redrawn when the display filters change) ----------------
   function drawEdges() {
     const ks = visible();
     edgeEls = new Array(g.edges.length).fill(null);
@@ -482,7 +486,7 @@ export async function renderGraph(main, ctx) {
         parts.push(stubCap(end[0], end[1], e.state === 'unknown' ? 'unknown' : 'dangling'));
       }
       parts.push(s('path', { class: 'hit', d }));
-      const el = s('g', { class: connectorClass(e.kind, e.status, e.state), 'data-k': k }, parts);
+      const el = s('g', { class: edgeClass(e.kind, e.status, e.state), 'data-k': k }, parts);
       el.addEventListener('mouseenter', () => hover({ edge: k }));
       el.addEventListener('mouseleave', () => hover(null));
       el.addEventListener('click', (ev) => {
@@ -495,7 +499,7 @@ export async function renderGraph(main, ctx) {
     }
     mount(edgesLayer, frag);
     for (let i = 0; i < g.nodes.length; i++) {
-      nodeEls[i].classList.toggle('ix', adj[i].length >= 2);
+      nodeEls[i].classList.toggle('hub', adj[i].length >= 2);
     }
     return ks;
   }
@@ -504,7 +508,7 @@ export async function renderGraph(main, ctx) {
   let view = viewports.get(viewKey) || null;
   function apply() {
     svg.setAttribute('viewBox', `${view.x.toFixed(1)} ${view.y.toFixed(1)} ${view.w.toFixed(1)} ${view.h.toFixed(1)}`);
-    const scale = (mapbox.clientWidth || 1) / view.w;
+    const scale = (graphBox.clientWidth || 1) / view.w;
     svg.classList.toggle('z-near', scale >= 0.8);
     svg.classList.toggle('z-mid', scale >= 0.5 && scale < 0.8);
     viewports.set(viewKey, { ...view });
@@ -512,7 +516,7 @@ export async function renderGraph(main, ctx) {
   }
   function fit() {
     const b = lay.bounds;
-    const aspect = (mapbox.clientHeight || 400) / (mapbox.clientWidth || 600);
+    const aspect = (graphBox.clientHeight || 400) / (graphBox.clientWidth || 600);
     // Keep the box's aspect so a drag maps 1:1 and nothing is distorted.
     let w = b.w;
     let hh = b.w * aspect;
@@ -540,8 +544,8 @@ export async function renderGraph(main, ctx) {
     return [view.x + ((clientX - rect.left) / rect.width) * view.w, view.y + ((clientY - rect.top) / rect.height) * view.h];
   };
   const toScreen = (x, y) => {
-    const w = mapbox.clientWidth;
-    const hh = mapbox.clientHeight;
+    const w = graphBox.clientWidth;
+    const hh = graphBox.clientHeight;
     return [((x - view.x) / view.w) * w, ((y - view.y) / view.h) * hh];
   };
 
@@ -549,7 +553,7 @@ export async function renderGraph(main, ctx) {
   const pointers = new Map();
   let start = null;
   // A gesture restarts whenever the number of fingers changes, so a pinch
-  // never compounds and lifting one finger does not jump the map.
+  // never compounds and lifting one finger does not jump the view.
   function restart() {
     const pts = [...pointers.values()];
     start = { view: { ...view }, x: pts[0] ? pts[0][0] : 0, y: pts[0] ? pts[0][1] : 0, dist: null, n: pts.length };
@@ -559,8 +563,8 @@ export async function renderGraph(main, ctx) {
     pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
     if (pointers.size === 1) dragged = false;
     restart();
-    // Engage the map: focus it so the wheel zooms from now on.
-    if (!mapbox.contains(document.activeElement)) mapbox.focus({ preventScroll: true });
+    // Engage the graph: focus it so the wheel zooms from now on.
+    if (!graphBox.contains(document.activeElement)) graphBox.focus({ preventScroll: true });
   });
   svg.addEventListener('pointermove', (ev) => {
     if (!pointers.has(ev.pointerId) || !start) return;
@@ -596,10 +600,10 @@ export async function renderGraph(main, ctx) {
   svg.addEventListener('pointerup', end);
   svg.addEventListener('pointercancel', end);
   let hintTimer = null;
-  mapbox.addEventListener(
+  graphBox.addEventListener(
     'wheel',
     (ev) => {
-      const engaged = mapbox.contains(document.activeElement) || ev.ctrlKey || ev.metaKey;
+      const engaged = graphBox.contains(document.activeElement) || ev.ctrlKey || ev.metaKey;
       if (!engaged) {
         // Let the page scroll; say how to zoom.
         hint.hidden = false;
@@ -618,10 +622,10 @@ export async function renderGraph(main, ctx) {
     if (!dragged) unpin();
   });
 
-  // Keyboard: the map is one tab stop; ] and [ walk the stations.
+  // Keyboard: the graph is one tab stop; ] and [ walk the memories.
   const walk = [...g.nodes.keys()].sort((a, b) => P(a)[1] - P(b)[1] || P(a)[0] - P(b)[0]);
   let walkAt = -1;
-  function stepStation(dir) {
+  function stepNode(dir) {
     const cur = document.activeElement && document.activeElement.getAttribute ? Number(document.activeElement.getAttribute('data-i')) : NaN;
     if (!Number.isNaN(cur)) walkAt = walk.indexOf(cur);
     walkAt = (walkAt + dir + walk.length) % walk.length;
@@ -630,9 +634,9 @@ export async function renderGraph(main, ctx) {
     if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
     nodeEls[i].focus({ preventScroll: true });
   }
-  mapbox.addEventListener('keydown', (ev) => {
-    const onStation = ev.target !== mapbox && ev.target.classList && ev.target.classList.contains('st');
-    if (ev.target !== mapbox && !onStation) return;
+  graphBox.addEventListener('keydown', (ev) => {
+    const onNode = ev.target !== graphBox && ev.target.classList && ev.target.classList.contains('node');
+    if (ev.target !== graphBox && !onNode) return;
     const step = ev.shiftKey ? 0.5 : 0.15;
     const keys = {
       ArrowLeft: () => (view.x -= view.w * step),
@@ -646,24 +650,24 @@ export async function renderGraph(main, ctx) {
     } else if (ev.key === '+' || ev.key === '=') zoom(1 / 1.3);
     else if (ev.key === '-' || ev.key === '_') zoom(1.3);
     else if (ev.key === '0') fit();
-    else if (ev.key === ']') stepStation(1);
-    else if (ev.key === '[') stepStation(-1);
+    else if (ev.key === ']') stepNode(1);
+    else if (ev.key === '[') stepNode(-1);
     else if (ev.key === 'Escape') {
       unpin();
-      mapbox.focus();
+      graphBox.focus();
     } else return;
     ev.preventDefault();
   });
   if (view) apply();
   else fit();
   if (typeof ResizeObserver === 'function') {
-    let lastW = mapbox.clientWidth;
+    let lastW = graphBox.clientWidth;
     new ResizeObserver(() => {
-      if (mapbox.isConnected && Math.abs(mapbox.clientWidth - lastW) > 2) {
-        lastW = mapbox.clientWidth;
+      if (graphBox.isConnected && Math.abs(graphBox.clientWidth - lastW) > 2) {
+        lastW = graphBox.clientWidth;
         fit();
       }
-    }).observe(mapbox);
+    }).observe(graphBox);
   }
 
   // ---- highlighting, the tooltip and the card -----------------------------
@@ -709,7 +713,7 @@ export async function renderGraph(main, ctx) {
     if (sel.node !== undefined) {
       const n = g.nodes[sel.node];
       [x, y] = P(sel.node);
-      mount(tip, h('strong', null, n.summary), h('span', { class: 'muted' }, ` · ${TYPE_LABEL[n.type] || n.type} · ${plural(adj[sel.node].length, 'connection')}`));
+      mount(tip, h('strong', null, n.summary), h('span', { class: 'muted' }, ` · ${TYPE_LABEL[n.type] || n.type} · ${plural(adj[sel.node].length, 'relation')}`));
     } else {
       const e = g.edges[sel.edge];
       const m = along(lay.routes[sel.edge], 0.5);
@@ -720,7 +724,7 @@ export async function renderGraph(main, ctx) {
     }
     const [sx, sy] = toScreen(x, y);
     tip.hidden = false;
-    const w = mapbox.clientWidth;
+    const w = graphBox.clientWidth;
     tip.style.maxWidth = Math.min(320, w - 16) + 'px';
     const tw = tip.offsetWidth;
     tip.style.left = Math.max(8, Math.min(w - tw - 8, sx - tw / 2)) + 'px';
@@ -742,7 +746,7 @@ export async function renderGraph(main, ctx) {
     tip.hidden = true;
     highlight(pinned);
     renderCard();
-    // On a narrow screen the card is below the map: bring it into view.
+    // On a narrow screen the card is below the graph: bring it into view.
     const stacked = window.matchMedia && window.matchMedia('(max-width: 980px)').matches;
     if (stacked) card.scrollIntoView({ block: 'start', behavior: 'smooth' });
     if (focusCard || stacked) {
@@ -772,14 +776,14 @@ export async function renderGraph(main, ctx) {
   }
 
   // The review's result stays readable across the reload that shows the new
-  // status: the reloaded map pins the edge's source station and repeats it.
+  // status: the reloaded graph pins the edge's source memory and repeats it.
   let reviewNote = null;
   const afterReview = (e) => (out, text) => {
     afterReviewPins.set(p.id, { node: e.src, text });
     setTimeout(() => ctx.refresh(), 900);
   };
 
-  /** The card shows the pinned station or connector, or the map summary. */
+  /** The card shows the pinned memory or relation, or the graph summary. */
   function renderCard() {
     const sel = pinned;
     const top = (what) => h('div', { class: 'card-top' }, h('div', { class: 'eyebrow' }, `${what} · pinned`), h('button', { type: 'button', class: 'btn sm ghost', onclick: () => unpin() }, 'Unpin'));
@@ -789,8 +793,8 @@ export async function renderGraph(main, ctx) {
       const dstNode = !e.dst_store && byId.has(e.dst) ? g.nodes[byId.get(e.dst)] : null;
       mount(
         card,
-        top('Connector'),
-        h('h3', null, connectorSample(e.kind, e.status, 40), ' ', kindLabel(e.kind)),
+        top('Relation'),
+        h('h3', null, edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind)),
         h(
           'dl',
           null,
@@ -825,7 +829,7 @@ export async function renderGraph(main, ctx) {
         return h(
           'li',
           null,
-          connectorSample(e.kind, e.status, 30),
+          edgeSample(e.kind, e.status, 30),
           h('span', { class: 'muted' }, ` ${dir}${kindLabel(e.kind).toLowerCase()}${e.status === 'proposed' ? ' (proposed)' : e.status === 'rejected' ? ' (rejected)' : ''}`),
           h('br'),
           other ? h('button', { type: 'button', class: 'linkish cn-other', onclick: () => pin({ edge: k }, true) }, other.summary) : h('span', { class: 'faint' }, e.state === 'unknown' ? 'other store (unknown)' : 'deleted memory'),
@@ -833,24 +837,24 @@ export async function renderGraph(main, ctx) {
       });
       mount(
         card,
-        top('Station'),
+        top('Memory'),
         note,
-        h('div', { class: 'sign sm' }, badge(n.line, n.line_slot), h('span', { class: 'sc' }, n.scope || 'No logical scope')),
+        h('div', { class: 'sign sm' }, badge(n.top_scope, n.color_slot), h('span', { class: 'sc' }, n.scope || 'No logical scope')),
         h('h3', null, n.summary),
         h('div', { class: 'mono faint small' }, n.id),
         h(
           'dl',
           null,
           h('dt', null, 'Kind'),
-          h('dd', null, h('span', { class: 'kind' }, kindIcon(n.type, n.line_slot), TYPE_LABEL[n.type] || n.type)),
+          h('dd', null, h('span', { class: 'kind' }, kindIcon(n.type, n.color_slot), TYPE_LABEL[n.type] || n.type)),
           h('dt', null, 'Status'),
           h('dd', null, n.invalidated ? 'invalidated' : label(n.status)),
           h('dt', null, 'Reads'),
           h('dd', null, `${fmt(n.usage.returned)} retrieved · ${fmt(n.usage.injected)} injected · ${fmt(n.usage.fetched)} fetched`),
         ),
         h('a', { class: 'btn solid', href: ctx.href('detail', p.id, n.id) }, 'Open memory →'),
-        h('div', { class: 'eyebrow' }, `Connections (${fmt(adj[sel.node].length)})`),
-        items.length ? h('ul', null, items) : h('p', { class: 'hint' }, 'No connections shown. Check the filters.'),
+        h('div', { class: 'eyebrow' }, `Relations (${fmt(adj[sel.node].length)})`),
+        items.length ? h('ul', null, items) : h('p', { class: 'hint' }, 'No relations shown. Check the filters.'),
       );
       return;
     }
@@ -859,21 +863,21 @@ export async function renderGraph(main, ctx) {
     const proposed = shown.filter((e) => e.status === 'proposed');
     mount(
       card,
-      h('div', { class: 'eyebrow' }, 'Station card'),
-      h('h3', null, 'Pick a station'),
-      h('p', { class: 'hint' }, 'Hover a station to light up its connections. Click it, or a connector, to pin it here: a proposed connector is reviewed from the card.'),
+      h('div', { class: 'eyebrow' }, 'Details'),
+      h('h3', null, 'Select a memory or relation'),
+      h('p', { class: 'hint' }, 'Hover a memory to highlight its relations. Click it, or a relation, to pin it here: a proposed relation is reviewed from this card.'),
       h(
         'dl',
         null,
-        h('dt', null, 'Lines'),
-        h('dd', null, fmt(g.lines.filter((l) => l.name).length)),
-        h('dt', null, 'Stations'),
+        h('dt', null, 'Scopes'),
+        h('dd', null, fmt(g.scopes.filter((l) => l.name).length)),
+        h('dt', null, 'Memories'),
         h('dd', null, g.truncated ? `${fmt(g.shown_nodes)} of ${fmt(g.total_nodes)}` : fmt(g.shown_nodes)),
-        h('dt', null, 'Connectors'),
+        h('dt', null, 'Relations'),
         h('dd', null, ks.length === g.edges.length ? fmt(ks.length) : `${fmt(ks.length)} of ${fmt(g.edges.length)} (filtered)`),
         h('dt', null, 'Proposed'),
         h('dd', null, `${fmt(proposed.length)}${proposed.some((e) => e.kind === 'contradicts') ? ` (${fmt(proposed.filter((e) => e.kind === 'contradicts').length)} contradictions)` : ''}`),
-        g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'connector')} to stations outside this view`)] : null,
+        g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'relation')} to memories outside this view`)] : null,
       ),
     );
   }
@@ -885,48 +889,48 @@ export async function renderGraph(main, ctx) {
     h(
       'div',
       null,
-      h('h4', null, 'Lines (logical scope)'),
+      h('h4', null, 'Scopes (top logical scope)'),
       h(
         'ul',
         null,
-        g.lines.slice(0, 12).map((l) =>
-          h('li', null, badge(l.name, l.slot), s('svg', { width: 34, height: 10, 'aria-hidden': 'true' }, s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: 'M3,5 H31' })), `${lineName(l.name)} · ${fmt(l.count)}`),
+        g.scopes.slice(0, 12).map((l) =>
+          h('li', null, badge(l.name, l.slot), s('svg', { width: 34, height: 10, 'aria-hidden': 'true' }, s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: 'M3,5 H31' })), `${scopeName(l.name)} · ${fmt(l.count)}`),
         ),
-        g.lines.length > 12 ? h('li', { class: 'faint' }, `and ${plural(g.lines.length - 12, 'more line')}`) : null,
+        g.scopes.length > 12 ? h('li', { class: 'faint' }, `and ${plural(g.scopes.length - 12, 'more scope')}`) : null,
       ),
     ),
     h(
       'div',
       null,
-      h('h4', null, 'Stations (memories)'),
+      h('h4', null, 'Memories (by type)'),
       h(
         'ul',
         null,
-        types.map((t) => h('li', null, legendStation(null, t), TYPE_LABEL[t] || t)),
-        h('li', null, legendStation('ix'), 'Interchange: 2+ connections'),
-        h('li', null, legendStation('never'), 'Never read'),
-        h('li', null, legendStation('chal'), 'Challenged'),
+        types.map((t) => h('li', null, legendNode(null, t), TYPE_LABEL[t] || t)),
+        h('li', null, legendNode('hub'), '2+ relations'),
+        h('li', null, legendNode('never'), 'Never read'),
+        h('li', null, legendNode('chal'), 'Challenged'),
         h('li', null, s('svg', { width: 34, height: 16, viewBox: '0 0 34 16', 'aria-hidden': 'true', class: 'lg-size' }, s('circle', { cx: 6, cy: 8, r: 3.5 }), s('circle', { cx: 23, cy: 8, r: 7 })), 'Size follows reads'),
       ),
     ),
     h(
       'div',
       null,
-      h('h4', null, 'Connectors (edges)'),
+      h('h4', null, 'Relations'),
       h(
         'ul',
         null,
-        KINDS.map((k) => h('li', null, connectorSample(k, 'confirmed'), kindLabel(k))),
-        h('li', null, connectorSample('contradicts', 'proposed'), 'Proposed contradiction (dashed, ⚠)'),
-        h('li', null, connectorSample('supports', 'proposed'), 'Any other proposed edge: faded'),
-        h('li', null, connectorSample('related_to', 'rejected'), 'Rejected'),
+        KINDS.map((k) => h('li', null, edgeSample(k, 'confirmed'), kindLabel(k))),
+        h('li', null, edgeSample('contradicts', 'proposed'), 'Proposed contradiction (dashed, ⚠)'),
+        h('li', null, edgeSample('supports', 'proposed'), 'Any other proposed relation: faded'),
+        h('li', null, edgeSample('related_to', 'rejected'), 'Rejected'),
         h('li', null, s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, 'dangling')), 'To a deleted memory'),
         h('li', null, s('svg', { width: 44, height: 16, viewBox: '0 0 44 16', 'aria-hidden': 'true', class: 'cx s-confirmed' }, s('path', { class: 'cn', d: 'M4,8 H30' }), stubCap(36, 8, 'unknown')), 'Into a store not checked here'),
       ),
     ),
   );
 
-  // ---- the connections table: proposed first, the rest on request ---------
+  // ---- the relations table: proposed first, the rest on request -----------
   const PAGE = 100;
   let showAll = false;
   let limit = PAGE;
@@ -949,7 +953,7 @@ export async function renderGraph(main, ctx) {
               renderTable(visible());
             },
           },
-          showAll ? 'Show proposed only' : `Show all ${fmt(rows.length)} connectors`,
+          showAll ? 'Show proposed only' : `Show all ${fmt(rows.length)} relations`,
         )
       : null;
     const more =
@@ -975,8 +979,8 @@ export async function renderGraph(main, ctx) {
     mount(
       tableBox,
       secHead(
-        'Connections',
-        h('span', { class: 'faint num' }, showAll ? plural(rows.length, 'connector') : `${plural(proposed.length, 'proposed connector')} of ${fmt(rows.length)}`),
+        'Relations',
+        h('span', { class: 'faint num' }, showAll ? plural(rows.length, 'relation') : `${plural(proposed.length, 'proposed relation')} of ${fmt(rows.length)}`),
         toggle,
       ),
       listed.length
@@ -986,7 +990,7 @@ export async function renderGraph(main, ctx) {
             h(
               'table',
               { class: 'edges-table' },
-              h('caption', { class: 'sr-only' }, showAll ? `Connectors on the route map of ${p.name}, proposed ones first.` : `Proposed connectors on the route map of ${p.name}.`),
+              h('caption', { class: 'sr-only' }, showAll ? `Relations in the graph of ${p.name}, proposed ones first.` : `Proposed relations in the graph of ${p.name}.`),
               h(
                 'thead',
                 null,
@@ -1000,18 +1004,18 @@ export async function renderGraph(main, ctx) {
                     'tr',
                     { class: 'plain-row' },
                     h('td', { class: 't' }, edgeEnd(e, 'src')),
-                    h('td', null, h('span', { class: 'kind' }, connectorSample(e.kind, e.status, 30), kindLabel(e.kind))),
+                    h('td', null, h('span', { class: 'kind' }, edgeSample(e.kind, e.status, 30), kindLabel(e.kind))),
                     h('td', { class: 't' }, edgeEnd(e, 'dst')),
                     h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${e.state}`) : null),
                     h('td', null, e.origin),
                     h('td', { class: 'n' }, Number(e.confidence).toFixed(2)),
-                    h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show on map')),
+                    h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show in graph')),
                   ),
                 ),
               ),
             ),
           )
-        : h('p', { class: 'muted' }, rows.length ? 'Nothing awaits review here.' : 'No connectors with these filters. Agents add edges with the link tool; NLI and embedding similarity propose them as memories are created.'),
+        : h('p', { class: 'muted' }, rows.length ? 'Nothing awaits review here.' : 'No relations with these filters. Agents add relations with the link tool; NLI and embedding similarity propose them as memories are created.'),
       more,
     );
   }
@@ -1041,12 +1045,12 @@ export async function renderGraph(main, ctx) {
   }
 }
 
-/** A legend station drawn like the map's (hollow, line-coloured ring). */
-function legendStation(kind, type) {
-  const cls = ['st', 'stroke-0', kind];
+/** A legend memory drawn like the graph's (hollow, scope-coloured outline). */
+function legendNode(kind, type) {
+  const cls = ['node', 'stroke-0', kind];
   return s(
     'svg',
-    { width: 18, height: 18, viewBox: '-9 -9 18 18', 'aria-hidden': 'true', class: 'lg-st' },
-    s('g', { class: cls }, kind === 'chal' ? s('circle', { class: 'chal-ring', r: 7.5 }) : null, type ? stationShape(type, 4.6) : s('circle', { class: 'sh', r: 5 })),
+    { width: 18, height: 18, viewBox: '-9 -9 18 18', 'aria-hidden': 'true', class: 'lg-node' },
+    s('g', { class: cls }, kind === 'chal' ? s('circle', { class: 'chal-ring', r: 7.5 }) : null, type ? typeShape(type, 4.6) : s('circle', { class: 'sh', r: 5 })),
   );
 }

@@ -3,12 +3,12 @@
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, stamp, plural, label, shortId } from '../format.js';
-import { badge, slot, lineName, kindIcon, TYPE_LABEL } from '../lines.js';
+import { badge, slot, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { smallMultiples } from '../chart.js';
 import { renderMarkdown } from '../markdown.js';
-import { secHead, pill, statusPill, disruption, errorBox } from './common.js';
+import { secHead, pill, statusPill, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
-import { connectorSample, kindLabel } from '../graph/glyphs.js';
+import { edgeSample, kindLabel } from '../graph/glyphs.js';
 
 const TIMELINE = {
   created: 'Created',
@@ -27,7 +27,7 @@ function statusKey(status) {
   return { Challenged: 'challenged', NeedsReview: 'needs_review' }[status] || 'active';
 }
 
-/** One edge row: direction, connector, kind, status, the other memory. */
+/** One edge row: direction, drawn sample, kind, status, the other memory. */
 function edgeItem(e, ctx) {
   const dir = e.symmetric ? '↔' : e.direction === 'out' ? 'Out →' : '← In';
   const other =
@@ -48,7 +48,7 @@ function edgeItem(e, ctx) {
       h(
         'div',
         { class: 'rt' },
-        connectorSample(e.kind, e.status, 40),
+        edgeSample(e.kind, e.status, 40),
         kindLabel(e.kind),
         h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)),
         e.state === 'invalidated' ? h('span', { class: 'ep invalidated' }, 'invalidated') : null,
@@ -100,7 +100,7 @@ function review(d, ctx) {
         return h(
           'li',
           null,
-          h('div', { class: 'ttl' }, connectorSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
+          h('div', { class: 'ttl' }, edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
           h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`),
           reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => ctx.refresh(), 600) }),
         );
@@ -139,7 +139,7 @@ function meta(m) {
 function timeline(d) {
   return h(
     'ul',
-    { class: ['tl', 'l-' + slot(d.line_slot)] },
+    { class: ['tl', 'l-' + slot(d.color_slot)] },
     d.timeline.map((e) =>
       h(
         'li',
@@ -178,19 +178,20 @@ export async function renderDetail(main, ctx) {
   mount(
     main,
     h('a', { class: 'crumb', href: ctx.href('memories', p.id) }, '← All memories'),
-    h('div', { class: 'sign' }, badge(d.line, d.line_slot, true), h('div', null, h('div', { class: 'sc' }, `${lineName(d.line)} line`), h('div', { class: 'sid mono' }, `${(m.logical || []).join(', ') || 'no logical scope'} · ${m.id}`))),
+    h('div', { class: 'sign' }, badge(d.top_scope, d.color_slot, true), h('div', null, h('div', { class: 'sc' }, `${scopeName(d.top_scope)} scope`), h('div', { class: 'sid mono' }, `${(m.logical || []).join(', ') || 'no logical scope'} · ${m.id}`))),
     h('h1', { class: 'd-title', id: 'view-title' }, title),
     h(
       'div',
       { class: 'd-pills' },
-      h('span', { class: 'kind' }, kindIcon(m.type, d.line_slot), TYPE_LABEL[m.type] || m.type),
+      h('span', { class: 'kind' }, kindIcon(m.type, d.color_slot), TYPE_LABEL[m.type] || m.type),
       pill(m.epistemic),
       statusPill(row),
       m.title && m.title !== m.summary ? h('span', { class: 'muted' }, m.summary) : null,
     ),
     challenged && newest
-      ? disruption(
-          `challenged ${plural(m.challenges.length, 'time')}, newest ${ago(newest.timestamp)}.`,
+      ? alertBanner(
+          'Challenged',
+          `${plural(m.challenges.length, 'time')}, newest ${ago(newest.timestamp)}.`,
           h('span', { class: 'clamp' }, newest.evidence),
         )
       : null,
@@ -217,7 +218,7 @@ export async function renderDetail(main, ctx) {
         h('p', { class: 'faint' }, `Across ${plural(u.returned_sessions, 'session')} retrieved and ${plural(u.injected_sessions, 'session')} injected. Viewing it here counts as nothing.`),
         chartBox,
         review(d, ctx),
-        secHead('Edges', h('span', { class: 'faint num' }, fmt(d.edges.outbound.length + d.edges.inbound.length)), h('a', { class: 'btn sm', href: ctx.href('graph', p.id) }, 'Route map →')),
+        secHead('Edges', h('span', { class: 'faint num' }, fmt(d.edges.outbound.length + d.edges.inbound.length)), h('a', { class: 'btn sm', href: ctx.href('graph', p.id) }, 'Graph →')),
         relations(d, ctx),
         m.challenges && m.challenges.length
           ? [

@@ -32,11 +32,11 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   memories have been read at all; and how many are challenged. A 30-day
   chart with one row per signal — retrieved, injected, fetched and writes —
   each on its own scale. A *needs attention* list: proposed contradictions
-  first (a red "service disruption"), then challenged memories, memories
+  first (under a red banner), then challenged memories, memories
   that need review, other proposed edges, and memories nobody has read in 30
   days. Each proposed edge opens a *Review* panel in place.
 - **Memories** — every memory in a sortable table, filterable by text, kind,
-  status and line. *Retrieved*, *injected* and *fetched* are separate
+  status and scope. *Retrieved*, *injected* and *fetched* are separate
   columns and are never added up: a memory retrieved by a query, put into an
   agent's context by a hook, and opened by id are three different things
   (see [`stats`](./cli-reference.md#stats--store-statistics)). Invalidated
@@ -54,22 +54,23 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
 - **Projects** — every store on the machine. A project whose directory is
   gone, or a worktree (which keeps its memories in the main checkout), is
   listed as unavailable with the reason rather than hidden.
-- **Route map** — the store's memories and the edges between them, drawn as
-  a transit map (below).
+- **Graph** — the store's memories and the relations between them
+  (below).
 
-The look follows a transit map: each top-level logical scope (`storage` in
-`storage.paths`) is a *line* with its own colour and two-letter badge, and
-each memory is a *station* whose shape follows its kind. The biggest seven
-lines get seven colours; further lines reuse a colour with a round, then a
-ringed, badge. A line keeps its colour on every page. The header button
-switches between the light and dark map; by default it follows your system.
+Each top-level logical scope (`storage` in `storage.paths`) has its own
+colour and two-letter badge, and each memory is drawn with a shape for its
+type. The biggest seven scopes get seven colours; further scopes reuse a
+colour with a round, then a ringed, badge. A scope keeps its colour on every
+page. The header button switches between the light and dark theme; by
+default it follows your system.
 
-## The route map
+## The graph
 
-Each line is a top-level logical scope and runs through its memories; each
-connector between two stations is an edge (see [Linking memories](./links.md)):
+Each memory is a node, coloured by its top scope; memories of one scope are
+joined by a path in its colour. Each relation between two memories is an
+edge (see [Linking memories](./links.md)):
 
-| Connector | Edge |
+| Drawn as | Relation |
 |---|---|
 | Red, with a ⊣ bar at each end | `contradicts` — dashed while proposed, solid once confirmed |
 | Heavy line, arrow at the replaced memory | `supersedes` |
@@ -77,31 +78,32 @@ connector between two stations is an edge (see [Linking memories](./links.md)):
 | Dotted line with an arrow | `derived_from` |
 | Thin grey line / grey dash-dot | `related_to` / `duplicates` |
 | Any other kind, faded | proposed, not yet reviewed |
-| Ending at a crossed-out station | the far end was deleted (dangling) |
+| Ending at a crossed-out circle (⊗) | the far end was deleted (dangling) |
 | Ending at a `?` | the far end is in a store that could not be opened here |
 
-Station size follows reads, so a memory nothing reads is small. Labels are
-the start of each memory's summary; where one would overlap another label or
-a station it is left out, and more appear as you zoom in. Filters (kinds,
-whether to include proposed, rejected and invalidated, and one line) live in
-the address bar, so a filtered map can be bookmarked. Toggling a kind,
-proposed or rejected only hides or shows connectors: stations stay where
-they are. Drag or use the arrow keys to pan, a pinch or `+`/`-` to zoom, and
-`0` or *Fit* to see it all. The wheel zooms only once you have clicked into
-the map (or while holding Ctrl/⌘), so scrolling the page past it never zooms
-by accident. `]` and `[` step through the stations.
+Memory size follows reads, so a memory nothing reads is small; a memory with
+two or more relations has a heavier outline. Labels are the start of each
+memory's summary; where one would overlap another label or a memory it is
+left out, and more appear as you zoom in. Filters (kinds, whether to include
+proposed, rejected and invalidated, and one scope) live in the address bar,
+so a filtered graph can be bookmarked. Toggling a kind, proposed or rejected
+only hides or shows relations: memories stay where they are. Drag or use
+the arrow keys to pan, a pinch or `+`/`-` to zoom, and `0` or *Fit* to see
+it all. The wheel zooms only once you have clicked into the graph (or while
+holding Ctrl/⌘), so scrolling the page past it never zooms by accident. `]`
+and `[` step through the memories.
 
-Hovering (or focusing) a station or connector shows a short tooltip.
-Clicking it pins it in the card beside the map (below it on a phone, which
-scrolls to it): a station's card lists its connections and has an *Open
-memory* link; a proposed connector's card is where it is reviewed. Below the
-map, a table lists the proposed connectors; *Show all connectors* expands it
-to every one, for keyboard and screen-reader use.
+Hovering (or focusing) a memory or relation shows a short tooltip.
+Clicking it pins it in the details card beside the graph (below it on a
+phone, which scrolls to it): a memory's card lists its relations and has an
+*Open memory* link; a proposed relation's card is where it is reviewed.
+Below the graph, a table lists the proposed relations; *Show all relations*
+expands it to every one, for keyboard and screen-reader use.
 
 A large store shows its most connected memories first (800 by default); the
-page says when it is partial, and picking a line shows the rest of it. The
+page says when it is partial, and picking a scope shows the rest of it. The
 layout runs in a background worker and is deterministic: the same store
-draws the same map.
+draws the same graph.
 
 ## Reviewing proposed edges
 

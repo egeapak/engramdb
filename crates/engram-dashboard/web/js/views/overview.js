@@ -4,12 +4,12 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, plural, shortId } from '../format.js';
-import { badge, warnGlyph, kindIcon, TYPE_LABEL } from '../lines.js';
+import { badge, warnGlyph, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { smallMultiples } from '../chart.js';
-import { projHead, secHead, disruption, schemaNote } from './common.js';
+import { projHead, secHead, alertBanner, schemaNote } from './common.js';
 import { projectCards } from './projects.js';
 import { reviewControls } from './review.js';
-import { connectorSample, kindLabel } from '../graph/glyphs.js';
+import { edgeSample, kindLabel } from '../graph/glyphs.js';
 
 /** "+12%" / "−40%" against the previous window, or why there is none. */
 function delta(now, before) {
@@ -43,7 +43,7 @@ function stat(eyebrow, value, sub, alert) {
 const REASON = {
   proposed_contradiction: 'Proposed contradictions',
   proposed_edge: 'Proposed edges',
-  challenged: 'Service disruptions',
+  challenged: 'Challenged memories',
   needs_review: 'Needs review',
   stale: 'Stale: no reads in 30 days',
   never_read: 'Never read',
@@ -60,7 +60,7 @@ function proposalItem(it, ctx) {
   return h(
     'li',
     null,
-    contra ? h('span', { class: 'ico' }, warnGlyph(22)) : h('span', { class: 'ico' }, connectorSample(e.kind, 'proposed', 22)),
+    contra ? h('span', { class: 'ico' }, warnGlyph(22)) : h('span', { class: 'ico' }, edgeSample(e.kind, 'proposed', 22)),
     h('div', { class: 'ttl' }, h('a', { href: ctx.href('detail', ctx.project.id, it.id) }, it.summary)),
     h(
       'div',
@@ -101,7 +101,7 @@ function attention(items, ctx) {
           return h(
             'li',
             null,
-            reason === 'challenged' ? h('span', { class: 'ico' }, warnGlyph(22)) : badge(it.line, it.line_slot),
+            reason === 'challenged' ? h('span', { class: 'ico' }, warnGlyph(22)) : badge(it.top_scope, it.color_slot),
             h('div', { class: 'ttl' }, h('a', { href: ctx.href('detail', ctx.project.id, it.id) }, it.summary)),
             h('div', { class: 'sub' }, sub),
           );
@@ -125,7 +125,7 @@ export async function renderOverview(main, ctx) {
   const days = st.series.map((d) => d.day);
   const col = (k) => st.series.map((d) => d[k]);
   const challenged = st.attention.filter((a) => a.reason === 'challenged');
-  const lines = st.by_line.filter((l) => l.name).length;
+  const scopes = st.by_scope.filter((l) => l.name).length;
 
   const meta = [h('span', { class: 'mono' }, p.path)];
   meta.push(`${p.last_write_at ? 'Last write ' + ago(p.last_write_at) : 'No writes yet'} · ${shortId(p.id)}`);
@@ -137,15 +137,17 @@ export async function renderOverview(main, ctx) {
     schemaNote(st.schema, st.staleness),
     st.rebuilding ? h('div', { class: 'note warn' }, 'The index is empty but the store records memories: it is being rebuilt (a reindex is running). Reload in a moment.') : null,
     st.edges && st.edges.proposed_contradictions
-      ? disruption(
+      ? alertBanner(
+          'Attention',
           `${plural(st.edges.proposed_contradictions, 'proposed contradiction')} awaiting review.`,
           null,
-          h('a', { class: 'btn sm solid', href: ctx.href('graph', p.id) }, 'Route map'),
+          h('a', { class: 'btn sm solid', href: ctx.href('graph', p.id) }, 'Graph'),
         )
       : null,
     challenged.length
-      ? disruption(
-          `${plural(challenged.length, 'memory is', 'memories are')} challenged and awaiting review.`,
+      ? alertBanner(
+          'Challenged',
+          `${plural(challenged.length, 'memory', 'memories')} awaiting review.`,
           null,
           h('a', { class: 'btn sm solid', href: ctx.href('memories', p.id, 'status=challenged') }, 'Review'),
         )
@@ -156,7 +158,7 @@ export async function renderOverview(main, ctx) {
       stat(
         'Memories',
         fmt(st.live),
-        `${lines ? plural(lines, 'line') : 'No lines yet'} · ${plural(st.edges ? st.edges.total : 0, 'edge')}${st.edges && st.edges.proposed ? ` (${fmt(st.edges.proposed)} proposed)` : ''}${st.invalidated ? ` · ${fmt(st.invalidated)} invalidated` : ''}`,
+        `${scopes ? plural(scopes, 'scope') : 'No scopes yet'} · ${plural(st.edges ? st.edges.total : 0, 'edge')}${st.edges && st.edges.proposed ? ` (${fmt(st.edges.proposed)} proposed)` : ''}${st.invalidated ? ` · ${fmt(st.invalidated)} invalidated` : ''}`,
       ),
       readsStat(st.usage),
       stat('Memories in use', fmt(st.usage.used_memories), `of ${fmt(st.live)} read at least once`),

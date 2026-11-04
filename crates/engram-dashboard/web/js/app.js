@@ -5,7 +5,7 @@
 //   #/p/<id>                overview
 //   #/p/<id>/memories?…     memory list (filters in the hash query)
 //   #/p/<id>/m/<memory id>  memory detail
-//   #/p/<id>/graph?…        route map (filters in the hash query)
+//   #/p/<id>/graph?…        memory graph (filters in the hash query)
 //   #/p/<id>/doctor         store health
 //   #/projects              every store on the machine
 
@@ -45,7 +45,7 @@ function applyTheme(t) {
   if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
   const btn = $('#theme-btn');
   const dark = effectiveTheme() === 'dark';
-  btn.textContent = dark ? 'Day map' : 'Night map';
+  btn.textContent = dark ? 'Light' : 'Dark';
   btn.setAttribute('aria-label', dark ? 'Switch to the light theme' : 'Switch to the dark theme');
 }
 
@@ -220,7 +220,7 @@ async function boot() {
   }
   const s = state.session;
   setCsrf(s.csrf);
-  $('#brand-sub').textContent = `Memory network · ${location.host}`;
+  $('#brand-sub').textContent = `Memory dashboard · ${location.host}`;
   const tag = $('#mode-tag');
   if (s.allow_writes) {
     tag.textContent = 'Edge review on';

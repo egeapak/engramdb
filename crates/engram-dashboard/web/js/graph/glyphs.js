@@ -1,8 +1,8 @@
-// Connector (edge) drawing, shared by the route map, its legend, the edge
+// Relation (edge) drawing, shared by the graph view, its legend, the edge
 // table and the memory page, so a kind looks the same everywhere.
 //
-// Visual language (Route Map style):
-//   contradicts   red "service disruption" segment; dashed while proposed,
+// Visual language (today's look; phase B moves it into the Grid theme):
+//   contradicts   red segment; dashed while proposed,
 //                 solid once confirmed; an inhibitory ⊣ bar at each end
 //   supersedes    heavy ink line, arrow toward the old memory
 //   supports      ink line, arrow toward what it supports
@@ -30,8 +30,8 @@ export function kindLabel(k) {
   return KIND_LABEL[k] || String(k).replace(/_/g, ' ');
 }
 
-/** The connector's classes: kind, status and far-end state. */
-export function connectorClass(kind, status, state) {
+/** A drawn relation's classes: kind, status and far-end state. */
+export function edgeClass(kind, status, state) {
   return ['cx', 'k-' + String(kind).replace(/[^a-z_]/g, ''), 's-' + String(status || 'confirmed').replace(/[^a-z_]/g, ''), state && state !== 'live' && 'x-' + state];
 }
 
@@ -59,8 +59,8 @@ export function warnSign(x, y, size = 1) {
   );
 }
 
-/** A small sample of a connector, for legends, tables and lists. */
-export function connectorSample(kind, status, width = 44) {
+/** A small sample of a relation's drawing, for legends, tables and lists. */
+export function edgeSample(kind, status, width = 44) {
   const y = 8;
   const x0 = 4;
   const x1 = width - 4;
@@ -70,10 +70,10 @@ export function connectorSample(kind, status, width = 44) {
   } else if (DIRECTED[kind]) {
     parts.push(chevron(x1 - 2, y, 0));
   }
-  return s('svg', { class: connectorClass(kind, status), width, height: 16, viewBox: `0 0 ${width} 16`, 'aria-hidden': 'true' }, parts);
+  return s('svg', { class: edgeClass(kind, status), width, height: 16, viewBox: `0 0 ${width} 16`, 'aria-hidden': 'true' }, parts);
 }
 
-/** A stub's end cap: a closed station (dangling) or a question mark (unknown). */
+/** A stub's end cap: a crossed circle (dangling) or a question mark (unknown). */
 export function stubCap(x, y, state) {
   if (state === 'unknown') {
     return s('g', { class: 'cap unknown', transform: `translate(${x.toFixed(1)},${y.toFixed(1)})` }, s('circle', { r: 7 }), s('text', { y: 0.5 }, '?'));

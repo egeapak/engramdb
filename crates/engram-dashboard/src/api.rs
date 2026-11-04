@@ -152,9 +152,10 @@ impl From<&UsageCounts> for UsageCols {
     }
 }
 
-/// The first segment of a memory's first logical scope: its "line" on the
-/// route map. `None` for a memory with no logical scope.
-pub(crate) fn line_of(logical: &[String]) -> Option<String> {
+/// The first segment of a memory's first logical scope: its top scope, the
+/// unit the dashboard colours and groups by. `None` for a memory with no
+/// logical scope.
+pub(crate) fn top_scope_of(logical: &[String]) -> Option<String> {
     logical
         .first()
         .and_then(|l| l.split('.').next())
@@ -162,19 +163,19 @@ pub(crate) fn line_of(logical: &[String]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Each line's colour slot: its rank in the whole store (invalidated
-/// memories included, so a status filter never recolours a line), by memory
+/// Each top scope's colour slot: its rank in the whole store (invalidated
+/// memories included, so a status filter never recolours a scope), by memory
 /// count, most first, then by name. The frontend paints `slot % 7` from its
-/// palette and varies the pattern by `slot / 7`, so the seven biggest lines
+/// palette and varies the pattern by `slot / 7`, so the seven biggest scopes
 /// get seven distinct solid colours and an eighth never repeats one exactly.
 ///
 /// **The one place a slot is decided**: the list, its facets, the overview
-/// and the detail page all call this over the same rows, so one line has one
-/// colour on every page. A slot can move when line sizes change rank.
-pub(crate) fn line_slots(all: &[IndexFilterable]) -> HashMap<String, u32> {
+/// and the detail page all call this over the same rows, so one scope has
+/// one colour on every page. A slot can move when scope sizes change rank.
+pub(crate) fn color_slots(all: &[IndexFilterable]) -> HashMap<String, u32> {
     let mut n: HashMap<String, usize> = HashMap::new();
     for e in all {
-        if let Some(l) = line_of(&e.logical) {
+        if let Some(l) = top_scope_of(&e.logical) {
             *n.entry(l).or_insert(0) += 1;
         }
     }
@@ -186,8 +187,8 @@ pub(crate) fn line_slots(all: &[IndexFilterable]) -> HashMap<String, u32> {
         .collect()
 }
 
-fn slot_of(slots: &HashMap<String, u32>, line: Option<&String>) -> Option<u32> {
-    line.and_then(|l| slots.get(l).copied())
+fn slot_of(slots: &HashMap<String, u32>, top_scope: Option<&String>) -> Option<u32> {
+    top_scope.and_then(|l| slots.get(l).copied())
 }
 
 pub(crate) fn status_str(s: Status) -> &'static str {
@@ -209,10 +210,10 @@ struct MemoryRow {
     visibility: String,
     criticality: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    line: Option<String>,
-    /// See [`line_slots`]; absent with `line`.
+    top_scope: Option<String>,
+    /// See [`color_slots`]; absent with `top_scope`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    line_slot: Option<u32>,
+    color_slot: Option<u32>,
     logical: Vec<String>,
     physical: Vec<String>,
     tags: Vec<String>,
@@ -239,9 +240,9 @@ fn row(
     usage: Option<&UsageCounts>,
     slots: &HashMap<String, u32>,
 ) -> MemoryRow {
-    let line = line_of(&e.logical);
+    let top_scope = top_scope_of(&e.logical);
     MemoryRow {
-        line_slot: slot_of(slots, line.as_ref()),
+        color_slot: slot_of(slots, top_scope.as_ref()),
         id: e.id.clone(),
         summary: e.summary.clone(),
         type_: wire(&e.type_),
@@ -249,7 +250,7 @@ fn row(
         status: status_str(e.status),
         visibility: wire(&e.visibility).to_lowercase(),
         criticality: e.criticality,
-        line,
+        top_scope,
         logical: e.logical.clone(),
         physical: e.physical.clone(),
         tags: e.tags.clone(),
@@ -273,7 +274,7 @@ fn is_invalidated(e: &IndexFilterable, now: DateTime<Utc>) -> bool {
 struct Count {
     name: String,
     count: usize,
-    /// Line counts only: see [`line_slots`].
+    /// Top-scope counts only: see [`color_slots`].
     #[serde(skip_serializing_if = "Option::is_none")]
     slot: Option<u32>,
 }
@@ -291,8 +292,9 @@ fn counts(map: BTreeMap<String, usize>) -> Vec<Count> {
     v
 }
 
-/// [`counts`] for lines (`""` is "no logical scope"), with their slots.
-fn line_counts(map: BTreeMap<String, usize>, slots: &HashMap<String, u32>) -> Vec<Count> {
+/// [`counts`] for top scopes (`""` is "no logical scope"), with their
+/// slots.
+fn scope_counts(map: BTreeMap<String, usize>, slots: &HashMap<String, u32>) -> Vec<Count> {
     let mut v = counts(map);
     for c in &mut v {
         c.slot = slots.get(&c.name).copied();
@@ -303,7 +305,7 @@ fn line_counts(map: BTreeMap<String, usize>, slots: &HashMap<String, u32>) -> Ve
 #[derive(Serialize)]
 struct Facets {
     types: Vec<Count>,
-    lines: Vec<Count>,
+    scopes: Vec<Count>,
     tags: Vec<Count>,
 }
 
@@ -370,13 +372,17 @@ async fn list_memories(
         None | Some("all") | Some("invalidated") => None,
         Some(s) => Some(parse_status(s).map_err(|e| ApiError::bad_request(e.to_string()))?),
     };
-    let lines: Option<Vec<&str>> = q.get("line").map(|l| l.split(',').map(str::trim).collect());
+    // `top_scope=`, not `scope=`: `scope` is the older substring filter over
+    // every physical and logical scope, kept as it was.
+    let top_scopes: Option<Vec<&str>> = q
+        .get("top_scope")
+        .map(|l| l.split(',').map(str::trim).collect());
     let scope = q.get("scope");
     let tag = q.get("tag");
     let text = q.get("q").map(|s| s.to_lowercase());
 
     let total = all.len();
-    let slots = line_slots(&all);
+    let slots = color_slots(&all);
     let admitted = |e: &&IndexFilterable| -> bool {
         let by_validity = match status {
             Some("invalidated") => is_invalidated(e, now),
@@ -386,12 +392,12 @@ async fn list_memories(
         by_validity && status_filter.is_none_or(|s| e.status == s)
     };
     let mut facet_types = BTreeMap::new();
-    let mut facet_lines = BTreeMap::new();
+    let mut facet_scopes = BTreeMap::new();
     let mut facet_tags = BTreeMap::new();
     for e in all.iter().filter(admitted) {
         *facet_types.entry(wire(&e.type_)).or_insert(0) += 1;
-        *facet_lines
-            .entry(line_of(&e.logical).unwrap_or_default())
+        *facet_scopes
+            .entry(top_scope_of(&e.logical).unwrap_or_default())
             .or_insert(0) += 1;
         for t in &e.tags {
             *facet_tags.entry(t.clone()).or_insert(0) += 1;
@@ -406,9 +412,9 @@ async fn list_memories(
         .filter(|e| kinds.as_ref().is_none_or(|k| k.contains(&e.type_)))
         .filter(|e| epistemic.as_ref().is_none_or(|k| k.contains(&e.epistemic)))
         .filter(|e| {
-            lines.as_ref().is_none_or(|ls| {
+            top_scopes.as_ref().is_none_or(|ls| {
                 // `-` names "no logical scope", so it survives a comma join.
-                let l = line_of(&e.logical).unwrap_or_else(|| "-".to_string());
+                let l = top_scope_of(&e.logical).unwrap_or_else(|| "-".to_string());
                 ls.contains(&l.as_str())
             })
         })
@@ -443,7 +449,7 @@ async fn list_memories(
             "updated" => micros(e.updated_at),
             "summary" => SortKey::Text(e.summary.to_lowercase()),
             "type" => SortKey::Text(wire(&e.type_)),
-            "line" => SortKey::Text(line_of(&e.logical).unwrap_or_default()),
+            "scope" => SortKey::Text(top_scope_of(&e.logical).unwrap_or_default()),
             "returned" => num(e, |c| c.returned),
             "injected" => num(e, |c| c.injected),
             "fetched" => num(e, |c| c.fetched),
@@ -464,7 +470,7 @@ async fn list_memories(
             | "updated"
             | "summary"
             | "type"
-            | "line"
+            | "scope"
             | "returned"
             | "injected"
             | "fetched"
@@ -473,10 +479,10 @@ async fn list_memories(
     ) {
         return Err(ApiError::bad_request(format!(
             "unknown sort {sort:?}: use criticality, created, updated, summary, type, \
-             line, returned, injected, fetched, updated_n or last_read"
+             scope, returned, injected, fetched, updated_n or last_read"
         )));
     }
-    let text_sort = matches!(sort, "summary" | "type" | "line");
+    let text_sort = matches!(sort, "summary" | "type" | "scope");
     let desc = match q.get("dir").map(String::as_str) {
         Some("asc") => false,
         Some("desc") => true,
@@ -542,7 +548,7 @@ async fn list_memories(
         next_cursor,
         facets: Facets {
             types: counts(facet_types),
-            lines: line_counts(facet_lines, &slots),
+            scopes: scope_counts(facet_scopes, &slots),
             tags,
         },
         rebuilding,
@@ -615,9 +621,9 @@ struct AttentionItem {
     id: String,
     summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    line: Option<String>,
+    top_scope: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    line_slot: Option<u32>,
+    color_slot: Option<u32>,
     /// Why it is listed, as data for the frontend to word.
     reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -698,7 +704,7 @@ struct StatsPage {
     by_type: Vec<Count>,
     by_status: Vec<Count>,
     by_epistemic: Vec<Count>,
-    by_line: Vec<Count>,
+    by_scope: Vec<Count>,
     #[serde(skip_serializing_if = "Option::is_none")]
     oldest: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -729,16 +735,16 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
     let series = store.series(None).await?;
     let now = Utc::now();
 
-    let slots = line_slots(&all);
+    let slots = color_slots(&all);
     let live: Vec<&IndexFilterable> = all.iter().filter(|e| !is_invalidated(e, now)).collect();
     let mut by_epistemic = BTreeMap::new();
-    let mut by_line = BTreeMap::new();
+    let mut by_scope = BTreeMap::new();
     for e in &live {
         *by_epistemic
             .entry(e.epistemic.as_str().to_string())
             .or_insert(0) += 1;
-        *by_line
-            .entry(line_of(&e.logical).unwrap_or_default())
+        *by_scope
+            .entry(top_scope_of(&e.logical).unwrap_or_default())
             .or_insert(0) += 1;
     }
 
@@ -806,8 +812,8 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
             out.push(AttentionItem {
                 id: src.id.clone(),
                 summary: src.summary.clone(),
-                line: line_of(&src.logical),
-                line_slot: slot_of(&slots, line_of(&src.logical).as_ref()),
+                top_scope: top_scope_of(&src.logical),
+                color_slot: slot_of(&slots, top_scope_of(&src.logical).as_ref()),
                 reason: if contradictions {
                     "proposed_contradiction"
                 } else {
@@ -848,8 +854,8 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         attention.push(AttentionItem {
             id: e.id.clone(),
             summary: e.summary.clone(),
-            line: line_of(&e.logical),
-            line_slot: slot_of(&slots, line_of(&e.logical).as_ref()),
+            top_scope: top_scope_of(&e.logical),
+            color_slot: slot_of(&slots, top_scope_of(&e.logical).as_ref()),
             reason: "challenged",
             at: newest.map(|c| c.timestamp),
             detail: newest.map(|c| c.evidence.clone()),
@@ -865,8 +871,8 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         attention.push(AttentionItem {
             id: e.id.clone(),
             summary: e.summary.clone(),
-            line: line_of(&e.logical),
-            line_slot: slot_of(&slots, line_of(&e.logical).as_ref()),
+            top_scope: top_scope_of(&e.logical),
+            color_slot: slot_of(&slots, top_scope_of(&e.logical).as_ref()),
             reason: "needs_review",
             at: Some(e.updated_at),
             detail: None,
@@ -900,8 +906,8 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         attention.push(AttentionItem {
             id: e.id.clone(),
             summary: e.summary.clone(),
-            line: line_of(&e.logical),
-            line_slot: slot_of(&slots, line_of(&e.logical).as_ref()),
+            top_scope: top_scope_of(&e.logical),
+            color_slot: slot_of(&slots, top_scope_of(&e.logical).as_ref()),
             reason: if lr.is_some() { "stale" } else { "never_read" },
             at: Some(lr.unwrap_or(e.created_at)),
             detail: None,
@@ -932,7 +938,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
                 .collect(),
         ),
         by_epistemic: counts(by_epistemic),
-        by_line: line_counts(by_line, &slots),
+        by_scope: scope_counts(by_scope, &slots),
         oldest: stats.oldest,
         newest: stats.newest,
         avg_criticality: stats.avg_criticality,
@@ -972,10 +978,10 @@ struct TimelineEntry {
 struct MemoryDetail {
     store_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    line: Option<String>,
-    /// See [`line_slots`].
+    top_scope: Option<String>,
+    /// See [`color_slots`].
     #[serde(skip_serializing_if = "Option::is_none")]
-    line_slot: Option<u32>,
+    color_slot: Option<u32>,
     memory: Memory,
     /// Exact (a raw scan of this memory's events); the list's counts come
     /// from the rollup and can lag these until its next refresh.
@@ -1066,8 +1072,8 @@ async fn memory_detail(
         .map(|u| u.counts)
         .unwrap_or_default();
     let series = store.series(Some(&memory.id)).await?;
-    let slots = line_slots(&store.list().await?);
-    let line = line_of(&memory.logical);
+    let slots = color_slots(&store.list().await?);
+    let top_scope = top_scope_of(&memory.logical);
 
     let mut wanted: Vec<String> = memory.supersedes.clone();
     if let Some(s) = &memory.superseded_by {
@@ -1089,8 +1095,8 @@ async fn memory_detail(
     let edges = store.links_of(&memory.id).await?;
     ok(&MemoryDetail {
         store_id: store.store_id().to_string(),
-        line_slot: slot_of(&slots, line.as_ref()),
-        line,
+        color_slot: slot_of(&slots, top_scope.as_ref()),
+        top_scope,
         timeline: timeline(&memory, &usage),
         usage,
         series,

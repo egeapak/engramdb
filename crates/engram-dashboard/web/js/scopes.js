@@ -1,49 +1,50 @@
-// Lines and stations: each top-level logical scope is a "line" with a
-// colour; each memory is a station whose shape follows its type.
+// Scopes and memory shapes: each top-level logical scope has a colour slot
+// and a two-letter badge; each memory is drawn with a shape for its type.
 
 import { h, s } from './dom.js';
 
 const SLOTS = 7;
 
 /**
- * The colour class of a line slot: "0".."6", or "none" for no line.
+ * The colour class of a scope's colour slot: "0".."6", or "none" for no
+ * scope.
  *
- * Slots are decided by the server (`line_slot` on rows, `slot` on line
- * counts): one rank per line over the whole store, so a line has the same
- * colour on every page. Nothing here keeps state.
+ * Slots are decided by the server (`color_slot` on rows, `slot` on scope
+ * counts): one rank per top scope over the whole store, so a scope has the
+ * same colour on every page. Nothing here keeps state.
  */
 export function slot(n) {
   return n === null || n === undefined ? 'none' : String(n % SLOTS);
 }
 
-/** 0 for the first seven lines, then 1 (ringed) and 2 (striped), so an eighth line never repeats a badge exactly. */
+/** 0 for the first seven scopes, then 1 (ringed) and 2 (striped), so an eighth scope never repeats a badge exactly. */
 export function variant(n) {
   return n === null || n === undefined ? 0 : Math.min(2, Math.floor(n / SLOTS));
 }
 
-export function code(line) {
-  if (!line) return '—';
-  const letters = line.replace(/[^A-Za-z0-9]/g, '');
-  return (letters.slice(0, 2) || line.slice(0, 2)).toUpperCase();
+export function code(scope) {
+  if (!scope) return '—';
+  const letters = scope.replace(/[^A-Za-z0-9]/g, '');
+  return (letters.slice(0, 2) || scope.slice(0, 2)).toUpperCase();
 }
 
-export function lineName(line) {
-  return line || 'No scope';
+export function scopeName(scope) {
+  return scope || 'No scope';
 }
 
-/** A line's two-letter badge. `n` is its server-assigned slot. */
-export function badge(line, n, large) {
-  const name = lineName(line);
+/** A top scope's two-letter badge. `n` is its server-assigned colour slot. */
+export function badge(scope, n, large) {
+  const name = scopeName(scope);
   const v = variant(n);
   return h(
     'span',
-    { class: ['badge', 'b-' + slot(n), v && 'v-' + v, large && 'lg'], title: `${name} line`, role: 'img', 'aria-label': `${name} line` },
-    code(line),
+    { class: ['badge', 'b-' + slot(n), v && 'v-' + v, large && 'lg'], title: `${name} scope`, role: 'img', 'aria-label': `${name} scope` },
+    code(scope),
   );
 }
 
-/** A station glyph for a memory type, centred on 0,0 (stroke comes from the parent). */
-export function stationShape(type, r) {
+/** A memory type's shape, centred on 0,0 (stroke comes from the parent). */
+export function typeShape(type, r) {
   switch (type) {
     case 'convention':
     case 'preference': {
@@ -67,12 +68,12 @@ export function stationShape(type, r) {
   }
 }
 
-/** A 16px station glyph for a memory type, stroked in its line's colour (`n`: the line's slot). */
+/** A 16px shape for a memory type, stroked in its scope's colour (`n`: the scope's colour slot). */
 export function kindIcon(type, n) {
   return s(
     'svg',
     { width: 16, height: 16, viewBox: '-8 -8 16 16', 'aria-hidden': 'true', class: 'stroke-' + slot(n) },
-    stationShape(type, 4.6),
+    typeShape(type, 4.6),
   );
 }
 

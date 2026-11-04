@@ -1,7 +1,7 @@
 // Pieces shared by several views.
 
 import { h } from '../dom.js';
-import { warnGlyph } from '../lines.js';
+import { warnGlyph } from '../scopes.js';
 
 export function errorBox(e) {
   const status = e && e.status;
@@ -38,13 +38,16 @@ export function statusPill(row) {
   return null;
 }
 
-/** The "service disruption" banner for challenged memories. */
-export function disruption(text, why, action) {
+/**
+ * The red banner over a view that has something to review: challenged
+ * memories, proposed contradictions. `lead` is its bold first word.
+ */
+export function alertBanner(lead, text, why, action) {
   return h(
     'div',
-    { class: 'disrupt', role: 'status' },
+    { class: 'alert-banner', role: 'status' },
     warnGlyph(22),
-    h('span', null, h('b', null, 'Service disruption: '), text),
+    h('span', null, h('b', null, `${lead}: `), text),
     action || null,
     why ? h('span', { class: 'why' }, why) : null,
   );

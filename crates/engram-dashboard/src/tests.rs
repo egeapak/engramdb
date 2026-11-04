@@ -557,16 +557,16 @@ async fn stats_has_counts_usage_series_and_attention() {
         ch["detail"],
         "<script>alert(1)</script> contradicts the exit-2 rule"
     );
-    let lines: Vec<&str> = v["by_line"]
+    let scopes: Vec<&str> = v["by_scope"]
         .as_array()
         .unwrap()
         .iter()
         .map(|l| l["name"].as_str().unwrap())
         .collect();
-    assert_eq!(lines, ["storage", "", "hooks"]);
-    // Slots rank lines over the whole store (the invalidated `build` line
+    assert_eq!(scopes, ["storage", "", "hooks"]);
+    // Slots rank scopes over the whole store (the invalidated `build` scope
     // included): storage 2, then build and hooks 1 each, by name.
-    let slots: Vec<serde_json::Value> = v["by_line"]
+    let slots: Vec<serde_json::Value> = v["by_scope"]
         .as_array()
         .unwrap()
         .iter()
@@ -580,19 +580,19 @@ async fn stats_has_counts_usage_series_and_attention() {
             serde_json::json!(2)
         ]
     );
-    assert_eq!(ch["line_slot"], 2);
+    assert_eq!(ch["color_slot"], 2);
     assert!(v.get("rebuilding").is_none());
 }
 
 #[tokio::test]
-async fn a_line_has_one_slot_on_every_endpoint() {
+async fn a_scope_has_one_slot_on_every_endpoint() {
     let fx = fixture().await;
     let app = app(Some(fx.current.clone()));
     let base = format!("/api/projects/{}", fx.id);
     let (_, list) = get_json(&app, &format!("{base}/memories?status=all")).await;
     let (_, stats) = get_json(&app, &format!("{base}/stats")).await;
     let facet = |name: &str| {
-        list["facets"]["lines"]
+        list["facets"]["scopes"]
             .as_array()
             .unwrap()
             .iter()
@@ -602,23 +602,23 @@ async fn a_line_has_one_slot_on_every_endpoint() {
     for m in list["items"].as_array().unwrap() {
         let id = m["id"].as_str().unwrap();
         let (_, d) = get_json(&app, &format!("{base}/memories/{id}")).await;
-        assert_eq!(m["line_slot"], d["line_slot"], "{id}: list vs detail");
-        if let Some(line) = m["line"].as_str() {
+        assert_eq!(m["color_slot"], d["color_slot"], "{id}: list vs detail");
+        if let Some(scope) = m["top_scope"].as_str() {
             assert_eq!(
-                Some(m["line_slot"].clone()),
-                facet(line),
-                "{line}: list vs facet"
+                Some(m["color_slot"].clone()),
+                facet(scope),
+                "{scope}: list vs facet"
             );
-            if let Some(b) = stats["by_line"]
+            if let Some(b) = stats["by_scope"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|l| l["name"] == line)
+                .find(|l| l["name"] == scope)
             {
-                assert_eq!(m["line_slot"], b["slot"], "{line}: list vs stats");
+                assert_eq!(m["color_slot"], b["slot"], "{scope}: list vs stats");
             }
         } else {
-            assert!(m.get("line_slot").is_none());
+            assert!(m.get("color_slot").is_none());
         }
     }
 }
@@ -753,7 +753,7 @@ async fn memories_filter_sort_and_page() {
         .unwrap();
     assert_eq!(a["usage"]["fetched"], 2);
     assert_eq!(a["usage"]["returned"], 1);
-    assert_eq!(a["line"], "storage");
+    assert_eq!(a["top_scope"], "storage");
     assert_eq!(a["type"], "decision");
     assert!(a["usage"]["last_read_at"].is_string());
 
@@ -801,17 +801,24 @@ async fn memories_filter_sort_and_page() {
     assert_eq!(ids(&v), [fx.ids[3].clone()]);
     let (_, v) = get_json(&app, &format!("{base}?scope=storage")).await;
     assert_eq!(v["matched"], 2);
-    let (_, v) = get_json(&app, &format!("{base}?line=hooks,-")).await;
+    let (_, v) = get_json(&app, &format!("{base}?top_scope=hooks,-")).await;
     let mut got = ids(&v);
     got.sort();
     let mut want = vec![fx.ids[2].clone(), fx.ids[3].clone()];
     want.sort();
     assert_eq!(got, want);
     assert_eq!(v["facets"]["types"][0]["name"], "decision");
+    let (s, v) = get_json(&app, &format!("{base}?sort=scope")).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // Text sorts ascend, and "no scope" sorts first.
+    assert!(v["items"][0].get("top_scope").is_none(), "{v}");
+    assert_eq!(v["items"][1]["top_scope"], "hooks", "{v}");
 
     for bad in [
         "kind=nope",
         "sort=nope",
+        // Renamed to `scope` (graph view v1.1).
+        "sort=line",
         "dir=up",
         "status=nope",
         "cursor=x",
@@ -1244,6 +1251,283 @@ fn the_frontend_never_parses_html_or_inlines_script_or_style() {
 }
 
 // ---------------------------------------------------------------------------
+// Neutral wording: the core speaks of graph, memory, relation and scope
+// ---------------------------------------------------------------------------
+
+/// Metaphor words the core frontend must not use. Graph view v1.1 moved the
+/// transit-map look into an optional theme: the core says graph, memory,
+/// relation and scope, and only a theme's own strings may add flavour.
+/// Matched case-insensitively anywhere in a file, comments included, since
+/// none of them has an innocent meaning in this frontend.
+const BANNED_TERMS: &[&str] = &[
+    "station",
+    "metro",
+    "route map",
+    "connector",
+    "interchange",
+    "disruption",
+    "night map",
+    "day map",
+];
+
+/// Names retired by the "line" → "scope" rename (API fields, the module,
+/// its helper, the CSS colour tokens). Matched case-sensitively anywhere, so
+/// a stale API field or import fails here rather than as an `undefined` on
+/// the page.
+const RETIRED_LINE_NAMES: &[&str] = &[
+    "line_slot",
+    "all_lines",
+    "by_line",
+    "facets.lines",
+    "lineName",
+    "lines.js",
+    "--l-",
+];
+
+/// Files the wording scan skips. Phase B moves both into `themes/grid/`, the
+/// one place a theme may keep its own words; until then their internal names
+/// (`routes`, `lines`, the scope "lines" the layout draws) stay as they are.
+const WORDING_EXEMPT: &[&str] = &["js/graph/layout.js", "js/graph/glyphs.js"];
+
+/// Visible text where "line" means a line of text, not a scope.
+const LINE_TEXT_ALLOWED: &[&str] = &["usage log lines"];
+
+/// The string literals of a JS module, with the byte offset each starts at:
+/// quoted strings, and the text parts of template literals (`${…}` is code
+/// again, nested templates included). Comments and regex literals are
+/// skipped; a `/` opens a regex when the previous significant token cannot
+/// end an expression, the usual heuristic, good enough for this hand-written
+/// frontend (`the_wording_scan_reads_strings_not_code` pins it).
+fn js_strings(src: &str) -> Vec<(usize, String)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    // Brace depth at each open `${`, innermost last.
+    let mut open_exprs: Vec<usize> = Vec::new();
+    let mut depth = 0usize;
+    // The last significant byte and identifier: decides regex vs division.
+    let mut prev = b'(';
+    let mut word = String::new();
+    let mut i = 0;
+    // Reads template text from `start` to the closing backtick or the next
+    // `${`; returns where code resumes and whether an expression opened.
+    let template = |start: usize, out: &mut Vec<(usize, String)>| -> (usize, bool) {
+        let mut j = start;
+        while j < b.len() {
+            match b[j] {
+                b'\\' => j += 2,
+                b'`' => {
+                    out.push((start, src[start..j].to_string()));
+                    return (j + 1, false);
+                }
+                b'$' if b.get(j + 1) == Some(&b'{') => {
+                    out.push((start, src[start..j].to_string()));
+                    return (j + 2, true);
+                }
+                _ => j += 1,
+            }
+        }
+        (b.len(), false)
+    };
+    while i < b.len() {
+        let c = b[i];
+        if c == b'/' && b.get(i + 1) == Some(&b'/') {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'/' && b.get(i + 1) == Some(&b'*') {
+            i = src[i + 2..].find("*/").map_or(b.len(), |k| i + 2 + k + 2);
+            continue;
+        }
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+                i += 1;
+            }
+            word = src[start..i].to_string();
+            prev = b'a';
+            continue;
+        }
+        let was_word = std::mem::take(&mut word);
+        match c {
+            b'\'' | b'"' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && b[j] != c && b[j] != b'\n' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                out.push((start, src[start..j.min(b.len())].to_string()));
+                i = j + 1;
+                prev = b'"';
+            }
+            b'`' => {
+                let (next, opened) = template(i + 1, &mut out);
+                if opened {
+                    open_exprs.push(depth);
+                    prev = b'(';
+                } else {
+                    prev = b'"';
+                }
+                i = next;
+            }
+            b'}' if open_exprs.last() == Some(&depth) => {
+                open_exprs.pop();
+                let (next, opened) = template(i + 1, &mut out);
+                if opened {
+                    open_exprs.push(depth);
+                    prev = b'(';
+                } else {
+                    prev = b'"';
+                }
+                i = next;
+            }
+            b'/' => {
+                let regex = b"(,=:[!&|?{};+-*%<>~^".contains(&prev)
+                    || matches!(
+                        was_word.as_str(),
+                        "return" | "typeof" | "case" | "of" | "in"
+                    );
+                i += 1;
+                if regex {
+                    let mut class = false;
+                    while i < b.len() && b[i] != b'\n' {
+                        match b[i] {
+                            b'\\' => i += 1,
+                            b'[' => class = true,
+                            b']' => class = false,
+                            b'/' if !class => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                    prev = b'"';
+                } else {
+                    prev = b'/';
+                }
+            }
+            _ => {
+                if c == b'{' {
+                    depth += 1;
+                } else if c == b'}' {
+                    depth = depth.saturating_sub(1);
+                }
+                prev = c;
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `text` uses the word "line"/"lines" on its own (not `line-height`,
+/// `-webkit-line-clamp`, `online`, `inline`, `timeline`, `outlined`, …).
+fn says_line(text: &str) -> bool {
+    let mut t = text.to_lowercase();
+    for ok in LINE_TEXT_ALLOWED {
+        t = t.replace(ok, "");
+    }
+    let edge = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
+    t.match_indices("line").any(|(at, _)| {
+        let rest = &t[at + 4..];
+        let rest = rest.strip_prefix('s').unwrap_or(rest);
+        edge(t[..at].chars().next_back()) && edge(rest.chars().next())
+    })
+}
+
+/// The visible strings of one asset that say "line": a JS module's string
+/// literals, an HTML page's text. CSS has no visible text (only property
+/// names like `line-height`), and an `s('line', …)` call names the SVG
+/// element, not a scope.
+fn visible_line_words(path: &str, src: &str) -> Vec<(usize, String)> {
+    if path.ends_with(".html") {
+        return src
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| says_line(l))
+            .map(|(n, l)| (n + 1, l.trim().to_string()))
+            .collect();
+    }
+    if !path.ends_with(".js") {
+        return Vec::new();
+    }
+    js_strings(src)
+        .into_iter()
+        .filter(|(at, text)| !(text == "line" && src[..*at].ends_with("s('")))
+        .filter(|(_, text)| says_line(text))
+        .map(|(at, text)| (src[..at].matches('\n').count() + 1, text))
+        .collect()
+}
+
+#[test]
+fn the_wording_scan_reads_strings_not_code() {
+    let src = "// one line per comment\n\
+               const lines = src.split('\\n');\n\
+               nodes.push(s('line', { class: 'grid' }));\n\
+               const fence = /^\\s*```/.test(lines[i]) ? 'line-through' : a / b;\n\
+               h('b', { title: `${name} line` }, 'All lines', 'inline', `${`x`}`);\n";
+    let hits: Vec<String> = visible_line_words("t.js", src)
+        .into_iter()
+        .map(|(n, t)| format!("{n}:{t}"))
+        .collect();
+    assert_eq!(hits, ["5: line", "5:All lines"]);
+    assert!(visible_line_words("t.css", ".a { line-height: 1 }").is_empty());
+    assert_eq!(
+        visible_line_words("t.html", "<p>\nOne line\n</p>"),
+        [(2, "One line".to_string())]
+    );
+}
+
+#[test]
+fn the_core_frontend_uses_neutral_words() {
+    let mut problems = Vec::new();
+    let mut scanned = 0;
+    for a in crate::assets::embedded() {
+        if WORDING_EXEMPT.contains(&a.path) {
+            continue;
+        }
+        let Ok(src) = std::str::from_utf8(a.bytes) else {
+            continue;
+        };
+        scanned += 1;
+        let line_of = |at: usize| src[..at].matches('\n').count() + 1;
+        let lower = src.to_lowercase();
+        for term in BANNED_TERMS {
+            for (at, _) in lower.match_indices(term) {
+                problems.push(format!("{}:{}: banned word {term:?}", a.path, line_of(at)));
+            }
+        }
+        for name in RETIRED_LINE_NAMES {
+            for (at, _) in src.match_indices(name) {
+                problems.push(format!(
+                    "{}:{}: retired name {name:?} (renamed to a scope name)",
+                    a.path,
+                    line_of(at)
+                ));
+            }
+        }
+        for (n, text) in visible_line_words(a.path, src) {
+            problems.push(format!(
+                "{}:{n}: \"line\" in visible text {text:?}: say \"scope\" (or add a \
+                 line-of-text phrase to LINE_TEXT_ALLOWED)",
+                a.path
+            ));
+        }
+    }
+    assert!(scanned >= 15, "the wording scan saw only {scanned} assets");
+    assert!(
+        problems.is_empty(),
+        "metaphor words in the core frontend (only a theme may use them):\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Edges: the graph endpoint and the confirm/reject writes
 // ---------------------------------------------------------------------------
 
@@ -1389,8 +1673,32 @@ async fn the_graph_has_nodes_edges_states_and_bounds() {
         .find(|n| n["id"] == fx.ids[1].as_str())
         .unwrap();
     assert_eq!(node["degree"], 3);
-    assert!(node["line"].is_string(), "{node}");
-    assert!(node["line_slot"].is_u64(), "{node}");
+    assert!(node["top_scope"].is_string(), "{node}");
+    assert!(node["color_slot"].is_u64(), "{node}");
+
+    // `scope=` narrows to some top scopes (`-` is "no logical scope"), and
+    // `all_scopes` still offers every one, so the picker never shrinks.
+    let (_, v) = get_json(&app, &format!("{base}?scope=hooks,-")).await;
+    let mut got: Vec<&str> = v["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    got.sort();
+    let mut want = vec![fx.ids[2].as_str(), fx.ids[3].as_str()];
+    want.sort();
+    assert_eq!(got, want);
+    let names = |key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    assert!(names("all_scopes").contains(&"storage".to_string()), "{v}");
+    assert!(!names("scopes").contains(&"storage".to_string()), "{v}");
 
     // Filters: kinds, proposed.
     let (_, v) = get_json(&app, &format!("{base}?kinds=supports")).await;
