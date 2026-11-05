@@ -4,8 +4,13 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const MIN = 60 * 1000;
 const DAY = 24 * 60 * MIN;
 
+/** One formatter for every call: `toLocaleString` builds a new one each time (ECMA-402 defines it as this). */
+const NUMBER = new Intl.NumberFormat('en-US');
+
 export function fmt(n) {
-  return Number(n || 0).toLocaleString('en-US');
+  const v = Number(n || 0);
+  // Below a thousand an integer has no separator: its plain digits.
+  return Number.isInteger(v) && v > -1000 && v < 1000 ? String(v) : NUMBER.format(v);
 }
 
 /** "5 min ago", "3 days ago", "never". */

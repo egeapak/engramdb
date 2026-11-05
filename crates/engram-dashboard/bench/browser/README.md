@@ -33,6 +33,10 @@ port; one per store).
 layout figure; `--no-layout-cache` starts the dashboard with
 `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`, so every server layout is cold (the
 layout cache otherwise lives under `<stores>/cache`, never the user's).
+`--cpu-throttle 4` slows the page's CPU by that factor (Chrome's
+`Emulation.setCPUThrottlingRate`), for figures that sit at the 60 fps cap on
+a fast machine: zoom on the 10k store's opened scope is 59–60 fps either
+way unthrottled, and 23 → 59 at 4× with the composited zoom gesture.
 
 ## What each column is
 
@@ -52,7 +56,7 @@ then `requestAnimationFrame`, then one task.
 | `*_layout_source` | where the layout came from: `server`, `worker`, `main` (no worker), `cache` (the page's own) |
 | `relations_first_page_ms` | click on the Relations tab → painted (`relations:painted`) |
 | `filter_toggle_ms` | the Proposed chip → painted, median of 10 (once, on the opened scope or the whole graph) |
-| `hover_ms_p50/p95` | `mouseenter` on a memory → painted, over 60 memories: latency, so it includes the wait for the next vsync (up to one 16.7 ms frame) |
+| `hover_ms_p50/p95` | `mouseover` (bubbling, as a pointer fires it) on a memory → painted, over 60 memories: latency, so it includes the wait for the next vsync (up to one 16.7 ms frame) |
 | `hover_frame_ms_p50/p95` | the hover's own frame: events dispatched at the start of a frame (in a rAF callback) → the task after that frame's paint, over 60 more memories; the main-thread work the 16 ms budget is about |
 | `frame_ms_p95/p99` | every frame's length while those hovers run |
 | `zoom_fps` | one wheel event per frame, 40 in and 40 out |

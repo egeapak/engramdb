@@ -6,7 +6,7 @@
 //   NODE_PATH=$(npm root -g) node bench/browser/run.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--sizes s60,s1k,s2k,s10k] [--styles plain,grid]
 //     [--themes light,dark] [--widths 1280,390] [--runs 5] [--assets web] [--chrome PATH]
-//     [--json out.json]
+//     [--json out.json] [--cpu-throttle 4]
 //
 // Every figure is a median over `--runs` cold page loads (a fresh browser
 // context, so no layout cache) unless it says otherwise.
@@ -169,6 +169,9 @@ async function newPage(browser, url, style, theme, width) {
     } catch (_) {}
   }, style);
   const p = await ctx.newPage();
+  // `--cpu-throttle N`: Chrome's CPU slowdown, so a frame-capped figure
+  // (zoom and pan fps sit at 60 on a fast machine) can show a difference.
+  if (args['cpu-throttle']) await (await ctx.newCDPSession(p)).send('Emulation.setCPUThrottlingRate', { rate: Number(args['cpu-throttle']) });
   p.on('pageerror', (e) => console.error('pageerror', e.message));
   await p.goto(url);
   await p.waitForSelector('.nav a[href*="/graph"]');
@@ -206,12 +209,16 @@ async function hoverFrames(p) {
     requestAnimationFrame(tick);
     const hover = [];
     let prev = null;
+    // What a pointer moving from one memory to the next fires (the page
+    // listens on the layer, so the events bubble).
+    const leave = (el, to) => el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: to }));
+    const enter = (el, from) => el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: from }));
     for (let i = 0; i < 60; i++) {
       const el = nodes[(i * 7919) % nodes.length];
       await window.__afterPaint();
       const t0 = performance.now();
-      if (prev) prev.dispatchEvent(new MouseEvent('mouseleave'));
-      el.dispatchEvent(new MouseEvent('mouseenter'));
+      if (prev) leave(prev, el);
+      enter(el, prev);
       hover.push((await window.__afterPaint()) - t0);
       prev = el;
       await new Promise((r) => setTimeout(r, 30));
@@ -229,8 +236,8 @@ async function hoverFrames(p) {
         await new Promise((res) =>
           requestAnimationFrame(() => {
             const t0 = performance.now();
-            if (prev) prev.dispatchEvent(new MouseEvent('mouseleave'));
-            el.dispatchEvent(new MouseEvent('mouseenter'));
+            if (prev) leave(prev, el);
+            enter(el, prev);
             const ch = new MessageChannel();
             ch.port1.onmessage = () => res(performance.now() - t0);
             ch.port2.postMessage(0);
@@ -240,7 +247,7 @@ async function hoverFrames(p) {
       prev = el;
       await new Promise((r) => setTimeout(r, 30));
     }
-    if (prev) prev.dispatchEvent(new MouseEvent('mouseleave'));
+    if (prev) leave(prev, null);
     return { hover, work, gaps: gaps.slice(3) };
   });
 }

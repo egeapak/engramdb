@@ -316,8 +316,8 @@ dl.meta dd { overflow-wrap: anywhere; }
 .filt .sel select { font-size: 13px; padding: 4px 28px 4px 8px; }
 .g-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; align-items: start; margin-bottom: 36px; }
 .g-main { min-width: 0; }
-/* The graph box measured before its data arrives (views/graph.js measureBox): laid out, never seen; as tall as the page will be, so a scrollbar takes the same width. */
-.g-probe { visibility: hidden; height: 100vh; overflow: hidden; margin: 0; }
+/* The graph box measured before its data arrives (views/graph.js measureBox): laid out at full size inside a zero-height wrapper, never seen, never scrolled to. */
+.g-probe { visibility: hidden; height: 0; overflow: hidden; margin: 0; }
 .graph-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; font-size: 12px; }
 .graph-tools .btn { min-width: 30px; justify-content: center; }
 .graph-tools .g-style { margin-left: auto; gap: 6px; height: 22px; }
@@ -328,6 +328,10 @@ dl.meta dd { overflow-wrap: anywhere; }
 .graph-empty { padding: 40px 20px; margin: 0; }
 .graph { display: block; width: 100%; height: 100%; cursor: grab; user-select: none; -webkit-user-select: none; }
 .graph:active { cursor: grabbing; }
+/* Mid-zoom (views/graph.js gestureZoom): one composited layer, drawn past its box. */
+.g-pane { height: 100%; }
+.g-pane.zooming { transform-origin: 0 0; will-change: transform; }
+.g-pane.zooming .graph { overflow: visible; }
 .graph .bg { fill: transparent; }
 /* relations: the core draws only the click target; each style's
  * css/themes/<id>.css draws the rest */

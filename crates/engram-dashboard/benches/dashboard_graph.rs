@@ -110,7 +110,7 @@ fn bench(c: &mut Criterion) {
             ),
             (
                 "graph_top_scope_layout",
-                format!("{base}/graph?{all}&top_scope=storage&layout=scope-force&layout_groups=sub&{lay}"),
+                format!("{base}/graph?{all}&top_scope=storage&layout=scope-force,opened&layout_open_over=150&{lay}"),
             ),
             (
                 "graph_show_all_layout",

@@ -19,7 +19,9 @@
 use std::collections::HashMap;
 
 use super::labels::{place_labels, LabelNode, Nudge, Options};
-use super::{fkey, js_cmp, js_round, ForceInput, ForceOutput, Rect, ScopeNameOut};
+use super::{
+    fkey, js_cmp, js_round, CoreTop, ForceCore, ForceInput, ForceOutput, Rect, ScopeNameOut,
+};
 
 /// The ideal relation length, in layout units.
 const S: f64 = 30.0;
@@ -975,8 +977,16 @@ fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// `layout(input)` of scope-force.js.
+/// `layout(input)` of scope-force.js: [`layout_core`], then [`finish`] for
+/// the input's width.
 pub fn layout(input: &ForceInput) -> ForceOutput {
+    finish(&layout_core(input), input.width)
+}
+
+/// Everything of scope-force.js's `layout` but its step 5b and the bounds:
+/// the part that does not depend on the box's width (the module docs of
+/// [`super`], "Width"), so one cached core serves every width.
+pub fn layout_core(input: &ForceInput) -> ForceCore {
     let nodes = &input.nodes;
     let edges = &input.edges;
     let n = nodes.len();
@@ -1530,23 +1540,6 @@ pub fn layout(input: &ForceInput) -> ForceOutput {
         y[rank[i]] = pos[2 * i + 1];
     }
 
-    // ---- 5b. the drawn scope names, sized by the box's width
-    let box_w = 200f64.max(match input.width {
-        Some(w) if w != 0.0 && !w.is_nan() => w,
-        _ => 900.0,
-    });
-    let draw_size = 120f64.min(name_size.max((12.0 * (extent + 200.0)) / box_w));
-    let mut shown = names.clone();
-    if n > 0 && draw_size > name_size * 1.01 {
-        let avoid: Vec<Rect> = labels.iter().filter(|l| l.placed).map(|l| l.rect).collect();
-        let big = place_scope_names(&names_in, &x, &y, &r, draw_size, &avoid).names;
-        shown = big
-            .into_iter()
-            .zip(names.iter())
-            .map(|(nm, old)| if nm.placed { nm } else { old.clone() })
-            .collect();
-    }
-
     // ---- 6. routes
     let centre_of: HashMap<&str, (f64, f64)> = tops
         .iter()
@@ -1695,6 +1688,87 @@ pub fn layout(input: &ForceInput) -> ForceOutput {
             grow(l.rect.x1, l.rect.y1);
         }
     }
+    ForceCore {
+        pos,
+        routes,
+        labels,
+        region_r,
+        x,
+        y,
+        r,
+        tops: tops
+            .iter()
+            .map(|t| CoreTop {
+                key: t.key.clone(),
+                key_len: t.key_len,
+                slot: t.slot,
+                cx: t.cx,
+                cy: t.cy,
+                reach: t.reach,
+            })
+            .collect(),
+        names,
+        name_size,
+        extent,
+        min: [min_x, min_y],
+        max: [max_x, max_y],
+    }
+}
+
+/// scope-force.js's step 5b and bounds over a [`ForceCore`]: the drawn scope
+/// names, at least 12 px on screen at Fit in a box `width` wide, placed
+/// again at that size clear of the placed labels (each keeping its step-4
+/// spot when no new one is free), and the bounds they grow.
+pub fn finish(core: &ForceCore, width: Option<f64>) -> ForceOutput {
+    let n = core.x.len();
+    let box_w = 200f64.max(match width {
+        Some(w) if w != 0.0 && !w.is_nan() => w,
+        _ => 900.0,
+    });
+    let draw_size = 120f64.min(core.name_size.max((12.0 * (core.extent + 200.0)) / box_w));
+    let mut shown = core.names.clone();
+    if n > 0 && draw_size > core.name_size * 1.01 {
+        let names_in: Vec<TopName<'_>> = core
+            .tops
+            .iter()
+            .map(|t| TopName {
+                key: &t.key,
+                key_len: t.key_len,
+                slot: t.slot,
+                cx: t.cx,
+                cy: t.cy,
+                reach: t.reach,
+            })
+            .collect();
+        let avoid: Vec<Rect> = core
+            .labels
+            .iter()
+            .filter(|l| l.placed)
+            .map(|l| l.rect)
+            .collect();
+        let big = place_scope_names(&names_in, &core.x, &core.y, &core.r, draw_size, &avoid).names;
+        shown = big
+            .into_iter()
+            .zip(core.names.iter())
+            .map(|(nm, old)| if nm.placed { nm } else { old.clone() })
+            .collect();
+    }
+    let [mut min_x, mut min_y] = core.min;
+    let [mut max_x, mut max_y] = core.max;
+    let mut grow = |gx: f64, gy: f64| {
+        if gx < min_x {
+            min_x = gx;
+        }
+        if gx > max_x {
+            max_x = gx;
+        }
+        if gy < min_y {
+            min_y = gy;
+        }
+        if gy > max_y {
+            max_y = gy;
+        }
+    };
     for nm in &shown {
         if nm.placed {
             grow(nm.rect.x0, nm.rect.y0);
@@ -1709,9 +1783,9 @@ pub fn layout(input: &ForceInput) -> ForceOutput {
     }
     let pad_b = 16.0;
     ForceOutput {
-        pos,
-        routes,
-        labels,
+        pos: core.pos.clone(),
+        routes: core.routes.clone(),
+        labels: core.labels.clone(),
         bounds: [
             min_x - pad_b,
             min_y - pad_b,
@@ -1719,6 +1793,6 @@ pub fn layout(input: &ForceInput) -> ForceOutput {
             max_y - min_y + pad_b * 2.0,
         ],
         scopes: shown,
-        region_r,
+        region_r: core.region_r,
     }
 }

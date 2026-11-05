@@ -140,6 +140,34 @@ export function spotsAt(x, y, r, w, corners) {
   return spots;
 }
 
+/**
+ * Spot `k` of `spotsAt(x, y, r, w, true)`, without its box (all a drawn
+ * label needs), by the same arithmetic: what the page rebuilds a server
+ * layout's labels with. `undefined` for an index out of range.
+ */
+export function spotAt(x, y, r, k) {
+  const c = r * 0.5;
+  switch (k) {
+    case 0:
+      return { x, y: y + r + LABEL_H - 2, anchor: 'middle' };
+    case 1:
+      return { x, y: y - r - 4, anchor: 'middle' };
+    case 2:
+      return { x: x + r + 2, y: y + 4, anchor: 'start' };
+    case 3:
+      return { x: x - r - 2, y: y + 4, anchor: 'end' };
+    case 4:
+      return { x: x + c, y: y + r + LABEL_H - 2, anchor: 'start' };
+    case 5:
+      return { x: x - c, y: y + r + LABEL_H - 2, anchor: 'end' };
+    case 6:
+      return { x: x + c, y: y - r - 4, anchor: 'start' };
+    case 7:
+      return { x: x - c, y: y - r - 4, anchor: 'end' };
+  }
+  return undefined;
+}
+
 /** Nudge directions and lengths (a fraction of `opts.nudge`), nearest first; literals, so every engine agrees. */
 const NUDGES = (() => {
   const d = 0.7071067811865476;

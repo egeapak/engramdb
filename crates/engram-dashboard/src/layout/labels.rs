@@ -56,6 +56,9 @@ pub enum Anchor {
 }
 
 impl Anchor {
+    /// Every anchor, in a fixed order (the layout cache's byte for one).
+    pub const ALL: [Anchor; 3] = [Anchor::Middle, Anchor::Start, Anchor::End];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Anchor::Middle => "middle",

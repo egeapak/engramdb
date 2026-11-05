@@ -1,5 +1,7 @@
 //! The layout cache: in memory (a small LRU in [`crate::AppState`]) and on
-//! disk, keyed by the layout input's digest ([`super::LayoutInput::digest`]).
+//! disk, keyed by the layout input's digest ([`super::LayoutInput::digest`]),
+//! with at most one computation per key in flight and at most
+//! [`MAX_COMPUTING`] at once.
 //!
 //! **The dashboard's one declared write outside a store.** Every GET is
 //! side-effect free *for stores* (they open read-only, nothing is created
@@ -8,58 +10,120 @@
 //! (`engram_storage::paths::dashboard_layout_cache_dir`;
 //! `ENGRAMDB_DASHBOARD_CACHE_DIR` overrides it, as `ENGRAMDB_DATA_DIR` does
 //! the data dir, and the test harness points it at a temp dir), never under
-//! a store, `.engramdb/` or the data dir. The directory is created 0700 and
+//! a store, `.engramdb/` or the data dir. The directory is created 0700 when
+//! the dashboard starts (whether or not a layout is ever asked for) and
 //! refused (memory only, one warning) when it exists with group/other bits,
-//! is a symlink or is not a directory; files are written 0600, temp file
-//! then rename. It holds the encoded layouts only: positions, label spots,
-//! scope names (`key` of each top scope) and the digest, no memory text.
-//! `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` turns both caches off (the browser
-//! bench's cold figure).
+//! with another owner, is a symlink or is not a directory; files are written
+//! 0600, temp file then rename. A file is read through one handle opened
+//! with `O_NOFOLLOW | O_NONBLOCK` (a planted symlink or FIFO is a miss, never
+//! followed or waited on), checked on that handle to be a regular file under
+//! [`MAX_FILE`], and its LRU stamp is refreshed on the same handle. It holds
+//! the layouts only: positions, label spots, scope names (`key` of each top
+//! scope) and the digest, no memory text. `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
+//! turns both caches off (the browser bench's cold figure).
+//!
+//! **Format.** `EDLC`, the [`super::LAYOUT_VERSION`] (u32 LE), the 64-byte
+//! hex digest, then [`super::Cached::to_bytes`]: scope-force's width-free
+//! core as raw little-endian doubles (exact, unlike a JSON parse), the
+//! overview as its encoded JSON text.
 //!
 //! **Bounded.** At most [`MEM_ENTRIES`] layouts in memory and
 //! [`DISK_BYTES`] on disk; past that the least recently used go (a disk hit
 //! refreshes the file's mtime, eviction takes the oldest mtimes first).
 //!
+//! **Bounded work.** A key being computed is computed once: later requests
+//! for it wait on the same result ([`Flight::Wait`]). At most
+//! [`MAX_COMPUTING`] keys are computed at once; a request past that gets no
+//! layout ([`Flight::Busy`]) and the page lays out itself, so slow inputs (a
+//! long scope name costs time in the name placement) cannot fill the
+//! blocking pool, whose other users are the store probes.
+//!
 //! **Loss paths, all harmless for a cache and all declared here:** a file
-//! that does not parse, carries another digest or another
-//! [`super::LAYOUT_VERSION`] is ignored and overwritten by the next write;
-//! two dashboards pruning at once may delete more than needed; a read that
-//! races a prune or a rename misses and recomputes; a write that fails
-//! (disk full, permissions) is logged at debug and the layout is still
-//! served from memory; two requests for one uncached layout both compute it
-//! (no single-flight: the second write replaces the first with the same
-//! bytes); a temp file a crash left behind is removed by the next prune once
-//! it is ten minutes old.
+//! that does not parse, carries another digest or another version is
+//! ignored and overwritten by the next write; files of an older format
+//! (`*.json`, layout version 1) are deleted by the next prune; two dashboards
+//! pruning at once may delete more than needed; a read that races a prune
+//! or a rename misses and recomputes; a write that fails (disk full,
+//! permissions) is logged at debug and the layout is still served from
+//! memory; two dashboards computing one layout both write it (the second
+//! rename replaces the first with the same bytes); a temp file a crash left
+//! behind is removed by the next prune once it is ten minutes old.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use serde_json::Value;
+use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
-/// One encoded layout: its JSON text, served as is. Kept as text rather
-/// than a `serde_json::Value` because serde_json (built without
-/// `float_roundtrip`) does not parse every double back to the same bits,
-/// and the page needs the layout's exact numbers.
-pub type Encoded = Arc<str>;
+use super::Cached;
+
+/// One encoded layout as the page gets it: JSON text, spliced into the
+/// response as is (see [`super::Cached`] for why it stays text).
+pub type Encoded = String;
 
 /// Layouts kept in memory.
 pub const MEM_ENTRIES: usize = 32;
 /// Bytes of layouts kept on disk.
 pub const DISK_BYTES: u64 = 64 * 1024 * 1024;
+/// Layouts computed at once (module docs, "Bounded work").
+pub const MAX_COMPUTING: usize = 2;
 /// A cache file larger than this is not read (none is written that large).
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 /// A temp file older than this is a crash's leftover.
 const STALE_TMP: Duration = Duration::from_secs(600);
+/// A cache file's first bytes.
+const MAGIC: &[u8; 4] = b"EDLC";
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+type Slot = watch::Receiver<Option<Arc<Cached>>>;
+
 pub struct LayoutCache {
     enabled: bool,
-    mem: Mutex<Vec<(String, Encoded)>>,
+    mem: Mutex<Vec<(String, Arc<Cached>)>>,
     /// `None`: memory only (no cache dir, or one refused).
     disk: Option<PathBuf>,
+    flights: Arc<Mutex<HashMap<String, Slot>>>,
+    permits: Arc<Semaphore>,
+}
+
+/// What a request for an uncached layout does ([`LayoutCache::begin`]).
+pub enum Flight {
+    /// Another request is computing it: wait for that one.
+    Wait(Slot),
+    /// Compute it (on the blocking pool), then [`LayoutCache::land`] it.
+    Lead(Lead),
+    /// [`MAX_COMPUTING`] layouts are being computed: go without.
+    Busy,
+}
+
+/// The right to compute one key. Dropped without landing (the computation
+/// panicked), it clears the key so the next request computes it again.
+pub struct Lead {
+    key: String,
+    tx: watch::Sender<Option<Arc<Cached>>>,
+    flights: Arc<Mutex<HashMap<String, Slot>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Lead {
+    /// A receiver of this computation's result.
+    pub fn subscribe(&self) -> Slot {
+        self.tx.subscribe()
+    }
+}
+
+impl Drop for Lead {
+    fn drop(&mut self) {
+        let mut f = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        if f.get(&self.key)
+            .is_some_and(|rx| rx.same_channel(&self.tx.subscribe()))
+        {
+            f.remove(&self.key);
+        }
+    }
 }
 
 impl LayoutCache {
@@ -97,6 +161,8 @@ impl LayoutCache {
             enabled,
             mem: Mutex::new(Vec::new()),
             disk,
+            flights: Arc::new(Mutex::new(HashMap::new())),
+            permits: Arc::new(Semaphore::new(MAX_COMPUTING)),
         }
     }
 
@@ -106,7 +172,7 @@ impl LayoutCache {
     }
 
     /// A layout held in memory (no I/O: safe on the runtime).
-    pub fn get_mem(&self, key: &str) -> Option<Encoded> {
+    pub fn get_mem(&self, key: &str) -> Option<Arc<Cached>> {
         if !self.enabled {
             return None;
         }
@@ -118,7 +184,10 @@ impl LayoutCache {
         Some(v)
     }
 
-    fn put_mem(&self, key: &str, v: Encoded) {
+    fn put_mem(&self, key: &str, v: Arc<Cached>) {
+        if !self.enabled {
+            return;
+        }
         let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
         mem.retain(|(k, _)| k != key);
         mem.push((key.to_string(), v));
@@ -127,21 +196,52 @@ impl LayoutCache {
         }
     }
 
+    /// Join the computation of `key` in flight, or lead a new one if a
+    /// permit is free (module docs, "Bounded work").
+    pub fn begin(&self, key: &str) -> Flight {
+        let mut f = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(rx) = f.get(key) {
+            return Flight::Wait(rx.clone());
+        }
+        let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+            return Flight::Busy;
+        };
+        let (tx, rx) = watch::channel(None);
+        f.insert(key.to_string(), rx);
+        Flight::Lead(Lead {
+            key: key.to_string(),
+            tx,
+            flights: Arc::clone(&self.flights),
+            _permit: permit,
+        })
+    }
+
+    /// Hand a led computation's result to everyone waiting on it.
+    pub fn land(&self, lead: Lead, v: Arc<Cached>) {
+        // Out of the map first, so a request arriving now reads the memory
+        // cache (filled before this) rather than a finished flight.
+        self.flights
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&lead.key);
+        let _ = lead.tx.send(Some(v));
+    }
+
     /// The layout for `key`: from memory, else from disk, else computed
     /// (and stored in both). Blocking: call it on the blocking pool.
-    pub fn get_or_compute(&self, key: &str, compute: impl FnOnce() -> String) -> Encoded {
+    pub fn fill(&self, key: &str, compute: impl FnOnce() -> Cached) -> Arc<Cached> {
         if !self.enabled {
-            return compute().into();
+            return Arc::new(compute());
         }
         if let Some(v) = self.get_mem(key) {
             return v;
         }
         if let Some(v) = self.read_disk(key) {
-            let v: Encoded = v.into();
+            let v = Arc::new(v);
             self.put_mem(key, Arc::clone(&v));
             return v;
         }
-        let v: Encoded = compute().into();
+        let v = Arc::new(compute());
         self.put_mem(key, Arc::clone(&v));
         if let Err(e) = self.write_disk(key, &v) {
             tracing::debug!("dashboard layout cache: write failed: {e}");
@@ -150,39 +250,44 @@ impl LayoutCache {
     }
 
     fn file_of(&self, key: &str) -> Option<PathBuf> {
-        // Digests are hex; anything else never names a file.
-        if key.is_empty() || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        // Digests are 64 hex digits; anything else never names a file.
+        if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
-        Some(self.disk.as_ref()?.join(format!("{key}.json")))
+        Some(self.disk.as_ref()?.join(format!("{key}.bin")))
     }
 
-    fn read_disk(&self, key: &str) -> Option<String> {
+    fn read_disk(&self, key: &str) -> Option<Cached> {
+        use std::io::Read;
         let path = self.file_of(key)?;
-        let meta = std::fs::symlink_metadata(&path).ok()?;
-        if !meta.file_type().is_file() || meta.len() > MAX_FILE {
+        let mut f = open_nofollow(&path).ok()?;
+        let meta = f.metadata().ok()?;
+        if !meta.is_file() || meta.len() > MAX_FILE {
             return None;
         }
-        let text = std::fs::read_to_string(&path).ok()?;
-        // Parsed only to check the header; the text itself is served.
-        let v: Value = serde_json::from_str(&text).ok()?;
-        let current = v.get("key").and_then(Value::as_str) == Some(key)
-            && v.get("v").and_then(Value::as_u64) == Some(u64::from(super::LAYOUT_VERSION));
-        if !current {
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        f.read_to_end(&mut bytes).ok()?;
+        let body = bytes.strip_prefix(MAGIC.as_slice())?;
+        let (version, body) = body.split_at_checked(4)?;
+        let (stored, body) = body.split_at_checked(64)?;
+        if version != super::LAYOUT_VERSION.to_le_bytes() || stored != key.as_bytes() {
             return None;
         }
-        // Refresh the LRU stamp; a failure only makes it evict sooner.
-        if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-            let _ = f.set_modified(SystemTime::now());
-        }
-        Some(text)
+        let v = Cached::from_bytes(body)?;
+        // Refresh the LRU stamp on the same handle; a failure only makes it
+        // evict sooner.
+        let _ = f.set_modified(SystemTime::now());
+        Some(v)
     }
 
-    fn write_disk(&self, key: &str, v: &str) -> std::io::Result<()> {
+    fn write_disk(&self, key: &str, v: &Cached) -> std::io::Result<()> {
         let (Some(path), Some(dir)) = (self.file_of(key), self.disk.as_ref()) else {
             return Ok(());
         };
-        let bytes = v.as_bytes();
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&super::LAYOUT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(key.as_bytes());
+        bytes.extend_from_slice(&v.to_bytes());
         let tmp = dir.join(format!(
             ".{key}.{}.{}.tmp",
             std::process::id(),
@@ -198,7 +303,7 @@ impl LayoutCache {
         let written = (|| {
             use std::io::Write;
             let mut f = opts.open(&tmp)?;
-            f.write_all(bytes)?;
+            f.write_all(&bytes)?;
             std::fs::rename(&tmp, &path)
         })();
         if written.is_err() {
@@ -208,6 +313,19 @@ impl LayoutCache {
         prune(dir, DISK_BYTES);
         Ok(())
     }
+}
+
+/// Open `path` for reading without following a symlink or blocking on a
+/// FIFO (the `state_file` rule).
+fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::File::options();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    opts.open(path)
 }
 
 /// Create the cache directory 0700, or say why it cannot be used.
@@ -226,9 +344,13 @@ fn prepare_dir(dir: &Path) -> Result<(), String> {
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         if meta.permissions().mode() & 0o077 != 0 {
             return Err("group or other can access it".into());
+        }
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err("another user owns it".into());
         }
     }
     Ok(())
@@ -236,7 +358,7 @@ fn prepare_dir(dir: &Path) -> Result<(), String> {
 
 /// Delete the least recently used layouts until the directory holds at most
 /// `cap` bytes (to three quarters of it, so a full cache does not prune on
-/// every write), and stale temp files.
+/// every write), stale temp files and files of the older format.
 fn prune(dir: &Path, cap: u64) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
@@ -261,7 +383,11 @@ fn prune(dir: &Path, cap: u64) {
             }
             continue;
         }
-        if !name.ends_with(".json") {
+        if name.ends_with(".json") {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if !name.ends_with(".bin") {
             continue;
         }
         total += meta.len();

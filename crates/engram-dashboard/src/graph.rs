@@ -35,16 +35,23 @@
 //! draws, without paying for the graph it does not draw. At or under N the
 //! answer is the ordinary graph, so one request both decides and serves.
 //!
-//! **Layout.** `layout=scope-force` (or `layout=scope-overview,scope-force`; with `layout_aspect=`, `layout_width=`
-//! and `layout_groups=top|sub`) adds `layout`: the page's scope-force layout
-//! of exactly this response, computed here ([`crate::layout`]) so the page
-//! skips its worker; `layout=scope-overview` does the same for a `summary`
-//! response's scope overview. Computed on the blocking pool under
-//! [`LAYOUT_TIMEOUT`] and cached by the input's digest (in memory and under
-//! the OS cache dir, never in a store: `layout::cache`); a layout that is
-//! not ready in time is left out (the page lays out as before) and still
-//! cached when it finishes. A layout that does not apply (scope-force on a
-//! summary, the overview on a graph) is left out too.
+//! **Layout.** `layout=` (with `layout_aspect=` and `layout_width=`, as the
+//! page rounds them; see [`crate::layout::LayoutRequest`]) adds `layout`:
+//! the page's layout of exactly this response, computed here
+//! ([`crate::layout`]) so the page skips its own. A `summary` response
+//! carries the scope overview when `layout=` names `scope-overview`; a graph
+//! carries scope-force grouped by sub-scope when `layout=` names `opened`,
+//! `top_scope=` names one scope and more than `layout_open_over=N` memories
+//! pass the status filters (the page's opened scope), else scope-force by
+//! top scope when `layout=` names `scope-force`; anything else carries none.
+//! Computed on the blocking pool, once per input at a time and at most
+//! `layout::cache::MAX_COMPUTING` at once (a request past that gets none),
+//! under `AppState::layout_timeout` ([`LAYOUT_TIMEOUT`]: about what the
+//! page's worker takes), and cached by the input's digest (in memory and
+//! under the OS cache dir, never in a store: `layout::cache`); a layout not
+//! ready in time is left out (the page lays out as before) and still cached
+//! when it finishes. With `--assets-dir` the layout is sent only while the
+//! layout JS on disk is the binary's (`AppState::server_layouts_match`).
 //!
 //! **Far ends.** A same-store edge whose target is gone is returned with
 //! `state: "dangling"` (drawn as a stub to a deleted-memory mark); one into
@@ -65,8 +72,8 @@ use serde::Serialize;
 
 use crate::api::{color_slots, ok, open, query, status_str, top_scope_of, wire, ApiResult};
 use crate::layout::{
-    overview::{OverviewEdge, OverviewInput, OverviewNode},
-    ForceEdge, ForceInput, ForceNode, LayoutInput, LayoutRequest,
+    cache::Flight, overview::OverviewInput, EdgeFacts, ForceInput, Groups, LayoutInput,
+    LayoutRequest, NodeFacts,
 };
 use crate::{ApiError, AppState};
 
@@ -76,8 +83,10 @@ pub const DEFAULT_LIMIT: usize = 800;
 pub const MAX_LIMIT: usize = 2000;
 /// Foreign stores probed per request; edges into any beyond are `unknown`.
 const MAX_FOREIGN_STORES: usize = 8;
-/// How long a response waits for its layout (module docs).
-pub const LAYOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a response waits for its layout (module docs): about what the
+/// page's worker takes for a large graph, so a slow layout never makes the
+/// page slower than laying out itself would.
+pub const LAYOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Serialize, Default)]
 struct Reads {
@@ -272,7 +281,7 @@ struct GraphPage {
 
 /// The page as JSON with `layout` (the encoded layout's text, module docs)
 /// spliced in as its last field: the layout is kept as text so its doubles
-/// reach the page bit for bit (`layout::cache::Encoded`).
+/// reach the page bit for bit (`layout::Cached`).
 fn respond(page: &GraphPage, layout: Option<crate::layout::cache::Encoded>) -> ApiResult {
     let Some(layout) = layout else {
         return ok(page);
@@ -296,143 +305,89 @@ fn respond(page: &GraphPage, layout: Option<crate::layout::cache::Encoded>) -> A
     Ok(r)
 }
 
-/// scope-force's input for `nodes` / `edges`, as `views/graph.js` builds
+/// scope-force's input for `nodes` / `edges`, as `graph/input.js` builds
 /// it from this response (`crate::layout` module docs).
-fn force_input(nodes: &[Node], edges: &[Edge], req: &LayoutRequest) -> ForceInput {
-    let by_id: HashMap<&str, usize> = nodes
+fn force_input(nodes: &[Node], edges: &[Edge], req: &LayoutRequest, groups: Groups) -> ForceInput {
+    let facts: Vec<NodeFacts<'_>> = nodes
         .iter()
-        .enumerate()
-        .map(|(i, n)| (n.id.as_str(), i))
+        .map(|n| NodeFacts {
+            id: &n.id,
+            top_scope: n.top_scope.as_deref(),
+            scope: n.scope.as_deref(),
+            summary: &n.summary,
+            reads: n.usage.returned + n.usage.injected + n.usage.fetched,
+            degree: n.degree,
+            slot: n.color_slot,
+        })
         .collect();
-    let top = |n: &Node| n.top_scope.clone().unwrap_or_default();
-    ForceInput {
-        nodes: nodes
-            .iter()
-            .map(|n| {
-                let reads = n.usage.returned + n.usage.injected + n.usage.fetched;
-                ForceNode {
-                    id: n.id.clone(),
-                    top_scope: if req.sub_groups {
-                        crate::layout::sub_key(
-                            n.scope.as_deref().unwrap_or(""),
-                            n.top_scope.as_deref().unwrap_or(""),
-                        )
-                    } else {
-                        top(n)
-                    },
-                    slot: n.color_slot,
-                    scope: n.scope.clone().unwrap_or_default(),
-                    degree: n.degree as f64,
-                    r: crate::layout::radius(reads),
-                    label_len: crate::layout::short_label_len(&n.summary),
-                    weight: reads as f64,
-                }
-            })
-            .collect(),
-        edges: edges
-            .iter()
-            .map(|e| {
-                let t = if e.dst_store.is_some() {
-                    None
-                } else {
-                    by_id.get(e.dst.as_str()).copied()
-                };
-                ForceEdge {
-                    s: by_id.get(e.src.as_str()).map_or(-1, |&s| s as i64),
-                    t: t.map_or(-1, |t| t as i64),
-                    far_scope: t.map(|t| top(&nodes[t])),
-                }
-            })
-            .collect(),
-        aspect: req.aspect,
-        width: Some(req.width),
-    }
+    let ends: Vec<EdgeFacts<'_>> = edges
+        .iter()
+        .map(|e| EdgeFacts {
+            src: &e.src,
+            dst: &e.dst,
+            cross_store: e.dst_store.is_some(),
+        })
+        .collect();
+    crate::layout::build_force_input(&facts, &ends, groups, req.aspect, req.width)
 }
 
 /// The overview's input for a summary's scopes, as
-/// `views/graph-overview.js::overviewLayout` builds it.
+/// `graph/input.js::overviewInput` builds it.
 fn overview_input(
     scopes: &[Scope],
     scope_edges: &[ScopeEdge],
     req: &LayoutRequest,
 ) -> OverviewInput {
-    let shown: Vec<&Scope> = scopes.iter().filter(|l| l.count > 0).collect();
-    let index: HashMap<&str, usize> = shown
+    let scopes: Vec<(&str, usize)> = scopes.iter().map(|l| (l.name.as_str(), l.count)).collect();
+    let rows: Vec<(&str, &str, usize)> = scope_edges
         .iter()
-        .enumerate()
-        .map(|(i, l)| (l.name.as_str(), i))
+        .map(|r| (r.a.as_str(), r.b.as_str(), r.tally.count))
         .collect();
-    // `scopePairs`: unordered pairs of different scopes, summed, in order of
-    // first appearance.
-    let mut pairs: Vec<(&str, &str, usize)> = Vec::new();
-    let mut at: HashMap<(&str, &str), usize> = HashMap::new();
-    for row in scope_edges {
-        if row.a == row.b {
-            continue;
-        }
-        let (a, b) = if crate::layout::js_cmp(&row.a, &row.b).is_lt() {
-            (row.a.as_str(), row.b.as_str())
-        } else {
-            (row.b.as_str(), row.a.as_str())
-        };
-        match at.get(&(a, b)) {
-            Some(&k) => pairs[k].2 += row.tally.count,
-            None => {
-                at.insert((a, b), pairs.len());
-                pairs.push((a, b, row.tally.count));
-            }
-        }
-    }
-    let name_len = |name: &str| {
-        if name.is_empty() {
-            "No scope".len()
-        } else {
-            name.encode_utf16().count()
-        }
-    };
-    OverviewInput {
-        nodes: shown
-            .iter()
-            .map(|l| OverviewNode {
-                id: l.name.clone(),
-                count: l.count as f64,
-                // "<name> · <count>"
-                full_len: name_len(&l.name) + 3 + crate::layout::fmt_len(l.count),
-                short_len: name_len(&l.name),
-            })
-            .collect(),
-        edges: pairs
-            .into_iter()
-            .filter_map(|(a, b, n)| {
-                Some(OverviewEdge {
-                    s: *index.get(a)?,
-                    t: *index.get(b)?,
-                    n: n as f64,
-                })
-            })
-            .collect(),
-        aspect: req.aspect,
-        width: req.width,
-    }
+    crate::layout::build_overview_input(&scopes, &rows, req.aspect, req.width)
 }
 
-/// The layout for `input`: from the cache, else computed on the blocking
-/// pool within [`LAYOUT_TIMEOUT`] (module docs). `None` when not ready.
+/// The encoded layout for `input`: from the cache, else computed on the
+/// blocking pool within the state's layout timeout, once per key at a time
+/// (module docs). `None` when not ready, busy, or not the page's layout.
 async fn layout_of(
     state: &Arc<AppState>,
     input: LayoutInput,
+    groups: Groups,
 ) -> Option<crate::layout::cache::Encoded> {
+    let deadline = tokio::time::Instant::now() + state.layout_timeout;
+    if matches!(state.assets, crate::assets::AssetSource::Disk(_)) {
+        let st = Arc::clone(state);
+        let current = tokio::task::spawn_blocking(move || st.server_layouts_match());
+        if !current.await.unwrap_or(false) {
+            return None;
+        }
+    }
+    let input = Arc::new(input);
     let key = input.digest();
-    if let Some(v) = state.layouts.get_mem(&key) {
-        return Some(v);
-    }
-    let st = Arc::clone(state);
-    let task =
-        tokio::task::spawn_blocking(move || st.layouts.get_or_compute(&key, || input.run(&key)));
-    match tokio::time::timeout(LAYOUT_TIMEOUT, task).await {
-        Ok(Ok(v)) => Some(v),
-        _ => None,
-    }
+    let cached = match state.layouts.get_mem(&key) {
+        Some(v) => v,
+        None => {
+            let mut rx = match state.layouts.begin(&key) {
+                Flight::Busy => return None,
+                Flight::Wait(rx) => rx,
+                Flight::Lead(lead) => {
+                    let rx = lead.subscribe();
+                    let (st, inp, k) = (Arc::clone(state), Arc::clone(&input), key.clone());
+                    tokio::task::spawn_blocking(move || {
+                        let v = st.layouts.fill(&k, || inp.run(&k));
+                        st.layouts.land(lead, v);
+                    });
+                    rx
+                }
+            };
+            let ready = tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await;
+            match ready {
+                Ok(Ok(v)) => Arc::clone(v.as_ref()?),
+                _ => return None,
+            }
+        }
+    };
+    input.render(&cached, &key, groups)
 }
 
 /// A memory's sub-scope: the first two segments of its first logical scope,
@@ -626,6 +581,8 @@ pub(crate) async fn project_graph(
             top_of.insert(e.id.as_str(), top);
         }
     }
+    // The page's `storeTotal`: what decides an opened scope.
+    let store_total: usize = totals.values().map(|t| t.0).sum();
     // Same-store relations between two of them (a dangling or cross-store
     // one has no far scope to count it under).
     let scope_pair = |e: &GraphEdge| -> Option<(&str, &str)> {
@@ -674,7 +631,7 @@ pub(crate) async fn project_graph(
         let layout = match layout_req {
             Some(req) if req.overview => {
                 let input = overview_input(&scopes, &scope_edges, &req);
-                layout_of(&state, LayoutInput::Overview(input)).await
+                layout_of(&state, LayoutInput::Overview(input), Groups::Top).await
             }
             _ => None,
         };
@@ -907,10 +864,21 @@ pub(crate) async fn project_graph(
         })
         .collect();
     let scopes = scopes_of(totals, &scope_count, &slots);
-    let layout = match layout_req {
-        Some(req) if req.force && !nodes.is_empty() => {
-            let input = force_input(&nodes, &edges, &req);
-            layout_of(&state, LayoutInput::Force(input)).await
+    // An opened scope (the page's `opened`) groups by sub-scope; else the
+    // style's own scope-force, by top scope (module docs).
+    let opened = layout_req.is_some_and(|req| {
+        req.open_over.is_some_and(|n| store_total > n)
+            && scopes_wanted.as_ref().is_some_and(|ls| ls.len() == 1)
+    });
+    let groups = match layout_req {
+        Some(_) if opened => Some(Groups::Sub),
+        Some(req) if req.force => Some(Groups::Top),
+        _ => None,
+    };
+    let layout = match (layout_req, groups) {
+        (Some(req), Some(groups)) if !nodes.is_empty() => {
+            let input = force_input(&nodes, &edges, &req, groups);
+            layout_of(&state, LayoutInput::Force(input), groups).await
         }
         _ => None,
     };

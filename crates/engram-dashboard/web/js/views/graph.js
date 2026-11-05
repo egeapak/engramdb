@@ -68,13 +68,14 @@ import { fmt, ago, plural, shortId, label } from '../format.js';
 import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel, edgeClass } from '../relations.js';
 import { runNamedLayout, usesWidth } from '../graph/layouts.js';
-import { fromServer, SERVER_LAYOUTS } from '../graph/server-layout.js';
+import { isFor, decode, serverKey, SERVER_LAYOUTS } from '../graph/server-layout.js';
+import { shortLabel, forceInput, roundAspect, roundWidth } from '../graph/input.js';
 import { along, pathD } from '../graph/geometry.js';
 import { reads, radius } from '../graph/radius.js';
 import { makeT } from '../graph/strings.js';
 import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.js';
 import { filtered } from '../graph/tally.js';
-import { subKey, drawRegions, placeTags } from '../graph/opened.js';
+import { drawRegions, placeTags } from '../graph/opened.js';
 import { memoryPanel } from '../graph/details.js';
 import { placeLabels } from '../graph/labels.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
@@ -156,35 +157,57 @@ function warmWorker() {
 }
 
 /**
+ * Roughly how much of the drawn graph page is not the graph box (heading,
+ * filters, tools, legend): with the box it decides whether the page will
+ * scroll, so the probe below takes the width a scrollbar leaves.
+ */
+const PAGE_EXTRA = 300;
+
+/**
  * The box a graph view will draw in, measured before its data arrives (the
  * server lays out for the box's shape): a hidden copy of the view's grid in
- * `main`, as tall as the page will be (so a scrollbar takes the same width).
- * Returns { aspect, width } rounded as the layout input rounds them.
+ * `main`, inside a zero-height wrapper so the loading page never scrolls.
+ * The page's scrollbar is set, for the measurement only, to what the drawn
+ * page will have (it scrolls when the box plus PAGE_EXTRA is taller than
+ * the window), since a classic scrollbar narrows the box. A wrong guess
+ * only costs speed: the drawn box then misses the server's layout and the
+ * worker lays out. Returns { aspect, width } rounded as the input rounds them.
  */
 export function measureBox(main, loadingEl) {
   const box = h('div', { class: 'graph-box' });
-  mount(main, loadingEl, h('div', { class: 'g-grid g-probe', 'aria-hidden': 'true' }, h('div', { class: 'g-main' }, box), h('aside', { class: 'g-card' })));
+  mount(main, loadingEl, h('div', { class: 'g-probe', 'aria-hidden': 'true' }, h('div', { class: 'g-grid' }, h('div', { class: 'g-main' }, box), h('aside', { class: 'g-card' }))));
+  const root = document.documentElement;
+  const scrolls = root.scrollHeight > root.clientHeight;
+  const willScroll = (box.clientHeight || 500) + PAGE_EXTRA > window.innerHeight;
+  const before = root.style.overflowY;
+  if (scrolls !== willScroll) root.style.overflowY = willScroll ? 'scroll' : 'hidden';
   const w = box.clientWidth || 800;
-  const aspect = Math.min(3, Math.max(0.3, (box.clientHeight || 500) / w));
-  return { aspect: Math.round(aspect * 20) / 20, width: Math.round(w / 40) * 40 };
+  const ht = box.clientHeight || 500;
+  root.style.overflowY = before;
+  return { aspect: roundAspect(ht / w), width: roundWidth(w) };
 }
 
+/**
+ * The layout of `input`: from the page's cache, the server's layout of this
+ * very input (`server`: { L, groups }, graph/server-layout.js), else the
+ * worker. A server layout is cached under its digest (`serverKey`), so the
+ * page never stringifies a large input it did not have to lay out.
+ */
 function runLayout(input, server) {
-  const key = JSON.stringify(input);
-  if (layoutCache.has(key)) return Promise.resolve({ key, lay: layoutCache.get(key), source: 'cache' });
-  // The server's layout of this very input, when it sent one (graph/server-layout.js).
-  const fromSrv = server ? fromServer(server, input) : null;
-  if (fromSrv) {
-    layoutCache.set(key, fromSrv);
-    while (layoutCache.size > 4) layoutCache.delete(layoutCache.keys().next().value);
-    return Promise.resolve({ key, lay: fromSrv, source: 'server' });
-  }
-  let source = 'worker';
-  const remember = (lay) => {
+  const remember = (key, lay, source) => {
     layoutCache.set(key, lay);
     while (layoutCache.size > 4) layoutCache.delete(layoutCache.keys().next().value);
     return { key, lay, source };
   };
+  const sKey = server && serverKey(server.L);
+  if (sKey && isFor(server.L, input, server.groups)) {
+    if (layoutCache.has(sKey)) return Promise.resolve({ key: sKey, lay: layoutCache.get(sKey), source: 'cache' });
+    const lay = decode(server.L, input);
+    if (lay) return Promise.resolve(remember(sKey, lay, 'server'));
+  }
+  const key = JSON.stringify(input);
+  if (layoutCache.has(key)) return Promise.resolve({ key, lay: layoutCache.get(key), source: 'cache' });
+  let source = 'worker';
   return new Promise((resolve, reject) => {
     const seq = ++layoutSeq;
     const fallback = () =>
@@ -208,7 +231,7 @@ function runLayout(input, server) {
       }
     }
     fallback();
-  }).then(remember);
+  }).then((lay) => remember(key, lay, source));
 }
 
 // ---------------------------------------------------------------------------
@@ -289,22 +312,6 @@ const FAR_END = { dangling: 'far end deleted', invalidated: 'far end invalidated
 // Geometry and text helpers
 // ---------------------------------------------------------------------------
 
-
-/**
- * A memory's short label: the summary up to its first clause break, cut on
- * a word boundary. (Titles are not in the index, so the summary is what a
- * graph read can show.)
- */
-export function shortLabel(summary, max = 24) {
-  let t = String(summary || '').trim();
-  const cut = t.search(/[:;—–(]|\.\s|,\s| - /);
-  if (cut > 8) t = t.slice(0, cut).trim();
-  if (t.length <= max) return t;
-  const words = t.slice(0, max).split(/\s+/);
-  if (words.length > 1) words.pop();
-  return words.join(' ').replace(/[,.:;\s]+$/, '') + '…';
-}
-
 /**
  * The filter rows (kinds, proposed / rejected / invalidated, the top-scope
  * picker) into `filterBox`; shared by the graph and the scope overview.
@@ -374,13 +381,16 @@ export async function renderGraph(main, ctx) {
     return;
   }
   // Ask the server to lay out what it can (graph/server-layout.js): the
-  // scope overview, and scope-force when the style (or an opened scope)
-  // uses it with no options of its own. The server picks the one that fits
-  // its answer (the overview for a summary, scope-force for a graph).
+  // scope overview, scope-force when the style uses it with no options of
+  // its own, and an opened scope (scope-force by sub-scope) when one scope
+  // is picked: the server knows the store's size, so it lays that out only
+  // when the store has an overview (more than OVERVIEW_MIN memories, as
+  // `opened` below decides), else the style's own when it asked. It answers
+  // with the one that fits its response.
   const box = measureBox(main, h('p', { class: 'loading' }, t('loading')));
   const singleScope = f.top_scope && !f.top_scope.includes(',');
-  const forceAsked = singleScope || (theme.layout.name === 'scope-force' && !Object.keys(theme.layout.options || {}).length);
-  const asked = [wantOverview && 'scope-overview', forceAsked && 'scope-force'].filter((n) => n && SERVER_LAYOUTS[n]);
+  const ownForce = theme.layout.name === 'scope-force' && !Object.keys(theme.layout.options || {}).length;
+  const asked = [wantOverview && 'scope-overview', ownForce && 'scope-force', singleScope && 'opened'].filter((n) => n && (n === 'opened' || SERVER_LAYOUTS[n]));
   let g;
   try {
     // Every kind and status: the display filters apply here (module docs).
@@ -393,9 +403,7 @@ export async function renderGraph(main, ctx) {
       layout: asked.length ? asked.join(',') : undefined,
       layout_aspect: asked.length ? String(box.aspect) : undefined,
       layout_width: asked.length ? String(box.width) : undefined,
-      // An opened scope groups by sub-scope (`opened` below needs the
-      // store's size, so a small store asked this way lays out locally).
-      layout_groups: asked.length && singleScope ? 'sub' : undefined,
+      layout_open_over: singleScope ? String(OVERVIEW_MIN) : undefined,
     });
   } catch (e) {
     if (ctx.isStale()) return;
@@ -597,32 +605,31 @@ export async function renderGraph(main, ctx) {
   }
   mount(graphBox, h('p', { class: 'graph-empty muted' }, t('layingOut', g.nodes.length)));
 
-  // Layout input: edge ends as node indices (-1: a stub off the source),
-  // and the name of the style's layout (part of the cache key).
+  // Layout input (graph/input.js, which the server mirrors): edge ends as
+  // node indices (-1: a stub off the source), and the name of the style's
+  // layout (part of the cache key). An opened scope: scope-force whatever
+  // the style, each sub-scope a region (its key stands in for the top scope
+  // the layout groups by). The box's width goes in only for a layout that
+  // sizes what must stay readable at Fit by it (coarsely, so a resize
+  // rarely misses the cache): any other would lay out again on every resize
+  // for nothing.
   const labels = g.nodes.map((n) => shortLabel(n.summary));
-  const boxAspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / (graphBox.clientWidth || 800)));
-  // An opened scope: scope-force whatever the style, each sub-scope a
-  // region (its key stands in for the top scope the layout groups by).
   const layoutName = opened ? 'scope-force' : theme.layout.name;
-  const groupKeys = g.nodes.map((n) => (opened ? subKey(n) : n.top_scope || ''));
-  const input = {
+  // The box's size, read once here, while the page is cheap to lay out (no
+  // graph in it yet), and kept current by the resize observer below: every
+  // read of it while the graph is built would force a style and layout pass
+  // over thousands of new SVG elements, and the paint does that pass anyway.
+  const boxSize = { w: graphBox.clientWidth, h: graphBox.clientHeight };
+  const { input, groupKeys } = forceInput(g, {
     layout: layoutName,
-    nodes: g.nodes.map((n, i) => ({ id: n.id, top_scope: groupKeys[i], slot: n.color_slot ?? null, scope: n.scope || '', degree: n.degree, r: radius(n), label: labels[i], weight: reads(n) })),
-    options: opened ? {} : theme.layout.options || {},
-    edges: g.edges.map((e) => {
-      const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
-      // A stub's far end is not in the node set, so its scope is unknown
-      // (null) unless the server names it.
-      return { s: byId.get(e.src), t: ti, kind: e.kind, far_scope: ti >= 0 ? g.nodes[ti].top_scope || '' : (e.far_scope ?? null) };
-    }),
-    aspect: Math.round(boxAspect * 20) / 20,
-  };
-  // The box's width in pixels, coarsely (so a resize rarely misses the
-  // cache), only for a layout that sizes what must stay readable at Fit by
-  // it: any other would lay out again on every resize for nothing.
-  if (usesWidth(layoutName)) input.width = Math.round((graphBox.clientWidth || 800) / 40) * 40;
-  // The server's layout serves only the grouping it was asked for.
-  const serverLay = g.layout && (!!opened === !!singleScope) ? g.layout : null;
+    options: opened ? {} : theme.layout.options,
+    opened: !!opened,
+    aspect: (boxSize.h || 500) / (boxSize.w || 800),
+    width: usesWidth(layoutName) ? boxSize.w || 800 : null,
+    labels,
+  });
+  // The server's layout says which grouping it is for (`groups`).
+  const serverLay = g.layout ? { L: g.layout, groups: opened ? 'sub' : 'top' } : null;
   const res = await runLayout(input, serverLay).catch((e) => {
     if (!ctx.isStale()) mount(graphBox, errorBox(e));
     return null;
@@ -637,7 +644,25 @@ export async function renderGraph(main, ctx) {
   // ---- static layers ---------------------------------------------------------
   const P = (i) => [lay.pos[2 * i], lay.pos[2 * i + 1]];
   const nodeEls = [];
+  // Per memory: its label element, `undefined` while not built yet (an
+  // unplaced one), null for none.
   const labelEls = [];
+  function makeLabel(i) {
+    const n = g.nodes[i];
+    const lp = lay.labels[i];
+    const major = n.degree >= 2 || n.proposed > 0 || n.challenged;
+    return s('text', { class: ['lbl', major && 'major', !lp.placed && 'unplaced'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]);
+  }
+  /** Memory `i`'s label element, built (in index order in its layer) on first need. */
+  function labelEl(i) {
+    if (labelEls[i] !== undefined) return labelEls[i];
+    const el = makeLabel(i);
+    let j = i + 1;
+    while (j < labelEls.length && !labelEls[j]) j++;
+    labelsLayer.insertBefore(el, j < labelEls.length ? labelEls[j] : null);
+    labelEls[i] = el;
+    return el;
+  }
   let edgeEls = [];
   let adj = [];
 
@@ -678,33 +703,63 @@ export async function renderGraph(main, ctx) {
       s('circle', { class: 'ring', r: r + 6 }),
       drawn.parts,
     );
-    el.addEventListener('mouseenter', () => hover({ node: i }));
-    el.addEventListener('mouseleave', () => hover(null));
-    // A neighbour focused by ] / [ keeps the selection's highlight (stepRow).
-    el.addEventListener('focus', () => {
-      if (!quietFocus) hover({ node: i });
-    });
-    el.addEventListener('blur', () => hover(null));
-    el.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      if (!dragged) pin({ node: i }, false);
-    });
-    el.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' || ev.key === ' ') {
-        ev.preventDefault();
-        ev.stopPropagation();
-        pin({ node: i }, true);
-      }
-    });
     nodeEls.push(el);
     nodesLayer.appendChild(el);
+    // A placed label now; an unplaced one (no free spot: hidden, shown only
+    // while its memory is highlighted, CSS .lbl.unplaced) the first time a
+    // highlight needs it (`labelEl`), since most of a large graph's labels
+    // have no spot and would only cost their creation.
     const lp = lay.labels[i];
-    const major = n.degree >= 2 || n.proposed > 0 || n.challenged;
-    // An unplaced label (no free spot) is drawn hidden and shows only while
-    // its memory is highlighted (CSS: .lbl.unplaced).
-    const lbl = lp ? s('text', { class: ['lbl', major && 'major', !lp.placed && 'unplaced'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]) : null;
-    labelEls.push(lbl);
-    if (lbl) labelsLayer.appendChild(lbl);
+    if (lp && lp.placed) {
+      const lbl = makeLabel(i);
+      labelEls.push(lbl);
+      labelsLayer.appendChild(lbl);
+    } else labelEls.push(lp ? undefined : null);
+  });
+  // Each memory's pointer, focus and key handling, delegated to the layer
+  // (one listener per event instead of six per memory): the memory is the
+  // `.node` the event came from, its index in `data-i`.
+  // The view a zoom gesture started from, while one runs (gestureZoom).
+  let shown = null;
+  let gestureTimer = null;
+  const nodeOf = (ev) => {
+    const el = ev.target instanceof Element ? ev.target.closest('.node') : null;
+    return el && nodesLayer.contains(el) ? el : null;
+  };
+  // mouseenter / mouseleave: moves within one memory's own parts are not
+  // an enter or a leave.
+  const crossed = (el, other) => !(other instanceof Node && el.contains(other));
+  nodesLayer.addEventListener('mouseover', (ev) => {
+    // Mid-zoom the map moves under a still pointer: no hover until it settles.
+    const el = shown ? null : nodeOf(ev);
+    if (el && crossed(el, ev.relatedTarget)) hover({ node: +el.dataset.i });
+  });
+  nodesLayer.addEventListener('mouseout', (ev) => {
+    const el = nodeOf(ev);
+    if (el && crossed(el, ev.relatedTarget)) hover(null);
+  });
+  // A neighbour focused by ] / [ keeps the selection's highlight (stepRow).
+  nodesLayer.addEventListener('focusin', (ev) => {
+    const el = nodeOf(ev);
+    if (el && ev.target === el && !quietFocus) hover({ node: +el.dataset.i });
+  });
+  nodesLayer.addEventListener('focusout', (ev) => {
+    const el = nodeOf(ev);
+    if (el && ev.target === el) hover(null);
+  });
+  nodesLayer.addEventListener('click', (ev) => {
+    const el = nodeOf(ev);
+    if (!el) return;
+    ev.stopPropagation();
+    if (!dragged) pin({ node: +el.dataset.i }, false);
+  });
+  nodesLayer.addEventListener('keydown', (ev) => {
+    const el = nodeOf(ev);
+    if (el && (ev.key === 'Enter' || ev.key === ' ')) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      pin({ node: +el.dataset.i }, true);
+    }
   });
   performance.mark('graph:nodes');
 
@@ -720,7 +775,10 @@ export async function renderGraph(main, ctx) {
     nodesLayer,
     tagsLayer,
   );
-  mount(graphBox, svg, tip, hint);
+  // The <svg>'s own box, which a zoom gesture transforms (gestureZoom): a
+  // transform on the <svg> itself re-lays it out and re-paints it.
+  const pane = h('div', { class: 'g-pane' }, svg);
+  mount(graphBox, pane, tip, hint);
   performance.mark('graph:mounted');
 
   // ---- an opened scope's far scopes: one tag each, stubs into it ----------
@@ -729,8 +787,8 @@ export async function renderGraph(main, ctx) {
   let viewBounds = lay.bounds;
   const tagByName = new Map();
   if (opened && g.stub_scopes && g.stub_scopes.length) {
-    const bw = graphBox.clientWidth || 800;
-    const bh = graphBox.clientHeight || 500;
+    const bw = boxSize.w || 800;
+    const bh = boxSize.h || 500;
     const dirs = new Map();
     const ov = overviewLayout(g, bw, Math.min(3, Math.max(0.3, bh / bw)));
     const me = ov.index.get(opened === '-' ? '' : opened);
@@ -762,7 +820,7 @@ export async function renderGraph(main, ctx) {
       // Zoomed in (cut mode): a stub whose memory is off screen is not
       // drawn, one whose tag is off screen is cut short, like a relation.
       if (cutMode) {
-        const sc = (graphBox.clientWidth || 1) / view.w;
+        const sc = (boxSize.w || 1) / view.w;
         const inView = (qx, qy) => qx >= view.x && qx <= view.x + view.w && qy >= view.y && qy <= view.y + view.h;
         if (!inView(x, y)) continue;
         if (!inView(x2, y2)) {
@@ -861,19 +919,31 @@ export async function renderGraph(main, ctx) {
     if (!drawn) drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
     // The wide transparent hit path is the core's, drawn last (on top).
     const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
-    const el = s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
-    el.addEventListener('mouseenter', () => hover({ edge: k }));
-    el.addEventListener('mouseleave', () => hover(null));
-    el.addEventListener('click', (ev) => {
-      if (dragged) return;
-      ev.stopPropagation();
-      pin({ edge: k }, false);
-    });
-    return el;
+    return s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
   }
+  // Pointer handling for every relation, on the layer (the relation is the
+  // `[data-k]` group the event came from), as for the memories.
+  const edgeOf = (ev) => {
+    const el = ev.target instanceof Element ? ev.target.closest('[data-k]') : null;
+    return el && edgesLayer.contains(el) ? el : null;
+  };
+  edgesLayer.addEventListener('mouseover', (ev) => {
+    const el = shown ? null : edgeOf(ev);
+    if (el && crossed(el, ev.relatedTarget)) hover({ edge: +el.dataset.k });
+  });
+  edgesLayer.addEventListener('mouseout', (ev) => {
+    const el = edgeOf(ev);
+    if (el && crossed(el, ev.relatedTarget)) hover(null);
+  });
+  edgesLayer.addEventListener('click', (ev) => {
+    const el = edgeOf(ev);
+    if (!el || dragged) return;
+    ev.stopPropagation();
+    pin({ edge: +el.dataset.k }, false);
+  });
   function drawEdges() {
     const ks = visible();
-    const scale = view ? (graphBox.clientWidth || 1) / view.w : 1;
+    const scale = view ? (boxSize.w || 1) / view.w : 1;
     drawnScale = scale;
     // Zoomed to 3× Fit or more on a big graph: a relation with one end off
     // screen is drawn as a short stub from the end on screen, and one with
@@ -927,8 +997,14 @@ export async function renderGraph(main, ctx) {
   let zoomedOnce = false;
   let cutMode = false;
   function apply() {
+    if (shown) {
+      clearTimeout(gestureTimer);
+      shown = null;
+      pane.classList.remove('zooming');
+      pane.style.transform = '';
+    }
     svg.setAttribute('viewBox', `${view.x.toFixed(1)} ${view.y.toFixed(1)} ${view.w.toFixed(1)} ${view.h.toFixed(1)}`);
-    const scale = (graphBox.clientWidth || 1) / view.w;
+    const scale = (boxSize.w || 1) / view.w;
     svg.classList.toggle('z-near', scale >= 0.8);
     svg.classList.toggle('z-mid', scale >= 0.5 && scale < 0.8);
     // A style may follow the zoom with one write on the <svg> (Plain: its
@@ -951,7 +1027,7 @@ export async function renderGraph(main, ctx) {
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
         if (!svg.isConnected) return;
-        const now = (graphBox.clientWidth || 1) / view.w;
+        const now = (boxSize.w || 1) / view.w;
         if (theme.zoomed) theme.zoomed(svg, now);
         if (drawnScale === null) return;
         const cutNow = big && fitView().w / view.w >= CUT_ZOOM;
@@ -968,7 +1044,7 @@ export async function renderGraph(main, ctx) {
   /** The view Fit shows: every memory (and an opened scope's tags). */
   function fitView() {
     const b = viewBounds;
-    const aspect = (graphBox.clientHeight || 400) / (graphBox.clientWidth || 600);
+    const aspect = (boxSize.h || 400) / (boxSize.w || 600);
     // Keep the box's aspect so a drag maps 1:1 and nothing is distorted.
     let w = b.w;
     let hh = b.w * aspect;
@@ -982,21 +1058,46 @@ export async function renderGraph(main, ctx) {
     view = fitView();
     apply();
   }
-  function zoom(factor, cx, cy) {
+  /** The view `factor` times as wide, around (cx, cy) (default: its centre). */
+  function zoomedView(factor, cx, cy) {
     const px = cx ?? view.x + view.w / 2;
     const py = cy ?? view.y + view.h / 2;
     const w = Math.min(Math.max(view.w * factor, 120), viewBounds.w * 6 + 2000);
     const k = w / view.w;
-    view = { x: px - (px - view.x) * k, y: py - (py - view.y) * k, w, h: view.h * k };
+    return { x: px - (px - view.x) * k, y: py - (py - view.y) * k, w, h: view.h * k };
+  }
+  function zoom(factor, cx, cy) {
+    view = zoomedView(factor, cx, cy);
     apply();
+  }
+  // A wheel or pinch zoom moves the drawn map as one composited layer (a CSS
+  // transform of the <svg> from the view it shows, `shown`) and sets the view
+  // box only once the gesture settles: re-painting every memory and relation
+  // at each step cost most of a zoom frame (measured in
+  // docs/contributors/dashboard-performance.md). Anything else that moves the
+  // view goes through apply(), which settles a gesture first.
+  function gestureZoom(factor, cx, cy) {
+    if (!shown) {
+      shown = { ...view };
+      pane.classList.add('zooming');
+    }
+    view = zoomedView(factor, cx, cy);
+    const a = shown.w / view.w;
+    const bx = ((shown.x - view.x) * (boxSize.w || 1)) / view.w;
+    const by = ((shown.y - view.y) * (boxSize.h || 1)) / view.h;
+    pane.style.transform = `translate(${bx}px, ${by}px) scale(${a})`;
+    clearTimeout(gestureTimer);
+    gestureTimer = setTimeout(apply, 160);
   }
   function centerOn(x, y) {
     view = { ...view, x: x - view.w / 2, y: y - view.h / 2 };
     apply();
   }
   const toMap = (clientX, clientY) => {
+    // Mid-gesture the <svg>'s box is transformed and shows `shown` whole.
+    const v = shown || view;
     const rect = svg.getBoundingClientRect();
-    return [view.x + ((clientX - rect.left) / rect.width) * view.w, view.y + ((clientY - rect.top) / rect.height) * view.h];
+    return [v.x + ((clientX - rect.left) / rect.width) * v.w, v.y + ((clientY - rect.top) / rect.height) * v.h];
   };
   const toScreen = (x, y) => {
     const w = graphBox.clientWidth;
@@ -1025,13 +1126,14 @@ export async function renderGraph(main, ctx) {
     if (!pointers.has(ev.pointerId) || !start) return;
     pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
     if (pointers.size !== start.n) restart();
+    if (shown && pointers.size < 2) apply();
     const rect = svg.getBoundingClientRect();
     if (pointers.size >= 2 && start.dist) {
       const [a, b] = [...pointers.values()];
       const dist = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1;
       const [cx, cy] = toMap((a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
       // Target width relative to the gesture's start, as a factor of now.
-      zoom((start.view.w * start.dist) / dist / view.w, cx, cy);
+      gestureZoom((start.view.w * start.dist) / dist / view.w, cx, cy);
       dragged = true;
       return;
     }
@@ -1067,9 +1169,10 @@ export async function renderGraph(main, ctx) {
         return;
       }
       ev.preventDefault();
-      hint.hidden = true;
+      // Only when shown: setting it again re-lays out the box on every step.
+      if (!hint.hidden) hint.hidden = true;
       const [cx, cy] = toMap(ev.clientX, ev.clientY);
-      zoom(Math.exp(ev.deltaY * 0.0015), cx, cy);
+      gestureZoom(Math.exp(ev.deltaY * 0.0015), cx, cy);
     },
     { passive: false },
   );
@@ -1133,15 +1236,18 @@ export async function renderGraph(main, ctx) {
   else fit();
   performance.mark('graph:view');
   if (typeof ResizeObserver === 'function') {
-    let lastW = graphBox.clientWidth;
+    let lastW = boxSize.w;
     const obs = new ResizeObserver(() => {
       if (!graphBox.isConnected) {
         obs.disconnect();
         if (resizeObs === obs) resizeObs = null;
         return;
       }
-      if (Math.abs(graphBox.clientWidth - lastW) > 2) {
-        lastW = graphBox.clientWidth;
+      // Layout is clean here: reading the box costs nothing.
+      boxSize.w = graphBox.clientWidth;
+      boxSize.h = graphBox.clientHeight;
+      if (Math.abs(boxSize.w - lastW) > 2) {
+        lastW = boxSize.w;
         fit();
       }
     });
@@ -1169,9 +1275,9 @@ export async function renderGraph(main, ctx) {
     };
     const markNode = (i, nb) => {
       mark(nodeEls[i]);
-      mark(labelEls[i]);
+      mark(labelEl(i));
       if (nb) {
-        for (const el of [nodeEls[i], labelEls[i]]) {
+        for (const el of [nodeEls[i], labelEl(i)]) {
           if (!el) continue;
           el.classList.add('nb');
           lit.push(el);
@@ -1236,7 +1342,7 @@ export async function renderGraph(main, ctx) {
     });
     const out = placeLabels(nodes, pos, [], { corners: true });
     out.forEach((lp, at) => {
-      const el = labelEls[idx[at]];
+      const el = labelEl(idx[at]);
       if (!el) return;
       if (!lp.placed && at > 0) {
         el.classList.add('nolbl');
@@ -1262,6 +1368,8 @@ export async function renderGraph(main, ctx) {
   let leaveFrame = 0;
   function hover(sel) {
     if (!sel) {
+      // Nothing hovered (a leave the map made moving under the pointer).
+      if (!hovered && !leaveFrame) return;
       if (!leaveFrame) {
         leaveFrame = requestAnimationFrame(() => {
           leaveFrame = 0;
@@ -1657,8 +1765,12 @@ export async function renderGraph(main, ctx) {
     if (first === true) performance.mark('graph:edges');
     if (pinned && pinned.edge !== undefined && !edgeEls[pinned.edge]) pinned = null;
     highlight(pinned);
-    renderFilters();
-    renderNotes(ks);
+    // The first draw's filters and notes were built before the layout, from
+    // the same filters (`ks` is `visible()`), so only a later redraw rebuilds them.
+    if (first !== true) {
+      renderFilters();
+      renderNotes(ks);
+    }
     renderTable(ks);
     renderCard();
   }

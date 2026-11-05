@@ -43,6 +43,11 @@ sha2 = "0.11"
 # The 0600 launch file `open_browser` hands the browser (already in the tree).
 tempfile = "3"
 
+# `O_NOFOLLOW` / `O_NONBLOCK` and `geteuid` for the layout cache's files
+# (already in the tree through engram-storage).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 engramdb = { path = "../..", default-features = false, features = ["test-support"] }
 engram-test-support = { path = "../engram-test-support" }

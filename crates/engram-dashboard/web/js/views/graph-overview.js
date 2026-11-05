@@ -23,6 +23,7 @@ import { scopeName, slot } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { runNamedLayout } from '../graph/layouts.js';
 import { fromServer } from '../graph/server-layout.js';
+import { overviewInput } from '../graph/input.js';
 import { filtered, merge, dominant } from '../graph/tally.js';
 import { projHead, secHead, alertBanner } from './common.js';
 
@@ -86,13 +87,12 @@ export function overviewLayout(g, width, aspect) {
   const scopes = g.scopes.filter((l) => l.count > 0);
   const index = new Map(scopes.map((l, i) => [l.name, i]));
   const pairs = scopePairs(g).filter((p) => index.has(p.a) && index.has(p.b));
-  const input = {
-    layout: 'scope-overview',
-    nodes: scopes.map((l) => ({ id: l.name, count: l.count, label: `${scopeName(l.name)} · ${fmt(l.count)}`, name: scopeName(l.name) })),
-    edges: pairs.map((p) => ({ s: index.get(p.a), t: index.get(p.b), n: p.tally.count })),
-    aspect: Math.round(aspect * 20) / 20,
-    width: Math.round(width / 40) * 40,
-  };
+  const input = overviewInput(
+    scopes,
+    pairs.map((p) => ({ a: p.a, b: p.b, n: p.tally.count })),
+    width,
+    aspect,
+  );
   const { lay, source } = layoutOf(input, g.layout && g.layout.name === 'scope-overview' ? g.layout : null);
   return { lay, source, scopes, pairs, index };
 }

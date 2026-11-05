@@ -55,20 +55,37 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 
 ## Server-side layout parity
 
-`node bench/server-layout.mjs --url '<token URL of a running dashboard>'`
-asks every available project's `/graph` for what the page asks (the
-overview's summary, the largest scope opened with `--scope`, show all) with
-a server layout (`src/layout/`), builds the worker's input from the same
-response as `views/graph.js` does, runs the JS layout here and compares:
-largest difference (0 = the same bits), labels placed, crossings, JS cold /
-warm ms, the response time with and without `layout=`, and the encoded
-layout's size against integer encodings, raw and gzipped. Exits 1 on any
-difference. Start the dashboard with `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
-for the server's cold figure.
+`node bench/server-layout.mjs --url '<token URL of a running dashboard>'
+[--scope NAME] [--boxes 0.6x1280,1.6x360]` asks every available project's
+`/graph` for what the page asks (the overview's summary, one scope opened —
+`--scope`, default the store's largest — and show all), once per box
+(aspect × width), with a server layout (`src/layout/`). It builds the
+worker's input from the same response with the page's own
+`web/js/graph/input.js`, runs the JS layout here and compares every key of
+the two outputs with `Object.is`: the largest difference is 0 only when the
+bits are the same (there is no tolerance). It also reports labels placed,
+crossings, JS cold / warm ms, the response time with and without `layout=`,
+and the encoded layout's size against integer encodings, raw and gzipped.
+Exits 1 on any difference. Start the dashboard with
+`ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` for the server's cold figure. With
+`--assets-dir`, the server lays out only while the files on disk are the
+layout JS the binary was built with.
 
 Node is a proxy for the browser. To time the real thing, post the same input
 to `js/graph/layout-worker.js` in a fresh Chromium worker (Playwright), once
 with a one-memory input first so the timing excludes module loading.
+
+## Golden fixtures
+
+`node bench/golden.mjs` writes `src/layout/fixtures/*.json`: three
+deterministic `/graph`-shaped responses (top scopes with stubs and labels
+nudged; one scope by sub-scope at phone width; the overview), with what the
+page's JS lays out from them, doubles as base64 little-endian. The Rust test
+`the_ports_match_the_js_on_the_golden_fixtures` builds the same inputs with
+its ports and compares every double bit for bit. `--check` exits 1 when the
+committed fixtures differ from what the JS writes now. Regenerate after
+changing a layout JS file and its port; the pin test
+(`the_layout_js_is_pinned_to_the_layout_version`) says when.
 
 ## Relation geometry check
 

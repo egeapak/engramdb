@@ -158,33 +158,56 @@ budget.
   further in, the rate is 60. It is paint-bound in Chrome's software
   rasterizer (the sandbox has no GPU); a GPU-rastered desktop should not see
   it, but that is not measured here.
+  **Since fixed** for wheel and pinch: a gesture now moves the drawn map
+  as one composited layer (a CSS transform on the `.g-pane` wrapper; on the
+  `<svg>` itself the transform still re-laid out and re-painted it) and sets
+  the view box once it settles, and hover is ignored mid-gesture (the map
+  moving under a still pointer hovered a memory, with its tooltip and
+  labels, nearly every frame). At 4× CPU throttle (`--cpu-throttle 4`),
+  which makes the difference visible: 23 → 59 fps; unthrottled 59–60. The
+  view after a gesture is the same; the box's rounded corners differ by one
+  colour level on ≤ 16 pixels after one (Chrome's corner clip once the
+  layer existed), the graph itself does not.
 - The 10k filter toggle (42.5–54.2 → 31.8–40.5 ms over the two runs) is
   now under 50 in every combination; before, it was over in some.
 
 ## Server-side layout
 
-`/graph?layout=scope-overview,scope-force&layout_aspect=…&layout_width=…`
+`/graph?layout=scope-overview,scope-force[,opened]&layout_aspect=…&layout_width=…`
 answers with a `layout` object computed in Rust (`src/layout/`, a port of
-`scope-force.js`, `scope-overview.js`, `labels.js` and `radius.js`). The page
-decodes it and skips the worker; it falls back to the worker when the
-response has none, or the header (`v`, name, node/edge counts, aspect,
-width) does not match its own input. Parity (`node bench/server-layout.mjs`):
-**max |Δ| = 0** for positions, routes, labels and scope names on every bench
-store and path (tab, opened scope, show all), the same labels placed and the
-same crossings.
+`scope-force.js`, `scope-overview.js`, `labels.js`, `radius.js` and the input
+builder `graph/input.js`). The page decodes it and skips its own layout; it
+lays out as before (scope-force in the worker, the overview on the main
+thread) when the response has none, or the header (`v`, name, node/edge
+counts, aspect, width, `groups`, and `check`, a checksum of the input the
+page recomputes) does not match its own input, or a decoded number is not
+finite. Parity (`node bench/server-layout.mjs`, every key compared with
+`Object.is`, so bit for bit, not within a tolerance): **0 differences** for
+positions, routes, labels and scope names on every bench store and path
+(tab, opened scope, show all) at 1280 and 390 px, the same labels placed
+and the same crossings. The same comparison runs in CI on three committed
+fixtures (`bench/golden.mjs`, `the_ports_match_the_js_on_the_golden_fixtures`),
+and a hash of the layout JS pinned to `LAYOUT_VERSION` fails CI when the JS
+changes without the port.
 
-Encoding (`layout.v = 1`): positions as little-endian f64 in base64,
+Encoding (`layout.v = 2`): positions as little-endian f64 in base64,
 one byte per label (the `spotsAt` index, 255 = unplaced), stub ends only
 (straight routes come from positions), scope names and region radii as
 JSON. For 800 memories: ~20 KB (14 KB gzipped) inside a ~450–530 KB
 response; the worker's full output as JSON would be ~150 KB. f64 was kept
 over integer-scaled positions (8.5 KB) because it is exact.
 
+Computation: single-flight per input, at most 2 layouts at once (a request
+that finds both busy goes without), waited for at most 250 ms; a late layout
+still lands in the cache for the next request. scope-force caches its
+width-free core and places the scope names per request, so one entry serves
+every box width.
+
 Cache: 32 layouts in memory per process, plus a disk cache (64 MiB, LRU by
 mtime) under `<cache>/engramdb/dashboard/layouts` (0700 dir, 0600 files,
 `ENGRAMDB_DASHBOARD_CACHE_DIR` overrides, `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
-disables both), keyed by SHA-256 of the layout version, name and input.
-Never written into a store.
+disables both), keyed by SHA-256 of the layout version, the layout JS hash,
+the crate version, the name and the input. Never written into a store.
 
 Browser, Plain, light, 1280 px, release, median of 5 runs, ms; *cold* =
 no layout cached on the server, *cached* = a repeat. Segments: response,
@@ -199,6 +222,17 @@ client layout (worker, or input + key + decode), build parts, paint.
 | s2k show all | 239 (23, 108) | 179 (51, 12) | 134 (25, 11) |
 | s10k open scope | 241 (57, 88) | 187 (83, 9) | 169 (56, 10) |
 | s10k show all | 263 (54, 122) | 198 (86, 25) | 178 (60, 25) |
+
+Then (encoding v2, width-free cache, `graph/input.js`, delegated node and
+relation listeners, labels built only when shown, no layout reads during
+the build, a cached number formatter, panels not rebuilt on the first draw),
+same method, 1280 px, total ms (response): s1k open scope cold 69 (26) /
+cached 53 (14); s1k show all 134 (49) / 106 (22); s2k open scope 90 (37) /
+73 (22); s2k show all 150 (52) / 118 (26); s10k open scope 173 (93) / 147
+(68); s10k show all 174 (90) / 137 (60); s10k tab 77 / 76. s1k show all's
+build parts now: nodes 12, view 1, legend 1, edges 13, panels 5, paint 39
+(the paint gained the style and layout the build no longer forces). Every
+cold run still got a server layout under the 250 ms wait.
 
 The build parts (s1k show all: nodes 21–24, view 9–10, legend 7, edges 15,
 panels 6–7, paint ≈ 31) did not change. A tab click on the overview is

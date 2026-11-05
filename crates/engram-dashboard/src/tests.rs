@@ -2847,6 +2847,8 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     let l = &v["layout"];
     assert_eq!(l["v"], crate::layout::LAYOUT_VERSION);
     assert_eq!(l["name"], "scope-force");
+    assert_eq!(l["groups"], "top");
+    assert!(l["check"].is_u64(), "{l}");
     assert_eq!(l["n"], v["nodes"].as_array().unwrap().len());
     assert_eq!(l["e"], v["edges"].as_array().unwrap().len());
     assert_eq!(l["aspect"], 0.6);
@@ -2855,6 +2857,18 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     // The same request again: the same layout (from the cache).
     let (_, again) = get_json(&app, &uri).await;
     assert_eq!(again["layout"], v["layout"]);
+    // Another width: the same cached (width-free) layout, finished for it.
+    let (_, narrow) = get_json(
+        &app,
+        &format!(
+            "/api/projects/{}/graph?layout=scope-force&layout_aspect=0.6&layout_width=360",
+            fx.id
+        ),
+    )
+    .await;
+    assert_eq!(narrow["layout"]["key"], key.as_str());
+    assert_eq!(narrow["layout"]["width"], 360.0);
+    assert_eq!(narrow["layout"]["pos"], v["layout"]["pos"]);
     // A summary carries the overview instead.
     let (_, sum) = get_json(
         &app,
@@ -2873,10 +2887,29 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     )
     .await;
     assert!(none.get("layout").is_none());
+    // One scope picked: grouped by sub-scope only when the store is past
+    // `layout_open_over` (the page's opened scope), else the style's own
+    // when it asked, else nothing.
+    let one = |extra: &str| {
+        format!(
+            "/api/projects/{}/graph?top_scope=storage&layout_aspect=0.6&layout_width=1280&{extra}",
+            fx.id
+        )
+    };
+    let (_, sub) = get_json(&app, &one("layout=scope-force,opened&layout_open_over=1")).await;
+    assert_eq!(sub["layout"]["groups"], "sub", "{sub}");
+    let (_, top) = get_json(
+        &app,
+        &one("layout=scope-force,opened&layout_open_over=1000"),
+    )
+    .await;
+    assert_eq!(top["layout"]["groups"], "top", "{top}");
+    let (_, neither) = get_json(&app, &one("layout=opened&layout_open_over=1000")).await;
+    assert!(neither.get("layout").is_none());
     // The cache file is in the cache dir (the harness's temp dir), 0600, and
     // nothing changed anywhere a store lives.
     let dir = paths::dashboard_layout_cache_dir().unwrap();
-    let file = dir.join(format!("{key}.json"));
+    let file = dir.join(format!("{key}.bin"));
     assert!(file.is_file(), "{}", file.display());
     #[cfg(unix)]
     {
@@ -2893,13 +2926,16 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     assert!(!dir.starts_with(&fx.dir));
     assert!(!dir.starts_with(paths::global_data_dir().unwrap()));
     assert_eq!(before, machine(&fx.dir), "a layout GET changed a store");
-    // Bad parameters are the caller's fault.
+    // Bad parameters are the caller's fault, including an aspect or width
+    // the page would have rounded (each would be a new cache key).
     for bad in [
         "layout=grid&layout_aspect=0.6&layout_width=1280",
         "layout=scope-force&layout_aspect=9&layout_width=1280",
         "layout=scope-force&layout_width=1280",
         "layout=scope-force&layout_aspect=0.6&layout_width=wide",
-        "layout=scope-force&layout_aspect=0.6&layout_width=1280&layout_groups=deep",
+        "layout=scope-force&layout_aspect=0.61&layout_width=1280",
+        "layout=scope-force&layout_aspect=0.6&layout_width=1290",
+        "layout=opened&layout_aspect=0.6&layout_width=1280",
     ] {
         let r = send(
             &app,
@@ -2908,6 +2944,46 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
         .await;
         assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
     }
+}
+
+/// With `--assets-dir`, the server lays out only while the layout JS on
+/// disk is the binary's: an edited layout is drawn by the page's own JS.
+#[tokio::test]
+async fn disk_assets_get_a_server_layout_only_while_the_layout_js_is_the_binarys() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let web = tempfile::tempdir().unwrap();
+    for f in crate::layout::LAYOUT_JS_FILES {
+        let to = web.path().join(f);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("web")
+                .join(f),
+            &to,
+        )
+        .unwrap();
+    }
+    let uri = format!(
+        "/api/projects/{}/graph?layout=scope-force&layout_aspect=0.6&layout_width=1280",
+        fx.id
+    );
+    let same = app_with(
+        Some(fx.current.clone()),
+        Some(web.path().to_path_buf()),
+        false,
+    );
+    let (_, v) = get_json(&same, &uri).await;
+    assert_eq!(v["layout"]["name"], "scope-force", "the same JS on disk");
+    let edited = web.path().join("js/graph/scope-force.js");
+    let mut text = std::fs::read_to_string(&edited).unwrap();
+    text.push_str("\n// edited\n");
+    std::fs::write(&edited, text).unwrap();
+    let (_, v) = get_json(&same, &uri).await;
+    assert!(
+        v.get("layout").is_none(),
+        "edited JS on disk: no server layout"
+    );
 }
 
 #[tokio::test]
