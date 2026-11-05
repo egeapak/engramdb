@@ -161,6 +161,57 @@ budget.
 - The 10k filter toggle (42.5–54.2 → 31.8–40.5 ms over the two runs) is
   now under 50 in every combination; before, it was over in some.
 
+## Server-side layout
+
+`/graph?layout=scope-overview,scope-force&layout_aspect=…&layout_width=…`
+answers with a `layout` object computed in Rust (`src/layout/`, a port of
+`scope-force.js`, `scope-overview.js`, `labels.js` and `radius.js`). The page
+decodes it and skips the worker; it falls back to the worker when the
+response has none, or the header (`v`, name, node/edge counts, aspect,
+width) does not match its own input. Parity (`node bench/server-layout.mjs`):
+**max |Δ| = 0** for positions, routes, labels and scope names on every bench
+store and path (tab, opened scope, show all), the same labels placed and the
+same crossings.
+
+Encoding (`layout.v = 1`): positions as little-endian f64 in base64,
+one byte per label (the `spotsAt` index, 255 = unplaced), stub ends only
+(straight routes come from positions), scope names and region radii as
+JSON. For 800 memories: ~20 KB (14 KB gzipped) inside a ~450–530 KB
+response; the worker's full output as JSON would be ~150 KB. f64 was kept
+over integer-scaled positions (8.5 KB) because it is exact.
+
+Cache: 32 layouts in memory per process, plus a disk cache (64 MiB, LRU by
+mtime) under `<cache>/engramdb/dashboard/layouts` (0700 dir, 0600 files,
+`ENGRAMDB_DASHBOARD_CACHE_DIR` overrides, `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
+disables both), keyed by SHA-256 of the layout version, name and input.
+Never written into a store.
+
+Browser, Plain, light, 1280 px, release, median of 5 runs, ms; *cold* =
+no layout cached on the server, *cached* = a repeat. Segments: response,
+client layout (worker, or input + key + decode), build parts, paint.
+
+| path | before (worker) | after, cold | after, cached |
+|---|---|---|---|
+| s60 tab | 72 (resp 11, layout 39) | 42 (15, 5) | 39 (13, 5) |
+| s1k open scope | 109 (12, 50) | 74 (26, 4) | 67 (13, 5) |
+| s1k show all | 224 (18, 107) | 151 (47, 11) | 124 (20, 11) |
+| s2k open scope | 134 (17, 57) | 110 (40, 7) | 90 (18, 7) |
+| s2k show all | 239 (23, 108) | 179 (51, 12) | 134 (25, 11) |
+| s10k open scope | 241 (57, 88) | 187 (83, 9) | 169 (56, 10) |
+| s10k show all | 263 (54, 122) | 198 (86, 25) | 178 (60, 25) |
+
+The build parts (s1k show all: nodes 21–24, view 9–10, legend 7, edges 15,
+panels 6–7, paint ≈ 31) did not change. A tab click on the overview is
+unchanged (35–89). Grid is pixel-identical; Plain differs by at most one
+colour level on a few anti-aliased pixels.
+
+Server side (Criterion, `dashboard_graph` `*_layout` cases, the whole
+`/graph` handler with a layout asked for; cold = cache off, cached = memory
+hit): s1k opened scope 21.3 → 9.0 ms, show all 36.5 → 10.1, overview 5.8
+either way; s2k opened scope 29.3 → 12.8, show all 39.4 → 14.1, overview
+8.7 → 8.1. So the Rust layout itself costs ≈ 12–26 ms per 800 memories,
+against 50–122 ms for the worker in the browser.
+
 ## Rerun
 
 ```bash

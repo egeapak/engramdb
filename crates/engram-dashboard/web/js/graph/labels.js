@@ -74,31 +74,13 @@ export function placeLabels(nodes, pos, obstacles = [], opts = {}) {
   const order = [...Array(n).keys()].sort(
     (a, b) => (nodes[b].degree || 0) - (nodes[a].degree || 0) || (nodes[b].weight || 0) - (nodes[a].weight || 0) || cmp(nodes[a].id, nodes[b].id),
   );
-  const spotsAt = (x, y, r, w) => {
-    const spots = [
-      { x, y: y + r + LABEL_H - 2, anchor: 'middle', b: { x0: x - w / 2, y0: y + r, x1: x + w / 2, y1: y + r + LABEL_H } },
-      { x, y: y - r - 4, anchor: 'middle', b: { x0: x - w / 2, y0: y - r - LABEL_H, x1: x + w / 2, y1: y - r } },
-      { x: x + r + 2, y: y + 4, anchor: 'start', b: { x0: x + r, y0: y - LABEL_H / 2, x1: x + r + 2 + w, y1: y + LABEL_H / 2 } },
-      { x: x - r - 2, y: y + 4, anchor: 'end', b: { x0: x - r - 2 - w, y0: y - LABEL_H / 2, x1: x - r, y1: y + LABEL_H / 2 } },
-    ];
-    if (opts.corners) {
-      const c = r * 0.5;
-      spots.push(
-        { x: x + c, y: y + r + LABEL_H - 2, anchor: 'start', b: { x0: x + c, y0: y + r, x1: x + c + w, y1: y + r + LABEL_H } },
-        { x: x - c, y: y + r + LABEL_H - 2, anchor: 'end', b: { x0: x - c - w, y0: y + r, x1: x - c, y1: y + r + LABEL_H } },
-        { x: x + c, y: y - r - 4, anchor: 'start', b: { x0: x + c, y0: y - r - LABEL_H, x1: x + c + w, y1: y - r } },
-        { x: x - c, y: y - r - 4, anchor: 'end', b: { x0: x - c - w, y0: y - r - LABEL_H, x1: x - c, y1: y - r } },
-      );
-    }
-    return spots;
-  };
   for (const i of order) {
     const text = nodes[i].label || '';
     const w = labelWidth(text);
     const r = (nodes[i].r || 6) + 4;
     const x = pos[2 * i];
     const y = pos[2 * i + 1];
-    const spots = spotsAt(x, y, r, w);
+    const spots = spotsAt(x, y, r, w, opts.corners);
     let free = text ? spots.find((sp) => !hits(sp.b)) : null;
     if (!free && text && opts.nudge) {
       // Move the memory a little to where one of its spots is free: its own
@@ -112,7 +94,7 @@ export function placeLabels(nodes, pos, obstacles = [], opts = {}) {
         if (hits(disc)) continue;
         // The caller's test runs last (it may be the costly one), and only
         // for a move that would place the label.
-        free = spotsAt(nx, ny, r, w).find((sp) => !hits(sp.b)) || null;
+        free = spotsAt(nx, ny, r, w, opts.corners).find((sp) => !hits(sp.b)) || null;
         if (free && opts.accept && !opts.accept(i, nx, ny)) free = null;
         if (free) {
           pos[2 * i] = nx;
@@ -130,6 +112,32 @@ export function placeLabels(nodes, pos, obstacles = [], opts = {}) {
     out[i] = { x: sp.x, y: sp.y, w, anchor: sp.anchor, placed: !!free, box: sp.b };
   }
   return out;
+}
+
+/**
+ * The spots a label may take around a memory at (x, y) of radius `r` (its
+ * drawn radius + 4) for a label `w` wide, in the order they are tried: below,
+ * above, right, left, then with `corners` the four corners. Exported so a
+ * layout computed elsewhere (the server's, `src/layout/labels.rs`) can send
+ * a spot's index and the page rebuild the label from it.
+ */
+export function spotsAt(x, y, r, w, corners) {
+  const spots = [
+    { x, y: y + r + LABEL_H - 2, anchor: 'middle', b: { x0: x - w / 2, y0: y + r, x1: x + w / 2, y1: y + r + LABEL_H } },
+    { x, y: y - r - 4, anchor: 'middle', b: { x0: x - w / 2, y0: y - r - LABEL_H, x1: x + w / 2, y1: y - r } },
+    { x: x + r + 2, y: y + 4, anchor: 'start', b: { x0: x + r, y0: y - LABEL_H / 2, x1: x + r + 2 + w, y1: y + LABEL_H / 2 } },
+    { x: x - r - 2, y: y + 4, anchor: 'end', b: { x0: x - r - 2 - w, y0: y - LABEL_H / 2, x1: x - r, y1: y + LABEL_H / 2 } },
+  ];
+  if (corners) {
+    const c = r * 0.5;
+    spots.push(
+      { x: x + c, y: y + r + LABEL_H - 2, anchor: 'start', b: { x0: x + c, y0: y + r, x1: x + c + w, y1: y + r + LABEL_H } },
+      { x: x - c, y: y + r + LABEL_H - 2, anchor: 'end', b: { x0: x - c - w, y0: y + r, x1: x - c, y1: y + r + LABEL_H } },
+      { x: x + c, y: y - r - 4, anchor: 'start', b: { x0: x + c, y0: y - r - LABEL_H, x1: x + c + w, y1: y - r } },
+      { x: x - c, y: y - r - 4, anchor: 'end', b: { x0: x - c - w, y0: y - r - LABEL_H, x1: x - c, y1: y - r } },
+    );
+  }
+  return spots;
 }
 
 /** Nudge directions and lengths (a fraction of `opts.nudge`), nearest first; literals, so every engine agrees. */

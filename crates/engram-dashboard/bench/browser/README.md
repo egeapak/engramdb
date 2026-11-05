@@ -28,6 +28,12 @@ measured without rebuilding the binary), `--chrome /usr/bin/google-chrome`
 (a system Chrome instead of Playwright's Chromium), `--port 7400` (the first
 port; one per store).
 
+`--paths-only` times only the tab click, the opened scope and show all
+(no interactive figures, no relations tab); `--no-layout` skips the worker
+layout figure; `--no-layout-cache` starts the dashboard with
+`ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`, so every server layout is cold (the
+layout cache otherwise lives under `<stores>/cache`, never the user's).
+
 ## What each column is
 
 Each JSON line is one (store, style, theme, width). Times are milliseconds,
@@ -42,6 +48,8 @@ then `requestAnimationFrame`, then one task.
 | `overview_paint_ms` | `tab_click_ms` when the first view is the overview |
 | `open_scope_ms` | click on the `--scope` disc → painted, split into `open_scope_response_ms` (→ `graph:data`), `open_scope_layout_ms` (the worker layout, → `graph:layout`) and `open_scope_build_ms` (the DOM, → `graph:built`); the rest is style, layout and paint |
 | `show_all_ms` | `#…/graph?all=1` → painted (the full graph, up to the server's 800-memory limit); `show_all_layout_ms` its layout |
+| `tab_segments`, `open_scope_segments`, `show_all_segments` | where the time went, medians, between consecutive marks: `response` (→ `graph:data`), `layout` (→ `graph:layout`: the worker, or decoding the server's layout), `backdrop`, `nodes`, `mount`, `view`, `legend`, `edges`, `panels` (→ `graph:built`: notes, table, card), `paint` (→ the frame after); the overview's are `response`, `layout`, `build`, `paint` |
+| `*_layout_source` | where the layout came from: `server`, `worker`, `main` (no worker), `cache` (the page's own) |
 | `relations_first_page_ms` | click on the Relations tab → painted (`relations:painted`) |
 | `filter_toggle_ms` | the Proposed chip → painted, median of 10 (once, on the opened scope or the whole graph) |
 | `hover_ms_p50/p95` | `mouseenter` on a memory → painted, over 60 memories: latency, so it includes the wait for the next vsync (up to one 16.7 ms frame) |

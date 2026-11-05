@@ -68,6 +68,7 @@ import { fmt, ago, plural, shortId, label } from '../format.js';
 import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel, edgeClass } from '../relations.js';
 import { runNamedLayout, usesWidth } from '../graph/layouts.js';
+import { fromServer, SERVER_LAYOUTS } from '../graph/server-layout.js';
 import { along, pathD } from '../graph/geometry.js';
 import { reads, radius } from '../graph/radius.js';
 import { makeT } from '../graph/strings.js';
@@ -154,18 +155,41 @@ function warmWorker() {
   ensureWorker();
 }
 
-function runLayout(input) {
+/**
+ * The box a graph view will draw in, measured before its data arrives (the
+ * server lays out for the box's shape): a hidden copy of the view's grid in
+ * `main`, as tall as the page will be (so a scrollbar takes the same width).
+ * Returns { aspect, width } rounded as the layout input rounds them.
+ */
+export function measureBox(main, loadingEl) {
+  const box = h('div', { class: 'graph-box' });
+  mount(main, loadingEl, h('div', { class: 'g-grid g-probe', 'aria-hidden': 'true' }, h('div', { class: 'g-main' }, box), h('aside', { class: 'g-card' })));
+  const w = box.clientWidth || 800;
+  const aspect = Math.min(3, Math.max(0.3, (box.clientHeight || 500) / w));
+  return { aspect: Math.round(aspect * 20) / 20, width: Math.round(w / 40) * 40 };
+}
+
+function runLayout(input, server) {
   const key = JSON.stringify(input);
-  if (layoutCache.has(key)) return Promise.resolve({ key, lay: layoutCache.get(key) });
+  if (layoutCache.has(key)) return Promise.resolve({ key, lay: layoutCache.get(key), source: 'cache' });
+  // The server's layout of this very input, when it sent one (graph/server-layout.js).
+  const fromSrv = server ? fromServer(server, input) : null;
+  if (fromSrv) {
+    layoutCache.set(key, fromSrv);
+    while (layoutCache.size > 4) layoutCache.delete(layoutCache.keys().next().value);
+    return Promise.resolve({ key, lay: fromSrv, source: 'server' });
+  }
+  let source = 'worker';
   const remember = (lay) => {
     layoutCache.set(key, lay);
     while (layoutCache.size > 4) layoutCache.delete(layoutCache.keys().next().value);
-    return { key, lay };
+    return { key, lay, source };
   };
   return new Promise((resolve, reject) => {
     const seq = ++layoutSeq;
     const fallback = () =>
       setTimeout(() => {
+        source = 'main';
         try {
           resolve(runNamedLayout(input));
         } catch (e) {
@@ -349,7 +373,14 @@ export async function renderGraph(main, ctx) {
     mount(main, projHead('Graph', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
     return;
   }
-  mount(main, h('p', { class: 'loading' }, t('loading')));
+  // Ask the server to lay out what it can (graph/server-layout.js): the
+  // scope overview, and scope-force when the style (or an opened scope)
+  // uses it with no options of its own. The server picks the one that fits
+  // its answer (the overview for a summary, scope-force for a graph).
+  const box = measureBox(main, h('p', { class: 'loading' }, t('loading')));
+  const singleScope = f.top_scope && !f.top_scope.includes(',');
+  const forceAsked = singleScope || (theme.layout.name === 'scope-force' && !Object.keys(theme.layout.options || {}).length);
+  const asked = [wantOverview && 'scope-overview', forceAsked && 'scope-force'].filter((n) => n && SERVER_LAYOUTS[n]);
   let g;
   try {
     // Every kind and status: the display filters apply here (module docs).
@@ -359,6 +390,12 @@ export async function renderGraph(main, ctx) {
       include_invalidated: f.invalidated ? 'true' : 'false',
       top_scope: f.top_scope || undefined,
       summary_over: wantOverview ? String(OVERVIEW_MIN) : undefined,
+      layout: asked.length ? asked.join(',') : undefined,
+      layout_aspect: asked.length ? String(box.aspect) : undefined,
+      layout_width: asked.length ? String(box.width) : undefined,
+      // An opened scope groups by sub-scope (`opened` below needs the
+      // store's size, so a small store asked this way lays out locally).
+      layout_groups: asked.length && singleScope ? 'sub' : undefined,
     });
   } catch (e) {
     if (ctx.isStale()) return;
@@ -584,12 +621,16 @@ export async function renderGraph(main, ctx) {
   // cache), only for a layout that sizes what must stay readable at Fit by
   // it: any other would lay out again on every resize for nothing.
   if (usesWidth(layoutName)) input.width = Math.round((graphBox.clientWidth || 800) / 40) * 40;
-  const res = await runLayout(input).catch((e) => {
+  // The server's layout serves only the grouping it was asked for.
+  const serverLay = g.layout && (!!opened === !!singleScope) ? g.layout : null;
+  const res = await runLayout(input, serverLay).catch((e) => {
     if (!ctx.isStale()) mount(graphBox, errorBox(e));
     return null;
   });
   if (!res || ctx.isStale()) return;
-  performance.mark('graph:layout');
+  // `source`: where the layout came from (worker, main thread, the page's
+  // cache, or the server), for the browser bench.
+  performance.mark('graph:layout', { detail: { source: res.source } });
   const lay = res.lay;
   const viewKey = p.id + '|' + hashKey(res.key);
 
@@ -610,6 +651,7 @@ export async function renderGraph(main, ctx) {
     : theme.layout.name === layoutName
       ? theme.drawBackdrop({ ...g, nodes: g.nodes.map((n, i) => ({ ...n, top_scope: groupKeys[i] })) }, lay) || {}
       : drawRegions(groupKeys, lay);
+  performance.mark('graph:backdrop');
   const edgesLayer = s('g', { class: 'edges', 'aria-hidden': 'true' });
   // An opened scope's stubs (under the relations) and far-scope tags (over everything).
   const stubsLayer = s('g', { class: 'xs-stubs', 'aria-hidden': 'true' });
@@ -664,6 +706,7 @@ export async function renderGraph(main, ctx) {
     labelEls.push(lbl);
     if (lbl) labelsLayer.appendChild(lbl);
   });
+  performance.mark('graph:nodes');
 
   const svg = s(
     'svg',
@@ -678,6 +721,7 @@ export async function renderGraph(main, ctx) {
     tagsLayer,
   );
   mount(graphBox, svg, tip, hint);
+  performance.mark('graph:mounted');
 
   // ---- an opened scope's far scopes: one tag each, stubs into it ----------
   // Placed once from the unfiltered counts (so a display filter never moves
@@ -1087,6 +1131,7 @@ export async function renderGraph(main, ctx) {
   });
   if (view) apply();
   else fit();
+  performance.mark('graph:view');
   if (typeof ResizeObserver === 'function') {
     let lastW = graphBox.clientWidth;
     const obs = new ResizeObserver(() => {
@@ -1512,6 +1557,7 @@ export async function renderGraph(main, ctx) {
   // ---- legend (the style's) -------------------------------------------------
   // The legend names the scopes drawn, with their drawn memories.
   mount(legendBox, theme.legend({ ...g, scopes: g.scopes.filter((l) => l.shown > 0).map((l) => ({ ...l, count: l.shown })) }, t));
+  performance.mark('graph:legend');
 
   // ---- the relations table: proposed first, the rest on request -----------
   const PAGE = 100;
@@ -1604,9 +1650,11 @@ export async function renderGraph(main, ctx) {
     );
   }
 
-  function redraw() {
+  // `first`: the initial draw, which sets the bench's `graph:edges` mark.
+  function redraw(first) {
     const ks = drawEdges();
     drawStubs();
+    if (first === true) performance.mark('graph:edges');
     if (pinned && pinned.edge !== undefined && !edgeEls[pinned.edge]) pinned = null;
     highlight(pinned);
     renderFilters();
@@ -1618,8 +1666,8 @@ export async function renderGraph(main, ctx) {
   ctl.zoom = zoom;
   ctl.fit = fit;
   ctl.pinEdge = (k, focus) => pin({ edge: k }, focus);
-  ctl.redraw = redraw;
-  redraw();
+  ctl.redraw = () => redraw(false);
+  redraw(true);
   performance.mark('graph:built');
   const back = afterReviewPins.get(p.id);
   if (back) {

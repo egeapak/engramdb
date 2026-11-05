@@ -38,6 +38,8 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
 tracing = "0.1"
 anyhow = "1"
+# The layout cache's digest (already in the tree through engram-storage).
+sha2 = "0.11"
 # The 0600 launch file `open_browser` hands the browser (already in the tree).
 tempfile = "3"
 

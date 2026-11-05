@@ -29,11 +29,20 @@
 //! `writes.rs` confirm or reject a *proposed* edge, each on a writable store
 //! opened for that request (never through the read-only cache, which it then
 //! invalidates). Without the flag they answer 403.
+//!
+//! **One declared write outside stores.** `/graph?layout=…` lays the graph
+//! out on the server ([`layout`]) and caches the encoded result in memory
+//! and under the OS cache dir (`<cache>/engramdb/dashboard/layouts/`, 0700
+//! dir, 0600 files, bounded; `ENGRAMDB_DASHBOARD_CACHE_DIR` overrides it,
+//! `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` turns it off): never under a store,
+//! `.engramdb/` or the data dir, and holding positions only (see
+//! `layout::cache`).
 
 pub mod api;
 pub mod assets;
 mod error;
 mod graph;
+pub mod layout;
 pub mod projects;
 mod relations;
 pub mod security;
@@ -113,6 +122,8 @@ pub struct AppState {
     pub(crate) allow_writes: bool,
     pub(crate) current: Option<CurrentProject>,
     pub(crate) stores: stores::StoreCache,
+    /// Server-side graph layouts (`layout::cache`).
+    pub(crate) layouts: layout::cache::LayoutCache,
 }
 
 impl AppState {
@@ -131,6 +142,7 @@ impl AppState {
             allow_writes,
             current,
             stores: stores::StoreCache::new(stores::DEFAULT_CAPACITY),
+            layouts: layout::cache::LayoutCache::from_env(),
         })
     }
 }

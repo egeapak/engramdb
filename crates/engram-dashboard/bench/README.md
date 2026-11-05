@@ -53,6 +53,19 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:$PORT/api/projects/$ID/graph?limit=2000" > saved-graph.json
 ```
 
+## Server-side layout parity
+
+`node bench/server-layout.mjs --url '<token URL of a running dashboard>'`
+asks every available project's `/graph` for what the page asks (the
+overview's summary, the largest scope opened with `--scope`, show all) with
+a server layout (`src/layout/`), builds the worker's input from the same
+response as `views/graph.js` does, runs the JS layout here and compares:
+largest difference (0 = the same bits), labels placed, crossings, JS cold /
+warm ms, the response time with and without `layout=`, and the encoded
+layout's size against integer encodings, raw and gzipped. Exits 1 on any
+difference. Start the dashboard with `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
+for the server's cold figure.
+
 Node is a proxy for the browser. To time the real thing, post the same input
 to `js/graph/layout-worker.js` in a fresh Chromium worker (Playwright), once
 with a one-memory input first so the timing excludes module loading.

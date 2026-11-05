@@ -16,6 +16,7 @@ fn engramdb(home: &TempDir) -> Command {
     c.env("ENGRAMDB_DATA_DIR", h.join("data"))
         .env("ENGRAMDB_CONFIG_DIR", h.join("config"))
         .env("ENGRAMDB_REGISTRY_PATH", h.join("registry.json"))
+        .env("ENGRAMDB_DASHBOARD_CACHE_DIR", h.join("layouts"))
         .env("ENGRAMDB_IN_PROCESS", "1")
         .env("RUST_LOG", "off")
         .env("RUST_BACKTRACE", "0");

@@ -64,6 +64,10 @@ function startDashboard(size, port) {
     ENGRAMDB_MODEL_CACHE_DIR: join(stores, 'models'),
     ENGRAMDB_OFFLINE: '1',
     ENGRAMDB_IN_PROCESS: '1',
+    // The server-side layout cache (src/layout/cache.rs) under the bench dir,
+    // never the user's; `--no-layout-cache` turns it off (every layout cold).
+    ENGRAMDB_DASHBOARD_CACHE_DIR: join(stores, 'cache'),
+    ...(args['no-layout-cache'] ? { ENGRAMDB_DASHBOARD_LAYOUT_CACHE: '0' } : {}),
   };
   const argv = ['dashboard', '--no-open', '--json', '--port', String(port)];
   if (args.assets) argv.push('--assets-dir', resolve(args.assets));
@@ -118,6 +122,16 @@ function initScript() {
   window.__painted = (...names) => new Promise((res) => {
     for (const n of names) waiters.set(n, [...(waiters.get(n) || []), (t) => res({ name: n, t })]);
   });
+  // Every mark set since t0 (the latest of each name) and the layout's source.
+  window.__marksSince = (t0) => {
+    const out = {};
+    for (const e of performance.getEntriesByType('mark')) {
+      if (e.startTime < t0) continue;
+      out[e.name] = e.startTime - t0;
+      if ((e.name === 'graph:layout' || e.name === 'graph:overview-layout') && e.detail) out.source = e.detail.source;
+    }
+    return out;
+  };
   window.__since = (name, t0) => {
     const e = performance.getEntriesByName(name).filter((x) => x.startTime >= t0).pop();
     return e ? e.startTime - t0 : NaN;
@@ -134,7 +148,7 @@ async function clickToPaint(p, sel, marks, extra = []) {
       const t0 = performance.now();
       document.querySelector(sel).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
       const { name, t } = await done;
-      const out = { ms: t - t0, mark: name };
+      const out = { ms: t - t0, mark: name, marks: window.__marksSince(t0) };
       for (const m of extra) out[m] = window.__since(m, t0);
       return out;
     },
@@ -282,11 +296,53 @@ async function panFrames(p) {
   });
 }
 
+/**
+ * Where a paint's time went, from the page's marks: the graph view's build
+ * steps in order (views/graph.js), or the overview's; `paint` is the last
+ * mark to the frame after it (style, layout and paint).
+ */
+const GRAPH_SEGS = [
+  ['response', 'graph:data'],
+  ['layout', 'graph:layout'],
+  ['backdrop', 'graph:backdrop'],
+  ['nodes', 'graph:nodes'],
+  ['mount', 'graph:mounted'],
+  ['view', 'graph:view'],
+  ['legend', 'graph:legend'],
+  ['edges', 'graph:edges'],
+  ['panels', 'graph:built'],
+];
+const OVERVIEW_SEGS = [
+  ['response', 'graph:data'],
+  ['layout', 'graph:overview-layout'],
+  ['build', 'graph:overview-built'],
+];
+function segments(marks, total, overview) {
+  const out = {};
+  let prev = 0;
+  for (const [k, name] of overview ? OVERVIEW_SEGS : GRAPH_SEGS) {
+    const t = marks[name];
+    if (!Number.isFinite(t)) continue;
+    out[k] = t - prev;
+    prev = t;
+  }
+  out.paint = total - prev;
+  return out;
+}
+/** Per-key medians of segment objects, plus the layout sources seen. */
+function medSegments(list) {
+  const out = {};
+  for (const k of new Set(list.flatMap((o) => Object.keys(o)))) out[k] = med(list.map((o) => o[k]));
+  return out;
+}
+const sources = (list) => [...new Set(list.filter(Boolean))].join('+') || undefined;
+
 const fps = (gaps) => (gaps.length ? 1000 / (gaps.reduce((a, b) => a + b, 0) / gaps.length) : NaN);
 
 async function benchCombo(browser, url, size, style, theme, width) {
   const row = { size, style, theme, width };
   const tab = [], data = [], ovPaint = [], open = [], openData = [], openLayout = [], openBuild = [], all = [], allLayout = [], rel = [];
+  const tabSeg = [], openSeg = [], allSeg = [], tabSrc = [], openSrc = [], allSrc = [];
   let interactive = null;
   for (let r = 0; r < runs; r++) {
     const { ctx, p } = await newPage(browser, url, style, theme, width);
@@ -294,22 +350,27 @@ async function benchCombo(browser, url, size, style, theme, width) {
     const t = await clickToPaint(p, '.nav a[href*="/graph"]', ['graph:built', 'graph:overview-built'], ['graph:data', 'graph:layout']);
     tab.push(t.ms);
     data.push(t['graph:data']);
+    tabSeg.push(segments(t.marks, t.ms, t.mark === 'graph:overview-built'));
+    tabSrc.push(t.marks.source);
     row.first_view = t.mark === 'graph:overview-built' ? 'overview' : 'graph';
     if (t.mark === 'graph:overview-built') {
       ovPaint.push(t.ms);
       // Open the largest scope from the overview.
       const o = await clickToPaint(p, `.so-scope[aria-label^="${OPEN}:"]`, ['graph:built'], ['graph:data', 'graph:layout', 'graph:built']);
       open.push(o.ms);
+      openSeg.push(segments(o.marks, o.ms, false));
+      openSrc.push(o.marks.source);
       openData.push(o['graph:data']);
       openLayout.push(o['graph:layout'] - o['graph:data']);
       openBuild.push(o['graph:built'] - o['graph:layout']);
     }
-    if (r === 0) interactive = p;
+    if (r === 0 && !args['paths-only']) interactive = p;
     else await ctx.close();
   }
   // The interactive measurements, once, on the view a user lands on: the
   // opened scope past 150 memories, else the whole graph.
   const p = interactive;
+  if (p) {
   await p.waitForTimeout(500);
   row.shown_nodes = await p.evaluate(() => document.querySelectorAll('svg.graph .node').length);
   row.shown_relations = await p.evaluate(() => document.querySelectorAll('svg.graph .edges > g:not([hidden])').length);
@@ -328,9 +389,10 @@ async function benchCombo(browser, url, size, style, theme, width) {
   await p.evaluate(() => (location.hash = location.hash.replace(/\/graph.*$/, '/overview')));
   await p.waitForTimeout(500);
   await p.context().close();
+  }
   for (let r = 0; r < runs; r++) {
     const { ctx, p: q } = await newPage(browser, url, style, theme, width);
-    rel.push((await clickToPaint(q, '.nav a[href*="/relations"]', ['relations:painted'])).ms);
+    if (!args['paths-only']) rel.push((await clickToPaint(q, '.nav a[href*="/relations"]', ['relations:painted'])).ms);
     if (row.first_view === 'overview') {
       // Show all (bounded by the server's limit): the full graph's first paint.
       const pid = await q.evaluate(() => location.hash.split('/')[2]);
@@ -339,10 +401,12 @@ async function benchCombo(browser, url, size, style, theme, width) {
         const t0 = performance.now();
         location.hash = `#/p/${pid}/graph?all=1`;
         const { t } = await done;
-        return { ms: t - t0, layout: window.__since('graph:layout', t0) - window.__since('graph:data', t0) };
+        return { ms: t - t0, layout: window.__since('graph:layout', t0) - window.__since('graph:data', t0), marks: window.__marksSince(t0) };
       }, pid);
       all.push(a.ms);
       allLayout.push(a.layout);
+      allSeg.push(segments(a.marks, a.ms, false));
+      allSrc.push(a.marks.source);
     }
     await ctx.close();
   }
@@ -357,6 +421,12 @@ async function benchCombo(browser, url, size, style, theme, width) {
     show_all_ms: med(all),
     show_all_layout_ms: med(allLayout),
     relations_first_page_ms: med(rel),
+    tab_segments: medSegments(tabSeg),
+    tab_layout_source: sources(tabSrc),
+    open_scope_segments: medSegments(openSeg),
+    open_scope_layout_source: sources(openSrc),
+    show_all_segments: medSegments(allSeg),
+    show_all_layout_source: sources(allSrc),
   });
   return row;
 }

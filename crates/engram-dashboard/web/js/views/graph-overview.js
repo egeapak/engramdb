@@ -22,6 +22,7 @@ import { fmt, plural } from '../format.js';
 import { scopeName, slot } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { runNamedLayout } from '../graph/layouts.js';
+import { fromServer } from '../graph/server-layout.js';
 import { filtered, merge, dominant } from '../graph/tally.js';
 import { projHead, secHead, alertBanner } from './common.js';
 
@@ -43,14 +44,21 @@ const overviewCache = new Map();
 /** The scope last opened from the overview, per project, so Back refocuses its disc. */
 const lastOpened = new Map();
 
-/** The overview layout for this input, cached by input (a few). */
-function layoutOf(input) {
+/**
+ * The overview layout for this input, cached by input (a few): the
+ * server's (`server`, graph/server-layout.js) when it is for exactly this
+ * input, else computed here. `source` says which, for the browser bench.
+ */
+function layoutOf(input, server) {
   const key = JSON.stringify(input);
+  let source = 'cache';
   if (!overviewCache.has(key)) {
-    overviewCache.set(key, runNamedLayout(input));
+    const fromSrv = server ? fromServer(server, input) : null;
+    source = fromSrv ? 'server' : 'main';
+    overviewCache.set(key, fromSrv || runNamedLayout(input));
     while (overviewCache.size > 4) overviewCache.delete(overviewCache.keys().next().value);
   }
-  return overviewCache.get(key);
+  return { lay: overviewCache.get(key), source };
 }
 
 /**
@@ -85,7 +93,8 @@ export function overviewLayout(g, width, aspect) {
     aspect: Math.round(aspect * 20) / 20,
     width: Math.round(width / 40) * 40,
   };
-  return { lay: layoutOf(input), scopes, pairs, index };
+  const { lay, source } = layoutOf(input, g.layout && g.layout.name === 'scope-overview' ? g.layout : null);
+  return { lay, source, scopes, pairs, index };
 }
 
 /** The point at `t` on a band's quadratic curve. */
@@ -157,7 +166,8 @@ export function renderOverview(main, ctx, g, env) {
 
   const width = graphBox.clientWidth || 800;
   const aspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / width));
-  const { lay, scopes, pairs, index } = overviewLayout(g, width, aspect);
+  const { lay, source, scopes, pairs, index } = overviewLayout(g, width, aspect);
+  performance.mark('graph:overview-layout', { detail: { source } });
   const W = lay.bounds.w;
   const H = lay.bounds.h;
   const P = (i) => [lay.pos[2 * i], lay.pos[2 * i + 1]];

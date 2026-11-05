@@ -147,6 +147,25 @@ pub fn model_cache_dir() -> Result<PathBuf> {
         .map(|p| p.join("engramdb").join("models"))
 }
 
+/// Returns the dashboard's layout cache directory.
+///
+/// 1. `ENGRAMDB_DASHBOARD_CACHE_DIR` if set (used verbatim; tests and the
+///    browser bench point it at a throwaway dir, mirroring
+///    `ENGRAMDB_MODEL_CACHE_DIR`).
+/// 2. `<platform cache dir>/engramdb/dashboard/layouts/` otherwise.
+///
+/// Holds `engramdb dashboard`'s computed graph layouts (positions only, no
+/// memory text): the dashboard's one write outside a store, never under a
+/// store, `.engramdb/` or the data dir (`engram-dashboard`'s `layout::cache`).
+pub fn dashboard_layout_cache_dir() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("ENGRAMDB_DASHBOARD_CACHE_DIR") {
+        return Ok(PathBuf::from(path));
+    }
+    dirs::cache_dir()
+        .ok_or_else(|| StorageError::Validation("Could not determine cache directory".to_string()))
+        .map(|p| p.join("engramdb").join("dashboard").join("layouts"))
+}
+
 /// Whether EngramDB is in offline mode (`ENGRAMDB_OFFLINE` set to a truthy
 /// value: `1`, `true`, `yes`, or `on`, case-insensitive).
 ///

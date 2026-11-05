@@ -2806,6 +2806,15 @@ async fn the_graph_and_detail_views_write_nothing() {
         format!("/api/projects/{}/graph?top_scope=storage", fx.id),
         format!("/api/projects/{}/graph?limit=1&top_scope=hooks,-", fx.id),
         format!("/api/projects/{}/graph?summary_over=1", fx.id),
+        // The server-side layout writes only its own cache (never a store).
+        format!(
+            "/api/projects/{}/graph?layout=scope-force&layout_aspect=0.6&layout_width=1280",
+            fx.id
+        ),
+        format!(
+            "/api/projects/{}/graph?summary_over=1&layout=scope-overview,scope-force&layout_aspect=0.55&layout_width=400",
+            fx.id
+        ),
         format!("/api/projects/{}/relations", fx.id),
         format!(
             "/api/projects/{}/relations?status=all&subs=1&include_invalidated=true&q=a",
@@ -2822,6 +2831,83 @@ async fn the_graph_and_detail_views_write_nothing() {
         assert_eq!(r.status, StatusCode::OK, "{uri}");
     }
     assert_eq!(before, machine(&fx.dir), "a GET changed something on disk");
+}
+
+#[tokio::test]
+async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let before = machine(&fx.dir);
+    let app = app(Some(fx.current.clone()));
+    let lay = "layout=scope-overview,scope-force&layout_aspect=0.6&layout_width=1280";
+    let uri = format!("/api/projects/{}/graph?{lay}", fx.id);
+    let (s, v) = get_json(&app, &uri).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    // A graph response carries scope-force, for exactly its nodes and edges.
+    let l = &v["layout"];
+    assert_eq!(l["v"], crate::layout::LAYOUT_VERSION);
+    assert_eq!(l["name"], "scope-force");
+    assert_eq!(l["n"], v["nodes"].as_array().unwrap().len());
+    assert_eq!(l["e"], v["edges"].as_array().unwrap().len());
+    assert_eq!(l["aspect"], 0.6);
+    assert_eq!(l["width"], 1280.0);
+    let key = l["key"].as_str().unwrap().to_string();
+    // The same request again: the same layout (from the cache).
+    let (_, again) = get_json(&app, &uri).await;
+    assert_eq!(again["layout"], v["layout"]);
+    // A summary carries the overview instead.
+    let (_, sum) = get_json(
+        &app,
+        &format!("/api/projects/{}/graph?summary_over=1&{lay}", fx.id),
+    )
+    .await;
+    assert_eq!(sum["summary"], true);
+    assert_eq!(sum["layout"]["name"], "scope-overview");
+    // The overview alone on a graph response: nothing fits, nothing sent.
+    let (_, none) = get_json(
+        &app,
+        &format!(
+            "/api/projects/{}/graph?layout=scope-overview&layout_aspect=0.6&layout_width=1280",
+            fx.id
+        ),
+    )
+    .await;
+    assert!(none.get("layout").is_none());
+    // The cache file is in the cache dir (the harness's temp dir), 0600, and
+    // nothing changed anywhere a store lives.
+    let dir = paths::dashboard_layout_cache_dir().unwrap();
+    let file = dir.join(format!("{key}.json"));
+    assert!(file.is_file(), "{}", file.display());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert!(!dir.starts_with(&fx.dir));
+    assert!(!dir.starts_with(paths::global_data_dir().unwrap()));
+    assert_eq!(before, machine(&fx.dir), "a layout GET changed a store");
+    // Bad parameters are the caller's fault.
+    for bad in [
+        "layout=grid&layout_aspect=0.6&layout_width=1280",
+        "layout=scope-force&layout_aspect=9&layout_width=1280",
+        "layout=scope-force&layout_width=1280",
+        "layout=scope-force&layout_aspect=0.6&layout_width=wide",
+        "layout=scope-force&layout_aspect=0.6&layout_width=1280&layout_groups=deep",
+    ] {
+        let r = send(
+            &app,
+            authed(&format!("/api/projects/{}/graph?{bad}", fx.id)),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
 }
 
 #[tokio::test]
