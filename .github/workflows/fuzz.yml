@@ -14,16 +14,105 @@ on:
 
 permissions:
   contents: read
-  # Needed by the issue-on-failure step below.
-  issues: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  fuzz:
-    name: Fuzz targets
+  # Build every target once and hand the binaries to the run legs. Each leg
+  # used to compile the whole crate graph (LanceDB, DataFusion, Arrow, ORT)
+  # itself, ASan-instrumented: 26 min per leg when it worked (run #18), and
+  # nine legs racing to run out of memory when it did not (#19 on). The nine
+  # binaries share one dependency graph, so one build costs about what one
+  # leg's did.
+  build:
+    name: Build fuzz targets
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      # Registry and git sources only, no build output: a full `fuzz/target`
+      # (ASan-instrumented nightly deps, multiple GB) would land in the 10 GB
+      # repo quota CI's caches live in and evict them, and a weekly run on a
+      # new nightly would barely reuse it anyway. Saved from master only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Build all targets
+        # A runner that runs out of memory (or disk) is shut down mid-step
+        # with exit 143 and no error from the build itself, so print both
+        # once a minute: the last sample before a kill names the resource.
+        # Measured peak with fuzz/Cargo.toml's profile is 13 GB at 4 jobs
+        # (4-core/15 GB box) and 11.7 GB at 3 jobs on a 16 GB runner.
+        #
+        # The build runs in a cgroup capped at MEM_CAP with no swap, so an
+        # overrun OOM-kills one rustc (a normal, logged build error) instead
+        # of starving the whole VM until the runner is shut down with no
+        # error at all. On any failure the build is retried at one job: the
+        # crates that finished are reused, so the retry pays only for what
+        # was left. A real compile error fails the retry too, quickly.
+        env:
+          CARGO_BUILD_JOBS: 3
+          MEM_CAP: 13G
+        run: |
+          (
+            while sleep 60; do
+              echo "[resources] $(date -u +%H:%M:%S)" \
+                "mem used/total MiB: $(free -m | awk '/^Mem:/{print $3"/"$2}')" \
+                "swap used MiB: $(free -m | awk '/^Swap:/{print $3}')" \
+                "disk free /: $(df -h --output=avail / | tail -1 | tr -d ' ')"
+            done
+          ) &
+          sampler=$!
+          capped() {
+            sudo --preserve-env systemd-run --scope --quiet \
+              -p MemoryMax="$MEM_CAP" -p MemorySwapMax=0 \
+              --uid="$(id -u)" --gid="$(id -g)" \
+              -- env PATH="$PATH" HOME="$HOME" "$@"
+          }
+          if ! capped cargo +nightly fuzz build; then
+            echo "::warning::fuzz build failed at $CARGO_BUILD_JOBS jobs (likely the $MEM_CAP memory cap); retrying at 1 job"
+            sudo dmesg | grep -iE 'oom|killed process' | tail -5 || true
+            CARGO_BUILD_JOBS=1 capped cargo +nightly fuzz build
+          fi
+          kill "$sampler" || true
+          free -m
+          df -h /
+          du -sh fuzz/target
+
+      - name: Package binaries
+        # upload-artifact drops the executable bit, so ship a tarball.
+        run: |
+          bin=fuzz/target/x86_64-unknown-linux-gnu/release
+          targets=$(cargo +nightly fuzz list)
+          tar -C "$bin" -czf fuzz-bins.tar.gz $targets
+          ls -l fuzz-bins.tar.gz
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-bins
+          path: fuzz-bins.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -40,15 +129,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install nightly toolchain
-        run: rustup toolchain install nightly --profile minimal
-
-      - name: Install protobuf compiler and lld linker
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
         with:
-          workspaces: ". -> target\nfuzz -> target"
+          name: fuzz-bins
+
+      - name: Unpack ${{ matrix.target }}
+        run: mkdir -p bins && tar -C bins -xzf fuzz-bins.tar.gz ${{ matrix.target }}
 
       - name: Restore fuzz corpus
         # The corpus grows as libfuzzer discovers new coverage; persist it
@@ -63,13 +149,17 @@ jobs:
           restore-keys: |
             fuzz-corpus-${{ matrix.target }}-
 
-      - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
-
       - name: Run ${{ matrix.target }}
+        # What `cargo fuzz run <t>` executes once its build is up to date:
+        # the same artifact prefix, corpus directory and ASAN_OPTIONS.
+        env:
+          ASAN_OPTIONS: detect_odr_violation=0
         run: |
-          cargo +nightly fuzz run ${{ matrix.target }} -- \
-            -max_total_time=${{ github.event.inputs.max_total_time || '300' }}
+          t=${{ matrix.target }}
+          mkdir -p "fuzz/artifacts/$t" "fuzz/corpus/$t"
+          "./bins/$t" -artifact_prefix="fuzz/artifacts/$t/" \
+            -max_total_time=${{ github.event.inputs.max_total_time || '300' }} \
+            "fuzz/corpus/$t"
 
       - name: Upload crash artifacts
         if: failure()
@@ -79,61 +169,99 @@ jobs:
           path: fuzz/artifacts/
           if-no-files-found: ignore
 
-      - name: File or update fuzz-failure issue
-        # Scheduled runs have no human watching them; route failures to an
-        # issue so a crash found on a Monday run isn't silently forgotten.
-        # One open issue per target: repeat failures append a comment.
-        if: failure() && github.event_name == 'schedule'
+  # A runner that is shut down mid-step (run 41441935829: every leg killed
+  # while compiling, exit 143) skips the rest of that job, `if: failure()`
+  # steps included, so the old in-job issue step never ran and ten weekly
+  # failures went unreported. This job runs on a fresh runner after the legs,
+  # whatever happened to them, and reads their outcome from the API.
+  report:
+    name: Report fuzz failures
+    needs: [build, fuzz]
+    if: >-
+      always() && github.event_name == 'schedule' &&
+      (needs.build.result != 'success' || needs.fuzz.result != 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: File or update fuzz-failure issues
         uses: actions/github-script@v9
         with:
           script: |
-            const target = '${{ matrix.target }}';
+            const { owner, repo } = context.repo;
             const label = 'fuzz-failure';
-            const title = `Fuzz failure: ${target}`;
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const body = [
-              `The scheduled fuzz run failed for target \`${target}\`.`,
-              '',
-              `Run: ${runUrl}`,
-              '',
-              'Crash inputs (if any) are in the run\'s `fuzz-artifacts-' + target + '` artifact.',
-              'Reproduce locally with:',
-              '```',
-              `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<crash-file>`,
-              '```',
-              'Per fuzz/ policy, commit the failing input as a corpus seed once fixed.',
-            ].join('\n');
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner, repo, run_id: context.runId, filter: 'latest', per_page: 100,
+            });
+            // A leg that found a crash fails its "Run <target>" step and then
+            // runs "Upload crash artifacts" to success. A leg whose runner was
+            // killed, that timed out, or that never started because the build
+            // failed, did not, and neither did the build job itself.
+            const crashed = [];
+            const broken = [];
+            for (const job of jobs) {
+              const m = /^Fuzz (.+)$/.exec(job.name);
+              if (!m && job.name !== 'Build fuzz targets') continue;
+              if (job.conclusion === 'success') continue;
+              const step = (name) => (job.steps || []).find((s) => s.name === name);
+              const run = m && step(`Run ${m[1]}`);
+              const upload = step('Upload crash artifacts');
+              if (run && run.conclusion === 'failure' && upload && upload.conclusion === 'success') {
+                crashed.push({ target: m[1], url: job.html_url });
+              } else {
+                broken.push({ name: job.name, conclusion: job.conclusion || job.status, url: job.html_url });
+              }
+            }
             try {
               await github.rest.issues.createLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: label,
-                color: 'b60205',
+                owner, repo, name: label, color: 'b60205',
                 description: 'A scheduled fuzz run found a failure',
               });
             } catch (e) {
               if (e.status !== 422) throw e; // 422 = label already exists
             }
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: label,
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: label, per_page: 100,
             });
-            const existing = issues.find((i) => i.title === title);
-            if (existing) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: existing.number,
-                body,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                labels: [label],
-                body,
-              });
+            // One open issue per title: a repeat failure appends a comment.
+            async function fileOrComment(title, body) {
+              const existing = open.find((i) => i.title === title);
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+              } else {
+                await github.rest.issues.create({ owner, repo, title, labels: [label], body });
+              }
             }
+            for (const { target, url } of crashed) {
+              await fileOrComment(`Fuzz failure: ${target}`, [
+                `The scheduled fuzz run found a crash in target \`${target}\`.`,
+                '',
+                `Run: ${runUrl}`,
+                `Job: ${url}`,
+                '',
+                `Crash inputs are in the run's \`fuzz-artifacts-${target}\` artifact.`,
+                'Reproduce locally with:',
+                '```',
+                `cargo +nightly fuzz run ${target} fuzz/artifacts/${target}/<crash-file>`,
+                '```',
+                'Per fuzz/ policy, commit the failing input as a corpus seed once fixed.',
+              ].join('\n'));
+            }
+            if (broken.length > 0) {
+              await fileOrComment('Fuzz workflow failure (not a crash)', [
+                'The scheduled fuzz run failed without a fuzzer crash: a build',
+                'error, a killed runner, a timeout or a cancellation. The jobs',
+                'below did not finish fuzzing.',
+                '',
+                `Run: ${runUrl}`,
+                '',
+                ...broken.map((b) => `- [${b.name}](${b.url}): ${b.conclusion}`),
+                '',
+                'The build step prints memory, swap and free disk once a minute,',
+                'so its last `[resources]` line before a runner shutdown shows',
+                'which one ran out.',
+              ].join('\n'));
+            }
+            await core.summary.addRaw(`crashes: ${crashed.length}, other failures: ${broken.length}`).write();
