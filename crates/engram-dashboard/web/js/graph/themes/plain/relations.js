@@ -115,6 +115,39 @@ const f1 = (v) => (Math.round(v * 10) / 10).toString();
 const f2 = (v) => (Math.round(v * 100) / 100).toString();
 
 /**
+ * Where `relationShape` writes a shape: `m(x, y)`, `l(x, y)`, `z()` in the
+ * local frame (px at scale 1). `textSink` makes SVG path data (integers of
+ * 1/`UNIT` px, as above); `path2dSink` adds to a Path2D at the same
+ * integers, so the canvas draws exactly the SVG's shape without writing
+ * and parsing the text (which was most of building a relation on canvas).
+ */
+export function textSink() {
+  let d = '';
+  return {
+    m(x, y) {
+      d += 'M' + q(x) + ',' + q(y);
+    },
+    l(x, y) {
+      d += 'L' + q(x) + ',' + q(y);
+    },
+    z() {
+      d += 'Z';
+    },
+    get d() {
+      return d;
+    },
+  };
+}
+
+export function path2dSink(p) {
+  return {
+    m: (x, y) => p.moveTo(Math.round(x * UNIT), Math.round(y * UNIT)),
+    l: (x, y) => p.lineTo(Math.round(x * UNIT), Math.round(y * UNIT)),
+    z: () => p.closePath(),
+  };
+}
+
+/**
  * The dash intervals [[a, b], …] along [0, L] for a status, less `hole`
  * (the chevron's stretch). `teeth`: a zigzag's knot spacing, so a dashed
  * zigzag breaks between whole teeth and still reads as one.
@@ -148,17 +181,27 @@ function intervals(status, L, k, hole, teeth) {
  * `knots(a, b)` the x of every bend of the centre strictly inside (a, b),
  * all in the local frame. Linear between knots, so the polygon is exact.
  */
-function band(a, b, c, hw, knots) {
+function band(out, a, b, c, hw, knots) {
   const xs = knots ? [a, ...knots(a, b), b] : [a, b];
-  let top = '';
-  let bot = '';
   for (let i = 0; i < xs.length; i++) {
     const x = xs[i];
-    top += (i ? 'L' : 'M') + q(x) + ',' + q(c(x) - hw(x));
-    const y = xs[xs.length - 1 - i];
-    bot += 'L' + q(y) + ',' + q(c(y) + hw(y));
+    if (i) out.l(x, c(x) - hw(x));
+    else out.m(x, c(x) - hw(x));
   }
-  return top + bot + 'Z';
+  for (let i = xs.length - 1; i >= 0; i--) {
+    const y = xs[i];
+    out.l(y, c(y) + hw(y));
+  }
+  out.z();
+}
+
+/** `band` over [0, L] with a constant centre `c` and half-widths `w0` at 0, `w1` at L. */
+function solid(out, L, c, w0, w1) {
+  out.m(0, c - w0);
+  out.l(L, c - w1);
+  out.l(L, c + w1);
+  out.l(0, c + w0);
+  out.z();
 }
 
 /**
@@ -219,7 +262,14 @@ const zigCount = (L, k) => Math.max(2, Math.round(L / (A.zigHalf * k)));
  * bar; `opts.chevron`: give a confirmed directed relation the mid chevron.
  */
 export function relationPath(kind, status, L, k = 1, opts = {}) {
-  if (!(L > 0.5) || !(k > 0)) return '';
+  const out = textSink();
+  relationShape(out, kind, status, L, k, opts);
+  return out.d;
+}
+
+/** `relationPath` into a sink (`textSink`, `path2dSink`); false when nothing was drawn. */
+export function relationShape(out, kind, status, L, k = 1, opts = {}) {
+  if (!(L > 0.5) || !(k > 0)) return false;
   // Bound the detail (module docs, Cost).
   k = Math.max(k, L / MAX_DETAIL_PX);
   const directed = isDirected(kind);
@@ -227,16 +277,33 @@ export function relationPath(kind, status, L, k = 1, opts = {}) {
   const chev = directed && (status === 'proposed' || (opts.chevron && status !== 'rejected')) && L > 3 * depth;
   const mid = L / 2;
   const hole = chev ? [mid - depth / 2 - A.chevClear * k, mid + depth / 2 + A.chevClear * k] : null;
+  // The common case, a solid untapered or tapered band (or duplicates'
+  // two): the same points the general walk below writes, without its
+  // closures and arrays (it was most of drawing a big graph on canvas).
+  if (!chev && opts.end !== 'bar' && status !== 'proposed' && status !== 'rejected' && kind !== 'contradicts' && kind !== 'derived_from') {
+    if (kind === 'duplicates') {
+      const hw = W.double / 2;
+      solid(out, L, -W.doubleGap, hw, hw);
+      solid(out, L, W.doubleGap, hw, hw);
+    } else if (directed) {
+      const m = kind === 'supersedes' ? W.heavy : 1;
+      const h0 = (W.source * m) / 2;
+      const h1 = (W.target * m) / 2;
+      solid(out, L, 0, h0 + ((h1 - h0) * 0) / (L || 1), h0 + ((h1 - h0) * L) / (L || 1));
+    } else solid(out, L, 0, W.thin / 2, W.thin / 2);
+    return true;
+  }
   const bands = bandsOf(kind, L, k);
   const teeth = kind === 'contradicts' ? L / zigCount(L, k) : 0;
-  let d = '';
+  let any = false;
   for (const [a, b] of intervals(status, L, k, hole, teeth)) {
     for (const bd of bands) {
       const lo = Math.max(a, bd.from);
       const hi = Math.min(b, bd.to);
       if (!(hi - lo > 0.05)) continue;
       if (!bd.ribs) {
-        d += band(lo, hi, bd.c, bd.hw, bd.knots);
+        band(out, lo, hi, bd.c, bd.hw, bd.knots);
+        any = true;
         continue;
       }
       // Only the ribs that meet [lo, hi], by index.
@@ -244,7 +311,10 @@ export function relationPath(kind, status, L, k = 1, opts = {}) {
       for (let j = Math.max(0, Math.ceil((lo - w) / step)); j * step < hi; j++) {
         const r0 = Math.max(lo, j * step);
         const r1 = Math.min(hi, j * step + w);
-        if (r1 - r0 > 0.05) d += band(r0, r1, bd.c, bd.hw);
+        if (r1 - r0 > 0.05) {
+          band(out, r0, r1, bd.c, bd.hw);
+          any = true;
+        }
       }
     }
   }
@@ -253,13 +323,25 @@ export function relationPath(kind, status, L, k = 1, opts = {}) {
     const x1 = mid + depth / 2;
     const t = A.chevThick * k;
     const hh = W.chev * (kind === 'supersedes' ? W.heavy : 1);
-    d += `M${q(x0)},${q(-hh)}L${q(x0 + t)},${q(-hh)}L${q(x1 + t)},0L${q(x0 + t)},${q(hh)}L${q(x0)},${q(hh)}L${q(x1)},0Z`;
+    out.m(x0, -hh);
+    out.l(x0 + t, -hh);
+    out.l(x1 + t, 0);
+    out.l(x0 + t, hh);
+    out.l(x0, hh);
+    out.l(x1, 0);
+    out.z();
+    any = true;
   }
   if (opts.end === 'bar') {
     const b = Math.min(L / 2, A.bar * k);
-    d += `M${q(L - b)},${q(-W.bar)}L${q(L)},${q(-W.bar)}L${q(L)},${q(W.bar)}L${q(L - b)},${q(W.bar)}Z`;
+    out.m(L - b, -W.bar);
+    out.l(L, -W.bar);
+    out.l(L, W.bar);
+    out.l(L - b, W.bar);
+    out.z();
+    any = true;
   }
-  return d;
+  return any;
 }
 
 /**
@@ -314,8 +396,8 @@ function fadeMask(id, last) {
 }
 
 /** How faint a stub gets at its far end: a dangling one stays at 0.6, so its end bar reads. */
-const FADE_TO = 0.12;
-const FADE_TO_DANGLING = 0.6;
+export const FADE_TO = 0.12;
+export const FADE_TO_DANGLING = 0.6;
 
 /** The graph's `<defs>` for both stub fades. */
 export function fadeDefs() {

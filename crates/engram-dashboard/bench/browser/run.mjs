@@ -194,10 +194,22 @@ async function filterToggle(p) {
   });
 }
 
-/** Hover 60 memories: hover → painted, and every frame's length meanwhile. */
+/**
+ * Hover 60 memories: hover → painted, and every frame's length meanwhile.
+ * Both surfaces: an SVG memory gets the mouseout / mouseover a pointer
+ * moving between memories fires (the page listens on the layer); a canvas
+ * gets the pointermove at the memory's centre, so its hit test is counted.
+ * Only memories whose centre is inside the box, on either surface.
+ */
 async function hoverFrames(p) {
   return p.evaluate(async () => {
-    const nodes = [...document.querySelectorAll('svg.graph .node')];
+    const o = document.querySelector('.graph-box').getBoundingClientRect();
+    const all = [...document.querySelectorAll('svg.graph .nodes .node, .g-a11y-node')].map((el) => {
+      const r = el.getBoundingClientRect();
+      return { el, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    const nodes = all.filter((n) => n.x > o.left + 8 && n.x < o.right - 8 && n.y > o.top + 8 && n.y < o.bottom - 8);
+    const host = document.querySelector('.g-canvas');
     const gaps = [];
     let last = 0;
     let run = true;
@@ -209,18 +221,22 @@ async function hoverFrames(p) {
     requestAnimationFrame(tick);
     const hover = [];
     let prev = null;
-    // What a pointer moving from one memory to the next fires (the page
-    // listens on the layer, so the events bubble).
-    const leave = (el, to) => el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: to }));
-    const enter = (el, from) => el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: from }));
+    const move = (to, from) => {
+      if (host) {
+        const at = to || { x: o.left + 2, y: o.top + 2 };
+        host.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: at.x, clientY: at.y, pointerType: 'mouse' }));
+        return;
+      }
+      if (from) from.el.dispatchEvent(new MouseEvent('mouseout', { bubbles: true, relatedTarget: to && to.el }));
+      if (to) to.el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, relatedTarget: from && from.el }));
+    };
     for (let i = 0; i < 60; i++) {
-      const el = nodes[(i * 7919) % nodes.length];
+      const n = nodes[(i * 7919) % nodes.length];
       await window.__afterPaint();
       const t0 = performance.now();
-      if (prev) leave(prev, el);
-      enter(el, prev);
+      move(n, prev);
       hover.push((await window.__afterPaint()) - t0);
-      prev = el;
+      prev = n;
       await new Promise((r) => setTimeout(r, 30));
     }
     run = false;
@@ -230,24 +246,23 @@ async function hoverFrames(p) {
     // the next vsync that `hover` above includes.
     const work = [];
     for (let i = 0; i < 60; i++) {
-      const el = nodes[(i * 104729 + 13) % nodes.length];
+      const n = nodes[(i * 104729 + 13) % nodes.length];
       await window.__afterPaint();
       work.push(
         await new Promise((res) =>
           requestAnimationFrame(() => {
             const t0 = performance.now();
-            if (prev) leave(prev, el);
-            enter(el, prev);
+            move(n, prev);
             const ch = new MessageChannel();
             ch.port1.onmessage = () => res(performance.now() - t0);
             ch.port2.postMessage(0);
           }),
         ),
       );
-      prev = el;
+      prev = n;
       await new Promise((r) => setTimeout(r, 30));
     }
-    if (prev) leave(prev, null);
+    move(null, prev);
     return { hover, work, gaps: gaps.slice(3) };
   });
 }
@@ -292,7 +307,7 @@ async function zoomFrames(p) {
 }
 
 async function panFrames(p) {
-  const r = await (await p.$('svg.graph')).boundingBox();
+  const r = await (await p.$('.graph-box')).boundingBox();
   const cx = r.x + r.width / 2;
   const cy = r.y + r.height / 2;
   return framesDuring(p, async () => {
@@ -379,8 +394,15 @@ async function benchCombo(browser, url, size, style, theme, width) {
   const p = interactive;
   if (p) {
   await p.waitForTimeout(500);
-  row.shown_nodes = await p.evaluate(() => document.querySelectorAll('svg.graph .node').length);
-  row.shown_relations = await p.evaluate(() => document.querySelectorAll('svg.graph .edges > g:not([hidden])').length);
+  row.surface = await p.evaluate(() => (document.querySelector('.g-canvas') ? 'canvas' : 'svg'));
+  row.shown_nodes = await p.evaluate(() => document.querySelectorAll('svg.graph .nodes .node, .g-a11y-node').length);
+  // A canvas has no element per relation: the card's count (display filters
+  // applied) stands in.
+  row.shown_relations = await p.evaluate(() => {
+    if (!document.querySelector('.g-canvas')) return document.querySelectorAll('svg.graph .edges > g:not([hidden])').length;
+    const dt = [...document.querySelectorAll('.g-card dt')].find((d) => d.textContent === 'Relations');
+    return dt ? Number(dt.nextElementSibling.textContent.split(' of ')[0].replace(/[^0-9]/g, '')) : NaN;
+  });
   const tg = await filterToggle(p);
   row.filter_toggle_ms = med(tg);
   const hv = await hoverFrames(p);

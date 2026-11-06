@@ -48,5 +48,16 @@ export function mount(el, ...children) {
   return el;
 }
 
+/**
+ * Run `fn` once the page is idle after the next frame is on screen (by
+ * `timeout` ms at the latest): for work a first paint should not wait for.
+ * The second animation frame is what makes it "after": an idle callback
+ * asked for in the first can run before that frame's paint is done.
+ */
+export function afterPaint(fn, timeout = 200) {
+  const idle = () => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout }) : setTimeout(fn, 16));
+  requestAnimationFrame(() => requestAnimationFrame(idle));
+}
+
 export const $ = (sel, root = document) => root.querySelector(sel);
 export const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));

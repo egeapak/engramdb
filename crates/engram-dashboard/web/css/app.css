@@ -333,6 +333,21 @@ dl.meta dd { overflow-wrap: anywhere; }
 .g-pane.zooming { transform-origin: 0 0; will-change: transform; }
 .g-pane.zooming .graph { overflow: visible; }
 .graph .bg { fill: transparent; }
+/* The canvas surface (js/graph/canvas/host.js): one box, its layers drawn
+   past it by the overscan margin (placed by CSSOM), its accessible list
+   invisible and placed over the drawing by one transform. */
+.g-canvas { position: relative; overflow: visible; }
+.g-canvas canvas { position: absolute; display: block; pointer-events: none; transform-origin: 0 0; }
+.g-canvas canvas[hidden] { display: none; }
+.g-a11y { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0; pointer-events: none; transform-origin: 0 0; }
+/* The list is clipped out of paint unless one of its buttons has focus,
+   and mid-gesture always: its 800 positioned buttons otherwise made Chrome
+   re-layerize the page on every frame of a zoom or pan, and on every hover
+   (7.8 ms of a 15 ms hover frame at 2× DPR; docs/contributors/dashboard-performance.md).
+   They stay focusable and in the accessibility tree; a focused one keeps
+   its on-screen bounds, so a screen magnifier can follow it. */
+.g-a11y:not(:focus-within), .g-pane.zooming .g-a11y { contain: paint; }
+.g-a11y > * { position: absolute; display: block; box-sizing: border-box; min-width: 0; margin: 0; padding: 0; border: 0; background: none; }
 /* relations: the core draws only the click target; each style's
  * css/themes/<id>.css draws the rest */
 .cx .hit { fill: none; stroke: transparent; stroke-width: 14; cursor: pointer; pointer-events: stroke; }

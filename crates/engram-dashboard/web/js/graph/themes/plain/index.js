@@ -18,7 +18,8 @@ import { s } from '../../../dom.js';
 import { plural } from '../../../format.js';
 import { slot, typeShape } from '../../../scopes.js';
 import { buildLegend } from '../../legend.js';
-import { radius } from '../../radius.js';
+import { regionArcs, texture } from './regions.js';
+import { canvas as canvasHooks } from './canvas.js';
 import { drawRelation, fadeDefs, relationSample, stubSwatch, zoomFactor, redrawOnZoom as redrawAt } from './relations.js';
 
 export const id = 'plain';
@@ -36,8 +37,13 @@ export const strings = {
 /** The core's scope-aware force layout (graph/scope-force.js), default options. */
 export const layout = { name: 'scope-force', options: {} };
 
-/** A scope's texture past the seventh scope: 0 none, 1 hatch, 2 dots, 3 cross-hatch (module docs). */
-const texture = (n) => (n === null || n === undefined ? 0 : Math.min(3, Math.floor(n / 7)));
+/**
+ * Plain draws on a canvas (graph/canvas/host.js) with the hooks of
+ * ./canvas.js; the SVG hooks below stay its fallback (a browser with no 2D
+ * canvas) and draw the legend and every other page's samples.
+ */
+export const renderer = 'canvas';
+export const canvas = canvasHooks;
 
 /** A region texture's pattern id: `v` the texture, `c` its tint. */
 const patternId = (v, c) => `pl-pat-${v}-${c}`;
@@ -59,25 +65,11 @@ function regionPattern(v, c) {
  * mask rides along in the lower layer.
  */
 export function drawBackdrop(g, lay) {
-  const rr = lay.region_r || 24;
-  const arcs = new Map();
-  g.nodes.forEach((n, i) => {
-    if (!n.top_scope) return;
-    const x = lay.pos[2 * i];
-    const y = lay.pos[2 * i + 1];
-    // At least the memory's own disc and outline, so a large one is never
-    // wider than its region.
-    const q = Math.max(radius(n) + 6, rr);
-    const qs = q.toFixed(1);
-    const d = `M${(x - q).toFixed(1)},${y.toFixed(1)}a${qs},${qs} 0 1,0 ${(2 * q).toFixed(1)},0a${qs},${qs} 0 1,0 ${(-2 * q).toFixed(1)},0`;
-    if (!arcs.has(n.top_scope)) arcs.set(n.top_scope, { slot: n.color_slot, d: [] });
-    arcs.get(n.top_scope).d.push(d);
-  });
   const defs = fadeDefs();
   const patterns = new Set();
   const below = s('g', { class: 'scope-regions', 'aria-hidden': 'true' }, defs);
-  for (const [, a] of [...arcs].sort((p, q) => (p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : 0))) {
-    const d = a.d.join('');
+  for (const a of regionArcs(g, lay)) {
+    const d = a.d;
     const c = slot(a.slot);
     below.appendChild(s('path', { class: ['region', 'fill-' + c], d }));
     const v = texture(a.slot);

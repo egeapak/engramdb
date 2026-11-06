@@ -68,3 +68,53 @@ The marks the page sets: `graph:data`, `graph:layout`, `graph:built`,
 
 The numbers depend on the machine; compare runs on one machine only, and
 close other heavy work first (a parallel `cargo build` doubles every figure).
+
+Both graph surfaces are measured the same way: a canvas-drawn style
+(Plain) has no element per memory or relation, so the hover figures move
+the pointer (`pointermove` at the memory's centre, counting the CPU hit
+test) where the SVG one gets `mouseout` / `mouseover`, only memories inside
+the box are hovered on either, the pan drags across `.graph-box`, and
+`shown_relations` on a canvas is the card's count. `surface` says which.
+
+## `views.mjs`: one view, both surfaces
+
+Holds a view fixed (`--views s1k:all,s2k:all,s10k:open,s10k:all`; `all` is
+show all, `open` the largest scope) and times what the surface costs, so two
+versions of `web/` can be compared on one binary (`--assets`, `--label`):
+
+```bash
+NODE_PATH=$(npm root -g) node bench/browser/views.mjs --stores /tmp/dash-bench \
+  --assets web --label after --json /tmp/dash-bench/views-after.json
+```
+
+`--modes cold,cached` (cold: the server's layout cache off; cached: one
+untimed load first), `--runs 5`, `--style plain`, `--theme light`,
+`--cpu-throttle 4`, `--dpr 2` (device scale factor), `--gpu` (SwiftShader
+as the GPU: headless Chromium otherwise rasters a 2D canvas on the main
+thread, inside the paint, which a machine with a GPU does not),
+`--paint-only`. Fields (medians over the runs): `paint` (hash change →
+the frame after `graph:built`), `draw` (`graph:layout` → that frame),
+`settle_ms` (a wheel zoom's 160 ms settle timer → the frame after the last
+settle step, the SVG's second timer included) and `settle_work_ms` (their
+script time), `zoom_fps`, `pan_fps`, `hover_frame_ms` (p50 of 30), and
+`heap_mb` / `dom_nodes` / `layout_objects` after a forced GC.
+
+## `checks.mjs`: interaction and accessibility, both surfaces
+
+Not a timing: pass / fail per view and style, exit 1 on any failure.
+
+```bash
+NODE_PATH=$(npm root -g) node bench/browser/checks.mjs --stores /tmp/dash-bench --assets web
+```
+
+Per view (`s60:full`, `s1k:all`, `s10k:open`) and style (`plain` on the
+canvas, `grid` on SVG): one accessible element per drawn memory, in index
+order, named `… (<type>, N relations)`, matching the card's count; the
+canvas has `role="img"` and a label; `]` / `[` walk memories in order with
+roving focus, Enter selects (card heading), a panel row is announced,
+Escape clears; hovering 30 memories at their centres hits each one (the
+tooltip names it, the cursor is a pointer); a click opens the panel; a
+relation pinned from the table is centred and the pointer there hits it;
+a display filter moves no memory; a zoom gesture settles; a light / dark
+switch repaints the canvas; no console error or CSP violation; and the
+canvas lists the same memories, with the same words, as the SVG surface.

@@ -62,20 +62,22 @@
 // only relations with both ends on screen are drawn whole, the rest as
 // short stubs (recomputed when a pan or zoom settles, never per frame).
 
-import { h, s, mount } from '../dom.js';
+import { h, mount, afterPaint } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, plural, shortId, label } from '../format.js';
 import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
-import { KINDS, kindLabel, edgeClass } from '../relations.js';
+import { KINDS, kindLabel } from '../relations.js';
 import { runNamedLayout, usesWidth } from '../graph/layouts.js';
 import { isFor, decode, serverKey, SERVER_LAYOUTS } from '../graph/server-layout.js';
 import { shortLabel, forceInput, roundAspect, roundWidth } from '../graph/input.js';
-import { along, pathD } from '../graph/geometry.js';
+import { along } from '../graph/geometry.js';
 import { reads, radius } from '../graph/radius.js';
 import { makeT } from '../graph/strings.js';
 import { STYLES, styleById, storeStyle, useStyle } from '../graph/themes/index.js';
 import { filtered } from '../graph/tally.js';
 import { drawRegions, placeTags } from '../graph/opened.js';
+import { svgSurface } from '../graph/surface-svg.js';
+import { canvasSurface, canvasSupported } from '../graph/canvas/host.js';
 import { memoryPanel } from '../graph/details.js';
 import { placeLabels } from '../graph/labels.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
@@ -641,143 +643,53 @@ export async function renderGraph(main, ctx) {
   const lay = res.lay;
   const viewKey = p.id + '|' + hashKey(res.key);
 
-  // ---- static layers ---------------------------------------------------------
+  // ---- the surface: what draws the graph ---------------------------------------
+  // A canvas style (`renderer = 'canvas'`, Plain) draws through the core
+  // canvas host (../graph/canvas/host.js), an SVG one (Grid) through
+  // ../graph/surface-svg.js; both have the same members (surface-svg.js
+  // docs), so nothing below names a style. An opened scope is laid out by
+  // scope-force for every style: a canvas style draws it only when that is
+  // its own layout (its backdrop expects it); any other draws the core's
+  // neutral SVG regions. A browser with no 2D canvas gets the SVG hooks.
   const P = (i) => [lay.pos[2 * i], lay.pos[2 * i + 1]];
-  const nodeEls = [];
-  // Per memory: its label element, `undefined` while not built yet (an
-  // unplaced one), null for none.
-  const labelEls = [];
-  function makeLabel(i) {
-    const n = g.nodes[i];
-    const lp = lay.labels[i];
-    const major = n.degree >= 2 || n.proposed > 0 || n.challenged;
-    return s('text', { class: ['lbl', major && 'major', !lp.placed && 'unplaced'], x: lp.x, y: lp.y, 'text-anchor': lp.anchor }, labels[i]);
-  }
-  /** Memory `i`'s label element, built (in index order in its layer) on first need. */
-  function labelEl(i) {
-    if (labelEls[i] !== undefined) return labelEls[i];
-    const el = makeLabel(i);
-    let j = i + 1;
-    while (j < labelEls.length && !labelEls[j]) j++;
-    labelsLayer.insertBefore(el, j < labelEls.length ? labelEls[j] : null);
-    labelEls[i] = el;
-    return el;
-  }
+  const ownLayout = theme.layout.name === layoutName;
+  const asCanvas = theme.renderer === 'canvas' && !!theme.canvas && (!opened || ownLayout) && canvasSupported();
+  // An opened scope's regions are its sub-scopes: a style laid out by
+  // scope-force draws them as its own regions (it reads each node's group
+  // as its top scope).
+  const backdropOf = opened && ownLayout ? { ...g, nodes: g.nodes.map((n, i) => ({ ...n, top_scope: groupKeys[i] })) } : g;
   let edgeEls = [];
   let adj = [];
-
-  // The style's backdrop: under the relations and over them (Grid: scope
-  // lines and their badges). An opened scope's regions are its sub-scopes:
-  // a style laid out by scope-force draws them as its own regions (it reads
-  // each node's group as its top scope); any other gets the core's neutral
-  // ones, since its backdrop expects its own layout.
-  const backdrop = !opened
-    ? theme.drawBackdrop(g, lay) || {}
-    : theme.layout.name === layoutName
-      ? theme.drawBackdrop({ ...g, nodes: g.nodes.map((n, i) => ({ ...n, top_scope: groupKeys[i] })) }, lay) || {}
-      : drawRegions(groupKeys, lay);
-  performance.mark('graph:backdrop');
-  const edgesLayer = s('g', { class: 'edges', 'aria-hidden': 'true' });
-  // An opened scope's stubs (under the relations) and far-scope tags (over everything).
-  const stubsLayer = s('g', { class: 'xs-stubs', 'aria-hidden': 'true' });
-  const tagsLayer = s('g', { class: 'xs-tags' });
-  let stubEls = g.nodes.map(() => []);
-  // Labels sit under the memories, so a label never hides one.
-  const labelsLayer = s('g', { class: 'labels', 'aria-hidden': 'true' });
-  const nodesLayer = s('g', { class: 'nodes' });
-  g.nodes.forEach((n, i) => {
-    const [x, y] = P(i);
-    const r = radius(n);
-    const drawn = theme.drawNode(n, r);
-    const el = s(
-      'g',
-      {
-        class: ['node', ...(drawn.cls || []), n.degree >= 2 && 'hub', !reads(n) && 'never', n.challenged && 'chal', n.invalidated && 'inv'],
-        transform: `translate(${x},${y})`,
-        'data-i': i,
-        tabindex: '-1',
-        role: 'button',
-        'aria-label': `${n.summary} (${TYPE_LABEL[n.type] || n.type}, ${plural(n.degree, 'relation')})`,
-      },
-      // The hover / focus ring is the core's; the rest is the style's.
-      s('circle', { class: 'ring', r: r + 6 }),
-      drawn.parts,
-    );
-    nodeEls.push(el);
-    nodesLayer.appendChild(el);
-    // A placed label now; an unplaced one (no free spot: hidden, shown only
-    // while its memory is highlighted, CSS .lbl.unplaced) the first time a
-    // highlight needs it (`labelEl`), since most of a large graph's labels
-    // have no spot and would only cost their creation.
-    const lp = lay.labels[i];
-    if (lp && lp.placed) {
-      const lbl = makeLabel(i);
-      labelEls.push(lbl);
-      labelsLayer.appendChild(lbl);
-    } else labelEls.push(lp ? undefined : null);
-  });
-  // Each memory's pointer, focus and key handling, delegated to the layer
-  // (one listener per event instead of six per memory): the memory is the
-  // `.node` the event came from, its index in `data-i`.
-  // The view a zoom gesture started from, while one runs (gestureZoom).
+  // The view a zoom gesture started from, while one runs (gestureTo), and
+  // whether a pan (canvas) or a zoom started it.
   let shown = null;
+  let shownBy = null;
   let gestureTimer = null;
-  const nodeOf = (ev) => {
-    const el = ev.target instanceof Element ? ev.target.closest('.node') : null;
-    return el && nodesLayer.contains(el) ? el : null;
+  const cb = {
+    hover: (sel) => hover(sel),
+    pin: (sel, focusCard) => pin(sel, focusCard),
+    unpin: () => unpin(),
+    quiet: () => quietFocus,
+    busy: () => !!shown,
+    dragged: () => dragged,
   };
-  // mouseenter / mouseleave: moves within one memory's own parts are not
-  // an enter or a leave.
-  const crossed = (el, other) => !(other instanceof Node && el.contains(other));
-  nodesLayer.addEventListener('mouseover', (ev) => {
-    // Mid-zoom the map moves under a still pointer: no hover until it settles.
-    const el = shown ? null : nodeOf(ev);
-    if (el && crossed(el, ev.relatedTarget)) hover({ node: +el.dataset.i });
-  });
-  nodesLayer.addEventListener('mouseout', (ev) => {
-    const el = nodeOf(ev);
-    if (el && crossed(el, ev.relatedTarget)) hover(null);
-  });
-  // A neighbour focused by ] / [ keeps the selection's highlight (stepRow).
-  nodesLayer.addEventListener('focusin', (ev) => {
-    const el = nodeOf(ev);
-    if (el && ev.target === el && !quietFocus) hover({ node: +el.dataset.i });
-  });
-  nodesLayer.addEventListener('focusout', (ev) => {
-    const el = nodeOf(ev);
-    if (el && ev.target === el) hover(null);
-  });
-  nodesLayer.addEventListener('click', (ev) => {
-    const el = nodeOf(ev);
-    if (!el) return;
-    ev.stopPropagation();
-    if (!dragged) pin({ node: +el.dataset.i }, false);
-  });
-  nodesLayer.addEventListener('keydown', (ev) => {
-    const el = nodeOf(ev);
-    if (el && (ev.key === 'Enter' || ev.key === ' ')) {
-      ev.preventDefault();
-      ev.stopPropagation();
-      pin({ node: +el.dataset.i }, true);
-    }
-  });
+  let surface = null;
+  if (asCanvas) {
+    surface = canvasSurface({ g: backdropOf, lay, labels, theme, box: graphBox, boxSize, cb, ariaLabel: t('canvasAria', g.nodes.length, g.edges.length) });
+    performance.mark('graph:backdrop');
+  }
+  if (!surface) {
+    // The style's backdrop: under the relations and over them (Grid: scope
+    // lines and their badges); the neutral regions for another style's
+    // opened scope.
+    const backdrop = !opened ? theme.drawBackdrop(g, lay) || {} : ownLayout ? theme.drawBackdrop(backdropOf, lay) || {} : drawRegions(groupKeys, lay);
+    performance.mark('graph:backdrop');
+    surface = svgSurface({ g, lay, labels, theme, backdrop, cb });
+  }
   performance.mark('graph:nodes');
-
-  const svg = s(
-    'svg',
-    { class: 'graph', role: 'group', 'aria-label': 'Memories' },
-    s('rect', { class: 'bg', x: -1e5, y: -1e5, width: 2e5, height: 2e5, 'aria-hidden': 'true' }),
-    backdrop.below || null,
-    stubsLayer,
-    edgesLayer,
-    backdrop.above || null,
-    labelsLayer,
-    nodesLayer,
-    tagsLayer,
-  );
-  // The <svg>'s own box, which a zoom gesture transforms (gestureZoom): a
+  // The surface's own box, which a zoom gesture transforms (gestureTo): a
   // transform on the <svg> itself re-lays it out and re-paints it.
-  const pane = h('div', { class: 'g-pane' }, svg);
+  const pane = h('div', { class: 'g-pane' }, surface.el);
   mount(graphBox, pane, tip, hint);
   performance.mark('graph:mounted');
 
@@ -808,8 +720,7 @@ export async function renderGraph(main, ctx) {
   /** Stubs from memories to their far scope's tag, and the tags, under the display filters. */
   function drawStubs() {
     if (!tagByName.size) return;
-    stubEls = g.nodes.map(() => []);
-    const lines = [];
+    const stubs = [];
     for (const st of g.stubs || []) {
       const i = byId.get(st.node);
       const tg = tagByName.get(st.scope);
@@ -832,66 +743,35 @@ export async function renderGraph(main, ctx) {
           y2 = y + (dy / len) * reach;
         }
       }
-      const el = s('line', {
-        class: ['xs-stub', ft.contradictions && 'contra'],
-        x1: x.toFixed(1),
-        y1: y.toFixed(1),
-        x2: x2.toFixed(1),
-        y2: y2.toFixed(1),
-        'stroke-width': (0.8 + 0.45 * Math.min(4, ft.count - 1)).toFixed(2),
-        'vector-effect': 'non-scaling-stroke',
-      });
-      stubEls[i].push(el);
-      lines.push(el);
+      stubs.push({ i, x1: x, y1: y, x2, y2, w: 0.8 + 0.45 * Math.min(4, ft.count - 1), contra: !!ft.contradictions });
     }
     // Many stubs would veil the memories: past STUBS_FAINT they are drawn
     // fainter and come up with their memory's highlight.
-    stubsLayer.classList.toggle('many', lines.length > STUBS_FAINT);
-    mount(stubsLayer, lines);
-    const tagEls = [];
+    surface.setStubs(stubs, stubs.length > STUBS_FAINT);
+    const tags = [];
     for (const sc of g.stub_scopes) {
       const tg = tagByName.get(sc.name);
       const ft = filtered(sc, f);
       if (!tg || !ft.count) continue;
-      const go = () => (location.hash = hashOf(ctx, { ...f, top_scope: sc.name || '-' }));
-      const el = s(
-        'g',
-        { class: ['xs-tag', ft.contradictions && 'contra'], transform: `translate(${tg.x.toFixed(1)},${tg.y.toFixed(1)})`, tabindex: '0', role: 'link', 'aria-label': t('tagAria', scopeName(sc.name), ft.count, ft.contradictions) },
-        s('rect', { x: (-tg.w / 2).toFixed(1), y: (-tg.h / 2).toFixed(1), width: tg.w.toFixed(1), height: tg.h.toFixed(1), rx: (tg.h / 2).toFixed(1) }),
-        s('text', { y: (tg.font * 0.36).toFixed(2), 'font-size': tg.font.toFixed(2), 'text-anchor': 'middle' }, `${scopeName(sc.name)} · ${fmt(ft.count)}`, ft.contradictions ? s('tspan', { class: 'w' }, `  ⚠ ${fmt(ft.contradictions)}`) : null),
-      );
-      el.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        if (!dragged) go();
-      });
-      el.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') {
-          ev.preventDefault();
-          ev.stopPropagation();
-          go();
-        }
-      });
-      tagEls.push(el);
+      tags.push({ tg, name: sc.name, count: ft.count, contradictions: ft.contradictions, aria: t('tagAria', scopeName(sc.name), ft.count, ft.contradictions), go: () => (location.hash = hashOf(ctx, { ...f, top_scope: sc.name || '-' })) });
     }
-    mount(tagsLayer, tagEls);
+    surface.setTags(tags);
   }
 
   // ---- relations (redrawn when the display filters change) ----------------
-  // Built relation elements by index, kept while what they were drawn for
+  // Built relations by index, kept while what they were drawn for
   // (`builtKey`: the scale, and the view in cut mode) holds. A display
-  // filter then only hides and shows them (`hidden`) instead of building
-  // and styling every drawn relation again: at 487 relations that was half
-  // of a toggle. They stay in index order, as a rebuild would put them, so
-  // a toggle never changes what overlaps what. A relation is built the
-  // first time it is shown (`undefined`: not yet; `null`: nothing to draw).
+  // filter then only hides and shows them instead of building every drawn
+  // relation again: at 487 relations that was half of a toggle (SVG). They
+  // stay in index order, as a rebuild would put them, so a toggle never
+  // changes what overlaps what. A relation is built the first time it is
+  // shown (`undefined`: not yet; `null`: nothing to draw).
   let built = [];
   let builtKey = null;
   function buildEdge(k, scale, onScreen) {
     const e = g.edges[k];
     const si = byId.get(e.src);
     const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
-    let pts = lay.routes[k];
-    let drawn = null;
     if (cutMode && ti >= 0) {
       const a = P(si);
       const b = P(ti);
@@ -907,40 +787,15 @@ export async function renderGraph(main, ctx) {
         const len = Math.sqrt(dx * dx + dy * dy) || 1;
         const reach = Math.min(len, 30 / scale);
         const q = [p0[0] + (dx / len) * reach, p0[1] + (dy / len) * reach];
-        pts = ina ? [a, q] : [q, b];
-        drawn = ina
-          ? theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: 0, stub: true, scale })
-          : theme.drawEdge(e, pts, { rs: 0, rt: radius(g.nodes[ti]) + 4, stub: false, scale });
-        drawn = { ...drawn, cls: [...(drawn.cls || []), 'cut'] };
+        const pts = ina ? [a, q] : [q, b];
+        const ends = ina ? { rs: radius(g.nodes[si]) + 4, rt: 0, stub: true, scale } : { rs: 0, rt: radius(g.nodes[ti]) + 4, stub: false, scale };
+        return surface.edge(k, e, pts, ends, true);
       }
     }
     // `scale`: screen px per layout unit now, for a style that sizes
     // what it draws along a relation by the zoom.
-    if (!drawn) drawn = theme.drawEdge(e, pts, { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale });
-    // The wide transparent hit path is the core's, drawn last (on top).
-    const parts = [drawn.parts, s('path', { class: 'hit', d: pathD(pts) })];
-    return s('g', { class: [...edgeClass(e.kind, e.status, e.state), ...(drawn.cls || [])], 'data-k': k }, parts);
+    return surface.edge(k, e, lay.routes[k], { rs: radius(g.nodes[si]) + 4, rt: ti >= 0 ? radius(g.nodes[ti]) + 4 : 9, stub: ti < 0, scale }, false);
   }
-  // Pointer handling for every relation, on the layer (the relation is the
-  // `[data-k]` group the event came from), as for the memories.
-  const edgeOf = (ev) => {
-    const el = ev.target instanceof Element ? ev.target.closest('[data-k]') : null;
-    return el && edgesLayer.contains(el) ? el : null;
-  };
-  edgesLayer.addEventListener('mouseover', (ev) => {
-    const el = shown ? null : edgeOf(ev);
-    if (el && crossed(el, ev.relatedTarget)) hover({ edge: +el.dataset.k });
-  });
-  edgesLayer.addEventListener('mouseout', (ev) => {
-    const el = edgeOf(ev);
-    if (el && crossed(el, ev.relatedTarget)) hover(null);
-  });
-  edgesLayer.addEventListener('click', (ev) => {
-    const el = edgeOf(ev);
-    if (!el || dragged) return;
-    ev.stopPropagation();
-    pin({ edge: +el.dataset.k }, false);
-  });
   function drawEdges() {
     const ks = visible();
     const scale = view ? (boxSize.w || 1) / view.w : 1;
@@ -955,7 +810,7 @@ export async function renderGraph(main, ctx) {
     if (key !== builtKey) {
       builtKey = key;
       built = new Array(g.edges.length);
-      edgesLayer.replaceChildren();
+      surface.resetEdges();
     }
     edgeEls = new Array(g.edges.length).fill(null);
     adj = g.nodes.map(() => []);
@@ -974,19 +829,8 @@ export async function renderGraph(main, ctx) {
         want[k] = 1;
       }
     }
-    // Index order, back to front: each element goes before the one after it.
-    let next = null;
-    for (let k = built.length - 1; k >= 0; k--) {
-      const el = built[k];
-      if (!el) continue;
-      if (want[k]) el.removeAttribute('hidden');
-      else el.setAttribute('hidden', '');
-      if (el.parentNode !== edgesLayer || el.nextSibling !== next) edgesLayer.insertBefore(el, next);
-      next = el;
-    }
-    for (let i = 0; i < g.nodes.length; i++) {
-      nodeEls[i].classList.toggle('hub', adj[i].length >= 2);
-    }
+    surface.placeEdges(built, want);
+    for (let i = 0; i < g.nodes.length; i++) surface.setHub(i, adj[i].length >= 2);
     return ks;
   }
 
@@ -994,48 +838,46 @@ export async function renderGraph(main, ctx) {
   let view = viewports.get(viewKey) || null;
   let drawnScale = null;
   let settleTimer = null;
-  let zoomedOnce = false;
   let cutMode = false;
+  /** A view settled: the relations are rebuilt when the zoom moved far, or in (or out of) cut mode. */
+  function settle(now) {
+    if (drawnScale === null) return;
+    const cutNow = big && fitView().w / view.w >= CUT_ZOOM;
+    if (cutNow || cutNow !== cutMode || (theme.redrawOnZoom && theme.redrawOnZoom(drawnScale, now))) {
+      drawEdges();
+      drawStubs();
+      highlight(hovered || pinned);
+    }
+  }
   function apply() {
     if (shown) {
       clearTimeout(gestureTimer);
       shown = null;
+      shownBy = null;
       pane.classList.remove('zooming');
+      surface.gesture(false);
       pane.style.transform = '';
     }
-    svg.setAttribute('viewBox', `${view.x.toFixed(1)} ${view.y.toFixed(1)} ${view.w.toFixed(1)} ${view.h.toFixed(1)}`);
     const scale = (boxSize.w || 1) / view.w;
-    svg.classList.toggle('z-near', scale >= 0.8);
-    svg.classList.toggle('z-mid', scale >= 0.5 && scale < 0.8);
-    // A style may follow the zoom with one write on the <svg> (Plain: its
-    // relations' width); never per relation. Even that one write restyles
-    // every relation that reads it (measured: 58 → 30 fps zooming 534
-    // relations), so it is made once the view settles, and once now for the
-    // first view; mid-gesture relations scale with the map.
-    if (theme.zoomed && !zoomedOnce) {
-      zoomedOnce = true;
-      theme.zoomed(svg, scale);
-    }
-    // A style that sizes detail along a relation by the zoom may ask for the
-    // relations to be redrawn once a zoom settles far enough from the one
-    // they were drawn at (Plain: dashes, chevrons, zigzags). Only then, and
-    // only the relations: never per frame.
-    // A big graph also redraws when a view settles in (or out of) the
-    // zoomed-in cut mode, and on every settle while in it, since what is on
-    // screen moved.
-    if (theme.zoomed || theme.redrawOnZoom || big) {
+    surface.show(view, scale);
+    if (surface.composited) {
+      // A canvas draws the settled view in this task (the transform comes
+      // off in it too, so no frame shows either half alone), and the
+      // relation rules run first so it draws once.
+      settle(scale);
+    } else if (theme.zoomed || theme.redrawOnZoom || big) {
+      // A style that sizes detail along a relation by the zoom may ask for
+      // the relations to be redrawn once a zoom settles far enough from the
+      // one they were drawn at (Plain: dashes, chevrons, zigzags). Only
+      // then, and only the relations: never per frame. A big graph also
+      // redraws when a view settles in (or out of) the zoomed-in cut mode,
+      // and on every settle while in it, since what is on screen moved.
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
-        if (!svg.isConnected) return;
+        if (!surface.el.isConnected) return;
         const now = (boxSize.w || 1) / view.w;
-        if (theme.zoomed) theme.zoomed(svg, now);
-        if (drawnScale === null) return;
-        const cutNow = big && fitView().w / view.w >= CUT_ZOOM;
-        if (cutNow || cutNow !== cutMode || (theme.redrawOnZoom && theme.redrawOnZoom(drawnScale, now))) {
-          drawEdges();
-          drawStubs();
-          highlight(hovered || pinned);
-        }
+        surface.settled(now);
+        settle(now);
       }, 160);
     }
     viewports.set(viewKey, { ...view });
@@ -1070,33 +912,40 @@ export async function renderGraph(main, ctx) {
     view = zoomedView(factor, cx, cy);
     apply();
   }
-  // A wheel or pinch zoom moves the drawn map as one composited layer (a CSS
-  // transform of the <svg> from the view it shows, `shown`) and sets the view
-  // box only once the gesture settles: re-painting every memory and relation
-  // at each step cost most of a zoom frame (measured in
-  // docs/contributors/dashboard-performance.md). Anything else that moves the
-  // view goes through apply(), which settles a gesture first.
-  function gestureZoom(factor, cx, cy) {
+  // A wheel or pinch zoom (and, on a canvas surface, a drag pan) moves the
+  // drawn map as one composited layer (a CSS transform of the surface from
+  // the view it shows, `shown`) and sets the view only once the gesture
+  // settles: re-painting every memory and relation at each step cost most
+  // of a zoom frame (measured in docs/contributors/dashboard-performance.md).
+  // Anything else that moves the view goes through apply(), which settles a
+  // gesture first.
+  function gestureTo(next, by) {
     if (!shown) {
       shown = { ...view };
+      shownBy = by;
       pane.classList.add('zooming');
+      surface.gesture(true);
     }
-    view = zoomedView(factor, cx, cy);
+    view = next;
     const a = shown.w / view.w;
     const bx = ((shown.x - view.x) * (boxSize.w || 1)) / view.w;
-    const by = ((shown.y - view.y) * (boxSize.h || 1)) / view.h;
-    pane.style.transform = `translate(${bx}px, ${by}px) scale(${a})`;
+    const by2 = ((shown.y - view.y) * (boxSize.h || 1)) / view.h;
+    pane.style.transform = `translate(${bx}px, ${by2}px) scale(${a})`;
     clearTimeout(gestureTimer);
     gestureTimer = setTimeout(apply, 160);
+  }
+  function gestureZoom(factor, cx, cy) {
+    gestureTo(zoomedView(factor, cx, cy), 'zoom');
   }
   function centerOn(x, y) {
     view = { ...view, x: x - view.w / 2, y: y - view.h / 2 };
     apply();
   }
+  const pointerEl = surface.pointerEl;
   const toMap = (clientX, clientY) => {
-    // Mid-gesture the <svg>'s box is transformed and shows `shown` whole.
+    // Mid-gesture the surface's box is transformed and shows `shown` whole.
     const v = shown || view;
-    const rect = svg.getBoundingClientRect();
+    const rect = pointerEl.getBoundingClientRect();
     return [v.x + ((clientX - rect.left) / rect.width) * v.w, v.y + ((clientY - rect.top) / rect.height) * v.h];
   };
   const toScreen = (x, y) => {
@@ -1115,19 +964,19 @@ export async function renderGraph(main, ctx) {
     start = { view: { ...view }, x: pts[0] ? pts[0][0] : 0, y: pts[0] ? pts[0][1] : 0, dist: null, n: pts.length };
     if (pts.length >= 2) start.dist = Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1;
   }
-  svg.addEventListener('pointerdown', (ev) => {
+  pointerEl.addEventListener('pointerdown', (ev) => {
     pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
     if (pointers.size === 1) dragged = false;
     restart();
     // Engage the graph: focus it so the wheel zooms from now on.
     if (!graphBox.contains(document.activeElement)) graphBox.focus({ preventScroll: true });
   });
-  svg.addEventListener('pointermove', (ev) => {
+  pointerEl.addEventListener('pointermove', (ev) => {
     if (!pointers.has(ev.pointerId) || !start) return;
     pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
     if (pointers.size !== start.n) restart();
-    if (shown && pointers.size < 2) apply();
-    const rect = svg.getBoundingClientRect();
+    if (shown && shownBy !== 'pan' && pointers.size < 2) apply();
+    const rect = pointerEl.getBoundingClientRect();
     if (pointers.size >= 2 && start.dist) {
       const [a, b] = [...pointers.values()];
       const dist = Math.hypot(a[0] - b[0], a[1] - b[1]) || 1;
@@ -1140,22 +989,29 @@ export async function renderGraph(main, ctx) {
     const dx = ev.clientX - start.x;
     const dy = ev.clientY - start.y;
     if (!dragged && Math.hypot(dx, dy) < 4) return;
-    if (!dragged) svg.setPointerCapture(ev.pointerId);
+    if (!dragged) pointerEl.setPointerCapture(ev.pointerId);
     dragged = true;
-    view = { ...view, x: start.view.x - (dx / rect.width) * view.w, y: start.view.y - (dy / rect.height) * view.h };
-    apply();
+    const next = { ...view, x: start.view.x - (dx / rect.width) * view.w, y: start.view.y - (dy / rect.height) * view.h };
+    // A canvas pans as a gesture too (it would redraw everything per move).
+    if (surface.composited) gestureTo(next, 'pan');
+    else {
+      view = next;
+      apply();
+    }
   });
   const end = (ev) => {
     pointers.delete(ev.pointerId);
     if (pointers.size) restart();
     else start = null;
+    // A pan settles when the pointer lifts.
+    if (shown && shownBy === 'pan' && !pointers.size) apply();
     // `dragged` stays set through the click that follows the pointerup.
     setTimeout(() => {
       if (!pointers.size) dragged = false;
     }, 0);
   };
-  svg.addEventListener('pointerup', end);
-  svg.addEventListener('pointercancel', end);
+  pointerEl.addEventListener('pointerup', end);
+  pointerEl.addEventListener('pointercancel', end);
   let hintTimer = null;
   graphBox.addEventListener(
     'wheel',
@@ -1176,26 +1032,26 @@ export async function renderGraph(main, ctx) {
     },
     { passive: false },
   );
-  svg.querySelector('.bg').addEventListener('click', () => {
-    if (!dragged) unpin();
-  });
 
   // Keyboard: the graph is one tab stop; ] and [ walk the memories, or the
   // selected memory's panel rows (stepRow).
   const selectedRows = () => !!(pinned && pinned.node !== undefined && panelRows.length);
-  const walk = [...g.nodes.keys()].sort((a, b) => P(a)[1] - P(b)[1] || P(a)[0] - P(b)[0]);
+  // Top to bottom, then left to right; sorted on the first step, since a
+  // 2k-memory sort cost the first paint ~1.3 ms (measured).
+  let walk = null;
   let walkAt = -1;
   function stepNode(dir) {
+    if (!walk) walk = [...g.nodes.keys()].sort((a, b) => lay.pos[2 * a + 1] - lay.pos[2 * b + 1] || lay.pos[2 * a] - lay.pos[2 * b]);
     const cur = document.activeElement && document.activeElement.getAttribute ? Number(document.activeElement.getAttribute('data-i')) : NaN;
     if (!Number.isNaN(cur)) walkAt = walk.indexOf(cur);
     walkAt = (walkAt + dir + walk.length) % walk.length;
     const i = walk[walkAt];
     const [x, y] = P(i);
     if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
-    nodeEls[i].focus({ preventScroll: true });
+    surface.focusNode(i);
   }
   graphBox.addEventListener('keydown', (ev) => {
-    const onNode = ev.target !== graphBox && ev.target.classList && ev.target.classList.contains('node');
+    const onNode = ev.target !== graphBox && surface.nodeIndexOf(ev.target) >= 0;
     if (ev.target !== graphBox && !onNode) return;
     const step = ev.shiftKey ? 0.5 : 0.15;
     const keys = {
@@ -1256,52 +1112,50 @@ export async function renderGraph(main, ctx) {
   }
 
   // ---- highlighting, the tooltip and the card -----------------------------
-  let lit = [];
   // Set while ] / [ moves focus to a neighbour: its focus is not a hover.
   let quietFocus = false;
   let pinned = null; // {edge: k} | {node: i}
   let hovered = null; // the same, while hovered or focused
+  /**
+   * What a focus lights, for the surface to draw (surface-svg.js
+   * `highlight`): a memory, its relations, stubs and neighbours (`.nb`),
+   * or a relation and its two ends; plus the lit labels placed again among
+   * themselves (`relabel`).
+   */
   function highlight(sel) {
-    for (const el of lit) el.classList.remove('on', 'nb', 'nolbl');
-    lit = [];
-    restoreLabels();
     hiddenNames = [];
-    svg.classList.toggle('has-focus', !!sel);
-    if (!sel) return;
-    const mark = (el) => {
-      if (!el) return;
-      el.classList.add('on');
-      lit.push(el);
-    };
+    if (!sel) {
+      surface.highlight(null);
+      return;
+    }
+    const plan = { on: [], nb: new Set(), edges: [], stubsOf: -1, moves: [], nolbl: [] };
+    const seen = new Set();
     const markNode = (i, nb) => {
-      mark(nodeEls[i]);
-      mark(labelEl(i));
-      if (nb) {
-        for (const el of [nodeEls[i], labelEl(i)]) {
-          if (!el) continue;
-          el.classList.add('nb');
-          lit.push(el);
-        }
+      if (!seen.has(i)) {
+        seen.add(i);
+        plan.on.push(i);
       }
+      if (nb) plan.nb.add(i);
     };
     if (sel.node !== undefined) {
-      for (const el of stubEls[sel.node]) mark(el);
+      plan.stubsOf = sel.node;
       for (const k of adj[sel.node]) {
-        mark(edgeEls[k]);
+        if (edgeEls[k]) plan.edges.push(k);
         const e = g.edges[k];
         for (const id of [e.src, e.dst]) if (byId.has(id) && !(id === e.dst && e.dst_store) && byId.get(id) !== sel.node) markNode(byId.get(id), true);
       }
       // Last, so a self-relation never marks the focused memory a neighbour.
       markNode(sel.node, false);
-      relabel([sel.node, ...neighboursOf(sel.node)]);
+      relabel(plan, [sel.node, ...neighboursOf(sel.node)]);
     } else {
       const e = g.edges[sel.edge];
-      mark(edgeEls[sel.edge]);
+      if (edgeEls[sel.edge]) plan.edges.push(sel.edge);
       const ends = [];
       for (const id of [e.src, e.dst]) if (!(id === e.dst && e.dst_store) && byId.has(id)) ends.push(byId.get(id));
       for (const i of ends) markNode(i);
-      relabel(ends);
+      relabel(plan, ends);
     }
+    surface.highlight(plan);
   }
 
   /** Memory `i`'s neighbours on the graph (indices, once each, not `i`). */
@@ -1319,19 +1173,10 @@ export async function renderGraph(main, ctx) {
   // had no spot there). O(degree): only the lit memories take part; the
   // focused one (first) is placed first and always shown. A label that still
   // finds no spot is hidden (`.nolbl`) and named in the tooltip instead (the
-  // panel lists every neighbour anyway). Moved labels go back on the next
-  // highlight.
-  let moved = [];
+  // panel lists every neighbour anyway). The surface puts moved labels back
+  // on the next highlight.
   let hiddenNames = [];
-  function restoreLabels() {
-    for (const [el, x, y, anchor] of moved) {
-      el.setAttribute('x', x);
-      el.setAttribute('y', y);
-      el.setAttribute('text-anchor', anchor);
-    }
-    moved = [];
-  }
-  function relabel(idx) {
+  function relabel(plan, idx) {
     if (idx.length < 2) return;
     const pos = [];
     const nodes = idx.map((i, at) => {
@@ -1342,17 +1187,14 @@ export async function renderGraph(main, ctx) {
     });
     const out = placeLabels(nodes, pos, [], { corners: true });
     out.forEach((lp, at) => {
-      const el = labelEl(idx[at]);
-      if (!el) return;
+      const i = idx[at];
+      if (!lay.labels[i]) return;
       if (!lp.placed && at > 0) {
-        el.classList.add('nolbl');
-        hiddenNames.push(labels[idx[at]]);
+        plan.nolbl.push(i);
+        hiddenNames.push(labels[i]);
         return;
       }
-      moved.push([el, el.getAttribute('x'), el.getAttribute('y'), el.getAttribute('text-anchor')]);
-      el.setAttribute('x', lp.x);
-      el.setAttribute('y', lp.y);
-      el.setAttribute('text-anchor', lp.anchor);
+      plan.moves.push([i, lp.x, lp.y, lp.anchor]);
     });
   }
 
@@ -1501,7 +1343,7 @@ export async function renderGraph(main, ctx) {
   // in the panel (a stacked phone layout, where the graph is off screen).
   let curNode = -1;
   function clearCur() {
-    if (curNode >= 0 && nodeEls[curNode]) nodeEls[curNode].classList.remove('cur');
+    if (curNode >= 0) surface.setCur(curNode, false);
     curNode = -1;
   }
   function stepRow(dir) {
@@ -1520,7 +1362,7 @@ export async function renderGraph(main, ctx) {
       if (row.node !== null) {
         const [x, y] = P(row.node);
         if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
-        nodeEls[row.node].classList.add('cur');
+        surface.setCur(row.node, true);
         curNode = row.node;
       }
       const btn = row.li.querySelector('button');
@@ -1529,7 +1371,7 @@ export async function renderGraph(main, ctx) {
         row.li.scrollIntoView({ block: 'nearest' });
       } else {
         row.li.scrollIntoView({ block: 'nearest' });
-        if (row.node !== null) nodeEls[row.node].focus({ preventScroll: true });
+        if (row.node !== null) surface.focusNode(row.node);
         else graphBox.focus({ preventScroll: true });
       }
     } finally {
@@ -1664,14 +1506,20 @@ export async function renderGraph(main, ctx) {
 
   // ---- legend (the style's) -------------------------------------------------
   // The legend names the scopes drawn, with their drawn memories.
-  mount(legendBox, theme.legend({ ...g, scopes: g.scopes.filter((l) => l.shown > 0).map((l) => ({ ...l, count: l.shown })) }, t));
+  // Below the graph, so built just after the first paint, like the table.
+  afterPaint(() => {
+    if (!ctx.isStale()) mount(legendBox, theme.legend({ ...g, scopes: g.scopes.filter((l) => l.shown > 0).map((l) => ({ ...l, count: l.shown })) }, t));
+  });
   performance.mark('graph:legend');
 
   // ---- the relations table: proposed first, the rest on request -----------
   const PAGE = 100;
   let showAll = false;
   let limit = PAGE;
+  /** The first draw's table, waiting for the frame after it (redraw). */
+  let tableLater = false;
   function renderTable(ks) {
+    tableLater = false;
     const rows = ks
       .map((k) => ({ e: g.edges[k], k }))
       .sort((a, b) => (a.e.status === 'proposed' ? 0 : 1) - (b.e.status === 'proposed' ? 0 : 1) || (a.e.kind === 'contradicts' ? 0 : 1) - (b.e.kind === 'contradicts' ? 0 : 1));
@@ -1762,6 +1610,8 @@ export async function renderGraph(main, ctx) {
   function redraw(first) {
     const ks = drawEdges();
     drawStubs();
+    // A canvas draws now, so `graph:edges` includes its drawing.
+    surface.flush();
     if (first === true) performance.mark('graph:edges');
     if (pinned && pinned.edge !== undefined && !edgeEls[pinned.edge]) pinned = null;
     highlight(pinned);
@@ -1771,7 +1621,16 @@ export async function renderGraph(main, ctx) {
       renderFilters();
       renderNotes(ks);
     }
-    renderTable(ks);
+    if (first !== true) renderTable(ks);
+    else {
+      // Below the graph, and its rows cost the first paint ~13 ms of layout
+      // (docs/contributors/dashboard-performance.md): built just after it,
+      // unless something rebuilds it first.
+      tableLater = true;
+      afterPaint(() => {
+        if (tableLater && !ctx.isStale()) renderTable(ks);
+      });
+    }
     renderCard();
   }
 

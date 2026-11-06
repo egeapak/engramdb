@@ -20,6 +20,9 @@ export const CORE = {
   emptyScope: 'No memories in this top-level scope with these filters.',
   graphAria: (project, n) =>
     `Graph of ${project}: ${plural(n, 'memory', 'memories')}. Arrow keys pan, plus and minus zoom, 0 fits, ] and [ step through memories (through the selected memory's relations once one is selected), Enter selects, Escape clears the selection and returns focus to the graph.`,
+  // The canvas a canvas style draws on (graph/canvas/host.js): a picture,
+  // whose memories are the buttons that follow it.
+  canvasAria: (n, m) => `Drawing of ${plural(n, 'memory', 'memories')} and ${plural(m, 'relation')}. Each memory is a button after it; ] and [ step through them.`,
   toolsHint: 'Drag to pan · click a memory to select it, or a relation to pin it',
   wheelHint: 'Click the graph (or hold Ctrl/⌘) to zoom with the wheel',
   styleLabel: 'Style',

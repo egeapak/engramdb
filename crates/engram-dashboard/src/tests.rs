@@ -1304,6 +1304,127 @@ fn every_graph_style_exports_the_interface() {
     );
 }
 
+/// What the core canvas host (`js/graph/canvas/host.js`) calls on a style
+/// that draws on a canvas: the style's `canvas` export, a frozen object.
+const CANVAS_HOOKS: &[&str] = &[
+    "look",
+    "tokens",
+    "backdrop",
+    "drawBelow",
+    "drawAbove",
+    "edge",
+    "drawEdges",
+    "drawNodes",
+];
+
+/// A style that asks for the canvas surface (`export const renderer =
+/// 'canvas'`) exports `canvas`, imported from its own `canvas.js`, whose
+/// `Object.freeze({ … })` names every hook in [`CANVAS_HOOKS`], each defined
+/// in that file; the host calls nothing else on it (every `hooks.<name>` in
+/// host.js is listed), so the list cannot drift from what the host needs.
+/// Plain draws on a canvas; Grid stays SVG (its pictures are pinned
+/// pixel-identical to the SVG they were).
+#[test]
+fn a_canvas_style_exports_every_canvas_hook() {
+    let host = asset_text("js/graph/canvas/host.js");
+    let mut called: Vec<&str> = host
+        .split("hooks.")
+        .skip(1)
+        .map(|rest| {
+            let end = rest
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            &rest[..end]
+        })
+        .collect();
+    called.sort_unstable();
+    called.dedup();
+    assert!(!called.is_empty(), "host.js calls no hooks");
+    for name in &called {
+        assert!(
+            CANVAS_HOOKS.contains(name),
+            "host.js calls hooks.{name}, which CANVAS_HOOKS does not list"
+        );
+    }
+    let mut canvas_styles = Vec::new();
+    for dir in style_dirs() {
+        let path = format!("{STYLE_ROOT}{dir}/index.js");
+        let src = asset_text(&path);
+        let renderer = quoted_after(src, "export const renderer = ");
+        assert!(
+            matches!(renderer.as_deref(), None | Some("canvas") | Some("svg")),
+            "{path}: renderer {renderer:?}"
+        );
+        if renderer.as_deref() != Some("canvas") {
+            continue;
+        }
+        canvas_styles.push(dir);
+        assert!(exports(src, "canvas"), "{path} does not export `canvas`");
+        assert!(
+            src.contains("from './canvas.js';"),
+            "{path}: the canvas hooks live in ./canvas.js"
+        );
+        let hooks_path = format!("{STYLE_ROOT}{dir}/canvas.js");
+        let hooks = asset_text(&hooks_path);
+        let keys = object_keys(hooks, "export const canvas = Object.freeze({");
+        for name in CANVAS_HOOKS {
+            assert!(
+                keys.iter().any(|k| k == name),
+                "{hooks_path}: `canvas` lacks {name:?} ({keys:?})"
+            );
+            assert!(
+                hooks.contains(&format!("function {name}("))
+                    || hooks.contains(&format!("const {name} = ")),
+                "{hooks_path} does not define {name}"
+            );
+        }
+    }
+    assert_eq!(canvas_styles, ["plain"], "styles on the canvas surface");
+}
+
+/// The canvas surface's accessible list: one button per drawn memory
+/// (`g.nodes`, every one, built in host.js), named by the same `nodeAria`
+/// the SVG surface puts on a memory's `<g>`, so a screen reader hears the
+/// same words whichever surface draws; and the canvas itself has a role and
+/// a label.
+#[test]
+fn the_canvas_accessible_list_covers_every_memory() {
+    let host = asset_text("js/graph/canvas/host.js");
+    let scene = asset_text("js/graph/canvas/scene.js");
+    assert!(
+        host.contains("const nodes = S.nodes;") && scene.contains("const nodes = g.nodes.map("),
+        "host.js: the memories it lists are every g.nodes entry (scene.js)"
+    );
+    // Built once, after the first paint or on the first focus (ensureList).
+    let at = host
+        .find("buttons = nodes.map(")
+        .expect("host.js builds one button per memory");
+    let body = &host[at..at + host[at..].find("\n    });").expect("unclosed map")];
+    for needle in [
+        "document.createElement('button')",
+        "'g-a11y-node'",
+        "nodeAria(nd.n)",
+        "dataset.i = nd.i",
+    ] {
+        assert!(body.contains(needle), "the button map lacks {needle}");
+    }
+    assert!(host.contains("import { nodeAria } from '../a11y.js';"));
+    assert!(
+        host.contains("L.base.cv.setAttribute('role', 'img');")
+            && host.contains("L.base.cv.setAttribute('aria-label', o.ariaLabel);"),
+        "the base canvas has role img and the view's label"
+    );
+    let svg = asset_text("js/graph/surface-svg.js");
+    assert!(svg.contains("import { nodeAria } from './a11y.js';"));
+    assert!(svg.contains("'aria-label': nodeAria(n)"));
+    // One place words a memory for assistive technology.
+    let view = asset_text("js/views/graph.js");
+    assert!(
+        !view.contains("plural(n.degree, 'relation')"),
+        "views/graph.js words a memory itself; use graph/a11y.js"
+    );
+}
+
 const STYLE_ROOT: &str = "js/graph/themes/";
 
 /// The style folders under [`STYLE_ROOT`], sorted.
