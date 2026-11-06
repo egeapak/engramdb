@@ -7062,3 +7062,94 @@ async fn early_embedding_warning_rides_the_instructions_only() {
     client.cancel().await.unwrap();
     server_handle.await.unwrap().unwrap();
 }
+
+/// A project whose store exists but whose registry entry does not (a
+/// removable drive set up on another computer, or pruned while unplugged) is
+/// registered at startup, and the agent is told once, on the first tool
+/// result.
+#[tokio::test]
+async fn startup_registers_an_unregistered_store_and_tells_the_agent_once() {
+    let tmp = TempDir::new().unwrap();
+    MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+        .await
+        .unwrap();
+    let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+    let server = new_server_at(tmp.path(), registry.clone());
+    let startup = server.clone();
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, async move {
+        startup.check_registration().await;
+        Ok(())
+    });
+    let client = rmcp::serve_client((), client_io).await.expect("handshake");
+
+    let text_of = |result: &CallToolResult| -> String {
+        result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ContentBlock::Text(TextContent { text, .. }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let stats = || {
+        client
+            .peer()
+            .call_tool(CallToolRequestParams::new("stats").with_arguments(serde_json::Map::new()))
+    };
+    let first = stats().await.expect("tools/call");
+    assert!(text_of(&first).contains("registered it now"), "{first:?}");
+    let second = stats().await.expect("tools/call");
+    assert!(
+        !text_of(&second).contains("registered it now"),
+        "{second:?}"
+    );
+
+    let id = engramdb::storage::project_id::compute_project_id(tmp.path());
+    assert!(registry
+        .load()
+        .await
+        .unwrap()
+        .projects
+        .iter()
+        .any(|e| e.project_id == id));
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A registration notice known at `initialize` rides the instructions.
+#[tokio::test]
+async fn early_registration_notice_rides_the_instructions() {
+    let tmp = TempDir::new().unwrap();
+    MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+        .await
+        .unwrap();
+    let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+    let server = new_server_at(tmp.path(), registry);
+    server.check_registration().await;
+    let (client, server_handle) = duplex_serve(server).await;
+    let instructions = client
+        .peer_info()
+        .and_then(|info| info.instructions.clone())
+        .unwrap_or_default();
+    assert!(instructions.contains("registered it now"), "{instructions}");
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A registered project starts with no notice at all.
+#[tokio::test]
+async fn startup_says_nothing_for_a_registered_project() {
+    let tmp = TempDir::new().unwrap();
+    let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+    MemoryStore::init(tmp.path(), registry.as_ref())
+        .await
+        .unwrap();
+    let server = new_server_at(tmp.path(), registry);
+    server.check_registration().await;
+    assert!(server.registration_notice.get().is_none());
+}
