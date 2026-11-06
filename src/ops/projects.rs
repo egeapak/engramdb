@@ -113,13 +113,144 @@ pub(crate) fn registry_entry_alive(e: &RegistryEntry) -> bool {
     // row and hand its data directory to the sweep while the checkout is merely
     // unreachable. This runs before `protected_project_ids`, so a fail-open
     // answer here makes that guard moot.
+    //
+    // An *unmounted* volume is not an error, though: an ejected drive's mount
+    // directory is removed, so `try_exists` answers `Ok(false)` exactly as for
+    // a deleted project. Auto-maintenance in any other project then dropped
+    // the entry (and its group subscriptions and parent link) while the drive
+    // was unplugged. `on_unmounted_volume` tells the two apart.
     let path = Path::new(&e.project_path);
     let target = if e.parent_project_id.is_some() {
         path.to_path_buf()
     } else {
         path.join(".engramdb")
     };
-    target.try_exists().unwrap_or(true)
+    match target.try_exists() {
+        Ok(true) | Err(_) => true,
+        Ok(false) => crate::storage::volume::on_unmounted_volume(path),
+    }
+}
+
+/// What [`ensure_registered`] found, and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrationCheck {
+    /// `dir` has no EngramDB store, so there is nothing to register.
+    NotInitialized,
+    /// The registry already has an entry for this project ID.
+    AlreadyRegistered,
+    /// The store existed but the registry had no entry for it; one was added.
+    Registered {
+        project_id: String,
+        project_path: String,
+    },
+    /// The registry entry pointed at a path that no longer exists (for
+    /// example a drive that now mounts under another name); it was moved to
+    /// `dir`.
+    Repointed {
+        project_id: String,
+        project_path: String,
+        previous_path: String,
+    },
+}
+
+impl RegistrationCheck {
+    /// The sentence an agent should pass on to the user, if anything changed.
+    ///
+    /// Shared by the SessionStart hook and the MCP server so both say the same
+    /// thing. Names no tool, because the hook may run without the MCP server.
+    pub fn agent_notice(&self) -> Option<String> {
+        match self {
+            Self::NotInitialized | Self::AlreadyRegistered => None,
+            Self::Registered {
+                project_id,
+                project_path,
+            } => Some(format!(
+                "[EngramDB] This project ({project_path}, id {project_id}) has an EngramDB store, \
+                 but it was not in this computer's EngramDB project registry, so EngramDB \
+                 registered it now. Tell the user. This can happen when the project is on a \
+                 removable or network drive that was used on another computer, or that was not \
+                 mounted when EngramDB cleaned up the registry. Group subscriptions \
+                 (`engramdb groups subscribe`) and project links (`engramdb projects link`) are \
+                 kept in the registry, so if the user had set them up for this project, they \
+                 must set them up again."
+            )),
+            Self::Repointed {
+                project_id,
+                project_path,
+                previous_path,
+            } => Some(format!(
+                "[EngramDB] This project (id {project_id}) was registered at {previous_path}, \
+                 which no longer exists, so EngramDB updated the registry to {project_path}. \
+                 Tell the user. This can happen when a removable drive mounts under a different \
+                 name."
+            )),
+        }
+    }
+}
+
+/// Make sure the initialized project at `dir` is in the registry.
+///
+/// A store lives in the project tree (`.engramdb/`) while the registry lives
+/// on this computer, so the two can disagree: the project is on a drive that
+/// was set up on another computer, the registry was reset, or an older binary
+/// pruned the entry while the drive was not mounted. Every lookup by project
+/// ID (`project: "<id>"`, `projects info`, group fan-in) then fails as if the
+/// project was never initialized.
+///
+/// Called on session start by the SessionStart hook and the MCP server.
+/// `dir` must be the resolved project root (the main worktree for a linked
+/// worktree). A directory without a store is left alone: auto-registering is
+/// not auto-initializing.
+pub async fn ensure_registered(
+    dir: &Path,
+    registry: &dyn RegistryBackend,
+) -> Result<RegistrationCheck> {
+    let engramdb_dir = paths::project_dir(dir);
+    let initialized =
+        engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
+    if !initialized {
+        return Ok(RegistrationCheck::NotInitialized);
+    }
+    let project_id = crate::storage::project_id::compute_project_id(dir);
+    let reg = registry.load().await?;
+    let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let project_path = canon.to_string_lossy().to_string();
+    match reg.projects.iter().find(|e| e.project_id == project_id) {
+        Some(entry) => {
+            let registered = Path::new(&entry.project_path);
+            // Never compare paths textually: the registry holds the
+            // canonical path, `dir` may be `.` or a symlinked spelling.
+            let same = registered
+                .canonicalize()
+                .map(|r| r == canon)
+                .unwrap_or(false);
+            // Only a path that is provably gone is repointed. An existing
+            // other checkout keeps ownership (two clones of one remote share
+            // an ID), and an unreadable one is left alone.
+            // A path on an unplugged drive is not gone either: that
+            // checkout still owns the ID and comes back when it is mounted.
+            if same
+                || !matches!(registered.try_exists(), Ok(false))
+                || crate::storage::volume::on_unmounted_volume(registered)
+            {
+                return Ok(RegistrationCheck::AlreadyRegistered);
+            }
+            let previous_path = entry.project_path.clone();
+            registry.update(dir, &project_id).await?;
+            Ok(RegistrationCheck::Repointed {
+                project_id,
+                project_path,
+                previous_path,
+            })
+        }
+        None => {
+            registry.update(dir, &project_id).await?;
+            Ok(RegistrationCheck::Registered {
+                project_id,
+                project_path,
+            })
+        }
+    }
 }
 
 /// List all registered projects.
@@ -980,6 +1111,200 @@ mod tests {
         let remaining = registry.load().await.unwrap();
         assert_eq!(remaining.projects.len(), 1);
         assert_ne!(remaining.projects[0].project_id, "stale-proj-001");
+    }
+
+    /// A mount container that exists on this machine, for paths that look
+    /// like an unplugged drive. `None` where there is none (then the test
+    /// that needs one has nothing to check).
+    #[cfg(unix)]
+    fn existing_mount_container() -> Option<&'static str> {
+        ["/Volumes", "/media", "/mnt"]
+            .into_iter()
+            .find(|c| Path::new(c).is_dir())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prune_keeps_a_project_on_an_unplugged_drive() {
+        // The bug: an ejected drive's mount directory disappears, so its
+        // projects looked deleted and auto-maintenance in any other project
+        // dropped their registry entries, subscriptions included.
+        let Some(container) = existing_mount_container() else {
+            return;
+        };
+        let unplugged = format!(
+            "{container}/engramdb-test-unplugged-{}/work/proj",
+            uuid::Uuid::now_v7().simple()
+        );
+        let registry = InMemoryRegistry::with(Registry {
+            projects: vec![RegistryEntry {
+                project_id: "drive-proj-0001".to_string(),
+                project_path: unplugged,
+                parent_project_id: None,
+                subscriptions: vec!["_group_x".to_string()],
+            }],
+            ..Default::default()
+        });
+
+        let result = prune_stale_projects(&registry, |_| {}).await.unwrap();
+        assert_eq!(result.stale_removed, 0, "an unplugged drive is not gone");
+        let kept = registry.load().await.unwrap();
+        assert_eq!(kept.projects.len(), 1);
+        assert_eq!(kept.projects[0].subscriptions, vec!["_group_x"]);
+    }
+
+    #[tokio::test]
+    async fn ensure_registered_leaves_an_uninitialized_directory_alone() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let check = ensure_registered(tmp.path(), &registry).await.unwrap();
+        assert_eq!(check, RegistrationCheck::NotInitialized);
+        assert!(check.agent_notice().is_none());
+        assert!(registry.load().await.unwrap().projects.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_registered_registers_a_store_the_registry_does_not_know() {
+        // The store was set up against another registry: another computer,
+        // or this one before the registry lost the entry.
+        let tmp = TempDir::new().unwrap();
+        MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let registry = InMemoryRegistry::new();
+
+        let check = ensure_registered(tmp.path(), &registry).await.unwrap();
+        let id = crate::storage::project_id::compute_project_id(tmp.path());
+        let canon = tmp.path().canonicalize().unwrap();
+        assert_eq!(
+            check,
+            RegistrationCheck::Registered {
+                project_id: id.clone(),
+                project_path: canon.to_string_lossy().to_string(),
+            }
+        );
+        let notice = check.agent_notice().expect("the agent is told");
+        assert!(notice.contains("registered it now"), "{notice}");
+        assert!(notice.contains("Tell the user"), "{notice}");
+        assert!(notice.contains(&id), "{notice}");
+
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 1);
+        assert_eq!(reg.projects[0].project_id, id);
+
+        // Idempotent: the next session start finds it registered.
+        let again = ensure_registered(tmp.path(), &registry).await.unwrap();
+        assert_eq!(again, RegistrationCheck::AlreadyRegistered);
+        assert!(again.agent_notice().is_none());
+    }
+
+    #[tokio::test]
+    async fn ensure_registered_matches_paths_by_canonical_form() {
+        // `serve --dir .` and a symlinked checkout reach this with another
+        // spelling of the registered path. That is not a re-registration.
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        MemoryStore::init(tmp.path(), &registry).await.unwrap();
+        let dotted = tmp.path().join(".");
+        let check = ensure_registered(&dotted, &registry).await.unwrap();
+        assert_eq!(check, RegistrationCheck::AlreadyRegistered);
+    }
+
+    #[tokio::test]
+    async fn ensure_registered_repoints_an_entry_whose_path_is_gone() {
+        // A drive that mounts under another name: same project, new path.
+        let tmp = TempDir::new().unwrap();
+        MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = crate::storage::project_id::compute_project_id(tmp.path());
+        let gone = tmp.path().join("no-longer-here");
+        let registry = InMemoryRegistry::with(Registry {
+            projects: vec![RegistryEntry {
+                project_id: id.clone(),
+                project_path: gone.to_string_lossy().to_string(),
+                parent_project_id: None,
+                subscriptions: vec!["_group_kept".to_string()],
+            }],
+            ..Default::default()
+        });
+
+        let check = ensure_registered(tmp.path(), &registry).await.unwrap();
+        assert!(
+            matches!(&check, RegistrationCheck::Repointed { previous_path, .. }
+                if *previous_path == gone.to_string_lossy()),
+            "{check:?}"
+        );
+        assert!(check.agent_notice().unwrap().contains("no longer exists"));
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects.len(), 1);
+        assert_eq!(
+            Path::new(&reg.projects[0].project_path),
+            tmp.path().canonicalize().unwrap()
+        );
+        // Repointing keeps what the entry carried.
+        assert_eq!(reg.projects[0].subscriptions, vec!["_group_kept"]);
+    }
+
+    #[tokio::test]
+    async fn ensure_registered_keeps_an_existing_other_checkout() {
+        // Two clones of one remote share an ID. The registered one exists, so
+        // it keeps ownership and nothing is reported.
+        let tmp = TempDir::new().unwrap();
+        let here = tmp.path().join("here");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        MemoryStore::init(&here, &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = crate::storage::project_id::compute_project_id(&here);
+        let registry = InMemoryRegistry::with(Registry {
+            projects: vec![RegistryEntry {
+                project_id: id,
+                project_path: other.to_string_lossy().to_string(),
+                parent_project_id: None,
+                subscriptions: vec![],
+            }],
+            ..Default::default()
+        });
+
+        let check = ensure_registered(&here, &registry).await.unwrap();
+        assert_eq!(check, RegistrationCheck::AlreadyRegistered);
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects[0].project_path, other.to_string_lossy());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ensure_registered_keeps_a_checkout_on_an_unplugged_drive() {
+        let Some(container) = existing_mount_container() else {
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let id = crate::storage::project_id::compute_project_id(tmp.path());
+        let unplugged = format!(
+            "{container}/engramdb-test-unplugged-{}/proj",
+            uuid::Uuid::now_v7().simple()
+        );
+        let registry = InMemoryRegistry::with(Registry {
+            projects: vec![RegistryEntry {
+                project_id: id,
+                project_path: unplugged.clone(),
+                parent_project_id: None,
+                subscriptions: vec![],
+            }],
+            ..Default::default()
+        });
+        let check = ensure_registered(tmp.path(), &registry).await.unwrap();
+        assert_eq!(check, RegistrationCheck::AlreadyRegistered);
+        assert_eq!(
+            registry.load().await.unwrap().projects[0].project_path,
+            unplugged
+        );
     }
 
     #[tokio::test]
