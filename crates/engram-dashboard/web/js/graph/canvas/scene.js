@@ -1,21 +1,28 @@
-// What a canvas layer of the graph shows, drawn from plain data: the part
-// of the canvas surface that runs wherever the drawing happens, in the
-// raster worker (./raster-worker.js) or, without one, on the page
-// (./raster.js). No DOM here: a scene is the graph's memories, relations,
-// stubs and tags, the style's hooks and the tokens, and every layer is a
-// function of a scene and a frame.
+// What a canvas layer of the graph shows, drawn from plain data: the
+// graph's memories, relations, stubs and tags, the style's hooks and the
+// tokens. The host (./host.js) owns the canvases; everything here draws
+// into a context it is handed, and the only page state it reads is none
+// (the one canvas it makes, for measuring label text, is never in the
+// page; a style's hooks may make their own, as Plain's textures do).
 //
 // A frame `fr` is { view: { x, y, w, h }, scale (screen px per layout
-// unit), M (the overscan margin, CSS px), dpr, pw, ph (device size), px
-// (device px per layout unit), font }.
+// unit), M (the overscan margin, CSS px), dpr, pw, ph (device size), font }.
 //
-// Layers (host.js says which is shown when):
-//   base      everything, unfaded
-//   dimBack   the backdrop, the faded relations and stubs, the scope names
-//   dimNodes  every memory, unfaded, on transparent (blitted at the style's
-//             faded opacity: one opacity per layer, as the SVG fades a group)
-//   dim       dimBack + every label and memory at their faded opacities,
-//             and the tags: what a focus shows outside the patch
+// **Parts.** Each layer the page shows is composed from part bitmaps, each
+// drawn by one function of the scene and a frame (`PARTS`), so a change
+// redraws only the parts it touches (a display filter: the relations) and
+// the layers are blits (`compose`):
+//   below   the style's backdrop under the relations (opaque: the background too)
+//   edges   every shown relation, unfaded (faded as a group, by its blit's opacity)
+//   above   the style's backdrop over the relations
+//   labels  the labels the zoom shows
+//   nodes   every memory, unfaded
+//   over    above, labels and nodes in one (the unfaded layer's top)
+// The unfaded layer is below, its relations drawn straight in, and over;
+// the faded copy blits below, edges, above, labels and nodes, each at its
+// own opacity (`LAYER_PARTS`).
+// The opened scope's stubs and tags are drawn straight into each layer
+// (few, and a stub's faded opacity is not its full one times a constant).
 
 import { fmt } from '../../format.js';
 import { scopeName } from '../../scopes.js';
@@ -26,11 +33,11 @@ export const STUB = { full: [0.3, 0.4], many: [0.09, 0.16], faded: [0.08, 0.08],
 
 /** Label size and halo (app.css `.lbl`). */
 const LABEL_PX = 11.5;
+const HALO = 4;
 
 /**
- * A scene for graph `g` (only `g.nodes` is read) laid out as `lay` (its
- * `routes` are not needed: relations come with their points), `labels[i]`
- * memory i's label text, `hooks` the style's canvas hooks.
+ * A scene for graph `g` (only `g.nodes` is read) laid out as `lay`,
+ * `labels[i]` memory i's label text, `hooks` the style's canvas hooks.
  */
 export function makeScene(hooks, g, lay, labels) {
   const nodes = g.nodes.map((n, i) => ({ i, n, x: lay.pos[2 * i], y: lay.pos[2 * i + 1], r: radius(n), hub: n.degree >= 2 }));
@@ -50,6 +57,8 @@ export function makeScene(hooks, g, lay, labels) {
     T: null,
     font: 'sans-serif',
     nodeVersion: 0,
+    widths: new Map(),
+    measure: null,
   };
 }
 
@@ -58,26 +67,11 @@ export function backdropOf(S) {
   return S.bd || (S.bd = S.hooks.backdrop(S.g, S.lay));
 }
 
+/** New tokens and font (a light/dark or style switch). A style keys its own caches by the tokens. */
 export function setTokens(S, T, font) {
   S.T = T;
+  if (font !== S.font) S.widths.clear();
   S.font = font;
-  if (S.bd) S.bd.patterns.clear();
-}
-
-/** Hub flags (`hubs[i]` 1 or 0) after the view counted adjacency. */
-export function setHubs(S, hubs, version) {
-  for (let i = 0; i < S.nodes.length; i++) S.nodes[i].hub = !!hubs[i];
-  S.nodeVersion = version;
-}
-
-/** Relations shown, in index order: [{ e, pts, ends }] → the style's records. */
-export function setEdges(S, items) {
-  const recs = [];
-  for (const it of items) {
-    const rec = S.hooks.edge(it.e, it.pts, it.ends);
-    if (rec) recs.push(rec);
-  }
-  S.recs = recs;
 }
 
 /** Clear `ctx` (to the background when `opaque`) and set the frame's view transform. */
@@ -92,9 +86,10 @@ export function begin(ctx, S, fr, opaque) {
   return ctx;
 }
 
-export function viewTransform(ctx, fr) {
+/** The frame's view transform, shifted by (dx, dy) device px (a patch's corner). */
+export function viewTransform(ctx, fr, dx = 0, dy = 0) {
   const px = fr.dpr * fr.scale;
-  ctx.setTransform(px, 0, 0, px, (fr.M - fr.view.x * fr.scale) * fr.dpr, (fr.M - fr.view.y * fr.scale) * fr.dpr);
+  ctx.setTransform(px, 0, 0, px, (fr.M - fr.view.x * fr.scale) * fr.dpr - dx, (fr.M - fr.view.y * fr.scale) * fr.dpr - dy);
 }
 
 /** The drawn area in layout units (the box and its margin), widened by `pad`. */
@@ -117,10 +112,30 @@ export function baseLabels(S, fr) {
   return out;
 }
 
-/** A label's box in layout units (its text estimated, halo included). */
-export function labelBox(S, i, x, y, anchor) {
-  const w = S.labels[i].length * LABEL_PX * 0.68 + 8;
-  const x0 = anchor === 'end' ? x - w : anchor === 'middle' ? x - w / 2 : x - 4;
+/** Label i's text width at `weight`, measured once (the font is the box's). */
+function labelWidth(S, i, weight) {
+  const key = i * 4 + (weight >= 700 ? 2 : weight >= 600 ? 1 : 0);
+  let w = S.widths.get(key);
+  if (w !== undefined) return w;
+  if (!S.measure) {
+    const c = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+    S.measure = { ctx: c.getContext('2d'), weight: 0 };
+  }
+  const m = S.measure;
+  if (m.weight !== weight || m.font !== S.font) {
+    m.ctx.font = `${weight} ${LABEL_PX}px ${S.font}`;
+    m.weight = weight;
+    m.font = S.font;
+  }
+  w = m.ctx.measureText(S.labels[i]).width;
+  S.widths.set(key, w);
+  return w;
+}
+
+/** A label's box in layout units, its text measured at `weight` (the boldest lit one by default), halo included. */
+export function labelBox(S, i, x, y, anchor, weight = 700) {
+  const w = labelWidth(S, i, weight) + HALO + 2;
+  const x0 = anchor === 'end' ? x - w + 1 : anchor === 'middle' ? x - w / 2 : x - HALO / 2 - 1;
   return [x0, y - 14, x0 + w, y + 6];
 }
 
@@ -128,7 +143,7 @@ export function drawLabels(ctx, S, items) {
   if (!items.length) return;
   ctx.globalAlpha = 1;
   ctx.lineJoin = 'round';
-  ctx.lineWidth = 4;
+  ctx.lineWidth = HALO;
   ctx.strokeStyle = S.T.bg;
   ctx.fillStyle = S.T.ink;
   ctx.textBaseline = 'alphabetic';
@@ -204,53 +219,111 @@ export function drawTags(ctx, S, fr, hot, focused, onlyMarked) {
 
 const hookFrame = (S, fr) => ({ scale: fr.scale, px: fr.dpr * fr.scale, font: S.font });
 
-export function drawBase(ctx, S, fr) {
+const drawAbovePart = (ctx, S, fr) => S.hooks.drawAbove(ctx, backdropOf(S), S.T, hookFrame(S, fr));
+const drawLabelsPart = (ctx, S, fr) => drawLabels(ctx, S, baseLabels(S, fr));
+const drawNodesPart = (ctx, S) => S.hooks.drawNodes(ctx, S.nodes, S.T, { focused: null, version: S.nodeVersion });
+
+/** The parts (module docs): `opaque` (drawn over the background) and the drawing, in layout units. */
+export const PARTS = Object.freeze({
+  below: { opaque: true, draw: (ctx, S, fr) => S.hooks.drawBelow(ctx, backdropOf(S), S.T, hookFrame(S, fr)) },
+  edges: { opaque: false, draw: (ctx, S, fr) => S.hooks.drawEdges(ctx, S.recs, S.T, { scale: fr.scale, lit: false }) },
+  above: { opaque: false, draw: drawAbovePart },
+  labels: { opaque: false, draw: drawLabelsPart },
+  nodes: { opaque: false, draw: drawNodesPart },
+  over: {
+    opaque: false,
+    draw: (ctx, S, fr) => {
+      drawAbovePart(ctx, S, fr);
+      ctx.globalAlpha = 1;
+      drawLabelsPart(ctx, S, fr);
+      ctx.globalAlpha = 1;
+      drawNodesPart(ctx, S, fr);
+    },
+  },
+});
+
+/**
+ * The parts each layer is composed from. The unfaded layer draws its
+ * relations straight in, between two blits (a display filter then costs
+ * those relations and two blits); the faded copy fades each group on its
+ * own, so it blits each part at its own opacity.
+ */
+export const LAYER_PARTS = Object.freeze({ base: Object.freeze(['below', 'over']), dim: Object.freeze(['below', 'edges', 'above', 'labels', 'nodes']) });
+
+/**
+ * The unfaded layer drawn straight from the scene, no part involved: what
+ * `compose(.., false)` gives, primitive by primitive (source-over is
+ * associative, so it differs from the blits by rounding only). For the
+ * strips a pan uncovers and a settle at a new scale, where no part holds
+ * the frame yet.
+ */
+export function drawUnfaded(ctx, S, fr) {
   begin(ctx, S, fr, true);
-  const bd = backdropOf(S);
-  const f = hookFrame(S, fr);
-  S.hooks.drawBelow(ctx, bd, S.T, f);
-  drawStubs(ctx, S, fr, 'full');
-  S.hooks.drawEdges(ctx, S.recs, S.T, { scale: fr.scale, zk: 1, alpha: 1 });
-  S.hooks.drawAbove(ctx, bd, S.T, f);
-  drawLabels(ctx, S, baseLabels(S, fr));
-  S.hooks.drawNodes(ctx, S.nodes, S.T, { focused: null, version: S.nodeVersion });
-  drawTags(ctx, S, fr, -1, -1, false);
+  PARTS.below.draw(ctx, S, fr);
+  ctx.globalAlpha = 1;
+  if (S.stubs.length) drawStubs(ctx, S, fr, 'full');
+  ctx.globalAlpha = 1;
+  PARTS.edges.draw(ctx, S, fr);
+  ctx.globalAlpha = 1;
+  PARTS.over.draw(ctx, S, fr);
+  ctx.globalAlpha = 1;
+  if (S.tags.length) drawTags(ctx, S, fr, -1, -1, false);
 }
 
-export function drawDimBack(ctx, S, fr) {
-  begin(ctx, S, fr, true);
-  const bd = backdropOf(S);
-  const f = hookFrame(S, fr);
-  S.hooks.drawBelow(ctx, bd, S.T, f);
-  drawStubs(ctx, S, fr, 'faded');
-  S.hooks.drawEdges(ctx, S.recs, S.T, { scale: fr.scale, zk: 1, alpha: S.look.fadeEdge });
-  S.hooks.drawAbove(ctx, bd, S.T, f);
-}
-
-export function drawDimNodes(ctx, S, fr) {
-  begin(ctx, S, fr, false);
-  S.hooks.drawNodes(ctx, S.nodes, S.T, { focused: null, version: S.nodeVersion });
-}
-
-/** Every unlit label on transparent (`skip`: a Set of memories left out). */
-export function drawDimLabels(ctx, S, fr, skip) {
-  begin(ctx, S, fr, false);
-  drawLabels(ctx, S, skip ? baseLabels(S, fr).filter((it) => !skip.has(it.i)) : baseLabels(S, fr));
+/** Draw part `name` of frame `fr` into `ctx` (cleared first: within the clip, when one is set). */
+export function drawPart(ctx, S, fr, name) {
+  const p = PARTS[name];
+  begin(ctx, S, fr, p.opaque);
+  p.draw(ctx, S, fr);
+  ctx.globalAlpha = 1;
 }
 
 /**
- * `dim` from its parts: dimBack, then the labels and the memories at their
- * faded opacities, then the far-scope tags unfaded (a focus never fades them).
+ * A layer from the parts `P` (canvases of frame `fr`, `LAYER_PARTS`):
+ * `base` unfaded (below, the relations drawn straight in, `over`), or
+ * `faded` (what a focus shows outside the patch: each part at the style's
+ * faded opacity, as the SVG fades a group; the tags never fade). Drawn at
+ * device offset (dx, dy) (a patch's corner), with `labels` in place of
+ * P.labels when given, at that offset already (faded only).
  */
-export function composeDim(ctx, S, fr, back, labels, nodes) {
+export function compose(ctx, S, fr, P, faded, dx = 0, dy = 0, labels = null) {
+  const px = -dx;
+  const py = -dy;
+  const lk = S.look;
+  const fb = faded && lk.fadeBackdrop !== undefined ? lk.fadeBackdrop : 1;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
-  ctx.drawImage(back, 0, 0);
-  ctx.globalAlpha = S.look.fadeLabel;
-  ctx.drawImage(labels, 0, 0);
-  ctx.globalAlpha = S.look.fadeNode;
-  ctx.drawImage(nodes, 0, 0);
+  if (fb < 1) {
+    ctx.fillStyle = S.T.bg;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  }
+  ctx.globalAlpha = fb;
+  ctx.drawImage(P.below, px, py);
+  if (S.stubs.length) {
+    viewTransform(ctx, fr, dx, dy);
+    drawStubs(ctx, S, fr, faded ? 'faded' : 'full');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  if (!faded) {
+    viewTransform(ctx, fr, dx, dy);
+    PARTS.edges.draw(ctx, S, fr);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.drawImage(P.over, px, py);
+  } else {
+    ctx.globalAlpha = lk.fadeEdge;
+    ctx.drawImage(P.edges, px, py);
+    ctx.globalAlpha = fb;
+    ctx.drawImage(P.above, px, py);
+    ctx.globalAlpha = lk.fadeLabel;
+    if (labels) ctx.drawImage(labels, 0, 0);
+    else ctx.drawImage(P.labels, px, py);
+    ctx.globalAlpha = lk.fadeNode;
+    ctx.drawImage(P.nodes, px, py);
+  }
   ctx.globalAlpha = 1;
-  viewTransform(ctx, fr);
-  drawTags(ctx, S, fr, -1, -1, false);
+  if (S.tags.length) {
+    viewTransform(ctx, fr, dx, dy);
+    drawTags(ctx, S, fr, -1, -1, false);
+  }
 }

@@ -271,68 +271,88 @@ last settle step (the SVG surface's second 160 ms timer included: its
 settled picture is not on screen before).
 
 
-**Software raster (headless default)** (before → after; the cached rows rerun after the draw-time work below, 7 runs; the cold rows and the CPU ÷4 / GPU tables are from the first canvas version and were not rerun)
+**Every table below was rerun for the parts round** (before = 8cd0dff, the
+first canvas commit; now = the working tree; same stores, same release
+binary, `--assets` from each tree). Columns added to `views.mjs` then:
+`pan settle` (the pointerup that ends a drag → the frame that shows the
+settled drawing), `filter toggle` (the Proposed chip off and on: click →
+the frame that shows it, mean of the two), `settle, memory selected` (a
+wheel zoom settling with a memory selected, so the faded copy is what is
+redrawn), long-task counts (PerformanceObserver `longtask`, > 50 ms) in
+the 1 s after first paint and around the toggles, and `canvas MB` (every
+canvas the host holds, 4 bytes per device pixel, `graphDebug.backingBytes`;
+not exposed before). `settle` now counts the settle step's microtasks and
+the frame after it (rAF callbacks, paint, and the raster a canvas pays
+there), not its synchronous script alone, so it reads higher than the
+previous version of these tables for both columns. `views.mjs` waits for
+the dashboard to answer before loading the page. The SVG surface (cb5f753),
+same harness, for comparison: s1k / s10k show all, software, DPR 1: first
+paint 122 / 167, settle 197 / 198, pan settle 153 / 152, filter toggle
+40 / 33, settle with a memory selected 187 / 185, hover frame 7.8 / 7.5;
+DPR 2: 133 / 183, 197 / 200, 151 / 151, 35 / 36, 193 / 187, 9.4 / 7.8.
 
-| view | mode | first paint | draw | settle | settle work | zoom fps | pan fps | hover frame | heap MB | DOM nodes | layout objects |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| s1k show all | cold | 179 → 163 | 102 → 90 | 201 → 24 | 17.8 → 7.2 | 60 → 60 | 59 → 60 | 10.5 → 10.8 | 3.2 → 3.5 | 8542 → 4978 | 7100 → 3676 |
-| s1k show all | cached | 146 → 88 | 103 → 44 | 202 → 21 | 16.7 → 5.9 | 60 → 60 | 59 → 60 | 10.1 → 6.4 | 3.2 → 3.5 | 8542 → 4979 | 7100 → 3676 |
-| s2k show all | cold | 188 → 167 | 104 → 92 | 213 → 27 | 25.1 → 7.1 | 60 → 60 | 59 → 60 | 11.6 → 11.2 | 3.2 → 3.5 | 9008 → 5182 | 7412 → 3680 |
-| s2k show all | cached | 143 → 90 | 99 → 43 | 208 → 23 | 18.5 → 6.6 | 60 → 60 | 59 → 60 | 11.0 → 6.9 | 3.2 → 3.6 | 9008 → 5183 | 7412 → 3680 |
-| s10k opened scope | cold | 270 → 259 | 111 → 99 | 185 → 20 | 0.4 → 0.4 | 60 → 60 | 59 → 60 | 12.2 → 11.5 | 3.2 → 3.6 | 7432 → 3619 | 7246 → 3617 |
-| s10k opened scope | cached | 206 → 137 | 100 → 43 | 183 → 21 | 0.3 → 0.4 | 60 → 60 | 59 → 60 | 9.2 → 6.9 | 3.2 → 3.7 | 7432 → 3620 | 7246 → 3617 |
-| s10k show all | cold | 228 → 222 | 90 → 84 | 196 → 26 | 13.6 → 6.3 | 60 → 60 | 60 → 60 | 9.9 → 10.7 | 3.0 → 3.3 | 6560 → 3417 | 6425 → 3412 |
-| s10k show all | cached | 191 → 134 | 86 → 39 | 196 → 20 | 12.6 → 5.8 | 60 → 60 | 60 → 60 | 8.6 → 6.2 | 3.0 → 3.3 | 6560 → 3418 | 6424 → 3412 |
+**Software raster (headless default)** (8cd0dff → now, 5 runs)
 
-**Software raster, CPU ÷4** (before → after)
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | heap MB | DOM nodes | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cold | 109 → 104 | 41.2 → 38.7 | 18.8 → 19.7 | 17 → 16.4 | 30.5 → 26.4 | 69.7 → 44.7 | 60.0 → 60.0 | 60.0 → 60.0 | 4.4 → 4 | 3.5 → 3.6 | 4939 → 4945 | – → 28.9 |
+| s2k show all | cold | 110 → 110 | 40.3 → 39.2 | 19.5 → 21.4 | 24.2 → 22 | 46.8 → 33.8 | 73.8 → 46.9 | 60.0 → 60.0 | 60.0 → 60.0 | 4.9 → 4 | 3.6 → 3.7 | 5143 → 5149 | – → 29.1 |
+| s10k opened scope | cold | 150 → 143 | 39.3 → 34.5 | 18.5 → 17.8 | 25.1 → 21.6 | 38.6 → 35.0 | 66 → 46 | 60.0 → 60.0 | 60.0 → 60.0 | 5 → 4.7 | 3.7 → 3.8 | 3580 → 3586 | – → 30.4 |
+| s10k show all | cold | 146 → 149 | 34.6 → 31.6 | 18.9 → 18.2 | 26.5 → 22.2 | 37.5 → 29.5 | 59.9 → 43.3 | 60.0 → 60.0 | 60.0 → 60.0 | 5 → 4 | 3.4 → 3.4 | 3378 → 3384 | – → 28.6 |
+| s1k show all | cached | 76.6 → 71 | 40.3 → 37.3 | 19.7 → 20.3 | 17.8 → 17 | 34.9 → 27.5 | 70.7 → 47.2 | 60.0 → 60.0 | 60.0 → 60.0 | 5 → 4.1 | 3.5 → 3.6 | 4939 → 4945 | – → 28.9 |
+| s2k show all | cached | 81.1 → 77 | 40 → 35.8 | 20.3 → 27.8 | 25.5 → 20.7 | 50.8 → 32.9 | 75.1 → 50.6 | 60.0 → 60.0 | 60.0 → 60.0 | 5.5 → 4 | 3.6 → 3.7 | 5143 → 5149 | – → 29.1 |
+| s10k opened scope | cached | 122 → 123 | 38.2 → 36.3 | 19.5 → 22.3 | 26.8 → 23.1 | 40.0 → 36.9 | 78.9 → 42.6 | 60.0 → 60.0 | 60.0 → 60.0 | 5.6 → 5.1 | 3.7 → 3.8 | 3580 → 3586 | – → 30.4 |
+| s10k show all | cached | 116 → 112 | 34.9 → 33.8 | 17.6 → 17.3 | 22.4 → 20.8 | 37.5 → 28.3 | 65.9 → 42.8 | 60.0 → 60.0 | 60.0 → 60.0 | 4.9 → 3.7 | 3.4 → 3.4 | 3378 → 3384 | – → 28.6 |
 
-| view | mode | first paint | draw | settle | zoom fps | pan fps | hover frame |
-|---|---|---|---|---|---|---|---|
-| s1k show all | cached | 607 → 547 | 472 → 437 | 413 → 111 | 56 → 60 | 37 → 58 | 48.6 → 37.5 |
-| s2k show all | cached | 592 → 575 | 489 → 465 | 366 → 129 | 56 → 60 | 38 → 58 | 46.8 → 41.1 |
-| s10k opened scope | cached | 722 → 650 | 540 → 440 | 263 → 105 | 57 → 60 | 38 → 57 | 43.5 → 53.0 |
-| s10k show all | cached | 615 → 591 | 443 → 390 | 317 → 106 | 57 → 60 | 45 → 58 | 40.1 → 37.5 |
+**Software raster, CPU ÷4** (8cd0dff → now, 3 runs; DPR 2 software: 5)
 
-**GPU (SwiftShader)** (before → after)
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | long tasks 1 s after paint | long tasks around the toggles | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cached | 272 → 238 | 170 → 146 | 81.2 → 74.7 | 88.3 → 57.3 | 152 → 125 | 300 → 200 | 60.0 → 60.0 | 54.1 → 54.9 | 18.3 → 19 | 1 → 0 | 4 → 2 | – → 28.9 |
+| s2k show all | cached | 258 → 265 | 173 → 166 | 80.9 → 82.2 | 116 → 103 | 188 → 177 | 322 → 221 | 60.0 → 60.0 | 59.1 → 60.0 | 21.4 → 18.2 | 1 → 0 | 4 → 3 | – → 29.1 |
+| s10k opened scope | cached | 315 → 290 | 167 → 154 | 72.1 → 72.6 | 118 → 107 | 197 → 164 | 296 → 185 | 60.0 → 60.0 | 59.1 → 58.2 | 21.9 → 19.6 | 1 → 0 | 4 → 4 | – → 30.4 |
+| s10k show all | cached | 337 → 289 | 170 → 144 | 72.4 → 84.4 | 98.6 → 122 | 160 → 128 | 271 → 192 | 60.0 → 60.0 | 60.0 → 59.1 | 17.7 → 21.4 | 1 → 0 | 3 → 2 | – → 28.6 |
 
-| view | mode | first paint | draw | settle | zoom fps | pan fps | hover frame |
-|---|---|---|---|---|---|---|---|
-| s1k show all | cached | 137 → 115 | 96 → 75 | 247 → 18 | 60 → 60 | 21 → 60 | 11.9 → 7.8 |
-| s2k show all | cached | 150 → 126 | 102 → 82 | 255 → 22 | 60 → 60 | 21 → 60 | 12.5 → 8.6 |
-| s10k opened scope | cached | 206 → 174 | 103 → 80 | 184 → 14 | 60 → 60 | 20 → 60 | 13.0 → 7.9 |
-| s10k show all | cached | 202 → 174 | 105 → 75 | 208 → 19 | 60 → 60 | 27 → 60 | 10.5 → 7.4 |
+**GPU (SwiftShader)** (8cd0dff → now, 3 runs; DPR 2 software: 5)
 
-**GPU (SwiftShader), CPU ÷4** (before → after)
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | long tasks 1 s after paint | long tasks around the toggles | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cached | 62.8 → 57.4 | 22.7 → 23.9 | 12.6 → 15.2 | 17.9 → 16.6 | 26.0 → 33.7 | 19.4 → 19.5 | 60.0 → 60.0 | 60.0 → 60.0 | 4.6 → 3.8 | 0 → 0 | 0 → 0 | – → 28.9 |
+| s2k show all | cached | 61.7 → 69.1 | 23.7 → 26.5 | 12.3 → 13.8 | 17.3 → 17 | 26.8 → 24.9 | 18.8 → 14.8 | 60.0 → 60.0 | 60.0 → 60.0 | 5.1 → 4.1 | 0 → 0 | 0 → 0 | – → 29.1 |
+| s10k opened scope | cached | 112 → 100 | 27.8 → 23.9 | 10.4 → 10.7 | 16.7 → 16.8 | 31.0 → 22.4 | 15.1 → 13.1 | 60.0 → 60.0 | 60.0 → 60.0 | 4.6 → 4 | 0 → 0 | 0 → 0 | – → 30.4 |
+| s10k show all | cached | 95.5 → 93.3 | 20.8 → 20.6 | 11.4 → 13.6 | 16.9 → 17.3 | 24.5 → 27.3 | 15.6 → 14.1 | 60.0 → 60.0 | 60.0 → 60.0 | 3.6 → 4 | 0 → 0 | 0 → 0 | – → 28.6 |
 
-| view | mode | first paint | draw | settle | zoom fps | pan fps | hover frame |
-|---|---|---|---|---|---|---|---|
-| s1k show all | cached | 664 → 488 | 484 → 375 | 387 → 91 | 54 → 60 | 35 → 56 | 53.3 → 35.4 |
-| s2k show all | cached | 706 → 513 | 560 → 409 | 498 → 95 | 51 → 59 | 32 → 58 | 61.8 → 34.8 |
-| s10k opened scope | cached | 781 → 540 | 567 → 358 | 270 → 65 | 55 → 60 | 29 → 57 | 60.9 → 33.8 |
-| s10k show all | cached | 677 → 524 | 455 → 347 | 414 → 92 | 53 → 60 | 35 → 58 | 58.3 → 31.2 |
+**GPU (SwiftShader), CPU ÷4** (8cd0dff → now, 3 runs; DPR 2 software: 5)
 
-**Software raster, DPR 2** (before → after, 7 runs)
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | long tasks 1 s after paint | long tasks around the toggles | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cached | 206 → 205 | 110 → 101 | 48.7 → 49.3 | 50.5 → 42.7 | 87.4 → 97.2 | 72.4 → 62.7 | 60.0 → 60.0 | 57.4 → 54.9 | 21.5 → 17.6 | 0 → 1 | 1 → 2 | – → 28.9 |
+| s2k show all | cached | 213 → 210 | 110 → 106 | 52.7 → 50.2 | 33.8 → 25.3 | 99.9 → 111 | 67.3 → 70.9 | 60.0 → 60.0 | 60.0 → 60.0 | 20.3 → 19.4 | 0 → 0 | 1 → 2 | – → 29.1 |
+| s10k opened scope | cached | 276 → 253 | 122 → 108 | 45.1 → 40.2 | 33.8 → 37.2 | 136 → 100 | 66.9 → 66.1 | 60.0 → 60.0 | 58.2 → 59.1 | 24.2 → 20.4 | 0 → 0 | 2 → 1 | – → 30.4 |
+| s10k show all | cached | 248 → 234 | 101 → 102 | 46.5 → 45.9 | 32.8 → 23.8 | 89.9 → 84.2 | 60.7 → 57.5 | 60.0 → 60.0 | 60.0 → 59.2 | 19.6 → 16.1 | 0 → 1 | 1 → 1 | – → 28.6 |
 
-| view | mode | first paint | draw | settle | zoom fps | pan fps | hover frame |
-|---|---|---|---|---|---|---|---|
-| s1k show all | cached | 135 → 121 | 94 → 80 | 202 → 31 | 60 → 60 | 60 → 60 | 10.6 → 9.1 |
-| s2k show all | cached | 149 → 131 | 100 → 81 | 209 → 32 | 60 → 60 | 59 → 59 | 11.7 → 10.3 |
-| s10k opened scope | cached | 223 → 180 | 106 → 82 | 189 → 33 | 60 → 60 | 59 → 58 | 11.5 → 10.4 |
-| s10k show all | cached | 177 → 169 | 87 → 73 | 196 → 30 | 60 → 60 | 59 → 59 | 10.1 → 9.2 |
+**Software raster, DPR 2** (8cd0dff → now, 3 runs; DPR 2 software: 5)
 
-**GPU (SwiftShader), DPR 2** (before → after)
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | long tasks 1 s after paint | long tasks around the toggles | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cached | 108 → 98.7 | 68.1 → 65.6 | 29.2 → 28.3 | 28.3 → 23.2 | 61.8 → 47.6 | 131 → 105 | 60.0 → 60.0 | 60.0 → 60.0 | 7.6 → 6.5 | 1 → 0 | 1 → 0 | – → 116 |
+| s2k show all | cached | 115 → 108 | 72.8 → 63 | 33.5 → 28.4 | 51.9 → 71.9 | 85.5 → 71.5 | 147 → 114 | 60.0 → 60.0 | 59.0 → 58.1 | 7.5 → 6.9 | 1 → 0 | 2 → 1 | – → 117 |
+| s10k opened scope | cached | 153 → 148 | 72.2 → 65.2 | 29.1 → 28.5 | 54.6 → 79.7 | 88.9 → 82.9 | 136 → 96.6 | 60.0 → 60.0 | 59.1 → 58.2 | 7.9 → 8.5 | 1 → 0 | 3 → 2 | – → 122 |
+| s10k show all | cached | 137 → 139 | 63.9 → 55.9 | 25.6 → 26 | 45.7 → 74.1 | 72.0 → 70.2 | 121 → 88.2 | 60.0 → 60.0 | 60.0 → 58.1 | 7.1 → 7.1 | 1 → 0 | 1 → 1 | – → 114 |
 
-| view | mode | first paint | draw | settle | zoom fps | pan fps | hover frame |
-|---|---|---|---|---|---|---|---|
-| s1k show all | cached | 151 → 135 | 104 → 90 | 229 → 26 | 60 → 60 | 22 → 59 | 11.3 → 14.4 |
-| s10k show all | cached | 167 → 211 | 78 → 105 | 201 → 28 | 60 → 60 | 25 → 60 | 9.0 → 18.0 |
+**GPU (SwiftShader), DPR 2** (8cd0dff → now, 3 runs; DPR 2 software: 5)
 
-**Software raster, DPR 2, CPU ÷4** (before → after)
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | long tasks 1 s after paint | long tasks around the toggles | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cached | 64.9 → 62.4 | 26.4 → 25 | 13.5 → 12.5 | 17.6 → 16.8 | 26 → 25.1 | 20.7 → 19 | 60.0 → 60.0 | 60.0 → 60.0 | 6.1 → 4.5 | 0 → 0 | 0 → 0 | – → 116 |
+| s10k show all | cached | 106 → 111 | 25.2 → 21.9 | 15.3 → 11.6 | 16.7 → 17 | 31.6 → 35.2 | 16.8 → 16.7 | 60.0 → 60.0 | 60.0 → 60.0 | 6.2 → 4.9 | 0 → 0 | 0 → 0 | – → 114 |
 
-| view | mode | first paint | draw | settle | zoom fps | pan fps | hover frame |
-|---|---|---|---|---|---|---|---|
-| s1k show all | cached | 672 → 704 | 539 → 590 | 389 → 191 | 54 → 57 | 33 → 58 | 53.1 → 92.3 |
-| s10k show all | cached | 610 → 783 | 425 → 584 | 346 → 183 | 56 → 56 | 39 → 58 | 46.9 → 104.9 |
+**Software raster, DPR 2, CPU ÷4** (8cd0dff → now, 3 runs; DPR 2 software: 5)
+
+| view | mode | first paint | draw | settle | pan settle | filter toggle | settle, memory selected | zoom fps | pan fps | hover frame | long tasks 1 s after paint | long tasks around the toggles | canvas MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1k show all | cached | 421 → 387 | 321 → 284 | 117 → 122 | 126 → 125 | 296 → 238 | 628 → 464 | 60.0 → 58.5 | 58.4 → 58.0 | 33.1 → 31.8 | 1 → 6 | 5 → 6 | – → 116 |
+| s10k show all | cached | 448 → 451 | 303 → 302 | 110 → 106 | 233 → 371 | 352 → 292 | 577 → 376 | 60.0 → 57.8 | 58.7 → 58.9 | 32.8 → 29.7 | 1 → 6 | 4 → 5 | – → 114 |
 
 **What moved.** A settle is now one synchronous redraw in the task that
 removes the gesture's transform: 184–255 → 13–28 ms (the SVG waited a
@@ -366,7 +386,7 @@ in all. What cut it, each measured (21-run medians unless noted):
 | relations table built after the first paint (`afterPaint`: two frames, then idle) | kept | −13 ms layout (`content-visibility: auto` instead: no gain, Chrome laid it out in the frame anyway) |
 | accessible list built after the first paint, or on the first focus into the graph (`ensureList`) | kept | −6 ms style; keyboard input always finds it built |
 | legend mounted after the first paint | kept | −3 ms |
-| first drawing without the overscan margin, the margin drawn once idle | kept | −4 ms at DPR 1, −8 at DPR 2 (the margin was nearly half the pixels) |
+| first drawing without the overscan margin, the margin grown once it is on screen by copying the first drawing into the centre and drawing only the strips around it | kept | 8cd0dff drew the base twice in the first-paint task (the margin rule read `key === null`), so this saved nothing there; with a drawn-once flag, measured against a build that draws the margin from the start (9 runs, cached): draw s1k / s2k 42.2 / 41.2 → 37.0 / 41.4 ms at DPR 1, 64.8 / 66.5 → 59.4 / 59.3 at DPR 2 |
 | relations written straight into one Path2D per group through a sink (`relationShape`), and a fast path for solid bands | kept | identical path data on 5,760 cases; −5 ms |
 | no `closePath` in a group's path (a fill closes each subpath itself) | kept | Chrome's `Path2D.closePath` costs time in proportion to the path so far: 10k points with 667 closes 10 ms, without 0.7; relations 9.3 → 5.0 ms |
 | the relation drawing run on made-up relations while the page is idle (`warmStep`), so the first graph finds it optimised | kept | relations 5.0 → 2.9 ms (cold, 610 relations cost 9 ms of JS; warm, under 1) |
@@ -393,6 +413,39 @@ hover frame was 20–23 ms; it is 9.1–10.4, below the SVG's 10.1–11.7:
 | patch canvas sized in 64-px steps (fewer reallocations) | dropped | 8.6 → 9.4 ms (noise) |
 | list items placed in one grid cell by margins (not positioned) | dropped | hover 36–40 ms: a grid relayout per hover |
 | `will-change` on the tooltip, canvases or pane; tooltip shadow off | dropped | no change (14.5–16.9 ms before the list fix) |
+
+### Parts round (fix round on 8cd0dff)
+
+Software raster, s1k show all unless noted, before → with the choice (or,
+for a dropped one, kept → dropped). A software blit is about 2.5 ms per
+million device pixels (measured in the page: 9–12 ms for one 2268 × 1640
+alpha blit, 7 for an opaque copy), which decided most of these.
+
+| choice | kept? | effect |
+|---|---|---|
+| layers composed from part bitmaps (below, edges, above, labels, nodes), each with its own version and frame key | kept | filter toggle 35 → 28 ms (DPR 1), 62 → 48 (DPR 2); settle with a memory selected 71 → 47 (DPR 1), 131 → 105 (DPR 2) |
+| an `over` part (above + labels + nodes) and the relations drawn straight into the base, so the base is two blits, not five | kept | DPR 2 toggle, the host's base bring-up 30–35 → 17 ms (its own timing) |
+| the base drawn straight from the scene at a new frame whose parts are behind (a settle), the parts following in idle time | kept | settle 28 → 20 ms (DPR 1), 50 → 34 (DPR 2) against composing it from freshly drawn parts |
+| the hidden layer brought up in idle time a part per callback, then in bands of 1.2 M device px, each rastered through a 1 × 1 sink | kept | the hidden layer no longer rasters at the focus frame; long tasks in the 1 s after first paint 1 → 0 (DPR 2, software); at DPR 2 ÷4 they are 1 → 6 (more, shorter steps: each part still exceeds 50 ms there) |
+| pan strips each under a rectangle clip, not one even-odd clip | kept | DPR 2 pan, the base bring-up 91 → 47 ms |
+| unfaded pan strips drawn straight from the scene (one canvas copied, not every part) | kept | DPR 2 pan, base bring-up 47 → 5 ms; pan settle s1k 28 → 23 ms |
+| faded pan strips drawn from the scene through strip-sized scratch parts | dropped | s2k / s10k pan settle at DPR 2 59 → 88 ms (the JS walks every item five times per strip) |
+| memory sprites per type / look / radius bucket | not built | memories cost 1–2 ms per draw in a profile of six toggles (drawNodes 6.9 ms in all); the gain is bounded there, and the pixel range against the SVG was the risk |
+| `ImageBitmapRenderingContext` for the shown layer (`transferFromImageBitmap` of an OffscreenCanvas) | dropped | a 2268 × 1640 update + frame: 5.0–5.2 ms with a 2D canvas, 14.8–16.7 with the bitmap renderer |
+| stubs batched | not built | not visible in the profiles (≤ 200 stubs in an opened scope); the look would need its own pixel check |
+| `toScreen` reads the box size the view keeps (`boxSize`), and the patch canvas only grows | kept | no forced layout per hover (not measured alone; the whole round moved the hover frame 5.0 → 4.1 ms at DPR 1, 7.6 → 6.5 at DPR 2) |
+| scratch canvases freed after use (spare copy canvas, 1 × 1 sink) | kept | canvas MB at DPR 2: 114–122 (base, dim, patch and six parts at 2268 × 1640; the `over` part is ~15 of it) |
+
+**Not reached.** The brief's targets of a 10–15 ms faded-copy rebuild and a
+≤ 25 ms filter toggle at DPR 2 were set before the blit cost was measured:
+two full-size blits at DPR 2 are ~20 ms in software before any relation is
+drawn, so the toggle is 48–83 ms there (SVG 35–36). At DPR 1 it is 26–37
+(SVG 33–40). Drawing the relations on a canvas of their own between two
+static ones would make a toggle a clear and a redraw, at the price of a
+third compositor layer every frame; not built. **Regression:** a pan
+settle with a memory selected on the 2k / 10k stores at DPR 2 is 46–55 →
+72–80 ms (the faded copy's six part copies plus its own), and at DPR 2 ÷4
+233 → 371 on s10k.
 
 ### Compositing choices, measured
 
@@ -426,6 +479,10 @@ channel: s60 Fit 1.03 / 0.59 (light), 1.03 / 0.54 (dark); s60 3× Fit
 relation kinds cross the canvas stacks by kind (faint first) rather than
 by index. Grid, the scope overview and every Grid view (Fit, 3×, light,
 dark; s60, s1k show all, s10k opened) are 0.000 %.
+
+After the parts round (DPR 1 screenshots, s60 and s1k show all, Fit and 3×, light
+and dark): against the SVG 0.73–1.50 % / 0.23–0.59 %, against 8cd0dff ≤ 0.005 %
+/ ≤ 0.001 % (max 96 of 255, a few edge pixels); Grid still 0.000 %.
 
 ## Rerun
 

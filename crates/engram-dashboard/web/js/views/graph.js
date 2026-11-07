@@ -675,7 +675,7 @@ export async function renderGraph(main, ctx) {
   };
   let surface = null;
   if (asCanvas) {
-    surface = canvasSurface({ g: backdropOf, lay, labels, theme, box: graphBox, boxSize, cb, ariaLabel: t('canvasAria', g.nodes.length, g.edges.length) });
+    surface = canvasSurface({ g: backdropOf, lay, labels, theme, box: graphBox, boxSize, cb, ariaLabel: (m) => t('canvasAria', g.nodes.length, m) });
     performance.mark('graph:backdrop');
   }
   if (!surface) {
@@ -948,9 +948,11 @@ export async function renderGraph(main, ctx) {
     const rect = pointerEl.getBoundingClientRect();
     return [v.x + ((clientX - rect.left) / rect.width) * v.w, v.y + ((clientY - rect.top) / rect.height) * v.h];
   };
+  // From the observed box size: reading clientWidth here, right after the
+  // tooltip is mounted, forced a layout on every hover.
   const toScreen = (x, y) => {
-    const w = graphBox.clientWidth;
-    const hh = graphBox.clientHeight;
+    const w = boxSize.w || graphBox.clientWidth;
+    const hh = boxSize.h || graphBox.clientHeight;
     return [((x - view.x) / view.w) * w, ((y - view.y) / view.h) * hh];
   };
 
@@ -1093,6 +1095,7 @@ export async function renderGraph(main, ctx) {
   performance.mark('graph:view');
   if (typeof ResizeObserver === 'function') {
     let lastW = boxSize.w;
+    let lastH = boxSize.h;
     const obs = new ResizeObserver(() => {
       if (!graphBox.isConnected) {
         obs.disconnect();
@@ -1104,7 +1107,15 @@ export async function renderGraph(main, ctx) {
       boxSize.h = graphBox.clientHeight;
       if (Math.abs(boxSize.w - lastW) > 2) {
         lastW = boxSize.w;
+        lastH = boxSize.h;
         fit();
+      } else if (surface.composited && view && (boxSize.w !== lastW || boxSize.h !== lastH)) {
+        // A canvas keeps its own view of the box (the SVG's viewBox does
+        // this itself): any other change re-fits that view to the new box,
+        // or hit testing and the drawing would use the old height.
+        lastW = boxSize.w;
+        lastH = boxSize.h;
+        apply();
       }
     });
     obs.observe(graphBox);

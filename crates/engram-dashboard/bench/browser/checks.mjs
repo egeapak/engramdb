@@ -20,15 +20,29 @@
 //   click          a click on a memory selects it
 //   relation       a relation pinned from the relations table is centred and
 //                  carded; the pointer at its middle names it, a click pins it
-//   filters        a display filter moves no memory
+//   filters        a display filter moves no memory, and (canvas) changes the
+//                  drawn pixels when it hides relations, which come back
+//                  identical when it is undone; the picture's label counts
+//                  the relations shown; a drawing built from copies (margin,
+//                  pans) is within antialiasing of one drawn whole (< 0.2 %
+//                  of pixels off by more than 8 levels)
 //   zoom           a wheel gesture settles (no transform left on the pane)
 //   pan            (canvas) with a memory selected, a drag moves one flattened
 //                  canvas that looks exactly like the layers it stands for, and
 //                  the layers come back when it settles
-//   partial        (canvas) after 12 hovers (each redrawing only the overlay's
-//                  old and new rectangle) the picture equals a full redraw
-//   theme          (canvas) the drawing follows a light / dark switch
+//   patch          (canvas) after 12 hovers (each moving the patch canvas and
+//                  redrawing it in a canvas that only grows) the picture
+//                  equals the same hover drawn after the pointer left: no
+//                  trail of an earlier patch
+//   theme          (canvas) the drawing follows a light / dark switch (most
+//                  of its pixels change) and comes back identical
+//   resize         (canvas) after a height-only resize of the window the
+//                  pointer still names the memory under it
+//   tags           (opened scope) the pointer over a far-scope tag shows the
+//                  pointer cursor, a click and Enter on its link open that scope
 //   console        no page error, no console error (a CSP violation is one)
+//
+// `--dpr 2` runs every check at device scale 2.
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -119,18 +133,73 @@ async function maxDiff(p, a, b) {
   );
 }
 
+/** The shown big layer's pixels, in the page: a digest and the array kept for `pixelDiff`. */
+const LAYER_PIXELS = (keep) => {
+  const c = [...document.querySelectorAll('.g-canvas canvas.g-cv-base, .g-canvas canvas.g-cv-dim')].find((x) => !x.hidden);
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  if (keep) window.__px = d;
+  let h = 2166136261;
+  for (let i = 0; i < d.length; i += 4) h = Math.imul(h ^ (d[i] | (d[i + 1] << 8) | (d[i + 2] << 16)), 16777619);
+  return h >>> 0;
+};
+/** The share of pixels (any channel off by > 8) that differ from the kept ones, and the largest difference. */
+const PIXEL_DIFF = () => {
+  const c = [...document.querySelectorAll('.g-canvas canvas.g-cv-base, .g-canvas canvas.g-cv-dim')].find((x) => !x.hidden);
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  const k = window.__px;
+  if (!k || k.length !== d.length) return { share: 1, max: 255 };
+  let n = 0;
+  let max = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const m = Math.max(Math.abs(d[i] - k[i]), Math.abs(d[i + 1] - k[i + 1]), Math.abs(d[i + 2] - k[i + 2]));
+    if (m > 8) n++;
+    if (m > max) max = m;
+  }
+  return { share: n / (d.length / 4), max };
+};
+
+/** Hover `n` memories inside the box: how many the tooltip names. */
+async function hoverHits(p, n) {
+  const box = await p.evaluate(() => {
+    const r = document.querySelector('.graph-box').getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height, vh: innerHeight };
+  });
+  // inside the box and the window (a short window cuts the box off)
+  const inBox = (await p.evaluate(MEMORIES)).filter((m) => m.x > 12 && m.x < box.w - 12 && m.y > 12 && m.y < box.h - 12 && m.y + box.y < box.vh - 12).map((m) => ({ ...m, x: m.x + box.x, y: m.y + box.y }));
+  let hits = 0;
+  let tried = 0;
+  const misses = [];
+  const cursors = new Set();
+  for (let k = 0; k < Math.min(n, inBox.length); k++) {
+    const m = inBox[Math.floor((k * inBox.length) / Math.min(n, inBox.length))];
+    await p.mouse.move(m.x, m.y);
+    await p.waitForTimeout(40);
+    const r = await p.evaluate(() => {
+      const tip = document.querySelector('.g-tip');
+      return { tip: tip && !tip.hidden ? (tip.querySelector('strong') || {}).textContent : null, cursor: getComputedStyle(document.querySelector('.g-canvas') || document.querySelector('svg.graph .node')).cursor };
+    });
+    tried++;
+    cursors.add(r.cursor);
+    if (r.tip === summaryOf(m.label)) hits++;
+    else misses.push({ want: summaryOf(m.label), got: r.tip });
+  }
+  return { box, inBox, tried, hits, cursors, misses };
+}
+
 async function openView(p, view) {
   const pid = await p.evaluate(() => location.hash.split('/')[2]);
   const q = view === 'all' ? 'all=1' : view === 'open' ? 'top_scope=storage' : '';
   await p.evaluate(([pid, q]) => (location.hash = `#/p/${pid}/graph${q ? '?' + q : ''}`), [pid, q]);
   await p.waitForSelector('.graph-box .g-pane', { timeout: 60000 });
+  // the canvas's accessible list is built in idle slices after the first paint
+  await p.waitForFunction(() => { const c = document.querySelector('.g-canvas'); return !c || c.graphDebug.listDone(); }, null, { timeout: 30000 });
   await p.waitForTimeout(600);
 }
 
 const summaryOf = (label) => label.replace(/ \([^()]*\)$/, '');
 
 async function check(browser, url, size, view, style) {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: 1, colorScheme: 'light' });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: Number(args.dpr || 1), colorScheme: 'light' });
   await ctx.addInitScript((st) => {
     try {
       localStorage.setItem('engramdb.graphStyle', st);
@@ -159,9 +228,10 @@ async function check(browser, url, size, view, style) {
   const shownN = Number((shown.split(' of ')[0] || '').replace(/[^0-9]/g, ''));
   ok('a11y_list', mems.length > 0 && mems.length === shownN && mems.every((m, k) => m.i === k && m.label && / relations?\)$/.test(m.label)), { elements: mems.length, card: shown });
   if (canvas) {
+    // On an element that is never hidden (the layers swap under a focus).
     const role = await p.evaluate(() => {
-      const c = document.querySelector('.g-canvas canvas[role="img"]');
-      return c ? c.getAttribute('aria-label') : null;
+      const c = document.querySelector('.g-canvas [role="img"]');
+      return c && !c.hidden && c.tagName !== 'CANVAS' ? c.getAttribute('aria-label') : null;
     });
     ok('canvas_role', !!role, role);
   }
@@ -202,32 +272,11 @@ async function check(browser, url, size, view, style) {
   ok('keyboard', roving && sel.head.includes(want) && sel.focus === 'H3' && (row.rows === 0 || (row.said && row.i !== null)) && cleared.box && cleared.head === 'Select a memory or relation', { walk: walk.map((w) => w.i), ys: ys.map(Math.round), selected: sel, row, cleared });
 
   // hover: 30 memories, pointer at each centre
-  const box = await p.evaluate(() => {
-    const r = document.querySelector('.graph-box').getBoundingClientRect();
-    return { x: r.left, y: r.top, w: r.width, h: r.height };
-  });
   await p.keyboard.press('0');
   await p.waitForTimeout(300);
-  const inBox = (await p.evaluate(MEMORIES)).filter((m) => m.x > 12 && m.x < box.w - 12 && m.y > 12 && m.y < box.h - 12).map((m) => ({ ...m, x: m.x + box.x, y: m.y + box.y }));
-  let hits = 0;
-  let tried = 0;
-  const misses = [];
-  const cursors = new Set();
-  for (let k = 0; k < Math.min(30, inBox.length); k++) {
-    const m = inBox[Math.floor((k * inBox.length) / Math.min(30, inBox.length))];
-    await p.mouse.move(m.x, m.y);
-    await p.waitForTimeout(40);
-    const r = await p.evaluate(() => {
-      const tip = document.querySelector('.g-tip');
-      const el = document.querySelector('.g-canvas') || document.elementFromPoint(0, 0);
-      return { tip: tip && !tip.hidden ? (tip.querySelector('strong') || {}).textContent : null, cursor: getComputedStyle(document.querySelector('.g-canvas') || document.querySelector('svg.graph .node')).cursor, el: !!el };
-    });
-    tried++;
-    cursors.add(r.cursor);
-    if (r.tip === summaryOf(m.label)) hits++;
-    else misses.push({ want: summaryOf(m.label), got: r.tip });
-  }
-  ok('hover', tried > 0 && hits >= Math.floor(tried * 0.9) && cursors.has('pointer'), { tried, hits, cursors: [...cursors], misses: misses.slice(0, 3) });
+  const hv = await hoverHits(p, 30);
+  const { box, inBox } = hv;
+  ok('hover', hv.tried > 0 && hv.hits >= Math.floor(hv.tried * 0.9) && hv.cursors.has('pointer'), { tried: hv.tried, hits: hv.hits, cursors: [...hv.cursors], misses: hv.misses.slice(0, 3) });
   // click a memory
   const target = inBox[Math.floor(inBox.length / 2)];
   await p.mouse.move(target.x, target.y);
@@ -270,6 +319,8 @@ async function check(browser, url, size, view, style) {
   await p.mouse.move(box.x + 2, box.y + 2);
 
   // a display filter moves no memory
+  await p.keyboard.press('Escape');
+  await p.mouse.move(box.x + 2, box.y + 2);
   // (after the pin's view move has settled: read until two reads agree)
   let before = await p.evaluate(MEMORIES);
   for (let k = 0; k < 20; k++) {
@@ -279,12 +330,32 @@ async function check(browser, url, size, view, style) {
     before = again;
     if (same) break;
   }
+  const drawn = () => p.evaluate(() => { const c = document.querySelector('.g-canvas'); return c ? { n: c.graphDebug.relationsDrawn(), label: c.querySelector('[role="img"]').getAttribute('aria-label') } : null; });
+  const d0 = await drawn();
+  // A drawing built from copies (the margin grown, a pan) is not bit-exact
+  // with one drawn whole: Skia antialiases a path the canvas edge clips by a
+  // different route, a few levels on edge pixels. So the copies are held to
+  // a bound here, and the baseline for the exact undo below is drawn whole.
+  let copied = null;
+  if (canvas) {
+    await p.evaluate(LAYER_PIXELS, true);
+    await p.evaluate(() => document.querySelector('.g-canvas').graphDebug.redrawAll());
+    await p.waitForTimeout(150);
+    copied = await p.evaluate(PIXEL_DIFF);
+    await p.evaluate(LAYER_PIXELS, true);
+  }
   await p.evaluate(() => [...document.querySelectorAll('.chip')].find((b) => b.textContent === 'Proposed').click());
   await p.waitForTimeout(150);
   const after = await p.evaluate(MEMORIES);
+  const d1 = await drawn();
+  const px1 = canvas ? await p.evaluate(PIXEL_DIFF) : null;
   await p.evaluate(() => [...document.querySelectorAll('.chip')].find((b) => b.textContent === 'Proposed').click());
+  await p.waitForTimeout(150);
+  const px2 = canvas ? await p.evaluate(PIXEL_DIFF) : null;
   const moved = before.filter((m, k) => !after[k] || Math.abs(m.x - after[k].x) >= 0.01 || Math.abs(m.y - after[k].y) >= 0.01);
-  ok('filters', before.length === after.length && moved.length === 0, { before: before.length, after: after.length, moved: moved.length, first: moved[0] && [moved[0], after[moved[0].i]] });
+  // Hiding relations must show in the pixels (and the label), and undoing it restore them exactly.
+  const drew = !canvas || ((d1.n < d0.n ? px1.share > 0 && d1.label !== d0.label : px1.max === 0) && px2.max === 0 && copied.share < 0.002);
+  ok('filters', before.length === after.length && moved.length === 0 && drew, { before: before.length, after: after.length, moved: moved.length, drawn: [d0, d1], pixels: [px1, px2], copiedVsWhole: copied });
 
   // zoom gesture settles
   await p.focus('.graph-box');
@@ -349,22 +420,64 @@ async function check(browser, url, size, view, style) {
     const whole = await shot(full);
     const pd = await maxDiff(p, partial, whole);
     if (args.dump) { writeFileSync(args.dump + '-p.png', partial); writeFileSync(args.dump + '-w.png', whole); }
-    ok('partial', pd <= 1 && inside.length >= 12, { maxChannelDiff: pd, memories: inside.length });
+    ok('patch', pd <= 1 && inside.length >= 12, { maxChannelDiff: pd, memories: inside.length });
     await p.mouse.move(b.x + 4, b.y + 4);
     await p.waitForTimeout(100);
-    const px = () =>
-      p.evaluate(() => {
-        const c = document.querySelector('.g-canvas canvas[role="img"]');
-        const d = c.getContext('2d').getImageData(2, 2, 1, 1).data;
-        return [d[0], d[1], d[2]].join(',');
+    // Every part follows the switch: most pixels change, and all come back.
+    // (The baseline is drawn whole, as the switch draws: a drawing straight
+    // from the scene or built from copies differs from it by rounding.)
+    await p.evaluate(() => document.querySelector('.g-canvas').graphDebug.redrawAll());
+    await p.waitForTimeout(150);
+    await p.evaluate(LAYER_PIXELS, true);
+    await p.click('#theme-btn');
+    await p.waitForTimeout(150);
+    const dark = await p.evaluate(PIXEL_DIFF);
+    await p.click('#theme-btn');
+    await p.waitForTimeout(150);
+    const back = await p.evaluate(PIXEL_DIFF);
+    ok('theme', dark.share > 0.5 && back.max === 0, { dark, back });
+
+    // a height-only resize: the pointer still names the memory under it
+    await p.setViewportSize({ width: 1280, height: 700 });
+    await p.waitForTimeout(400);
+    await p.keyboard.press('0');
+    await p.waitForTimeout(300);
+    const rz = await hoverHits(p, 15);
+    await p.setViewportSize({ width: 1280, height: 860 });
+    await p.waitForTimeout(300);
+    ok('resize', rz.tried > 0 && rz.hits >= Math.floor(rz.tried * 0.9) && rz.box.h !== box.h, { tried: rz.tried, hits: rz.hits, height: [box.h, rz.box.h], misses: rz.misses.slice(0, 3) });
+  }
+  if (view === 'open') {
+    // far-scope tags: the pointer, a click, and Enter on the link
+    await p.keyboard.press('0');
+    await p.waitForTimeout(300);
+    const tag = await p.evaluate(() => {
+      const b = document.querySelector('.graph-box').getBoundingClientRect();
+      const all = [...document.querySelectorAll('.g-a11y-tag, svg.graph .xs-tag')].map((el, j) => {
+        const r = el.getBoundingClientRect();
+        return { j, x: r.left + r.width / 2, y: r.top + r.height / 2, label: el.getAttribute('aria-label') };
       });
-    const light = await px();
-    await p.click('#theme-btn');
-    await p.waitForTimeout(150);
-    const dark = await px();
-    await p.click('#theme-btn');
-    await p.waitForTimeout(150);
-    ok('theme', light !== dark && (await px()) === light, { light, dark });
+      return all.find((t) => t.x > b.left + 8 && t.x < b.right - 8 && t.y > b.top + 8 && t.y < Math.min(b.bottom, innerHeight) - 8) || null;
+    });
+    let detail = { tag };
+    let pass = !!tag;
+    if (tag) {
+      await p.mouse.move(tag.x, tag.y);
+      await p.waitForTimeout(60);
+      const cur = await p.evaluate(() => getComputedStyle(document.querySelector('.g-canvas') || document.querySelector('svg.graph .xs-tag')).cursor);
+      const hash0 = await p.evaluate(() => location.hash);
+      await p.mouse.click(tag.x, tag.y);
+      await p.waitForTimeout(300);
+      const hash1 = await p.evaluate(() => location.hash);
+      await openView(p, view);
+      await p.evaluate((j) => document.querySelectorAll('.g-a11y-tag, svg.graph .xs-tag')[j].focus(), tag.j);
+      await p.keyboard.press('Enter');
+      await p.waitForTimeout(300);
+      const hash2 = await p.evaluate(() => location.hash);
+      pass = cur === 'pointer' && hash1 !== hash0 && /top_scope=/.test(hash1) && hash2 === hash1;
+      detail = { cur, hash0, hash1, hash2 };
+    }
+    ok('tags', pass, detail);
   }
   ok('console', errors.length === 0, errors.slice(0, 5));
   await ctx.close();

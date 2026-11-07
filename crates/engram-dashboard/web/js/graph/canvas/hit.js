@@ -63,10 +63,13 @@ function segDist2(x, y, ax, ay, bx, by) {
  * or null when it is not drawn. Each segment is sampled every half cell
  * into the cell of each sample, so a point within `tol` of a segment is
  * within `tol` + a quarter cell of some sample: the query looks that far.
- * Returns a function (x, y, tol) → the topmost (highest index) relation
- * whose polyline passes within `tol`, or -1.
+ * Returns a function (x, y, tol) → the topmost relation whose polyline
+ * passes within `tol`, or -1: the highest `rank[k]` (the order the style
+ * draws in, so a click lands on what is seen on top), ties to the higher
+ * index; with no `rank`, the highest index.
  */
-export function edgeGrid(paths) {
+export function edgeGrid(paths, rank) {
+  const above = rank ? (k, b) => b < 0 || rank[k] > rank[b] || (rank[k] === rank[b] && k > b) : (k, b) => k > b;
   const cells = new Map();
   const step = EDGE_CELL / 2;
   paths.forEach((pts, k) => {
@@ -101,7 +104,7 @@ export function edgeGrid(paths) {
         const list = cells.get(key(cx, cy));
         if (!list) continue;
         for (const k of list) {
-          if (k <= best) continue;
+          if (!above(k, best)) continue;
           const pts = paths[k];
           for (let j = 1; j < pts.length; j++) {
             if (segDist2(x, y, pts[j - 1][0], pts[j - 1][1], pts[j][0], pts[j][1]) <= t2) {

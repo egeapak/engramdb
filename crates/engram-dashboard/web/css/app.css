@@ -339,6 +339,8 @@ dl.meta dd { overflow-wrap: anywhere; }
 .g-canvas { position: relative; overflow: visible; }
 .g-canvas canvas { position: absolute; display: block; pointer-events: none; transform-origin: 0 0; }
 .g-canvas canvas[hidden] { display: none; }
+/* The picture's role and label, on an element that never swaps or hides (host.js). */
+.g-cv-pic { position: absolute; inset: 0; pointer-events: none; }
 .g-a11y { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0; pointer-events: none; transform-origin: 0 0; }
 /* The list is clipped out of paint unless one of its buttons has focus,
    and mid-gesture always: its 800 positioned buttons otherwise made Chrome

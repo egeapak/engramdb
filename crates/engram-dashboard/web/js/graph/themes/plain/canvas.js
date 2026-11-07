@@ -26,11 +26,12 @@ import { relationShape, path2dSink, UNIT, SHORT_PX, zoomFactor, FADE_TO, FADE_TO
 
 /**
  * What plain.css says about highlighting, as numbers the host applies: the
- * faded opacity of memories, relations and labels under a focus, how much
- * wider a lit relation is (`--zk`), the relation click target's width
- * (`.cx .hit`, screen px) and the lit labels' weights.
+ * faded opacity of memories, relations, labels and the backdrop under a
+ * focus (Plain's backdrop does not fade), how much wider a lit relation is
+ * (`--zk`), the relation click target's width (`.cx .hit`, screen px) and
+ * the lit labels' weights.
  */
-const look = Object.freeze({ fadeNode: 0.14, fadeEdge: 0.14, fadeLabel: 0.24, litEdge: 1.5, hitWidth: 12, labelWeight: Object.freeze({ focus: 700, nb: 500 }) });
+const look = Object.freeze({ fadeNode: 0.14, fadeEdge: 0.14, fadeLabel: 0.24, fadeBackdrop: 1, litWidth: 1.5, hitWidth: 12, labelWeight: Object.freeze({ focus: 700, nb: 500 }) });
 
 const KINDS = ['contradicts', 'supersedes', 'supports', 'derived_from', 'duplicates', 'related_to'];
 
@@ -86,7 +87,9 @@ function backdrop(g, lay) {
  */
 function pattern(ctx, bd, T, v, c, px) {
   const n = Math.max(3, Math.min(256, Math.round(9 * px)));
-  const key = `${v}|${c}|${n}`;
+  // Keyed by the colour too, so a light/dark switch needs no clearing.
+  const colour = slotColour(T, c);
+  const key = `${v}|${colour}|${n}`;
   let p = bd.patterns.get(key);
   if (p) return p;
   const tile = document.createElement('canvas');
@@ -95,7 +98,6 @@ function pattern(ctx, bd, T, v, c, px) {
   const tc = tile.getContext('2d');
   tc.scale(n / 9, n / 9);
   tc.globalAlpha = TEX_ALPHA;
-  const colour = slotColour(T, c);
   if (v === 2) {
     tc.fillStyle = colour;
     tc.beginPath();
@@ -305,6 +307,15 @@ function warmStep(deadline) {
 }
 if (typeof requestIdleCallback === 'function' && typeof Path2D === 'function') requestIdleCallback(warmStep, { timeout: 1000 });
 
+/**
+ * Where relation `rec` lies in the drawing order (`drawEdges`: rejected
+ * groups first, then by `KIND_ORDER`, stubs last), so the host's hit test
+ * picks the one drawn on top.
+ */
+function edgeRank(rec) {
+  return rec.stub ? 2 * KIND_ORDER.length : (rec.rejected ? 0 : KIND_ORDER.length) + KIND_ORDER.indexOf(rec.kind);
+}
+
 const rgba = (hex, a) => {
   const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
   if (!m) return hex;
@@ -313,18 +324,17 @@ const rgba = (hex, a) => {
 };
 
 /**
- * Relations `recs` (from `edge`), batched (module docs). `o`: { scale, zk
- * (a lit relation's extra width), alpha }. A stub fades along its own
+ * Relations `recs` (from `edge`), batched (module docs). `o`: { scale, lit
+ * (drawn lit: `look.litWidth` wider) }. A stub fades along its own
  * frame exactly as the SVG mask does (opaque at the source, 0.9 at 35 %,
  * `FADE_TO` at the far end; a dangling one stays at `FADE_TO_DANGLING`).
  */
 function drawEdges(ctx, recs, T, o) {
   if (!recs.length) return;
-  const z = zoomFactor(o.scale) * (o.zk || 1);
+  const z = zoomFactor(o.scale) * (o.lit ? look.litWidth : 1);
   const { order, stubs } = groupsOf(recs, z);
-  const alpha = o.alpha ?? 1;
   for (const gp of order) {
-    ctx.globalAlpha = alpha * (gp.rejected ? REJECTED_ALPHA : 1);
+    ctx.globalAlpha = gp.rejected ? REJECTED_ALPHA : 1;
     ctx.fillStyle = T.kinds[gp.kind];
     ctx.fill(gp.path);
   }
@@ -337,7 +347,7 @@ function drawEdges(ctx, recs, T, o) {
     gr.addColorStop(0, rgba(colour, 1));
     gr.addColorStop(0.35, rgba(colour, 0.9));
     gr.addColorStop(1, rgba(colour, last));
-    ctx.globalAlpha = alpha * (r.rejected ? REJECTED_ALPHA : 1);
+    ctx.globalAlpha = r.rejected ? REJECTED_ALPHA : 1;
     ctx.fillStyle = gr;
     ctx.fill(localPath(r));
     ctx.restore();
@@ -405,7 +415,10 @@ function nodeGroups(recs, focused, version) {
   const chal = new Path2D();
   for (const rec of recs) {
     const lk = lookOf(rec, !!(focused && focused.has(rec.i)));
-    const key = lk.join('|');
+    // A polygon's own path per look: Path2D.closePath costs in proportion
+    // to the path so far (`placedSink`), so they are kept apart.
+    const poly = rec.n.type === 'hazard' || rec.n.type === 'debug';
+    const key = lk.join('|') + (poly ? '|' + rec.n.type : '');
     let gp = looks.get(key);
     if (!gp) looks.set(key, (gp = { lk, path: new Path2D() }));
     shape(gp.path, rec.n.type, rec.x, rec.y, rec.r);
@@ -453,4 +466,4 @@ function drawNodes(ctx, recs, T, o) {
 }
 
 /** The hooks, by name (the host's contract: graph/canvas/host.js docs). */
-export const canvas = Object.freeze({ look, tokens, backdrop, drawBelow, drawAbove, edge, drawEdges, drawNodes });
+export const canvas = Object.freeze({ look, tokens, backdrop, drawBelow, drawAbove, edge, edgeRank, drawEdges, drawNodes });

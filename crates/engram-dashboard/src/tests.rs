@@ -1317,18 +1317,13 @@ const CANVAS_HOOKS: &[&str] = &[
     "drawNodes",
 ];
 
-/// A style that asks for the canvas surface (`export const renderer =
-/// 'canvas'`) exports `canvas`, imported from its own `canvas.js`, whose
-/// `Object.freeze({ … })` names every hook in [`CANVAS_HOOKS`], each defined
-/// in that file; the host calls nothing else on it (every `hooks.<name>` in
-/// host.js is listed), so the list cannot drift from what the host needs.
-/// Plain draws on a canvas; Grid stays SVG (its pictures are pinned
-/// pixel-identical to the SVG they were).
-#[test]
-fn a_canvas_style_exports_every_canvas_hook() {
-    let host = asset_text("js/graph/canvas/host.js");
-    let mut called: Vec<&str> = host
-        .split("hooks.")
+/// Hooks the core calls only when a style defines them (`hooks.<name> ?`).
+const CANVAS_OPTIONAL_HOOKS: &[&str] = &["edgeRank"];
+
+/// Every `<prefix><name>` read in `src`, sorted and deduplicated.
+fn names_after<'a>(src: &'a str, prefix: &str) -> Vec<&'a str> {
+    let mut out: Vec<&str> = src
+        .split(prefix)
         .skip(1)
         .map(|rest| {
             let end = rest
@@ -1336,16 +1331,52 @@ fn a_canvas_style_exports_every_canvas_hook() {
                 .unwrap_or(rest.len());
             &rest[..end]
         })
+        .filter(|n| !n.is_empty())
         .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// A style that asks for the canvas surface (`export const renderer =
+/// 'canvas'`) exports `canvas`, imported from its own `canvas.js`, whose
+/// `Object.freeze({ … })` names every hook in [`CANVAS_HOOKS`], each defined
+/// in that file; the core calls nothing else on it (every `hooks.<name>` in
+/// host.js and scene.js is listed, the optional ones in
+/// [`CANVAS_OPTIONAL_HOOKS`] guarded at their call), and every field of
+/// `look` the core reads is in the style's `look`, so the list cannot drift
+/// from what the core needs. Plain draws on a canvas; Grid stays SVG (its
+/// pictures are pinned pixel-identical to the SVG they were).
+#[test]
+fn a_canvas_style_exports_every_canvas_hook() {
+    let host = asset_text("js/graph/canvas/host.js");
+    let scene = asset_text("js/graph/canvas/scene.js");
+    let mut called = names_after(host, "hooks.");
+    called.extend(names_after(scene, "hooks."));
     called.sort_unstable();
     called.dedup();
-    assert!(!called.is_empty(), "host.js calls no hooks");
+    assert!(called.len() > 4, "the core calls too few hooks: {called:?}");
     for name in &called {
         assert!(
-            CANVAS_HOOKS.contains(name),
-            "host.js calls hooks.{name}, which CANVAS_HOOKS does not list"
+            CANVAS_HOOKS.contains(name) || CANVAS_OPTIONAL_HOOKS.contains(name),
+            "the canvas core calls hooks.{name}, which CANVAS_HOOKS does not list"
         );
     }
+    for name in CANVAS_OPTIONAL_HOOKS {
+        assert!(
+            host.contains(&format!("hooks.{name} ?")),
+            "host.js calls the optional hook {name} without checking it exists"
+        );
+    }
+    // The look fields the core reads (`look.x` in host.js, `lk.x` in scene.js).
+    let mut fields = names_after(host, "look.");
+    fields.extend(names_after(scene, "lk."));
+    fields.sort_unstable();
+    fields.dedup();
+    assert!(
+        fields.contains(&"fadeEdge") && fields.contains(&"hitWidth"),
+        "no look fields found: {fields:?}"
+    );
     let mut canvas_styles = Vec::new();
     for dir in style_dirs() {
         let path = format!("{STYLE_ROOT}{dir}/index.js");
@@ -1367,6 +1398,21 @@ fn a_canvas_style_exports_every_canvas_hook() {
         let hooks_path = format!("{STYLE_ROOT}{dir}/canvas.js");
         let hooks = asset_text(&hooks_path);
         let keys = object_keys(hooks, "export const canvas = Object.freeze({");
+        let look = object_keys(hooks, "const look = Object.freeze({");
+        for f in &fields {
+            assert!(
+                look.iter().any(|k| k == f),
+                "{hooks_path}: `look` lacks {f:?}, which the canvas core reads ({look:?})"
+            );
+        }
+        for name in CANVAS_OPTIONAL_HOOKS {
+            if keys.iter().any(|k| k == name) {
+                assert!(
+                    hooks.contains(&format!("function {name}(")),
+                    "{hooks_path} lists {name} but does not define it"
+                );
+            }
+        }
         for name in CANVAS_HOOKS {
             assert!(
                 keys.iter().any(|k| k == name),
@@ -1385,8 +1431,8 @@ fn a_canvas_style_exports_every_canvas_hook() {
 /// The canvas surface's accessible list: one button per drawn memory
 /// (`g.nodes`, every one, built in host.js), named by the same `nodeAria`
 /// the SVG surface puts on a memory's `<g>`, so a screen reader hears the
-/// same words whichever surface draws; and the canvas itself has a role and
-/// a label.
+/// same words whichever surface draws; and the picture has a role and a
+/// label that counts the relations the filters leave.
 #[test]
 fn the_canvas_accessible_list_covers_every_memory() {
     let host = asset_text("js/graph/canvas/host.js");
@@ -1395,24 +1441,42 @@ fn the_canvas_accessible_list_covers_every_memory() {
         host.contains("const nodes = S.nodes;") && scene.contains("const nodes = g.nodes.map("),
         "host.js: the memories it lists are every g.nodes entry (scene.js)"
     );
-    // Built once, after the first paint or on the first focus (ensureList).
+    // Built in idle slices after the first paint, or the rest at once when
+    // the view moves focus to a memory (ensureList), every one in index order.
     let at = host
-        .find("buttons = nodes.map(")
+        .find("function makeButtons(deadline) {")
         .expect("host.js builds one button per memory");
-    let body = &host[at..at + host[at..].find("\n    });").expect("unclosed map")];
+    let body = &host[at..at + host[at..].find("\n  }\n").expect("unclosed makeButtons")];
+    assert!(
+        body.contains("while (made.length < nodes.length")
+            && body.contains("const nd = nodes[made.length];")
+            && body.contains("if (made.length === nodes.length) buttons = made;"),
+        "makeButtons builds every memory's button, in index order"
+    );
+    assert!(
+        host.contains("function ensureList() {\n    if (!buttons) makeButtons(null);"),
+        "ensureList finishes the list at once"
+    );
     for needle in [
         "document.createElement('button')",
         "'g-a11y-node'",
         "nodeAria(nd.n)",
         "dataset.i = nd.i",
     ] {
-        assert!(body.contains(needle), "the button map lacks {needle}");
+        assert!(body.contains(needle), "makeButtons lacks {needle}");
     }
     assert!(host.contains("import { nodeAria } from '../a11y.js';"));
+    // The picture's role and label sit on an element that is never hidden
+    // (the canvases take turns), and the label follows the filters.
     assert!(
-        host.contains("L.base.cv.setAttribute('role', 'img');")
-            && host.contains("L.base.cv.setAttribute('aria-label', o.ariaLabel);"),
-        "the base canvas has role img and the view's label"
+        host.contains(
+            "const pic = h('div', { class: 'g-cv-pic', role: 'img', 'aria-label': o.ariaLabel("
+        ) && host.contains("pic.setAttribute('aria-label', o.ariaLabel(shown));"),
+        "the picture has role img and the view's label, kept current"
+    );
+    assert!(
+        !host.contains("pic.hidden"),
+        "the picture element is never hidden"
     );
     let svg = asset_text("js/graph/surface-svg.js");
     assert!(svg.contains("import { nodeAria } from './a11y.js';"));
