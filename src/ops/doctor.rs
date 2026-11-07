@@ -34,9 +34,30 @@ pub struct DoctorResult {
     /// if it had no home, which is the loss path this codebase requires to be
     /// declared rather than swallowed.
     pub undetermined: Vec<String>,
+    /// Orphaned or drifted files that no longer parse, with the parser's
+    /// reason — most often a merge-conflict marker in the hidden metadata
+    /// block. Such a file is never rewritten (every write path reads it first
+    /// and fails), so nothing in it is lost, but it is also invisible to every
+    /// query until fixed by hand; naming the reason is what turns "orphaned"
+    /// into something a user can act on. Checked for at most
+    /// [`MAX_PARSE_PROBES`] files.
+    pub unparseable: Vec<UnparseableFile>,
     /// Whether the store is healthy (no issues found).
     pub healthy: bool,
 }
+
+/// A memory file that exists but does not parse.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnparseableFile {
+    pub id: String,
+    pub error: String,
+}
+
+/// How many orphaned/drifted files `doctor` re-parses to explain them. Each
+/// probe is two directory scans, so this bounds the cost on a store whose
+/// whole index is stale (where the explanation is "reindex", not a per-file
+/// reason).
+pub const MAX_PARSE_PROBES: usize = 64;
 
 /// Run a health check on the memory store.
 ///
@@ -86,13 +107,31 @@ pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
 
     let (drifted_entries, undetermined) = check_content_drift(store).await;
 
+    let mut unparseable = Vec::new();
+    let probes = orphaned_files
+        .iter()
+        .chain(drifted_entries.iter().flatten())
+        .take(MAX_PARSE_PROBES);
+    for id in probes {
+        if let Ok(Some(bytes)) = store.read_memory_bytes(id).await {
+            let text = String::from_utf8_lossy(&bytes);
+            if let Err(e) = crate::storage::memory_file::parse_memory_file(&text) {
+                unparseable.push(UnparseableFile {
+                    id: id.clone(),
+                    error: e.to_string(),
+                });
+            }
+        }
+    }
+
     // `drifted_entries: None` is "not checked" and must not read as clean, so
     // it cannot contribute to `healthy` in either direction. `undetermined`
     // likewise: a file we could not read is not evidence of health.
     let healthy = stale_entries.is_empty()
         && orphaned_files.is_empty()
         && drifted_entries.as_ref().is_none_or(|d| d.is_empty())
-        && undetermined.is_empty();
+        && undetermined.is_empty()
+        && unparseable.is_empty();
 
     Ok(DoctorResult {
         indexed,
@@ -101,6 +140,7 @@ pub async fn doctor(store: &MemoryStore) -> Result<DoctorResult> {
         orphaned_files,
         drifted_entries,
         undetermined,
+        unparseable,
         healthy,
     })
 }
@@ -174,6 +214,102 @@ async fn check_content_drift(store: &MemoryStore) -> (Option<Vec<String>>, Vec<S
     }
     drifted.sort();
     (Some(drifted), unreadable)
+}
+
+/// The "Memory edges" check (schema 0.9.0). `None` for a store with no
+/// edges, so a store that never linked anything sees no new line.
+///
+/// Never a failure: a dangling edge (its target was deleted), an edge into a
+/// store this machine cannot open, and a newer binary's edge kind are all
+/// legal states (`ops::links` module docs). The one finding worth a Warn
+/// beyond dangling edges is a committed file naming a personal memory — the
+/// leak the link rules prevent, reachable by a visibility change made after
+/// linking.
+async fn check_memory_edges(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let health = match super::links::edge_health(store).await {
+        Ok(h) => h,
+        Err(e) => {
+            return Some(EnvironmentCheck {
+                name: "Memory edges".to_string(),
+                passed: true,
+                message: format!("not checked: {e:#}"),
+                suggestion: Some("Run `engramdb reindex` to rebuild the edges table".to_string()),
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            })
+        }
+    };
+    if health.total == 0 && health.table_drift == 0 {
+        return None;
+    }
+    let mut details = vec![format!("edges: {}", health.total)];
+    if health.table_drift > 0 {
+        details.push(format!(
+            "edges table out of step with the memory files: {} row(s)",
+            health.table_drift
+        ));
+    }
+    for e in health.dangling.iter().take(10) {
+        details.push(format!("dangling: {} {} {}", e.src, e.kind, e.dst));
+    }
+    if health.dangling.len() > 10 {
+        details.push(format!(
+            "… and {} more dangling",
+            health.dangling.len() - 10
+        ));
+    }
+    for e in &health.personal_leaks {
+        details.push(format!(
+            "committed file names a personal memory: {} {} {}",
+            e.src, e.kind, e.dst
+        ));
+    }
+    if health.unknown > 0 {
+        details.push(format!(
+            "unknown (target store not available here): {}",
+            health.unknown
+        ));
+    }
+    if health.unknown_kinds > 0 {
+        details.push(format!(
+            "kinds this binary does not know (kept as written): {}",
+            health.unknown_kinds
+        ));
+    }
+    let warn =
+        !health.dangling.is_empty() || !health.personal_leaks.is_empty() || health.table_drift > 0;
+    let message = if warn {
+        let mut parts = Vec::new();
+        if health.table_drift > 0 {
+            parts.push(format!("{} table row(s) out of step", health.table_drift));
+        }
+        if !health.dangling.is_empty() {
+            parts.push(format!("{} dangling", health.dangling.len()));
+        }
+        if !health.personal_leaks.is_empty() {
+            parts.push(format!(
+                "{} naming a personal memory from a committed file",
+                health.personal_leaks.len()
+            ));
+        }
+        parts.join(", ")
+    } else {
+        "consistent".to_string()
+    };
+    Some(EnvironmentCheck {
+        name: "Memory edges".to_string(),
+        passed: true,
+        message,
+        suggestion: warn.then(|| {
+            "Dangling edges point at deleted memories and are hidden from queries; remove them \
+             with `engramdb unlink`. A committed memory naming a personal one leaks that id into \
+             git: unlink it and re-link from the personal side. An edges table out of step \
+             with the files is rebuilt by `engramdb reindex`."
+                .to_string()
+        }),
+        details,
+        status: warn.then_some(CheckStatus::Warn),
+    })
 }
 
 /// Scan a directory for `.md` memory files, counting total and collecting orphans.
@@ -381,6 +517,15 @@ pub async fn doctor_environment(
                         },
                         suggestion: if result.healthy {
                             None
+                        } else if !result.unparseable.is_empty() {
+                            // A reindex cannot fix these: it keeps their old
+                            // rows and vectors, and they stay flagged until
+                            // the file itself is repaired.
+                            Some(
+                                "Fix the memory file(s) that do not parse (an unresolved merge \
+                                 conflict?), then run `engramdb reindex`"
+                                    .to_string(),
+                            )
                         } else {
                             Some("Run `engramdb reindex` to repair".to_string())
                         },
@@ -411,6 +556,9 @@ pub async fn doctor_environment(
                             if !result.undetermined.is_empty() {
                                 d.push(format!("unreadable: {}", result.undetermined.len()));
                             }
+                            for bad in &result.unparseable {
+                                d.push(format!("does not parse: {} ({})", bad.id, bad.error));
+                            }
                             d
                         },
                         status: None,
@@ -438,6 +586,9 @@ pub async fn doctor_environment(
         }
         if let Some(s) = store {
             project_checks.push(check_chunk_orphans(s).await);
+            if let Some(check) = check_memory_edges(s).await {
+                project_checks.push(check);
+            }
         }
 
         // Three cases, not two. A re-keyed project is registered — just under
@@ -2986,6 +3137,109 @@ mod tests {
         assert!(result.stale_entries.is_empty());
     }
 
+    /// The hidden-block risk end to end: a merge conflict in the metadata
+    /// block must neither reset the hidden fields nor let any write rewrite
+    /// the file, and doctor must say why the memory vanished.
+    #[tokio::test]
+    async fn test_doctor_names_a_conflicted_hidden_block_and_nothing_is_reset() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
+        mem.supersedes = vec!["old-1".into()];
+        let id = store.create(&mem).await.unwrap();
+        let path = temp_dir
+            .path()
+            .join(".engramdb/memories")
+            .join(format!("{id}.md"));
+        let clean = async_fs::read_to_string(&path).await.unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted);
+        async_fs::write(&path, &conflicted).await.unwrap();
+
+        assert!(store.get(&id).await.is_err(), "a read surfaces the error");
+        let mut upd = crate::types::MemoryUpdate::new();
+        upd.summary = Some("rewritten".into());
+        assert!(
+            store.update(&id, upd).await.is_err(),
+            "no write can rewrite it"
+        );
+        assert_eq!(async_fs::read_to_string(&path).await.unwrap(), conflicted);
+
+        let result = doctor(&store).await.unwrap();
+        assert!(!result.healthy);
+        assert_eq!(result.unparseable.len(), 1, "{result:?}");
+        assert_eq!(result.unparseable[0].id, id);
+        assert!(result.unparseable[0].error.contains("merge conflict"));
+
+        // A reindex keeps its row (now drifted from the bytes) rather than
+        // dropping it — still named, still intact, still unhealthy.
+        store.reindex().await.unwrap();
+        let result = doctor(&store).await.unwrap();
+        assert!(result.orphaned_files.is_empty(), "{result:?}");
+        assert_eq!(result.drifted_entries.as_deref(), Some(&[id.clone()][..]));
+        assert_eq!(result.unparseable[0].id, id);
+        assert!(!result.healthy);
+        assert_eq!(async_fs::read_to_string(&path).await.unwrap(), conflicted);
+    }
+
+    #[tokio::test]
+    async fn test_memory_edges_check_warns_on_dangling_and_is_absent_without_edges() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let a = store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "a",
+                "c",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        let b = store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "b",
+                "c",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        assert!(check_memory_edges(&store).await.is_none());
+
+        crate::ops::links::link(
+            &store,
+            crate::ops::links::LinkParams {
+                src: a.clone(),
+                kind: crate::types::LinkKind::Supports,
+                dst: b.clone(),
+                dst_store: None,
+                confidence: None,
+                origin: crate::types::LinkOrigin::Human,
+                status: None,
+                note: None,
+            },
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let ok = check_memory_edges(&store).await.unwrap();
+        assert_eq!(ok.status, None);
+        assert_eq!(ok.message, "consistent");
+
+        store.delete(&b).await.unwrap();
+        let warn = check_memory_edges(&store).await.unwrap();
+        assert_eq!(warn.status, Some(CheckStatus::Warn));
+        assert!(warn.passed, "a dangling edge is legal: Warn, never Fail");
+        assert!(warn.message.contains("1 dangling"), "{}", warn.message);
+    }
+
     #[tokio::test]
     async fn test_doctor_detects_stale_entry() {
         let temp_dir = TempDir::new().unwrap();
@@ -5503,7 +5757,7 @@ mod epistemic_doctor_tests {
         assert_eq!(store.get("doc-path").await.unwrap().challenges.len(), 1);
 
         // ops::verify clears the doctor review.
-        let vr = super::super::verify::verify_memory(&store, "doc-path")
+        let vr = super::super::verify::verify_memory(&store, "doc-path", crate::ops::Surface::Cli)
             .await
             .unwrap();
         assert!(vr.review_cleared);

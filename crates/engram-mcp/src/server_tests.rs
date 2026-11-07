@@ -51,6 +51,7 @@ fn query_input(mode: &str) -> QueryInput {
         detail_level: None,
         include_expired: None,
         include_global: None,
+        expand_links: None,
         project: None,
     }
 }
@@ -82,6 +83,7 @@ fn create_input(type_: &str, summary: &str, content: &str) -> CreateInput {
         title: None,
         title_strategy: None,
         project: None,
+        links: None,
     }
 }
 
@@ -148,6 +150,7 @@ async fn create_with_all_fields() {
         title: None,
         title_strategy: None,
         project: None,
+        links: None,
     };
     let result = server.memory_create(Parameters(input)).await;
     let val = parse_ok(&result);
@@ -288,6 +291,7 @@ async fn update_summary() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -336,6 +340,7 @@ async fn update_type() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -384,6 +389,7 @@ async fn update_status() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -444,6 +450,7 @@ async fn update_tags_add_remove() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     parse_ok(&result);
@@ -499,6 +506,7 @@ async fn update_criticality_validation() {
             decay_ttl: None,
             decay_floor: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_err(&result);
@@ -541,6 +549,7 @@ async fn update_decay_params() {
             audience: None,
             decay_ttl: None,
             project: None,
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -1238,6 +1247,7 @@ async fn challenge_memory() {
             evidence: "Found contradicting evidence".to_string(),
             source_file: Some("src/test.rs".to_string()),
             project: None,
+            against: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -1260,6 +1270,7 @@ async fn review_shows_challenged() {
             evidence: "Evidence".to_string(),
             source_file: None,
             project: None,
+            against: None,
         }))
         .await
         .unwrap();
@@ -1294,6 +1305,7 @@ async fn review_with_type_filter() {
                 evidence: "Evidence".to_string(),
                 source_file: None,
                 project: None,
+                against: None,
             }))
             .await
             .unwrap();
@@ -1380,6 +1392,7 @@ async fn resolve_keep() {
             evidence: "Maybe wrong".to_string(),
             source_file: None,
             project: None,
+            against: None,
         }))
         .await
         .unwrap();
@@ -1415,6 +1428,7 @@ async fn resolve_delete() {
             evidence: "Definitely wrong".to_string(),
             source_file: None,
             project: None,
+            against: None,
         }))
         .await
         .unwrap();
@@ -1457,6 +1471,9 @@ async fn stats_empty() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -1474,12 +1491,91 @@ async fn stats_populated() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
     assert_eq!(val["total"], 3);
     assert_eq!(val["by_type"]["decision"], 2);
     assert_eq!(val["by_type"]["hazard"], 1);
+}
+
+/// The MCP surface records `created`, `returned` and `fetched` with the
+/// server's session, and `stats` reads them back per memory and as a top-N.
+#[tokio::test]
+async fn stats_reports_per_memory_usage_and_top_used() {
+    let (_dir, server) = setup().await;
+    let id = create_and_get_id(&server, "decision", "Usage target", "Tracked content").await;
+    let _other = create_and_get_id(&server, "decision", "Bystander", "Other").await;
+    server
+        .memory_get(Parameters(GetInput {
+            id: id.clone(),
+            project: None,
+        }))
+        .await
+        .unwrap();
+    let mut q = query_input("filter");
+    q.query = Some("Tracked".to_string());
+    server.memory_query(Parameters(q)).await.unwrap();
+
+    let result = server
+        .memory_stats(Parameters(StatsInput {
+            project: None,
+            all_projects: None,
+            memory_id: Some(id[..24].to_string()),
+            top: Some(5),
+            by: Some("fetched".to_string()),
+        }))
+        .await;
+    let val = parse_ok(&result);
+    let usage = &val["memory_usage"];
+    assert_eq!(usage["memory_id"], id.as_str());
+    assert_eq!(usage["fetched"], 1);
+    assert_eq!(usage["returned"], 1);
+    assert_eq!(usage["returned_sessions"], 1);
+    assert_eq!(usage["injected"], 0);
+    assert!(usage["last_written_at"].is_string(), "created is a write");
+    assert_eq!(usage["daily"].as_array().unwrap().len(), 30);
+    let top = val["top_used"]["memories"].as_array().unwrap();
+    assert_eq!(top.len(), 1, "the bystander was never read");
+    assert_eq!(top[0]["memory_id"], id.as_str());
+    assert_eq!(val["top_used"]["by"], "fetched");
+
+    let bad = server
+        .memory_stats(Parameters(StatsInput {
+            project: None,
+            all_projects: None,
+            memory_id: None,
+            top: Some(1),
+            by: Some("summed".to_string()),
+        }))
+        .await;
+    assert!(bad.is_err());
+    let missing = server
+        .memory_stats(Parameters(StatsInput {
+            project: None,
+            all_projects: None,
+            memory_id: Some("nonexistent".to_string()),
+            top: None,
+            by: None,
+        }))
+        .await;
+    assert!(missing.unwrap_err().contains("MEMORY_NOT_FOUND"));
+    for (top, by) in [(None, Some("fetched")), (Some(0), None)] {
+        let err = server
+            .memory_stats(Parameters(StatsInput {
+                project: None,
+                all_projects: None,
+                memory_id: None,
+                top,
+                by: by.map(str::to_string),
+            }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("VALIDATION"), "{top:?}/{by:?}: {err}");
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -1651,11 +1747,12 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
     //
     // `embed_memory` stamps the store's fingerprint on a first embed — when it
     // observes no fingerprint and no chunks — and `memory_create` returns
-    // before that runs. An ingest that read `None` early and completes late
-    // therefore writes the REAL model id straight over the bogus one set here,
-    // the gate below finds no mismatch, and the test fails claiming the gate is
-    // broken. Waiting until chunks exist makes `stamp_first_embed` false for
-    // anything still in flight, so the corruption sticks.
+    // before that runs. The stamp is conditional on the store still being
+    // unstamped when it lands (`stamp_embedding_fingerprint_if_unset`), so an
+    // in-flight ingest cannot write the real model id over the bogus one set
+    // here; it used to, whenever its stamp landed after the re-assert below,
+    // and the gate then found no mismatch. The wait keeps the reindex below
+    // operating on a store that actually holds vectors.
     //
     // Bounded, not asserted: when the ONNX model cannot load in this
     // environment no chunks ever appear, which the model-load-race branch below
@@ -1687,11 +1784,9 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
     .await
     .unwrap();
 
-    // Re-assert immediately before the check. If the wait above timed out —
-    // a heavily loaded machine where the embed had not landed within 5s — an
-    // ingest that computed `stamp_first_embed` before the corruption can still
-    // write the real model id over it. Once chunks exist no further stamp is
-    // possible, so this second write is the one that sticks.
+    // Re-assert immediately before the check. Redundant since the first-embed
+    // stamp became conditional (it never overwrites a fingerprint); kept as a
+    // cheap second write.
     store
         .set_embedding_fingerprint(engramdb::storage::EmbeddingFingerprint {
             model: "onnx/bogus-old-model".to_string(),
@@ -2038,6 +2133,7 @@ fn update_input(id: &str, project: Option<String>) -> UpdateInput {
         decay_ttl: None,
         decay_floor: None,
         project,
+        links: None,
     }
 }
 
@@ -2114,6 +2210,7 @@ async fn cross_project_write_gate_rejects_when_disabled() {
             evidence: "contradiction".to_string(),
             source_file: None,
             project: Some(project_b),
+            against: None,
         }))
         .await;
     assert_blocked(&ch);
@@ -2193,6 +2290,9 @@ async fn cross_project_stats() {
         .memory_stats(Parameters(StatsInput {
             project: Some(project_b),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -2223,6 +2323,9 @@ async fn cross_project_uninitialized_store_errors() {
         .memory_stats(Parameters(StatsInput {
             project: Some(project_b),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     assert!(result.is_err());
@@ -2290,6 +2393,7 @@ async fn cross_project_update() {
             decay_ttl: None,
             decay_floor: None,
             project: Some(project_b.clone()),
+            links: None,
         }))
         .await;
     let update_val = parse_ok(&update_result);
@@ -2321,6 +2425,9 @@ async fn cross_project_write_isolation() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let count_a_before = parse_ok(&stats_a_before)["total"].as_u64().unwrap();
@@ -2349,6 +2456,9 @@ async fn cross_project_write_isolation() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let count_a_after = parse_ok(&stats_a_after)["total"].as_u64().unwrap();
@@ -2476,6 +2586,7 @@ async fn cross_project_challenge_and_review() {
             evidence: "New evidence contradicts this".to_string(),
             source_file: None,
             project: Some(project_b.clone()),
+            against: None,
         }))
         .await;
     let challenge_val = parse_ok(&challenge_result);
@@ -2647,6 +2758,7 @@ async fn global_create_with_all_fields() {
         title: Some("Semver Convention".to_string()),
         title_strategy: None,
         project: global_project(),
+        links: None,
     };
     let result = server.memory_create(Parameters(input)).await;
     let val = parse_ok(&result);
@@ -2720,6 +2832,7 @@ async fn global_update() {
             decay_ttl: None,
             decay_floor: None,
             project: global_project(),
+            links: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -3143,6 +3256,7 @@ async fn global_challenge_and_review() {
             evidence: "Modern JS style guides recommend no semicolons".to_string(),
             source_file: Some(".eslintrc".to_string()),
             project: global_project(),
+            against: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -3186,6 +3300,7 @@ async fn global_resolve_keep() {
             evidence: "Might be wrong".to_string(),
             source_file: None,
             project: global_project(),
+            against: None,
         }))
         .await
         .unwrap();
@@ -3233,6 +3348,7 @@ async fn global_resolve_update() {
             evidence: "Needs update".to_string(),
             source_file: None,
             project: global_project(),
+            against: None,
         }))
         .await
         .unwrap();
@@ -3279,6 +3395,7 @@ async fn global_resolve_delete() {
             evidence: "Should be deleted".to_string(),
             source_file: None,
             project: global_project(),
+            against: None,
         }))
         .await
         .unwrap();
@@ -3381,6 +3498,9 @@ async fn global_stats() {
         .memory_stats(Parameters(StatsInput {
             project: global_project(),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -3578,6 +3698,9 @@ async fn global_all_memory_types() {
         .memory_stats(Parameters(StatsInput {
             project: global_project(),
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4071,6 +4194,9 @@ async fn stats_includes_runtime_fields_after_calls() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4120,6 +4246,9 @@ async fn stats_all_projects_returns_breakdown() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: Some(true),
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4155,6 +4284,9 @@ async fn stats_records_zero_results_and_quality() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4185,6 +4317,9 @@ async fn stats_reports_session_id_and_unique_sessions() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4218,6 +4353,9 @@ async fn stats_reports_followups_for_same_session_queries() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4245,6 +4383,9 @@ async fn stats_records_tool_errors() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: None,
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -4268,6 +4409,9 @@ async fn stats_buckets_projects_list_under_system() {
         .memory_stats(Parameters(StatsInput {
             project: None,
             all_projects: Some(true),
+            memory_id: None,
+            top: None,
+            by: None,
         }))
         .await;
     let val = parse_ok(&result);
@@ -5082,6 +5226,7 @@ async fn verify_tool_stamps_and_update_reopens() {
         decay_ttl: None,
         decay_floor: None,
         project: None,
+        links: None,
     };
     update.clear_invalidated = Some(true);
     parse_ok(&server.memory_update(Parameters(update)).await);
@@ -7061,6 +7206,319 @@ async fn early_embedding_warning_rides_the_instructions_only() {
 
     client.cancel().await.unwrap();
     server_handle.await.unwrap().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// typed edges: link / unlink / link_status, links on create, get, against
+// -----------------------------------------------------------------------
+
+#[tokio::test]
+async fn link_tools_round_trip_and_get_shows_both_ends() {
+    let (_dir, server) = setup().await;
+    let a = create_and_get_id(&server, "decision", "Alpha", "first").await;
+    let b = create_and_get_id(&server, "decision", "Beta", "second").await;
+
+    let val = parse_ok(
+        &server
+            .memory_link(Parameters(LinkInput {
+                src: a.clone(),
+                kind: "supports".into(),
+                dst: b.clone(),
+                dst_store: None,
+                confidence: Some(0.9),
+                note: Some("same root cause".into()),
+                status: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(val["created"], true);
+    assert_eq!(val["kind"], "supports");
+
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: b.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["edges"]["inbound"][0]["other_id"], a.as_str());
+    assert_eq!(got["edges"]["inbound"][0]["note"], "same root cause");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: a.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["edges"]["outbound"][0]["other_id"], b.as_str());
+
+    // Unknown kinds are a validation error at the boundary.
+    let err = server
+        .memory_link(Parameters(LinkInput {
+            src: a.clone(),
+            kind: "suports".into(),
+            dst: b.clone(),
+            dst_store: None,
+            confidence: None,
+            note: None,
+            status: None,
+            project: None,
+        }))
+        .await;
+    assert!(err.is_err());
+
+    parse_ok(
+        &server
+            .memory_unlink(Parameters(UnlinkInput {
+                src: a.clone(),
+                kind: "supports".into(),
+                dst: b.clone(),
+                dst_store: None,
+                project: None,
+            }))
+            .await,
+    );
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: a,
+                project: None,
+            }))
+            .await,
+    );
+    // Always present, empty once the edge is gone (lead decision (f)).
+    assert_eq!(got["edges"]["outbound"], serde_json::json!([]), "{got}");
+    assert_eq!(got["edges"]["inbound"], serde_json::json!([]), "{got}");
+    assert_eq!(got["edges"]["hidden"], 0, "{got}");
+}
+
+#[tokio::test]
+async fn create_links_param_adds_edges_and_reports_failures() {
+    let (_dir, server) = setup().await;
+    let target = create_and_get_id(&server, "decision", "Target", "t").await;
+    let mut input = create_input("decision", "Source", "s");
+    input.links = Some(vec![
+        LinkSpec {
+            to: target.clone(),
+            kind: "derived_from".into(),
+            store: None,
+            confidence: None,
+            note: None,
+            status: None,
+        },
+        LinkSpec {
+            to: "does-not-exist".into(),
+            kind: "supports".into(),
+            store: None,
+            confidence: None,
+            note: None,
+            status: None,
+        },
+    ]);
+    let val = parse_ok(&server.memory_create(Parameters(input)).await);
+    let id = val["id"].as_str().unwrap().to_string();
+    assert_eq!(val["link_errors"].as_array().unwrap().len(), 1, "{val}");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput { id, project: None }))
+            .await,
+    );
+    assert_eq!(got["edges"]["outbound"][0]["kind"], "derived_from");
+
+    // A typo'd kind fails the whole call before anything is written.
+    let mut bad = create_input("decision", "Never written", "x");
+    bad.links = Some(vec![LinkSpec {
+        to: target,
+        kind: "nope".into(),
+        store: None,
+        confidence: None,
+        note: None,
+        status: None,
+    }]);
+    assert!(server.memory_create(Parameters(bad)).await.is_err());
+}
+
+#[tokio::test]
+async fn challenge_against_proposes_a_contradiction_a_reviewer_resolves() {
+    let (_dir, server) = setup().await;
+    let old = create_and_get_id(&server, "decision", "Use structlog", "logging").await;
+    let new = create_and_get_id(&server, "decision", "Use tracing", "logging").await;
+    let val = parse_ok(
+        &server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: old.clone(),
+                evidence: "we moved to tracing".into(),
+                source_file: None,
+                project: None,
+                against: Some(new.clone()),
+            }))
+            .await,
+    );
+    assert_eq!(val["edge"]["kind"], "contradicts");
+    assert_eq!(val["edge"]["status"], "proposed");
+
+    let val = parse_ok(
+        &server
+            .memory_link_status(Parameters(LinkStatusInput {
+                src: old.clone(),
+                dst: new.clone(),
+                kind: None,
+                status: "confirmed".into(),
+                winner: Some(new.clone()),
+                note: None,
+                dst_store: None,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(val["outcome"], "superseded");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: old,
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["superseded_by"], new.as_str());
+    assert!(got["invalidated_at"].is_string());
+}
+
+/// Review p3-ops #6: a bad `against` fails the call before the challenge is
+/// written. Review #9: `winner` needs `status: confirmed`.
+#[tokio::test]
+async fn challenge_against_is_validated_first_and_winner_needs_confirmed() {
+    let (_dir, server) = setup().await;
+    let a = create_and_get_id(&server, "decision", "Use structlog", "logging").await;
+    let b = create_and_get_id(&server, "decision", "Use tracing", "logging").await;
+    let res = server
+        .memory_challenge(Parameters(ChallengeInput {
+            id: a.clone(),
+            evidence: "x".into(),
+            source_file: None,
+            project: None,
+            against: Some(a.clone()),
+        }))
+        .await;
+    assert!(res.is_err(), "{res:?}");
+    let got = parse_ok(
+        &server
+            .memory_get(Parameters(GetInput {
+                id: a.clone(),
+                project: None,
+            }))
+            .await,
+    );
+    assert_eq!(got["status"], "active", "no challenge recorded: {got}");
+
+    parse_ok(
+        &server
+            .memory_challenge(Parameters(ChallengeInput {
+                id: a.clone(),
+                evidence: "x".into(),
+                source_file: None,
+                project: None,
+                against: Some(b.clone()),
+            }))
+            .await,
+    );
+    let res = server
+        .memory_link_status(Parameters(LinkStatusInput {
+            src: a.clone(),
+            dst: b.clone(),
+            kind: None,
+            status: "rejected".into(),
+            winner: Some(b.clone()),
+            note: None,
+            dst_store: None,
+            project: None,
+        }))
+        .await;
+    assert!(res.is_err(), "{res:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: `expand_links` and the graph score components on `query`.
+// ---------------------------------------------------------------------------
+
+async fn link_confirmed(server: &EngramDbServer, src: &str, kind: &str, dst: &str) {
+    let r = server
+        .memory_link(Parameters(LinkInput {
+            src: src.to_string(),
+            kind: kind.to_string(),
+            dst: dst.to_string(),
+            dst_store: None,
+            confidence: None,
+            note: None,
+            status: Some("confirmed".to_string()),
+            project: None,
+        }))
+        .await;
+    parse_ok(&r);
+}
+
+#[tokio::test]
+async fn query_expand_links_adds_marked_neighbour() {
+    let (_dir, server) = setup().await;
+    let hit = create_and_get_id(&server, "decision", "Quokka rotation", "quokka body").await;
+    let nb = create_and_get_id(&server, "context", "Unrelated wording", "other body").await;
+    link_confirmed(&server, &nb, "supports", &hit).await;
+
+    // Off by default: only the keyword hit.
+    let plain = parse_ok(
+        &server
+            .memory_query(Parameters(QueryInput {
+                query: Some("quokka".to_string()),
+                ..query_input("filter")
+            }))
+            .await,
+    );
+    let ids: Vec<&str> = plain["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&nb.as_str()));
+    assert!(plain["memories"][0].get("via").is_none());
+
+    let expanded = parse_ok(
+        &server
+            .memory_query(Parameters(QueryInput {
+                query: Some("quokka".to_string()),
+                expand_links: Some(3),
+                ..query_input("filter")
+            }))
+            .await,
+    );
+    let m = expanded["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == nb.as_str())
+        .expect("the supporter is reached through the edge");
+    assert_eq!(m["via"]["from"], hit.as_str());
+    assert_eq!(m["via"]["kind"], "supports");
+}
+
+#[tokio::test]
+async fn query_expand_links_rejects_more_than_the_cap() {
+    let (_dir, server) = setup().await;
+    let result = server
+        .memory_query(Parameters(QueryInput {
+            query: Some("x".to_string()),
+            expand_links: Some(engramdb::types::MAX_EXPAND_LINKS as u32 + 1),
+            ..query_input("filter")
+        }))
+        .await;
+    let err = parse_err(&result);
+    assert!(
+        err.to_string().contains("expand_links must be at most"),
+        "{err}"
+    );
 }
 
 /// A project whose store exists but whose registry entry does not (a

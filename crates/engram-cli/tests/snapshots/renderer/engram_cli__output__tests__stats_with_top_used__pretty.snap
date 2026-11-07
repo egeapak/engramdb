@@ -1,0 +1,23 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total Memories: 3
+
+By Type:
+  Decision: 3
+
+By Status:
+  Active: 3
+
+Expired: 0
+
+Average Criticality: 0.50
+
+Most used memories (by fetched; read signals are never summed):
+  1. 018f2a1b Blocking calls deadlock the daemon
+     fetched 4, injected 12 in 1 session, returned 3 in 2 sessions
+  2. 018f2a1b (deleted)
+     fetched 0, injected 1 in 1 session, returned 0
+--- stderr ---

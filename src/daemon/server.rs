@@ -581,6 +581,9 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 if let Some((pid, batch)) = ctx.hook_telemetry.record(&call, project, ms, run.ok) {
                     ctx.hook_telemetry.spawn_write(pid, batch);
                 }
+                for (sid, batch) in ctx.hook_telemetry.record_usage(project, run.usage_events) {
+                    ctx.hook_telemetry.spawn_usage_write(sid, batch);
+                }
                 // After the reply would otherwise be delayed: spawned, and
                 // throttled per project.
                 if ctx.hook_telemetry.maintenance_due(&project.root) {

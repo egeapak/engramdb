@@ -1,0 +1,80 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/help.rs
+expression: "f.run_bare(& [\"link\", \"--help\"])"
+---
+$ engramdb link --help
+exit: 0
+--- stdout ---
+Link two memories with a typed edge (or update an existing edge)
+
+Kinds: contradicts, supersedes, supports, derived_from, related_to, duplicates. Symmetric kinds (contradicts, related_to, duplicates) are stored once and shown on both memories. Re-linking the same edge changes only what you pass (e.g. `--status rejected` keeps its note); a proposed link never changes an existing one.
+
+Usage: engramdb link [OPTIONS] <SRC> <KIND> <DST>
+
+Arguments:
+  <SRC>
+          Source memory ID (supports prefix matching)
+
+  <KIND>
+          Edge kind
+
+  <DST>
+          Target memory ID (prefix matching within the same store; a full id for a target in another store)
+
+Options:
+      --store <STORE>
+          The target's store, when it is not this one: `global`, `group:<name>`, or a project id
+
+      --confidence <CONFIDENCE>
+          How sure the link is, 0.0-1.0 (default 1.0)
+
+      --note <NOTE>
+          Why the two are linked
+
+      --status <STATUS>
+          Review status: proposed, confirmed (default) or rejected. Not for `supersedes`, which is always confirmed (unlink it to reject it)
+
+      --winner <WINNER>
+          Resolve a `contradicts` edge by direction: this memory (one of the two) supersedes the other, whose validity window closes. The edge is rewritten as `<winner> supersedes <loser>`
+
+      --global
+          Operate on the global (cross-project) memory store instead of the current project
+
+      --format <FORMAT>
+          Output format
+
+          Possible values:
+          - pretty: Human-friendly colored output with formatting
+          - json:   JSON output for programmatic parsing
+          - plain:  Plain text output without colors
+
+      --json
+          Output as JSON
+
+  -q, --quiet
+          Suppress non-essential output
+
+  -v, --verbose
+          Verbose output
+
+      --no-color
+          No colored output
+
+      --dir <DIR>
+          Working directory (default: current directory)
+
+      --embedding-backend <EMBEDDING_BACKEND>
+          Embedding backend: auto, onnx, or ollama
+
+      --in-process
+          Force in-process model loading — never contact the shared embedding daemon. Equivalent to setting ENGRAMDB_IN_PROCESS=1
+
+      --spawn-daemon
+          Spawn the shared embedding daemon if it is not already running, then route through it. By default the CLI only uses a daemon that is already running (connect-only)
+
+      --no-maintenance
+          Skip the automatic main-worktree maintenance pass (orphan-project cleanup + a quick store health check) for this invocation. Equivalent to setting ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1
+
+  -h, --help
+          Print help (see a summary with '-h')
+--- stderr ---

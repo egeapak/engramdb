@@ -228,6 +228,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             | Command::Completions { .. }
             | Command::Setup { .. }
             | Command::Daemon { .. }
+            | Command::Dashboard { .. }
     );
     // Hooks are dispatched below with a fail-open backstop, but that can't
     // catch errors raised BEFORE dispatch — and worktree resolution hard-
@@ -412,6 +413,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             situation,
             include_invalidated,
             show_scores,
+            expand_links,
             include_global,
             global,
             group,
@@ -449,6 +451,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     situation,
                     include_invalidated,
                     show_scores,
+                    expand_links,
                     include_global,
                 },
                 backend,
@@ -576,6 +579,47 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_delete(&dir, global, &id, force, &formatter).await
         }
         Command::Verify { id, global } => commands::run_verify(&dir, global, &id, &formatter).await,
+        Command::Link {
+            src,
+            kind,
+            dst,
+            store,
+            confidence,
+            note,
+            status,
+            winner,
+            global,
+        } => {
+            commands::run_link(
+                &dir,
+                global,
+                commands::LinkArgs {
+                    src,
+                    kind,
+                    dst,
+                    store,
+                    confidence,
+                    note,
+                    status,
+                    winner,
+                },
+                &formatter,
+            )
+            .await
+        }
+        Command::Unlink {
+            src,
+            kind,
+            dst,
+            store,
+            global,
+        } => commands::run_unlink(&dir, global, &src, &kind, &dst, store, &formatter).await,
+        Command::Links {
+            id,
+            all,
+            kind,
+            global,
+        } => commands::run_links(&dir, global, &id, all, &kind, &formatter).await,
         Command::Task { command } => match command {
             TaskCommand::Current {
                 name,
@@ -599,7 +643,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             all_projects,
             global,
             daemon,
-        } => commands::run_stats(&dir, global, daemon, backend, all_projects, &formatter).await,
+            memory,
+            top,
+            by,
+        } => {
+            let usage = commands::stats::UsageArgs {
+                memory,
+                top,
+                by: by.into(),
+            };
+            commands::run_stats(
+                &dir,
+                global,
+                daemon,
+                backend,
+                all_projects,
+                usage,
+                &formatter,
+            )
+            .await
+        }
         Command::Doctor {
             command,
             global,
@@ -615,6 +678,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             id,
             evidence,
             source_file,
+            against,
             global,
         } => {
             commands::run_challenge(
@@ -624,6 +688,7 @@ pub async fn run(cli: Cli) -> Result<()> {
                     id,
                     evidence,
                     source_file,
+                    against,
                 },
                 &formatter,
             )
@@ -643,6 +708,26 @@ pub async fn run(cli: Cli) -> Result<()> {
             commands::run_serve(&dir, &transport, port, backend, &formatter).await
         }
         Command::Daemon { command } => commands::run_daemon_cmd(command, &formatter).await,
+        Command::Dashboard {
+            port,
+            bind,
+            no_open,
+            assets_dir,
+            allow_writes,
+        } => {
+            commands::run_dashboard(
+                &dir,
+                commands::DashboardParams {
+                    port,
+                    bind,
+                    no_open,
+                    assets_dir,
+                    allow_writes,
+                },
+                &formatter,
+            )
+            .await
+        }
         Command::Completions { shell } => {
             commands::run_completions(shell);
             Ok(())

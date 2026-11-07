@@ -1,0 +1,87 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "accessed_at": "2026-01-02T03:04:05Z",
+  "challenges": [],
+  "confidence": 0.9,
+  "content": "Test content",
+  "created_at": "2026-01-02T03:04:05Z",
+  "criticality": 0.8,
+  "edges": {
+    "hidden": 2,
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "inbound": [
+      {
+        "confidence": 0.6,
+        "created_at": "2026-10-30T09:15:00Z",
+        "direction": "in",
+        "kind": "contradicts",
+        "note": "webpki rejects the gateway CA",
+        "origin": "agent",
+        "other_id": "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c",
+        "other_summary": "Custom CA breaks webpki downloads",
+        "state": "live",
+        "status": "proposed",
+        "symmetric": true
+      },
+      {
+        "confidence": 1.0,
+        "created_at": "2026-10-30T09:15:00Z",
+        "direction": "in",
+        "kind": "derived_from",
+        "origin": "human",
+        "other_id": "018f2a1b-2222-7e5f-8a9b-0c1d2e3f4a5e",
+        "other_summary": "Custom CA breaks webpki downloads",
+        "state": "invalidated",
+        "status": "confirmed",
+        "successor": "018f2a1b-3333-7e5f-8a9b-0c1d2e3f4a5f",
+        "symmetric": false
+      }
+    ],
+    "outbound": [
+      {
+        "confidence": 1.0,
+        "created_at": "2026-10-30T09:15:00Z",
+        "direction": "out",
+        "kind": "related_to",
+        "origin": "human",
+        "other_id": "018f2a1b-1111-7e5f-8a9b-0c1d2e3f4a5d",
+        "other_store": "__g_0123456789ab",
+        "state": "unknown",
+        "status": "confirmed",
+        "symmetric": true
+      },
+      {
+        "confidence": 1.0,
+        "created_at": "2026-10-30T09:15:00Z",
+        "direction": "out",
+        "kind": "supports",
+        "note": "measured on the sandbox\nsecond line",
+        "origin": "human",
+        "other_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+        "other_summary": "Custom CA breaks webpki downloads",
+        "state": "live",
+        "status": "confirmed",
+        "symmetric": false
+      }
+    ]
+  },
+  "epistemic": "decision",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "logical": [],
+  "physical": [],
+  "provenance": {
+    "source": "human"
+  },
+  "status": "Active",
+  "summary": "Test summary",
+  "supersedes": [],
+  "tags": [],
+  "type": "decision",
+  "updated_at": "2026-01-02T03:04:05Z",
+  "visibility": "Shared"
+}
+--- stderr ---

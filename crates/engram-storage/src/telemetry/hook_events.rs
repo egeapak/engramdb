@@ -251,13 +251,13 @@ pub fn retention_cutoff(retention_days: Option<u64>, now: DateTime<Utc>) -> Opti
     retention_days.map(|d| now - chrono::Duration::days(d.min(36_500) as i64))
 }
 
-fn ts_literal(ts: DateTime<Utc>) -> String {
+pub(crate) fn ts_literal(ts: DateTime<Utc>) -> String {
     format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
 }
 
 /// SQL string literal. Hook names come from our own writers, but a drained
 /// JSONL file is a file on disk, so quote defensively.
-fn str_literal(s: &str) -> String {
+pub(crate) fn str_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 

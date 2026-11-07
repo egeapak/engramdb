@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+Linked [ID13] contradicts [ID13] (proposed)
+Resolved contradiction: [ID13] supersedes [ID13] ([ID13] is now invalidated)
+memory=[ID] outbound=1 inbound=0 hidden=0
+edge direction=out kind=supersedes other=[ID] store=- status=confirmed origin=human confidence=1.00 state=invalidated at=[TS] successor=[ID]
+--- stderr ---

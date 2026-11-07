@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"stats\", \"--top\", \"3\", \"--daemon\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] stats --top 3 --daemon
+exit: 2
+--- stdout ---
+--- stderr ---
+error: the argument '--top <N>' cannot be used with '--daemon'
+
+Usage: engramdb stats --top <N>
+
+For more information, try '--help'.

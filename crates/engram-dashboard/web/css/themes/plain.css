@@ -1,0 +1,85 @@
+/* Plain graph style (the default). Every rule is scoped under
+ * [data-graph-style="plain"] (set on <html>).
+ *
+ * Memories are one neutral fill, outlined in the page background so
+ * neighbours stay apart; each top scope a soft region (one path per scope,
+ * textured past the seventh) and one name, both light so the relations stay
+ * the subject. Relations (js/graph/themes/plain/relations.js) are filled
+ * shapes, one path each, coloured by kind.
+ *
+ * Colours: tokens in app.css's three-block pattern (light; the system's
+ * dark unless the page was set to light; the page set to dark). The
+ * selectors keep the [data-graph-style="plain"] prefix every rule here
+ * needs and test <html>'s data-theme through :is(… *) on <body>.
+ * Every relation colour and the memory fill meet WCAG 1.4.11 (3:1) against
+ * the page background in both schemes, and against the faintest region tint
+ * (≥ 3.08):
+ *   light (#fff)    contradicts 5.2  supersedes 15.6  supports 4.7
+ *                   derived_from 5.4  duplicates 6.1  related_to 3.5  memory 4.7
+ *   dark (#0f1822)  contradicts 5.9  supersedes 14.9  supports 8.0
+ *                   derived_from 6.9  duplicates 7.1  related_to 5.0  memory 5.7
+ * Declared exceptions: a rejected relation is drawn faint on purpose (.55:
+ * 1.9–3.3:1; it is shown only with the Rejected filter and is also dotted),
+ * and where a relation crosses a region's texture stripe the stripe lowers
+ * its local contrast (about 2.1:1 for related_to over a stripe). A
+ * never-read memory is hollow, so its outline keeps the full contrast.
+ * Blue/violet and red/green pairs merge under deutan/protan vision, which
+ * is why each kind also has its own shape (relations.js). */
+[data-graph-style="plain"] body {
+  --pl-contradicts: #d1242f; --pl-supersedes: #1d2430; --pl-supports: #11845b;
+  --pl-derived_from: #2368c9; --pl-duplicates: #7c3fcf; --pl-related_to: #7f8a96;
+  --pl-node: #6b7480; --pl-region-a: .065;
+}
+@media (prefers-color-scheme: dark) {
+  [data-graph-style="plain"] body:is(:root:not([data-theme="light"]) *) {
+    --pl-contradicts: #ff5d5d; --pl-supersedes: #e6ebf0; --pl-supports: #2fc488;
+    --pl-derived_from: #5aa2ff; --pl-duplicates: #ae93f7; --pl-related_to: #7b8995;
+    --pl-node: #8593a0; --pl-region-a: .11;
+  }
+}
+[data-graph-style="plain"] body:is([data-theme="dark"] *) {
+  --pl-contradicts: #ff5d5d; --pl-supersedes: #e6ebf0; --pl-supports: #2fc488;
+  --pl-derived_from: #5aa2ff; --pl-duplicates: #ae93f7; --pl-related_to: #7b8995;
+  --pl-node: #8593a0; --pl-region-a: .11;
+}
+[data-graph-style="plain"] .scope-regions .region { fill-opacity: var(--pl-region-a); stroke: none; }
+[data-graph-style="plain"] .scope-regions .tex { fill-opacity: .28; stroke-opacity: .28; stroke-width: 1.6; }
+[data-graph-style="plain"] .scope-names .scope-name-bg { fill: var(--bg); fill-opacity: .72; stroke: none; pointer-events: none; }
+[data-graph-style="plain"] .scope-names .scope-name { font-weight: 700; letter-spacing: .02em; fill: var(--ink-2); fill-opacity: .8; paint-order: stroke; stroke: var(--bg); stroke-width: .25em; stroke-linejoin: round; pointer-events: none; }
+[data-graph-style="plain"] .lg-region .region { fill-opacity: .4; }
+[data-graph-style="plain"] .lg-region .tex { fill-opacity: .9; stroke-opacity: .9; stroke-width: 1.4; }
+/* Memories */
+[data-graph-style="plain"] .node.pl .sh { fill: var(--pl-node); stroke: var(--bg); stroke-width: 1.5; }
+[data-graph-style="plain"] .node.pl .dot { fill: var(--bg); stroke: none; }
+[data-graph-style="plain"] .node.pl.hub .sh { stroke: var(--ink); stroke-width: 1.6; }
+[data-graph-style="plain"] .node.pl.never .sh { fill: var(--bg); stroke: var(--pl-node); stroke-width: 1.6; }
+[data-graph-style="plain"] .node.pl.inv .sh { fill: var(--bg-2); stroke: var(--ink-3); stroke-dasharray: 2 3; }
+/* Relations: .cx carries kind k-*, status s-*, far end x-*. One filled
+   path (.rel) each; the core's .hit path is the click target, kept a
+   constant 12px on screen at any zoom. */
+[data-graph-style="plain"] .cx .rel { fill: var(--pl-related_to); stroke: none; }
+[data-graph-style="plain"] .cx.k-contradicts .rel { fill: var(--pl-contradicts); }
+[data-graph-style="plain"] .cx.k-supersedes .rel { fill: var(--pl-supersedes); }
+[data-graph-style="plain"] .cx.k-supports .rel { fill: var(--pl-supports); }
+[data-graph-style="plain"] .cx.k-derived_from .rel { fill: var(--pl-derived_from); }
+[data-graph-style="plain"] .cx.k-duplicates .rel { fill: var(--pl-duplicates); }
+[data-graph-style="plain"] .cx.s-rejected .rel { fill-opacity: .55; }
+[data-graph-style="plain"] .graph .cx .hit { stroke-width: 12px; vector-effect: non-scaling-stroke; }
+/* Highlighting: the core toggles .has-focus on the graph, .on on what is lit
+   and .nb on the focused memory's neighbours (lit too); faded = not .on;
+   a lit relation is drawn half as wide again (--zk, read by its
+   transform), the rest fade. */
+/* No opacity transition: animating the fade on every memory and relation
+   made each hover frame re-layerize all of them (measured 15.8 → 9.2 ms p50
+   per frame at 800 memories). */
+[data-graph-style="plain"] .graph.has-focus .node:not(.on), [data-graph-style="plain"] .graph.has-focus .cx:not(.on) { opacity: .14; }
+/* Faded labels stay a little stronger than faded memories: on a phone the
+   rest of the graph would otherwise read as nothing. */
+[data-graph-style="plain"] .graph.has-focus .lbl:not(.on) { opacity: .24; }
+[data-graph-style="plain"] .graph.has-focus .cx.on { --zk: 1.5; }
+/* The focused memory (.on, not .nb) is outlined; its neighbours (.nb) keep
+   their own look at full strength, and their labels show in a lighter weight. */
+[data-graph-style="plain"] .graph.has-focus .node.pl.on:not(.nb) .sh { stroke: var(--ink); stroke-width: 1.8; }
+[data-graph-style="plain"] .graph.has-focus .lbl.on:not(.nb) { font-weight: 700; }
+[data-graph-style="plain"] .graph.has-focus .lbl.nb { font-weight: 500; }
+[data-graph-style="plain"] .legend .lg-dir { color: var(--ink-2); }

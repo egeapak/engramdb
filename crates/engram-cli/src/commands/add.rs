@@ -275,6 +275,7 @@ async fn run_direct_mode(
             embed_async: false,
         },
         Some(engine),
+        engramdb::ops::Surface::Cli,
     )
     .await?;
 
@@ -423,6 +424,7 @@ async fn run_interactive_mode(
             embed_async: false,
         },
         Some(engine),
+        engramdb::ops::Surface::Cli,
     )
     .await?;
 
@@ -534,6 +536,7 @@ async fn run_editor_mode(
             embed_async: false,
         },
         Some(engine),
+        engramdb::ops::Surface::Cli,
     )
     .await?;
 

@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"stats\", \"--top\", \"0\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] stats --top 0
+exit: 2
+--- stdout ---
+--- stderr ---
+error: invalid value '0' for '--top <N>': must be at least 1
+
+For more information, try '--help'.

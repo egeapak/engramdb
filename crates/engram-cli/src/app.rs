@@ -537,6 +537,36 @@ pub enum OutputFormat {
     Plain,
 }
 
+/// `--top N`: a listing of zero memories is a mistake, not a request.
+fn parse_top_n(s: &str) -> Result<usize, String> {
+    match s.parse::<usize>() {
+        Ok(0) => Err("must be at least 1".to_string()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The read signal that orders `stats --top`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UsageSortArg {
+    /// Opened explicitly by id (`get`)
+    Fetched,
+    /// Rendered into an agent's context by a hook
+    Injected,
+    /// Returned by a `query`
+    Returned,
+}
+
+impl From<UsageSortArg> for engramdb::ops::UsageSort {
+    fn from(a: UsageSortArg) -> Self {
+        match a {
+            UsageSortArg::Fetched => Self::Fetched,
+            UsageSortArg::Injected => Self::Injected,
+            UsageSortArg::Returned => Self::Returned,
+        }
+    }
+}
+
 /// EngramDB command-line interface.
 #[derive(Parser)]
 #[command(
@@ -824,6 +854,21 @@ pub enum Command {
         #[arg(long)]
         show_scores: bool,
 
+        /// Add up to N one-hop neighbours of the top results, over confirmed
+        /// `supports`, `derived_from` and `related_to` edges (bare flag: 5;
+        /// `--expand-links=N` for another N — the `=` is required, so a query
+        /// after the flag stays the query; 0 = off; max 20). Defaults to
+        /// `[retrieval].expand_links` (0). Added results are marked with the
+        /// hit and edge they came through.
+        #[arg(
+            long,
+            value_name = "N",
+            num_args = 0..=1,
+            require_equals = true,
+            default_missing_value = "5"
+        )]
+        expand_links: Option<usize>,
+
         /// Also merge global (cross-project) memories into the results.
         ///
         /// Runs the same query against the global store and folds its hits
@@ -1069,6 +1114,91 @@ pub enum Command {
         global: bool,
     },
 
+    /// Link two memories with a typed edge (or update an existing edge)
+    ///
+    /// Kinds: contradicts, supersedes, supports, derived_from, related_to,
+    /// duplicates. Symmetric kinds (contradicts, related_to, duplicates) are
+    /// stored once and shown on both memories. Re-linking the same edge
+    /// changes only what you pass (e.g. `--status rejected` keeps its note);
+    /// a proposed link never changes an existing one.
+    Link {
+        /// Source memory ID (supports prefix matching)
+        src: String,
+
+        /// Edge kind
+        kind: String,
+
+        /// Target memory ID (prefix matching within the same store; a full
+        /// id for a target in another store)
+        dst: String,
+
+        /// The target's store, when it is not this one: `global`,
+        /// `group:<name>`, or a project id
+        #[arg(long)]
+        store: Option<String>,
+
+        /// How sure the link is, 0.0-1.0 (default 1.0)
+        #[arg(long)]
+        confidence: Option<f64>,
+
+        /// Why the two are linked
+        #[arg(long)]
+        note: Option<String>,
+
+        /// Review status: proposed, confirmed (default) or rejected. Not for
+        /// `supersedes`, which is always confirmed (unlink it to reject it)
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Resolve a `contradicts` edge by direction: this memory (one of the
+        /// two) supersedes the other, whose validity window closes. The edge
+        /// is rewritten as `<winner> supersedes <loser>`
+        #[arg(long, conflicts_with_all = ["status", "confidence", "store"])]
+        winner: Option<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Remove an edge between two memories
+    Unlink {
+        /// Source memory ID (supports prefix matching)
+        src: String,
+
+        /// Edge kind
+        kind: String,
+
+        /// Target memory ID
+        dst: String,
+
+        /// The target's store, when it is not this one
+        #[arg(long)]
+        store: Option<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// List a memory's edges, outbound and inbound
+    Links {
+        /// Memory ID (supports prefix matching)
+        id: String,
+
+        /// Also show dangling, invalidated and rejected edges
+        #[arg(long)]
+        all: bool,
+
+        /// Only these kinds (repeatable)
+        #[arg(long)]
+        kind: Vec<String>,
+
+        /// Operate on the global (cross-project) memory store instead of the current project
+        #[arg(long)]
+        global: bool,
+    },
+
     /// Show effective config values, thresholds, and the store's top tags
     Config {
         /// Number of top tags to show (most-used first)
@@ -1093,6 +1223,24 @@ pub enum Command {
         /// Show the shared embedding daemon's metrics instead of memory-store stats
         #[arg(long)]
         daemon: bool,
+
+        /// Show one memory's usage (returned / injected / fetched, writes, last 30 days)
+        /// instead of store stats. Accepts a unique id prefix.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["daemon", "top", "all_projects"])]
+        memory: Option<String>,
+
+        /// Append the N most-used memories (N >= 1)
+        #[arg(
+            long,
+            value_name = "N",
+            value_parser = parse_top_n,
+            conflicts_with_all = ["daemon", "all_projects"]
+        )]
+        top: Option<usize>,
+
+        /// Which read signal orders --top; the others break ties (they are never summed)
+        #[arg(long, value_enum, default_value_t = UsageSortArg::Fetched, requires = "top")]
+        by: UsageSortArg,
     },
 
     /// Check environment and store health
@@ -1163,6 +1311,11 @@ pub enum Command {
         #[arg(long)]
         source_file: Option<String>,
 
+        /// The memory this one contradicts (id or prefix): also propose a
+        /// `contradicts` edge between the two, for review with `engramdb link`
+        #[arg(long)]
+        against: Option<String>,
+
         /// Operate on the global (cross-project) memory store instead of the current project
         #[arg(long)]
         global: bool,
@@ -1207,6 +1360,36 @@ pub enum Command {
         /// Port for SSE transport
         #[arg(long)]
         port: Option<u16>,
+    },
+
+    /// Open a local, read-only web dashboard of every store on this machine
+    ///
+    /// Serves on 127.0.0.1, opens your browser signed in, and prints the
+    /// bare address (no token; `--no-open` prints the sign-in URL instead).
+    /// Viewing a memory there does not count as using it. The one write
+    /// path is reviewing proposed relations, and only with `--allow-writes`.
+    Dashboard {
+        /// Port to listen on [default: 7341, or a free port when taken; 0: any free port]
+        #[arg(long)]
+        port: Option<u16>,
+
+        /// Address to listen on. Anything but loopback is reachable from the network
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: std::net::IpAddr,
+
+        /// Print the sign-in URL (with its token) instead of opening a browser.
+        /// Without it the terminal shows only the bare address, unless the
+        /// browser cannot be launched
+        #[arg(long)]
+        no_open: bool,
+
+        /// Serve the web files from this directory instead of the built-in copy (frontend development)
+        #[arg(long, value_name = "DIR")]
+        assets_dir: Option<PathBuf>,
+
+        /// Allow the dashboard's one write: confirming or rejecting proposed relations between memories
+        #[arg(long)]
+        allow_writes: bool,
     },
 
     /// Run the shared embedding daemon (normally auto-spawned by MCP)
@@ -1480,6 +1663,45 @@ mod tests {
                 assert!(include_invalidated);
             }
             _ => panic!("expected Query"),
+        }
+
+        // query --expand-links: bare flag = 5, `=N`, absent = None.
+        for (args, want) in [
+            (&["--expand-links"][..], Some(5)),
+            (&["--expand-links=2"][..], Some(2)),
+            (&[][..], None),
+        ] {
+            let mut argv = vec!["engramdb", "query", "--mode", "filter", "x"];
+            argv.extend_from_slice(args);
+            let cli = Cli::try_parse_from(argv).expect("--expand-links must parse");
+            match cli.command {
+                Command::Query { expand_links, .. } => assert_eq!(expand_links, want, "{args:?}"),
+                _ => panic!("expected Query"),
+            }
+        }
+        // A query after the bare flag stays the query (`require_equals`):
+        // without it, clap took "10" as N and "deploy freeze" as a bad N.
+        for text in ["deploy freeze", "10"] {
+            let cli = Cli::try_parse_from([
+                "engramdb",
+                "query",
+                "--mode",
+                "filter",
+                "--expand-links",
+                text,
+            ])
+            .expect("positional query after --expand-links must parse");
+            match cli.command {
+                Command::Query {
+                    expand_links,
+                    query_pos,
+                    ..
+                } => {
+                    assert_eq!(expand_links, Some(5), "{text}");
+                    assert_eq!(query_pos.as_deref(), Some(text));
+                }
+                _ => panic!("expected Query"),
+            }
         }
 
         // list: epistemic filter + include-invalidated.
@@ -1839,6 +2061,7 @@ mod tests {
                 daemon,
                 global,
                 all_projects,
+                ..
             } => {
                 assert!(daemon);
                 assert!(!global);
@@ -1850,6 +2073,46 @@ mod tests {
         match Cli::try_parse_from(["engramdb", "stats"]).unwrap().command {
             Command::Stats { daemon, .. } => assert!(!daemon),
             _ => panic!("Expected Stats command"),
+        }
+    }
+
+    #[test]
+    fn stats_usage_flags_parse_and_conflict() {
+        match Cli::try_parse_from(["engramdb", "stats", "--top", "5", "--by", "injected"])
+            .unwrap()
+            .command
+        {
+            Command::Stats {
+                top, by, memory, ..
+            } => {
+                assert_eq!(top, Some(5));
+                assert_eq!(by, UsageSortArg::Injected);
+                assert_eq!(memory, None);
+            }
+            _ => panic!("Expected Stats command"),
+        }
+        match Cli::try_parse_from(["engramdb", "stats", "--memory", "abc"])
+            .unwrap()
+            .command
+        {
+            Command::Stats { memory, by, .. } => {
+                assert_eq!(memory.as_deref(), Some("abc"));
+                assert_eq!(by, UsageSortArg::Fetched, "the default order");
+            }
+            _ => panic!("Expected Stats command"),
+        }
+        assert!(Cli::try_parse_from(["engramdb", "stats", "--memory", "a", "--top", "3"]).is_err());
+        assert!(Cli::try_parse_from(["engramdb", "stats", "--by", "returned"]).is_err());
+        for bad in [
+            &["engramdb", "stats", "--top", "0"][..],
+            &["engramdb", "stats", "--top", "3", "--daemon"][..],
+            &["engramdb", "stats", "--top", "3", "--all-projects"][..],
+            &["engramdb", "stats", "--memory", "a", "--all-projects"][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(bad).is_err(),
+                "{bad:?} must be rejected"
+            );
         }
     }
 

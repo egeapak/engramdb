@@ -1,0 +1,34 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "accessed_at": "2026-01-02T03:04:05Z",
+  "challenges": [],
+  "confidence": 0.9,
+  "content": "Test content",
+  "created_at": "2026-01-02T03:04:05Z",
+  "criticality": 0.8,
+  "edges": {
+    "hidden": 0,
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "inbound": [],
+    "outbound": []
+  },
+  "epistemic": "decision",
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "logical": [],
+  "physical": [],
+  "provenance": {
+    "source": "human"
+  },
+  "status": "Active",
+  "summary": "Test summary",
+  "supersedes": [],
+  "tags": [],
+  "type": "decision",
+  "updated_at": "2026-01-02T03:04:05Z",
+  "visibility": "Shared"
+}
+--- stderr ---

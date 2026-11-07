@@ -1970,6 +1970,12 @@ impl super::HookExecutor for EchoExecutor {
                     retention_days: Some(90),
                     session_id: Some("sess-x".to_string()),
                 }),
+                usage_events: vec![crate::ops::usage::MemoryEvent::new(
+                    "echo-memory",
+                    &self.project_id,
+                    crate::ops::UsageKind::Injected,
+                    crate::ops::Surface::HookPreTool,
+                )],
             }
         })
     }
@@ -2047,6 +2053,13 @@ async fn daemon_runs_hooks_and_flushes_hook_events_on_shutdown() {
     assert_eq!((ss.calls, ss.errors), (1, 0));
     let pc = &groups[&("pre-compact".to_string(), HookPath::Daemon)];
     assert_eq!((pc.calls, pc.errors), (1, 1));
+
+    // The hooks' `injected` usage events were buffered and flushed beside
+    // them, straight into the table and its rollup.
+    let usage = crate::telemetry::usage::load_rollup(&project_id)
+        .await
+        .unwrap();
+    assert_eq!(usage["echo-memory"].counts.injected, 2);
 }
 
 /// A session whose data dir differs from the daemon's must not have its hook

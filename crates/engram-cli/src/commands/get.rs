@@ -38,6 +38,13 @@ pub async fn run_get(
         formatter.print_warning(&warning);
     }
     let memory = get_memory(&store, id).await?;
+    engramdb::ops::record_fetched(
+        &store,
+        &memory.id,
+        engramdb::ops::Surface::Cli,
+        engramdb::ops::usage::cli_session_id().as_deref(),
+    )
+    .await;
 
     // Resolve the memory's on-disk path. Shared memories live under the
     // *store's* project directory — which differs from the `dir` parameter
@@ -66,12 +73,26 @@ pub async fn run_get(
         return Ok(());
     }
 
-    // Handle --full flag: show complete details without truncation
-    if full {
-        formatter.print_memory_full(&memory);
-    } else {
-        formatter.print_memory(&memory);
-    }
+    // Edges, both directions, with the default filter (dangling, invalidated
+    // and rejected hidden but counted). A read failure here is not a reason
+    // to withhold the memory itself: show it without, and say so.
+    let links = match engramdb::ops::links::links_of(
+        &store,
+        &memory.id,
+        &engramdb::ops::links::LinkFilter::default(),
+    )
+    .await
+    {
+        Ok(view) => Some(view),
+        Err(e) => {
+            formatter.print_warning(&format!("could not read this memory's edges: {e:#}"));
+            None
+        }
+    };
+
+    // `--full` is currently the same rendering (nothing is truncated yet).
+    let _ = full;
+    formatter.print_memory_with_links(&memory, links.as_ref());
 
     Ok(())
 }
@@ -110,6 +131,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -232,6 +254,46 @@ mod tests {
         assert!(
             project_result.is_err(),
             "project lookup must not see global memories"
+        );
+    }
+
+    /// `get` by prefix records one `fetched` event with the full id; no
+    /// session id in the environment means none on the event.
+    #[tokio::test]
+    async fn get_records_fetched_with_the_full_id() {
+        use engramdb::ops::{Surface, UsageKind};
+        std::env::remove_var("CLAUDE_SESSION_ID");
+        std::env::remove_var("MCP_SESSION_ID");
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = create_test_memory("fetch-me-0001-aaaa", MemoryType::Decision, 0.5);
+        store.create(&mem).await.unwrap();
+        let formatter = OutputFormatter::new(None, false, true);
+        run_get(
+            temp_dir.path(),
+            false,
+            "fetch-me",
+            false,
+            false,
+            false,
+            &formatter,
+        )
+        .await
+        .unwrap();
+        let events = engramdb::telemetry::usage::load_memory_events(temp_dir.path())
+            .unwrap()
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].memory_id, "fetch-me-0001-aaaa");
+        assert_eq!(
+            (
+                events[0].kind,
+                events[0].surface,
+                events[0].session_id.as_deref()
+            ),
+            (UsageKind::Fetched, Surface::Cli, None)
         );
     }
 }

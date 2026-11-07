@@ -1,6 +1,6 @@
 //! EngramDB MCP server implementation.
 //!
-//! Defines the server struct, all MCP tools (23), resources (2), and prompts (2).
+//! Defines the server struct, all MCP tools, resources (2), and prompts (2).
 //! Tools delegate to the `ops` layer; the server opens a fresh `MemoryStore`
 //! per request so it always sees the latest on-disk state.
 
@@ -72,6 +72,11 @@ struct CreateInput {
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Typed edges to add from this memory (add semantics: existing edges are kept). Each: {to, kind, store?, confidence?, note?, status?}. kind: contradicts|supports|derived_from|related_to|duplicates (supersedes goes in `supersedes`)."
+    )]
+    links: Option<Vec<LinkSpec>>,
 
     #[schemars(
         description = "Audience for a group/global share: the project ids and/or group ids the memory is scoped to in cross-store fan-in. Omit for whole-group visibility. Only meaningful when writing into a group (project: \"group:<name>\") or the global store; inert on a project-local memory. Advisory scoping, NOT a confidentiality boundary — a direct query of the shared store still returns it."
@@ -191,6 +196,11 @@ struct QueryInput {
     include_global: Option<bool>,
 
     #[schemars(
+        description = "Add up to N one-hop neighbours of the top results, reached over confirmed supports / derived_from / related_to edges (0 = off, max 20; default from [retrieval].expand_links, normally 0). Each added result carries `via` {from, kind}; it is scored at its hit's score times expand_links_decay minus its own challenge/contradicts penalties (never above its hit), passes every filter a direct result would, and N is per query across every fanned-in store."
+    )]
+    expand_links: Option<u32>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
@@ -257,6 +267,11 @@ struct UpdateInput {
 
     #[schemars(description = "IDs of memories this supersedes")]
     supersedes: Option<Vec<String>>,
+
+    #[schemars(
+        description = "Typed edges to add from this memory (add semantics — never replaces the existing set; use `unlink` to remove). Each: {to, kind, store?, confidence?, note?, status?}."
+    )]
+    links: Option<Vec<LinkSpec>>,
 
     #[schemars(
         description = "Set the per-memory audience (project/group ids) for a group/global share. Omit to leave unchanged; pass an empty list to clear it to whole-group visibility. Only meaningful on a memory in a group/global store."
@@ -346,6 +361,11 @@ struct ChallengeInput {
     source_file: Option<String>,
 
     #[schemars(
+        description = "Id of the memory that contradicts this one, when the conflict is between two memories. Also records a proposed `contradicts` edge between them, which a reviewer later confirms, rejects, or resolves as one superseding the other (`link_status`)."
+    )]
+    against: Option<String>,
+
+    #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
     project: Option<String>,
@@ -401,6 +421,95 @@ struct ResolveInput {
     )]
     superseded_by: Option<String>,
 
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+/// One edge in a `create`/`update` `links` list.
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LinkSpec {
+    #[schemars(description = "Target memory id (a unique prefix is resolved to the full id)")]
+    to: String,
+    #[schemars(
+        description = "contradicts | supports | derived_from | related_to | duplicates | supersedes"
+    )]
+    kind: String,
+    #[schemars(
+        description = "Store of the target when it is not this one: \"global\", \"group:<name>\" or a 16-char project id"
+    )]
+    store: Option<String>,
+    #[schemars(description = "0.0-1.0 (default 1.0)")]
+    confidence: Option<f64>,
+    #[schemars(description = "Why the edge holds")]
+    note: Option<String>,
+    #[schemars(description = "proposed | confirmed (default confirmed)")]
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LinkInput {
+    #[schemars(description = "Source memory id")]
+    src: String,
+    #[schemars(
+        description = "contradicts | supports | derived_from | related_to | duplicates | supersedes. Symmetric kinds (contradicts, related_to, duplicates) are stored once and seen from both ends."
+    )]
+    kind: String,
+    #[schemars(description = "Target memory id")]
+    dst: String,
+    #[schemars(
+        description = "Store of the target when it is not the source's: \"global\", \"group:<name>\" or a 16-char project id. A store that cannot be opened here needs the full target id and is recorded as unknown."
+    )]
+    dst_store: Option<String>,
+    #[schemars(description = "0.0-1.0 (default 1.0)")]
+    confidence: Option<f64>,
+    #[schemars(description = "Why the edge holds")]
+    note: Option<String>,
+    #[schemars(description = "proposed | confirmed (default confirmed)")]
+    status: Option<String>,
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UnlinkInput {
+    #[schemars(description = "Source memory id")]
+    src: String,
+    #[schemars(description = "Edge kind")]
+    kind: String,
+    #[schemars(description = "Target memory id")]
+    dst: String,
+    #[schemars(description = "Store of the target when it is not the source's")]
+    dst_store: Option<String>,
+    #[schemars(
+        description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
+    )]
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LinkStatusInput {
+    #[schemars(description = "One end of the edge (either end for a symmetric kind)")]
+    src: String,
+    #[schemars(description = "The other end")]
+    dst: String,
+    #[schemars(description = "Edge kind (default contradicts)")]
+    kind: Option<String>,
+    #[schemars(
+        description = "confirmed | rejected | proposed. A rejected edge is kept so it is not proposed again. For contradicts, `confirmed` without `winner` means both stand (both are penalized)."
+    )]
+    status: String,
+    #[schemars(
+        description = "contradicts only: the id of the memory that supersedes the other. Rewrites the edge as `winner supersedes loser` and invalidates the loser; only the loser is demoted."
+    )]
+    winner: Option<String>,
+    #[schemars(description = "Reviewer's note")]
+    note: Option<String>,
+    #[schemars(description = "Store of `dst` when it is not `src`'s")]
+    dst_store: Option<String>,
     #[schemars(
         description = "Target project: absolute path, 16-char project ID, \"global\" for the machine-wide everyone store, or \"group:<name>\" for a named group store. Subscribed groups also fan into a project's queries automatically. Omit for current project."
     )]
@@ -565,6 +674,19 @@ struct StatsInput {
     )]
     #[serde(default)]
     all_projects: Option<bool>,
+    #[schemars(
+        description = "A memory id (or unique prefix): add a `memory_usage` object with that memory's usage — returned / injected / fetched counts (separate signals, never summed), distinct sessions, writes, and a 30-day daily series."
+    )]
+    #[serde(default)]
+    memory_id: Option<String>,
+    #[schemars(description = "Add a `top_used` list of the N most-used memories in this store.")]
+    #[serde(default)]
+    top: Option<usize>,
+    #[schemars(
+        description = "Read signal that orders `top`: fetched (default), injected or returned. The others break ties; they are never summed."
+    )]
+    #[serde(default)]
+    by: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -752,6 +874,75 @@ struct CreateOutput {
     id: String,
     created: bool,
     summary: String,
+    /// `links` entries that could not be added (the memory itself was
+    /// written): one message per failed edge.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_errors: Vec<String>,
+}
+
+fn parse_link_kind(s: &str) -> Result<ops::links::LinkKind, String> {
+    ops::links::LinkKind::parse_known(s).ok_or_else(|| {
+        error_response(
+            ErrorCode::ValidationError,
+            &format!(
+                "unknown edge kind {s:?} (known: {})",
+                ops::links::LinkKind::known_list()
+            ),
+        )
+    })
+}
+
+fn parse_link_status(s: &str) -> Result<ops::links::LinkStatus, String> {
+    ops::links::LinkStatus::parse_known(s).ok_or_else(|| {
+        error_response(
+            ErrorCode::ValidationError,
+            &format!(
+                "unknown edge status {s:?} (known: {})",
+                ops::links::LinkStatus::known_list()
+            ),
+        )
+    })
+}
+
+/// Validate a `links` list before anything is written, so a typo fails the
+/// whole call instead of leaving a memory written without its edges.
+fn parse_link_specs(
+    src: &str,
+    specs: Vec<LinkSpec>,
+) -> Result<Vec<ops::links::LinkParams>, String> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            Ok(ops::links::LinkParams {
+                src: src.to_string(),
+                kind: parse_link_kind(&spec.kind)?,
+                dst: spec.to,
+                dst_store: spec.store,
+                confidence: spec.confidence,
+                origin: ops::links::LinkOrigin::Agent,
+                status: spec.status.as_deref().map(parse_link_status).transpose()?,
+                note: spec.note,
+            })
+        })
+        .collect()
+}
+
+/// Add each edge; per-edge failures are returned, not raised (the memory is
+/// already written, and one bad target must not hide the edges that worked).
+async fn apply_links(
+    store: &MemoryStore,
+    src: &str,
+    links: Vec<ops::links::LinkParams>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for mut params in links {
+        params.src = src.to_string();
+        let label = format!("{} {}", params.kind, params.dst);
+        if let Err(e) = ops::links::link(store, params, ops::Surface::Mcp).await {
+            errors.push(format!("{label}: {e:#}"));
+        }
+    }
+    errors
 }
 
 #[derive(Serialize)]
@@ -832,6 +1023,39 @@ fn is_not_found(e: &anyhow::Error) -> bool {
     )
 }
 
+/// True for the one `StorageError::Validation` that is the caller's to fix:
+/// an ambiguous id prefix. Storage reports every LanceDB failure as
+/// `Validation` too, and those must never read as the caller's fault.
+fn is_ambiguous_prefix(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<engramdb::storage::StorageError>(),
+        Some(engramdb::storage::StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix")
+    )
+}
+
+/// The error code of a failed `link` / `unlink` / `link_status`. The
+/// request's problem: a missing memory or edge (`MEMORY_NOT_FOUND`), a
+/// refusal `ops::links` typed as its own (`LinkRefused`, `NotProposed`) or an
+/// ambiguous prefix (`VALIDATION_ERROR`). Anything else — an I/O or index
+/// failure inside a write — is `INTERNAL_ERROR`, so an agent does not retry
+/// with different arguments for a fault that is not theirs.
+fn link_error_code(e: &anyhow::Error) -> ErrorCode {
+    if is_not_found(e) || e.downcast_ref::<ops::links::EdgeNotFound>().is_some() {
+        ErrorCode::MemoryNotFound
+    } else if e.downcast_ref::<ops::links::LinkRefused>().is_some()
+        || e.downcast_ref::<ops::links::NotProposed>().is_some()
+        || is_ambiguous_prefix(e)
+    {
+        ErrorCode::ValidationError
+    } else {
+        ErrorCode::InternalError
+    }
+}
+
+fn link_error(e: anyhow::Error) -> String {
+    error_response(link_error_code(&e), &format!("{e:#}"))
+}
+
 #[derive(Serialize)]
 struct ScoreBreakdownOutput {
     final_score: f64,
@@ -849,6 +1073,18 @@ struct ScoreBreakdownOutput {
     situation_multiplier: f64,
     decay: f64,
     criticality: f64,
+    // Phase-5 graph/usage components: present only when their knob is on and
+    // they changed the score, so a default config's output is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    contradicts_penalty: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    contradicted_by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supports_multiplier: Option<f64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    supported_by: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_multiplier: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -860,6 +1096,10 @@ struct ScoredMemoryOutput {
     /// relevance threshold. Present only when true.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     below_threshold: bool,
+    /// Set when the result was added by `expand_links`: the direct hit it was
+    /// reached from and the edge kind followed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    via: Option<engramdb::scoring::LinkVia>,
     score_breakdown: ScoreBreakdownOutput,
 }
 
@@ -2285,6 +2525,9 @@ impl EngramDbServer {
             .transpose()
             .map_err(|e| error_response(ErrorCode::ValidationError, e.as_str()))?;
 
+        // Parsed before the write; the source id is filled in afterwards.
+        let links = parse_link_specs("", input.links.unwrap_or_default())?;
+
         let result = ops::create_memory(
             store,
             ops::CreateParams {
@@ -2323,14 +2566,17 @@ impl EngramDbServer {
                 embed_async: true,
             },
             Some(&engine),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        let link_errors = apply_links(store, &result.id, links).await;
         let r = serde_json::to_string(&CreateOutput {
             id: result.id,
             created: true,
             summary: result.summary,
+            link_errors,
         })
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -2384,6 +2630,19 @@ impl EngramDbServer {
             .transpose()
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
 
+        let expand_links = match input.expand_links {
+            Some(n) if n as usize > engramdb::types::MAX_EXPAND_LINKS => {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    &format!(
+                        "expand_links must be at most {}, got {n}",
+                        engramdb::types::MAX_EXPAND_LINKS
+                    ),
+                ));
+            }
+            other => other.map(|n| n as usize),
+        };
+
         let query = RetrievalQuery {
             mode,
             path: input.path,
@@ -2401,6 +2660,7 @@ impl EngramDbServer {
             // `[retrieval].rank_fallback` from config: an agent browsing by
             // rank gets marked weak matches rather than an empty answer.
             rank_fallback: None,
+            expand_links,
         };
 
         // Cross-store read fan-in (ops::query_memories_with_extra_stores). When
@@ -2416,10 +2676,11 @@ impl EngramDbServer {
         // write gate, this visibility is registry-trust-level (advisory).
         let targets_shared_store = Self::is_global(input.project.as_deref())
             || Self::is_group_target(input.project.as_deref());
-        let result = if targets_shared_store {
-            ops::query_memories(&engine, &query)
+        let (result, owners) = if targets_shared_store {
+            let result = ops::query_memories(&engine, &query)
                 .await
-                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            (result, Default::default())
         } else {
             let project_id = self.pid_for_input(input.project.as_deref());
             let registry = self
@@ -2471,8 +2732,16 @@ impl EngramDbServer {
                     "some subscribed/global stores were unreadable and were skipped in fan-in"
                 );
             }
-            outcome.result
+            (outcome.result, outcome.owners)
         };
+        ops::record_returned(
+            &engine,
+            &result,
+            &owners,
+            mode,
+            ops::Surface::Mcp,
+            Some(&self.session_id),
+        );
 
         let memories: Vec<ScoredMemoryOutput> = result
             .memories
@@ -2494,7 +2763,13 @@ impl EngramDbServer {
                     situation_multiplier: sm.score_breakdown.situation_multiplier,
                     decay: sm.score_breakdown.decay,
                     criticality: sm.score_breakdown.criticality,
+                    contradicts_penalty: sm.score_breakdown.contradicts_penalty,
+                    contradicted_by: sm.score_breakdown.contradicted_by.clone(),
+                    supports_multiplier: sm.score_breakdown.supports_multiplier,
+                    supported_by: sm.score_breakdown.supported_by.clone(),
+                    usage_multiplier: sm.score_breakdown.usage_multiplier,
                 },
+                via: sm.score_breakdown.via.clone(),
             })
             .collect();
 
@@ -2541,7 +2816,32 @@ impl EngramDbServer {
             error_response(code, &e.to_string())
         })?;
 
-        let r = serde_json::to_string(&memory_to_output(&memory, true))
+        ops::record_fetched(
+            &store,
+            &memory.id,
+            ops::Surface::Mcp,
+            Some(&self.session_id),
+        )
+        .await;
+        let mut out = serde_json::to_value(memory_to_output(&memory, true))
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        // Edges both ways, in the default view (dangling, invalidated and
+        // rejected hidden, but counted). Always present — empty lists when
+        // there are none — so a client need not tell "no edges" from "not
+        // reported"; the key is `edges`, as in the CLI's JSON. A failed edge
+        // read must not fail the get (the memory itself was read fine): it
+        // is reported as `edges_error` instead.
+        match ops::links::links_of(&store, &memory.id, &ops::LinkFilter::default()).await {
+            Ok(view) => {
+                out["edges"] = serde_json::json!({
+                    "outbound": view.outbound,
+                    "inbound": view.inbound,
+                    "hidden": view.hidden,
+                });
+            }
+            Err(e) => out["edges_error"] = serde_json::json!(format!("{e:#}")),
+        }
+        let r = serde_json::to_string(&out)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
@@ -2562,6 +2862,8 @@ impl EngramDbServer {
         // paying a second `MemoryStore::open` per request.
         let engine = self.build_engine_for(input.project.as_deref()).await?;
         let store = engine.store();
+        let store_for_links = store.clone();
+        let links = parse_link_specs(&input.id, input.links.unwrap_or_default())?;
 
         let type_ = input
             .type_
@@ -2658,6 +2960,7 @@ impl EngramDbServer {
                 embed_async: true,
             },
             Some(&engine),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| {
@@ -2677,11 +2980,16 @@ impl EngramDbServer {
             error_response(code, &e.to_string())
         })?;
 
-        let r = serde_json::to_string(&serde_json::json!({
+        let link_errors = apply_links(&store_for_links, &input.id, links).await;
+        let mut out = serde_json::json!({
             "id": input.id,
             "updated": true
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        });
+        if !link_errors.is_empty() {
+            out["link_errors"] = serde_json::json!(link_errors);
+        }
+        let r = serde_json::to_string(&out)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
     }
@@ -2698,7 +3006,7 @@ impl EngramDbServer {
         self.check_cross_project_write(input.project.as_deref())
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
-        ops::delete_memory(&store, &input.id)
+        ops::delete_memory(&store, &input.id, ops::Surface::Mcp)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
@@ -2723,20 +3031,44 @@ impl EngramDbServer {
         self.check_cross_project_write(input.project.as_deref())
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
+        // Validate `against` before the challenge is recorded: a bad target
+        // must fail the whole call, not leave a challenge a retry duplicates.
+        if let Some(against) = &input.against {
+            ops::links::check_link(
+                &store,
+                ops::links::challenge_edge(&input.id, against, &input.evidence),
+            )
+            .await
+            .map_err(|e| error_response(ErrorCode::ValidationError, &format!("against: {e:#}")))?;
+        }
         let result = ops::challenge_memory(
             &store,
             &input.id,
             &input.evidence,
             input.source_file.as_deref(),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
-        let r = serde_json::to_string(&serde_json::json!({
+        let mut out = serde_json::json!({
             "challenged": result.challenged,
             "memory": memory_to_output(&result.memory, true)
-        }))
-        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        });
+        if let Some(against) = input.against {
+            match ops::links::link(
+                &store,
+                ops::links::challenge_edge(&result.memory.id, &against, &input.evidence),
+                ops::Surface::Mcp,
+            )
+            .await
+            {
+                Ok(edge) => out["edge"] = serde_json::json!(edge),
+                Err(e) => out["edge_error"] = serde_json::json!(format!("{e:#}")),
+            }
+        }
+        let r = serde_json::to_string(&out)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
         Ok(r)
     }
@@ -2837,6 +3169,7 @@ impl EngramDbServer {
                 updated_summary: input.updated_summary,
                 superseded_by: input.superseded_by,
             },
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
@@ -2852,6 +3185,150 @@ impl EngramDbServer {
     }
 
     #[tool(
+        name = "link",
+        description = "Record a typed edge between two memories: contradicts, supports, derived_from, related_to, duplicates, or supersedes (which also closes the target's validity window, like create's `supersedes`). Re-linking the same pair and kind updates the edge instead of duplicating it. A shared (committed) memory cannot point at a personal one: symmetric kinds are stored on the personal side instead, directed ones are refused."
+    )]
+    async fn memory_link(
+        &self,
+        Parameters(input): Parameters<LinkInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("link", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+        let params = ops::links::LinkParams {
+            src: input.src,
+            kind: parse_link_kind(&input.kind)?,
+            dst: input.dst,
+            dst_store: input.dst_store,
+            confidence: input.confidence,
+            origin: ops::links::LinkOrigin::Agent,
+            status: input.status.as_deref().map(parse_link_status).transpose()?,
+            note: input.note,
+        };
+        let result = ops::links::link(&store, params, ops::Surface::Mcp)
+            .await
+            .map_err(link_error)?;
+        let r = serde_json::to_string(&result)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "unlink",
+        description = "Remove a typed edge. Either end of a symmetric edge may be given as src. Unlinking `supersedes` also reopens the target if this source is what closed it."
+    )]
+    async fn memory_unlink(
+        &self,
+        Parameters(input): Parameters<UnlinkInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("unlink", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+        let edge = ops::EdgeRef {
+            src: input.src,
+            kind: parse_link_kind(&input.kind)?,
+            dst: input.dst,
+            dst_store: input.dst_store,
+        };
+        let result = ops::links::unlink(&store, edge, ops::Surface::Mcp)
+            .await
+            .map_err(link_error)?;
+        let r = serde_json::to_string(&result)
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(r)
+    }
+
+    #[tool(
+        name = "link_status",
+        description = "Review an edge: confirm, reject (kept, so it is not proposed again) or set back to proposed. For a contradicts edge, pass `winner` to resolve it as one memory superseding the other: the edge becomes `winner supersedes loser` and the loser is invalidated. Without `winner`, confirming a contradiction means both stand."
+    )]
+    async fn memory_link_status(
+        &self,
+        Parameters(input): Parameters<LinkStatusInput>,
+    ) -> Result<String, String> {
+        let _scope = self.scope("link_status", input.project.as_deref());
+        self.check_cross_project_write(input.project.as_deref())
+            .await?;
+        let store = self.open_store_for(input.project.as_deref()).await?;
+        let kind = input
+            .kind
+            .as_deref()
+            .map(parse_link_kind)
+            .transpose()?
+            .unwrap_or(ops::links::LinkKind::Contradicts);
+        let status = parse_link_status(&input.status)?;
+        let invalid = link_error;
+        let value = if kind == ops::links::LinkKind::Contradicts && input.dst_store.is_none() {
+            let verdict = match (status, input.winner) {
+                (ops::links::LinkStatus::Confirmed, Some(winner)) => {
+                    ops::ContradictionVerdict::Supersedes { winner }
+                }
+                (_, Some(_)) => {
+                    return Err(error_response(
+                        ErrorCode::ValidationError,
+                        "`winner` resolves a contradiction, so it needs `status: \"confirmed\"`",
+                    ));
+                }
+                (ops::links::LinkStatus::Rejected, None) => ops::ContradictionVerdict::Reject,
+                (ops::links::LinkStatus::Confirmed, None) => ops::ContradictionVerdict::BothStand,
+                (status, None) => {
+                    let edge = ops::EdgeRef {
+                        src: input.src,
+                        kind,
+                        dst: input.dst,
+                        dst_store: None,
+                    };
+                    let r =
+                        ops::set_link_status(&store, edge, status, input.note, ops::Surface::Mcp)
+                            .await
+                            .map_err(invalid)?;
+                    let r = serde_json::to_string(&r)
+                        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+                    _scope.mark_success();
+                    return Ok(r);
+                }
+            };
+            serde_json::to_value(
+                ops::confirm_contradiction_direction(
+                    &store,
+                    &input.src,
+                    &input.dst,
+                    verdict,
+                    input.note,
+                    ops::Surface::Mcp,
+                )
+                .await
+                .map_err(invalid)?,
+            )
+        } else {
+            if input.winner.is_some() {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    "`winner` applies only to a contradicts edge within one store",
+                ));
+            }
+            let edge = ops::EdgeRef {
+                src: input.src,
+                kind,
+                dst: input.dst,
+                dst_store: input.dst_store,
+            };
+            serde_json::to_value(
+                ops::set_link_status(&store, edge, status, input.note, ops::Surface::Mcp)
+                    .await
+                    .map_err(invalid)?,
+            )
+        }
+        .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        _scope.mark_success();
+        Ok(value.to_string())
+    }
+
+    #[tool(
         name = "verify",
         description = "Confirm a memory is still accurate after checking it against the code. Stamps verified_at (facts rank fresher) and clears doctor-flagged needs_review."
     )]
@@ -2864,7 +3341,7 @@ impl EngramDbServer {
             .await?;
         let store = self.open_store_for(input.project.as_deref()).await?;
 
-        let result = ops::verify_memory(&store, &input.id)
+        let result = ops::verify_memory(&store, &input.id, ops::Surface::Mcp)
             .await
             .map_err(|e| error_response(ErrorCode::MemoryNotFound, &e.to_string()))?;
 
@@ -2996,6 +3473,7 @@ impl EngramDbServer {
                 embed_async: true,
             },
             Some(&engine),
+            ops::Surface::Mcp,
         )
         .await
         .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -3097,6 +3575,54 @@ impl EngramDbServer {
             if !hooks.is_empty() {
                 payload["hooks"] = serde_json::to_value(&hooks).unwrap_or_default();
             }
+        }
+        // Per-memory usage, from the store's usage events (table + undrained
+        // log). Additive keys, present only when asked for. Validated as the
+        // CLI validates its flags: `by` needs `top`, and `top` must be >= 1.
+        let by = match input.by.as_deref() {
+            None => ops::UsageSort::default(),
+            Some(_) if input.top.is_none() => {
+                return Err(error_response(
+                    ErrorCode::ValidationError,
+                    "by applies to top: pass top as well",
+                ))
+            }
+            Some(s) => ops::UsageSort::parse(s).ok_or_else(|| {
+                error_response(
+                    ErrorCode::ValidationError,
+                    &format!("by must be fetched, injected or returned, got {s:?}"),
+                )
+            })?,
+        };
+        if input.top == Some(0) {
+            return Err(error_response(
+                ErrorCode::ValidationError,
+                "top must be at least 1",
+            ));
+        }
+        if let Some(id) = input.memory_id.as_deref() {
+            let report = ops::memory_usage_report(&store, id).await.map_err(|e| {
+                let code = if is_not_found(&e) {
+                    ErrorCode::MemoryNotFound
+                } else if is_ambiguous_prefix(&e) {
+                    // An ambiguous prefix is the caller's to fix; every other
+                    // `Validation` is a backend failure.
+                    ErrorCode::ValidationError
+                } else {
+                    ErrorCode::InternalError
+                };
+                error_response(code, &e.to_string())
+            })?;
+            payload["memory_usage"] = serde_json::to_value(&report).unwrap_or_default();
+        }
+        if let Some(n) = input.top {
+            let memories = ops::top_used(&store, n, by)
+                .await
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+            payload["top_used"] = serde_json::json!({
+                "by": by.as_str(),
+                "memories": memories,
+            });
         }
 
         let r = serde_json::to_string(&payload)
@@ -3273,7 +3799,8 @@ impl EngramDbServer {
             "skipped": result.skipped,
             "rows_skipped": result.rows_skipped,
             "errors": result.errors,
-            "warnings": result.warnings
+            "warnings": result.warnings,
+            "unparseable": result.unparseable
         }))
         .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -3400,6 +3927,9 @@ impl EngramDbServer {
         }
         if !result.undetermined.is_empty() {
             response["undetermined"] = serde_json::json!(result.undetermined);
+        }
+        if !result.unparseable.is_empty() {
+            response["unparseable"] = serde_json::json!(result.unparseable);
         }
         if !result.healthy {
             response["fix"] = serde_json::json!("Run reindex to repair.");
@@ -4535,11 +5065,23 @@ impl ServerHandler for EngramDbServer {
                     max_results: Some(10),
                     // Presented as the file's relevant memories: no weak fallback.
                     rank_fallback: Some(0),
+                    // Injected context, like a hook: no link expansion.
+                    expand_links: Some(0),
                     ..RetrievalQuery::default()
                 };
                 let result = ops::query_memories(&engine, &query)
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                // A resource read hands the agent these memories exactly as
+                // a query does: the same signal, so promotion sees it.
+                ops::record_returned(
+                    &engine,
+                    &result,
+                    &Default::default(),
+                    RetrievalMode::Rank,
+                    ops::Surface::Mcp,
+                    Some(&self.session_id),
+                );
 
                 let memories: Vec<serde_json::Value> = result
                     .memories
@@ -4620,9 +5162,19 @@ impl ServerHandler for EngramDbServer {
                         max_results: Some(10),
                         // Presented as the file's relevant memories: no weak fallback.
                         rank_fallback: Some(0),
+                        // Injected context, like a hook: no link expansion.
+                        expand_links: Some(0),
                         ..RetrievalQuery::default()
                     };
                     if let Ok(result) = ops::query_memories(&engine, &query).await {
+                        ops::record_returned(
+                            &engine,
+                            &result,
+                            &Default::default(),
+                            RetrievalMode::Rank,
+                            ops::Surface::Mcp,
+                            Some(&self.session_id),
+                        );
                         for sm in &result.memories {
                             let status_marker = match sm.memory.status {
                                 Status::Challenged => " ⚠️",
@@ -5122,3 +5674,57 @@ pub async fn run_sse(
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+    use engramdb::storage::StorageError;
+
+    #[test]
+    fn link_errors_keep_backend_failures_internal() {
+        let code = |e: anyhow::Error| link_error_code(&e).as_str();
+        assert_eq!(
+            code(ops::links::EdgeNotFound("no edge".into()).into()),
+            ErrorCode::MemoryNotFound.as_str()
+        );
+        assert_eq!(
+            code(anyhow::Error::from(StorageError::NotFound("x".into())).context("target")),
+            ErrorCode::MemoryNotFound.as_str()
+        );
+        assert_eq!(
+            code(ops::links::LinkRefused("leak".into()).into()),
+            ErrorCode::ValidationError.as_str()
+        );
+        assert_eq!(
+            code(
+                ops::links::NotProposed {
+                    current: ops::links::LinkStatus::Confirmed
+                }
+                .into()
+            ),
+            ErrorCode::ValidationError.as_str()
+        );
+        assert_eq!(
+            code(StorageError::Validation("Ambiguous ID prefix 'a': matches 2".into()).into()),
+            ErrorCode::ValidationError.as_str()
+        );
+        assert_eq!(
+            code(StorageError::Validation("LanceDB upsert failed".into()).into()),
+            ErrorCode::InternalError.as_str()
+        );
+        assert_eq!(
+            code(anyhow::anyhow!("Failed to query edges")),
+            ErrorCode::InternalError.as_str()
+        );
+    }
+
+    #[test]
+    fn only_an_ambiguous_prefix_is_the_callers_validation_error() {
+        assert!(is_ambiguous_prefix(
+            &StorageError::Validation("Ambiguous ID prefix 'a': matches 2 memories".into()).into()
+        ));
+        assert!(!is_ambiguous_prefix(
+            &StorageError::Validation("LanceDB open failed".into()).into()
+        ));
+    }
+}

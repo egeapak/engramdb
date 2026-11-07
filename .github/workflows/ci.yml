@@ -213,6 +213,24 @@ jobs:
           print("OK: all engram-cli output goes through OutputFormatter")
           PY
 
+  # The server's layouts are Rust ports of the dashboard's layout JS, held
+  # bit for bit by committed golden fixtures. The Rust half
+  # (`the_ports_match_the_js_on_the_golden_fixtures`) runs with the tests;
+  # this is the JS half: the fixtures must still be what the JS writes, so an
+  # edit to the layout JS (or the overview's pairing) cannot slip past with
+  # stale fixtures. No Rust needed.
+  dashboard-layout-golden:
+    name: Dashboard layout golden fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Node ships with the runner image; the script needs no packages.
+      - name: The committed fixtures match the layout JS
+        run: |
+          node --version
+          node crates/engram-dashboard/bench/golden.mjs --check
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest

@@ -116,6 +116,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

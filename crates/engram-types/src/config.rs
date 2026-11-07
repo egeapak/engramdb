@@ -189,7 +189,40 @@ pub struct ScoringConfig {
     /// Situation-conditioned epistemic-class weighting (post-multiplier).
     #[serde(default)]
     pub situation: SituationConfig,
+
+    /// Flat subtraction for a memory with a **confirmed** `contradicts` edge
+    /// to a live memory (default 0.0 = off). Applied beside
+    /// `challenge_penalty`, once however many such edges it has. Both ends of
+    /// an undirected contradiction are penalized: without a reviewer's
+    /// direction neither side is known to be right. A proposed edge never
+    /// counts, and a reviewer who picks a direction turns the edge into
+    /// `supersedes`, whose target is invalidated (hidden) instead.
+    #[serde(default)]
+    pub contradicts_penalty: f64,
+
+    /// Per-supporter boost from confirmed incoming `supports` edges from live
+    /// memories (default 0.0 = off): multiplier
+    /// `1 + supports_boost * min(n, 3)`. At most 0.1, so three supporters
+    /// lift a score by 30% at the very most.
+    #[serde(default)]
+    pub supports_boost: f64,
+
+    /// Weight of the usage boost (default 0.0 = off):
+    /// `1 + usage_weight * min(3, ρ * ln(1 + fetched + 0.3 * injected_sessions))`
+    /// with the exposure ratio `ρ = min(1, (fetched + 1) / (injected + returned + 1))`,
+    /// so a memory that is only ever injected — and is injected *because*
+    /// it already ranks well — cannot reward itself (see
+    /// `scoring::usage_multiplier`). At most 0.2.
+    #[serde(default)]
+    pub usage_weight: f64,
 }
+
+/// Upper bound of `retrieval.scoring.supports_boost`.
+pub const MAX_SUPPORTS_BOOST: f64 = 0.1;
+/// Upper bound of `retrieval.scoring.usage_weight`.
+pub const MAX_USAGE_WEIGHT: f64 = 0.2;
+/// Upper bound of `retrieval.expand_links` (and of a query's own value).
+pub const MAX_EXPAND_LINKS: usize = 20;
 
 /// Challenge penalty: legacy flat value or per-epistemic-class values.
 ///
@@ -497,7 +530,23 @@ impl Default for ScoringConfig {
             depth_decay_base: 0.82,
             depth_decay_floor: 0.3,
             situation: SituationConfig::default(),
+            contradicts_penalty: 0.0,
+            supports_boost: 0.0,
+            usage_weight: 0.0,
         }
+    }
+}
+
+impl ScoringConfig {
+    /// Whether any knob that reads the `edges` table is on. Off ⇒ the engine
+    /// performs no edge lookup at all.
+    pub fn edge_signals_enabled(&self) -> bool {
+        self.contradicts_penalty > 0.0 || self.supports_boost > 0.0
+    }
+
+    /// Whether the usage boost is on. Off ⇒ no usage read.
+    pub fn usage_signal_enabled(&self) -> bool {
+        self.usage_weight > 0.0
     }
 }
 
@@ -716,6 +765,17 @@ pub struct RetrievalConfig {
 
     /// Scoring configuration
     pub scoring: ScoringConfig,
+
+    /// Default for a query's `expand_links`: how many one-hop neighbours of
+    /// the top hits to add, following confirmed `supports`, `derived_from`
+    /// and `related_to` edges (default 0 = off; at most
+    /// [`MAX_EXPAND_LINKS`]). A query's own value overrides it; hooks always
+    /// pass 0.
+    pub expand_links: usize,
+
+    /// Score of an expanded neighbour as a fraction of the hit it was reached
+    /// from (default 0.5, in `(0, 1]`).
+    pub expand_links_decay: f64,
 }
 
 impl Default for RetrievalConfig {
@@ -726,6 +786,8 @@ impl Default for RetrievalConfig {
             max_results: 10,
             include_expired: false,
             scoring: ScoringConfig::default(),
+            expand_links: 0,
+            expand_links_decay: 0.5,
         }
     }
 }
@@ -1235,6 +1297,133 @@ pub struct EngramConfig {
     /// Index-currency checking (how hard the staleness check works)
     #[serde(default)]
     pub index: IndexConfig,
+
+    /// Automatic edge proposals (NLI contradictions, embedding neighbours)
+    #[serde(default)]
+    pub links: LinksConfig,
+}
+
+/// Automatic proposal of typed memory edges (`[links]` section).
+///
+/// Two proposers write `status: proposed` edges into memory files when a
+/// memory is embedded on create (and on an MCP update): an NLI contradiction
+/// becomes a proposed `contradicts` edge, and an embedding neighbour above
+/// `related_threshold` a proposed `related_to` (above `duplicate_threshold`,
+/// `duplicates`). A proposal never changes a score; a reviewer confirms or
+/// rejects it (`engramdb link`, MCP `link_status`, the dashboard).
+///
+/// **Not part of the provider cache's model keys**: the proposers reuse the
+/// vectors and NLI results the ingest already computed and load no model of
+/// their own, so these fields must never be folded into a model key.
+///
+/// The thresholds are on the vector search's similarity score (the scale
+/// `[nli].similarity_threshold` uses; 1.0 = identical). For the default
+/// unit-length embeddings that score is `1 / (3 - 2·cos)`, so 0.80 is a
+/// cosine of about 0.88 and 0.92 about 0.96.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LinksConfig {
+    /// Propose a `contradicts` edge for each NLI contradiction (needs
+    /// `[nli].enabled`). The NLI challenge itself is written either way.
+    #[serde(default = "default_true")]
+    pub propose_contradictions: bool,
+
+    /// Propose `related_to` / `duplicates` edges to embedding neighbours.
+    #[serde(default = "default_true")]
+    pub propose_similar: bool,
+
+    /// Similarity score at or above which a neighbour is proposed as
+    /// `related_to`.
+    #[serde(default = "default_related_threshold")]
+    pub related_threshold: f64,
+
+    /// Similarity score at or above which a neighbour is proposed as
+    /// `duplicates` instead.
+    #[serde(default = "default_duplicate_threshold")]
+    pub duplicate_threshold: f64,
+
+    /// Nearest neighbours examined per embedded memory.
+    #[serde(default = "default_similar_candidates")]
+    pub similar_candidates: usize,
+
+    /// Most pending (`proposed`) automatic edges one memory may take part in.
+    /// A proposal is skipped when either end is at the cap, so a noisy model
+    /// cannot flood a committed file; confirming or rejecting one frees a
+    /// slot. `0` turns both proposers off.
+    #[serde(default = "default_max_proposals_per_memory")]
+    pub max_proposals_per_memory: usize,
+}
+
+fn default_related_threshold() -> f64 {
+    0.80
+}
+
+fn default_duplicate_threshold() -> f64 {
+    0.92
+}
+
+fn default_similar_candidates() -> usize {
+    5
+}
+
+fn default_max_proposals_per_memory() -> usize {
+    3
+}
+
+impl Default for LinksConfig {
+    fn default() -> Self {
+        Self {
+            propose_contradictions: true,
+            propose_similar: true,
+            related_threshold: default_related_threshold(),
+            duplicate_threshold: default_duplicate_threshold(),
+            similar_candidates: default_similar_candidates(),
+            max_proposals_per_memory: default_max_proposals_per_memory(),
+        }
+    }
+}
+
+impl LinksConfig {
+    /// Thresholds in `[0, 1]` and ordered; a bounded candidate count.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        for (name, v) in [
+            ("links.related_threshold", self.related_threshold),
+            ("links.duplicate_threshold", self.duplicate_threshold),
+        ] {
+            if !(0.0..=1.0).contains(&v) {
+                anyhow::bail!("{name} ({v}) must be in [0.0, 1.0]");
+            }
+        }
+        if self.duplicate_threshold < self.related_threshold {
+            anyhow::bail!(
+                "links.duplicate_threshold ({}) must be >= links.related_threshold ({})",
+                self.duplicate_threshold,
+                self.related_threshold
+            );
+        }
+        if self.similar_candidates > 50 {
+            anyhow::bail!(
+                "links.similar_candidates ({}) must be at most 50",
+                self.similar_candidates
+            );
+        }
+        if self.max_proposals_per_memory > 32 {
+            anyhow::bail!(
+                "links.max_proposals_per_memory ({}) must be at most 32",
+                self.max_proposals_per_memory
+            );
+        }
+        Ok(())
+    }
+
+    /// Whether the similarity proposer runs at all.
+    pub fn similar_enabled(&self) -> bool {
+        self.propose_similar && self.max_proposals_per_memory > 0 && self.similar_candidates > 0
+    }
+
+    /// Whether the contradiction proposer runs at all.
+    pub fn contradictions_enabled(&self) -> bool {
+        self.propose_contradictions && self.max_proposals_per_memory > 0
+    }
 }
 
 /// Settings for harvesting past Claude Code sessions (`[harvest]` section).
@@ -2186,6 +2375,7 @@ impl EngramConfig {
         self.review.validate()?;
         self.harvest.validate()?;
         self.index.validate()?;
+        self.links.validate()?;
 
         if !(0.0..=1.0).contains(&self.retrieval.scoring.scope_multiplier_floor) {
             anyhow::bail!("scoring.scope_multiplier_floor must be in [0.0, 1.0]");
@@ -2200,6 +2390,26 @@ impl EngramConfig {
         }
         if !(0.0..=1.0).contains(&self.retrieval.scoring.depth_decay_floor) {
             anyhow::bail!("scoring.depth_decay_floor must be in [0.0, 1.0]");
+        }
+        let scoring = &self.retrieval.scoring;
+        if !(0.0..=1.0).contains(&scoring.contradicts_penalty) {
+            anyhow::bail!("scoring.contradicts_penalty must be in [0.0, 1.0]");
+        }
+        if !(0.0..=MAX_SUPPORTS_BOOST).contains(&scoring.supports_boost) {
+            anyhow::bail!("scoring.supports_boost must be in [0.0, {MAX_SUPPORTS_BOOST}]");
+        }
+        if !(0.0..=MAX_USAGE_WEIGHT).contains(&scoring.usage_weight) {
+            anyhow::bail!("scoring.usage_weight must be in [0.0, {MAX_USAGE_WEIGHT}]");
+        }
+        if self.retrieval.expand_links > MAX_EXPAND_LINKS {
+            anyhow::bail!(
+                "retrieval.expand_links ({}) must be at most {MAX_EXPAND_LINKS}",
+                self.retrieval.expand_links
+            );
+        }
+        let decay = self.retrieval.expand_links_decay;
+        if !(decay > 0.0 && decay <= 1.0) {
+            anyhow::bail!("retrieval.expand_links_decay ({decay}) must be in (0.0, 1.0]");
         }
 
         if self.embeddings.dimensions == 0 || self.embeddings.dimensions > 4096 {
@@ -3302,6 +3512,42 @@ weight = 0.7
             relevance: 0.25,
         };
         assert!(sw.validate("test").is_ok());
+    }
+
+    #[test]
+    fn graph_and_usage_knobs_default_off_and_validate() {
+        let c = EngramConfig::default();
+        assert_eq!(c.retrieval.scoring.contradicts_penalty, 0.0);
+        assert_eq!(c.retrieval.scoring.supports_boost, 0.0);
+        assert_eq!(c.retrieval.scoring.usage_weight, 0.0);
+        assert_eq!(c.retrieval.expand_links, 0);
+        assert!(!c.retrieval.scoring.edge_signals_enabled());
+        assert!(!c.retrieval.scoring.usage_signal_enabled());
+        assert!(c.validate().is_ok());
+
+        // A partial section names only the knob it sets.
+        let parsed: EngramConfig = toml::from_str(
+            "[retrieval]\nexpand_links = 3\n[retrieval.scoring]\ncontradicts_penalty = 0.1\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.retrieval.expand_links, 3);
+        assert_eq!(parsed.retrieval.scoring.contradicts_penalty, 0.1);
+        assert!(parsed.retrieval.scoring.edge_signals_enabled());
+        assert!(parsed.validate().is_ok());
+
+        let bad = |f: fn(&mut EngramConfig)| {
+            let mut c = EngramConfig::default();
+            f(&mut c);
+            c.validate().is_err()
+        };
+        assert!(bad(|c| c.retrieval.scoring.contradicts_penalty = 1.5));
+        assert!(bad(|c| c.retrieval.scoring.contradicts_penalty = f64::NAN));
+        assert!(bad(|c| c.retrieval.scoring.supports_boost = 0.2));
+        assert!(bad(|c| c.retrieval.scoring.usage_weight = -0.1));
+        assert!(bad(|c| c.retrieval.scoring.usage_weight = 0.5));
+        assert!(bad(|c| c.retrieval.expand_links = MAX_EXPAND_LINKS + 1));
+        assert!(bad(|c| c.retrieval.expand_links_decay = 0.0));
+        assert!(bad(|c| c.retrieval.expand_links_decay = 1.5));
     }
 
     #[test]

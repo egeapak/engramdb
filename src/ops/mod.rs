@@ -16,6 +16,8 @@ pub mod get;
 pub mod harvest;
 pub mod harvest_index;
 pub mod harvest_pin;
+pub mod link_proposals;
+pub mod links;
 pub mod list;
 pub mod maintenance;
 pub mod parsing;
@@ -29,6 +31,7 @@ pub mod review;
 pub mod stats;
 pub mod task;
 pub mod update;
+pub mod usage;
 pub mod verify;
 
 pub use challenge::{
@@ -71,6 +74,10 @@ pub use harvest_pin::{
     evidence_links, expired_evidence, link_memories, sessions_with_bytes, EvidenceLinks,
     ExpiredEvidence, LinkReport,
 };
+pub use links::{
+    confirm_contradiction_direction, link, links_of, load_graph, set_link_status, unlink,
+    ContradictionVerdict, EdgeRef, GraphFilter, LinkFilter, LinkParams, LinksView, StoreGraph,
+};
 pub use list::{list_memories, parse_sort_field, ListParams, SortField};
 pub use maintenance::{
     auto_compact, auto_maintain, auto_maintain_with_engine, maintain_hook_events,
@@ -95,6 +102,11 @@ pub use task::{
     PromotionReport, TaskCompleteResult, TaskCurrentResult,
 };
 pub use update::{update_memory, UpdateParams};
+pub use usage::{
+    maintain_memory_events, memory_usage_report, memory_usage_report_in, record_fetched,
+    record_returned, top_used, MemoryUsageReport, StoreRef, Surface, TopMemory, UsageKind,
+    UsageSort,
+};
 pub use verify::{verify_memory, VerifyResult};
 
 use crate::embeddings::EmbeddingProvider;

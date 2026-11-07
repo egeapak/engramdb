@@ -19,6 +19,9 @@ Commands:
   delete       Delete a memory
   task         Task lifecycle: declare or complete the task this session works on
   verify       Confirm a memory is still accurate (stamps verified_at; clears doctor-flagged needs_review)
+  link         Link two memories with a typed edge (or update an existing edge)
+  unlink       Remove an edge between two memories
+  links        List a memory's edges, outbound and inbound
   config       Show effective config values, thresholds, and the store's top tags
   stats        Show statistics
   doctor       Check environment and store health
@@ -29,6 +32,7 @@ Commands:
   gc           Run garbage collection on low-relevance memories
   compress     List compression candidates (actual compression requires MCP mode)
   serve        Start the MCP server
+  dashboard    Open a local, read-only web dashboard of every store on this machine
   daemon       Run the shared embedding daemon (normally auto-spawned by MCP)
   completions  Generate shell completions
   migrate      Migrate memory files to the latest format version

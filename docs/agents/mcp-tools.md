@@ -35,11 +35,16 @@ Every tool exposed by `engramdb serve`. For when to use which tool, see [workflo
 | `situation?` | `string` | `session_start` \| `file_edit` \| `debugging` \| `design_choice`. Reweights epistemic classes for what you're doing (see [query-modes.md](./query-modes.md#situation-aware-queries)). Declare `debugging` when investigating a failure, `design_choice` when weighing alternatives. |
 | `include_invalidated?` | `bool` | Default false. Include memories whose validity window was closed (superseded / invalidated). |
 | `include_global?` | `bool` | Also merge global-store hits. Default false. |
+| `expand_links?` | `u32` | Add up to N one-hop neighbours of the results, over confirmed `supports` / `derived_from` / `related_to` edges (0 = off, max 20; default `[retrieval].expand_links`, normally 0). Use it when the direct hits are a decision or rule and you also want its evidence or what was derived from it. |
 | `project?` | `string` | See conventions. |
 
 In `mode: "filter"`, **at least one** of `query`, `path`, `logical`, or `tags` must be present.
 
 Every returned memory carries `epistemic` (always) plus `valid_while`, `valid_from`, `invalidated_at`, `superseded_by`, and `verified_at` when present. Each result's `score_breakdown` includes `situation_multiplier` (1.0 when no `situation` was passed).
+
+When the project turns on the link and usage scoring settings (all off by default; see [configuration](../users/configuration.md#links-and-usage-in-scoring)), `score_breakdown` also carries whichever of these changed the score: `contradicts_penalty` with `contradicted_by` (ids of live memories it has a confirmed contradiction with — treat the result as disputed), `supports_multiplier` with `supported_by`, and `usage_multiplier`.
+
+A result added by `expand_links` carries `via: {from, kind}` — the direct result it was reached from and the edge kind. It was **not** matched by your query: read it as context for `from`, not as an answer on its own. It passed every filter a direct result must (types, tags, class, criticality, expiry, validity, audience), and is scored at that result's score × `expand_links_decay`, minus its *own* challenge and `contradicts` penalties (or at its own score when your query scored it and that is higher), so it never ranks above the result it came from. Its `score_breakdown` is its own: a `contradicted_by` there means the neighbour itself is disputed. Up to N are added per query in total, across every fanned-in store. It is not recorded as `returned` in usage statistics.
 
 ### `get` (read-only)
 
@@ -51,6 +56,8 @@ Every returned memory carries `epistemic` (always) plus `valid_while`, `valid_fr
 | `project?` | `string` | See conventions. |
 
 Returns the full memory object including `details` (which is lazy-loaded in `query`).
+
+The response always carries `edges: {outbound, inbound, hidden}` (empty lists when there are none; `edges_error` instead if they could not be read). Each edge names the `other_id` (and `other_store`, `other_summary`), `kind`, `symmetric`, `status`, `origin`, `confidence`, `note`, and the far end's `state` (`live`, `invalidated` with its `successor`, `dangling`, or `unknown` for a store not reachable here). Dangling, invalidated and rejected edges are hidden and counted in `hidden`.
 
 ### `list` (read-only)
 
@@ -88,6 +95,7 @@ Each entry includes `epistemic` (always) and `invalidated_at` / `valid_from` whe
 | `confidence?` | `f64` | 0..1, default 0.8. |
 | `visibility?` | `"shared"` \| `"personal"` | Default `"shared"`. |
 | `supersedes?` | `array[string]` | IDs this memory replaces (closes their validity windows). |
+| `links?` | `array[object]` | Edges to add from the new memory: `{to, kind, store?, confidence?, note?, status?}` (see [`link`](#link-mutates)). Applied after the write, origin `agent`; per-edge failures come back in `link_errors` and never undo the create. |
 | `epistemic?` | `"fact"` \| `"observation"` \| `"decision"` | Epistemic class. Defaults from `type`; set only when it differs. |
 | `premise?` | `string` | Premise this memory depends on, e.g. `"while we pin ort rc.12"`. State it if the memory becomes wrong when something specific changes. |
 | `invalidated_by?` | `array[string]` | Paths/globs whose change invalidates this memory (distinct from `physical`, which is where it applies). |
@@ -120,6 +128,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `tags?` | `array[string]` | **Replaces** all tags. |
 | `tags_add?` | `array[string]` | Incrementally add tags (merged with existing). |
 | `tags_remove?` | `array[string]` | Incrementally remove tags. |
+| `links?` | `array[object]` | Edges to **add** (or update, same target and kind) from this memory, as on `create`. Never removes one — use `unlink`. Failures come back in `link_errors`. |
 | `criticality?` | `f64` | |
 | `confidence?` | `f64` | |
 | `visibility?` | `"shared"` \| `"personal"` | |
@@ -162,6 +171,7 @@ If NLI contradiction detection is enabled, the response may include auto-challen
 | `id` | `string` | Required. |
 | `evidence` | `string` | Required. What contradicts the memory. |
 | `source_file?` | `string` | File where evidence was found. |
+| `against?` | `string` | The memory this one contradicts, validated before anything is written (a bad one fails the call). Also proposes a `contradicts` edge between the two (status `proposed`, origin `agent`, the evidence as its note), returned as `edge` (or `edge_error`). Resolve it with [`link_status`](#link_status-mutates). |
 | `project?` | `string` | See conventions. |
 
 ### `review` (read-only)
@@ -205,6 +215,50 @@ The `memory-session-end` prompt also reports how many active memories are past t
 | `project?` | `string` | See conventions. |
 
 Returns `{ id, verified, review_cleared }`.
+
+---
+
+## Edge tools
+
+Typed edges between memories. Kinds: `contradicts`, `related_to`, `duplicates` (symmetric — stored once, seen from both ends), `supports`, `derived_from`, `supersedes` (directed; `supersedes` also closes the target's validity window, like `create`'s `supersedes`). Statuses: `proposed`, `confirmed` (the default for an explicit link), `rejected` (kept so it is not proposed again). A shared — committed — memory never names a personal one, in any direction: a symmetric edge is stored on the personal side, a directed one is refused, a supersession between shared and personal is refused either way, and so is an `update` of `visibility` that would break the rule. A `supersedes` edge has no review status: `link_status` refuses it; `unlink` it to reject it. Edges into a deleted memory are left dangling and reported by `doctor`. Full rules: [docs/users/links.md](../users/links.md).
+
+### `link` (mutates)
+
+**Add an edge, or update the same edge** (same source, target, kind and store).
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `src` | `string` | Required. Source memory id (prefix ok). |
+| `kind` | `string` | Required. |
+| `dst` | `string` | Required. Target id; a prefix is resolved within the same store, a target in another store needs the full id. |
+| `dst_store?` | `string` | `"global"`, `"group:<name>"` or a 16-char project id when the target is not in the source's store. A store that cannot be opened here is recorded as `unknown`, never dangling. |
+| `confidence?` | `f64` | 0..1, default 1.0. |
+| `note?` | `string` | Why the edge holds (≤ 1000 chars). |
+| `status?` | `"proposed"` \| `"confirmed"` | Default `confirmed` for a new edge. On an existing edge only the fields you pass change (origin is kept), and a `proposed` link never changes an existing edge. `supersedes` is always confirmed. |
+| `project?` | `string` | See conventions. |
+
+Returns `{owner_id, src_id, dst_id, dst_store, kind, status, created, target_state, stored_note?}`; `owner_id` differs from `src_id` when a symmetric edge was stored on the other side (`stored_note` says why).
+
+### `unlink` (mutates)
+
+**Remove one edge.** `src`, `kind`, `dst`, `dst_store?`, `project?`. For a symmetric kind either end works. Removing `supersedes` also removes the canonical entry and reopens the target's window when this edge was what closed it (`reopened: true`).
+
+### `link_status` (mutates)
+
+**Review an edge.**
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `src` | `string` | Required. One end. |
+| `dst` | `string` | Required. The other end. |
+| `kind?` | `string` | Default `contradicts`. |
+| `status` | `"confirmed"` \| `"rejected"` \| `"proposed"` | Required. |
+| `winner?` | `string` | `contradicts` only, with `status: "confirmed"`: the memory that is right. Refused if the loser is already superseded by a third memory. The edge becomes `winner supersedes loser` and the loser is invalidated; only it is demoted. Without `winner`, `confirmed` means both stand, in conflict. |
+| `note?` | `string` | Reviewer's note. |
+| `dst_store?` | `string` | As on `link`. |
+| `project?` | `string` | See conventions. |
+
+Edges are separate from challenges: `resolve` with `action: "keep"` clears a memory's challenges and leaves its edges alone.
 
 ---
 
@@ -276,6 +330,8 @@ Returns `{ task, demoted, kept_custom_decay, project_wide_review }`.
 | `embeddings_only?` | `bool` | Only re-embed, skip index rebuild. |
 | `index_only?` | `bool` | Only rebuild index, skip embedding. |
 | `project?` | `string` | See conventions. |
+
+The response includes `unparseable`: memory files the rebuild could not parse (usually an unresolved merge conflict), each with `path`, `id`, `error` and `preserved`. Their existing index rows, vectors and edges are kept, not dropped; they are also named in `warnings`.
 
 ---
 

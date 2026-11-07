@@ -332,9 +332,17 @@ pub struct PromotionReport {
     pub promoted: Vec<String>,
 }
 
-/// Count, per memory id, the DISTINCT sessions whose retrievals returned it
-/// (from the §11.3 telemetry rows). Pure so the counting is testable without
-/// LanceDB.
+/// Count, per memory id, the DISTINCT sessions whose retrievals returned it,
+/// from the legacy `stats_events` `Retrieval` rows. Pure so the counting is
+/// testable without LanceDB.
+///
+/// Those rows are no longer written (the engine recorded them only for the
+/// MCP server); promotion now reads `returned` usage events. Only events
+/// that name a session count: the MCP server always knows its session, the
+/// CLI only when `CLAUDE_SESSION_ID` / `MCP_SESSION_ID` is set (the variables
+/// `task current` and the MCP server already honor), so a plain terminal
+/// `engramdb query` does not re-confirm anything. The legacy rows are still read and unioned in, so history
+/// recorded before the upgrade keeps counting until it ages out.
 pub fn count_retrieval_sessions(
     events: &[crate::telemetry::EventRow],
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
@@ -376,8 +384,17 @@ pub async fn promote_reconfirmed_memories(
         return Ok(PromotionReport::default());
     }
 
-    let events = crate::telemetry::persistence::load_recent(&store.project_id, 50_000).await?;
-    let sessions_by_memory = count_retrieval_sessions(&events);
+    // `returned` usage events (table + undrained log), unioned with the
+    // legacy rows. A union of session sets: a session in both counts once.
+    // A read failure is an error, not "no sessions": a pass that cannot see
+    // the evidence must not report that there is none.
+    let mut sessions_by_memory =
+        crate::telemetry::usage::returned_sessions(&store.project_dir, &store.project_id, None)
+            .await?;
+    let legacy = crate::telemetry::persistence::load_recent(&store.project_id, 50_000).await?;
+    for (id, sessions) in count_retrieval_sessions(&legacy) {
+        sessions_by_memory.entry(id).or_default().extend(sessions);
+    }
     if sessions_by_memory.is_empty() {
         return Ok(PromotionReport::default());
     }
@@ -427,7 +444,17 @@ pub async fn promote_reconfirmed_memories(
                 })
                 .await;
             match promoted {
-                Ok(_) => report.promoted.push(id.clone()),
+                Ok(_) => {
+                    super::usage::record_write(
+                        store,
+                        id,
+                        super::usage::UsageKind::Promoted,
+                        super::usage::Surface::Maintenance,
+                        None,
+                    )
+                    .await;
+                    report.promoted.push(id.clone())
+                }
                 Err(e) => tracing::warn!(memory_id = %id, "auto-promotion failed: {e}"),
             }
         } else {
@@ -540,6 +567,144 @@ mod promotion_tests {
             m.valid_while.unwrap().origin_task.as_deref(),
             Some("feat-x")
         );
+    }
+
+    /// A memory that only ever arrived through `expand_links` (its breakdown
+    /// carries `via`) did not survive ranking, so `record_returned` leaves it
+    /// out and it is never re-confirmed — however many sessions saw it.
+    #[tokio::test]
+    async fn expanded_neighbours_are_not_returned_and_never_promote() {
+        use crate::ops::usage::{record_returned, Surface};
+        use crate::retrieval::engine::RetrievalMode;
+        use crate::retrieval::engine::{RetrievalEngine, RetrievalResult, ScoredMemory};
+        use crate::scoring::{LinkVia, ScoreBreakdown};
+        let (_t, store, config) = store_with_task_memory(true).await;
+        let engine = RetrievalEngine::new(store.clone(), config.clone());
+        let scored = |id: &str, via: Option<LinkVia>| ScoredMemory {
+            memory: Memory {
+                id: id.to_string(),
+                ..Memory::new(MemoryType::Decision, "s", "c", Provenance::human())
+            },
+            score: 0.5,
+            score_breakdown: ScoreBreakdown {
+                via,
+                ..Default::default()
+            },
+        };
+        let via = LinkVia {
+            from: "hit-1".to_string(),
+            kind: crate::types::LinkKind::RelatedTo,
+        };
+        let expanded = RetrievalResult {
+            memories: vec![scored("hit-1", None), scored("promo-1", Some(via))],
+            total: 2,
+            retrieval_quality: "keyword_only".to_string(),
+            dropped_below_threshold: 0,
+        };
+        for sid in ["s1", "s2", "s3", "s4"] {
+            record_returned(
+                &engine,
+                &expanded,
+                &Default::default(),
+                RetrievalMode::Filter,
+                Surface::Mcp,
+                Some(sid),
+            );
+        }
+        let events = crate::telemetry::usage::load_memory_events(&store.project_dir)
+            .unwrap()
+            .events;
+        assert!(events.iter().all(|e| e.memory_id == "hit-1"), "{events:?}");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].rank, Some(1));
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert!(report.promoted.is_empty() && report.suggestions.is_empty());
+
+        // The same memory returned directly in three sessions does promote.
+        let direct = RetrievalResult {
+            memories: vec![scored("promo-1", None)],
+            ..expanded
+        };
+        for sid in ["s1", "s2", "s3"] {
+            record_returned(
+                &engine,
+                &direct,
+                &Default::default(),
+                RetrievalMode::Filter,
+                Surface::Mcp,
+                Some(sid),
+            );
+        }
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert_eq!(report.promoted, vec!["promo-1".to_string()]);
+    }
+
+    /// Promotion reads `returned` usage events that name a session (a CLI
+    /// query's, when it runs under a session id), and a session seen in both
+    /// those and a legacy row counts once. A sessionless event never counts.
+    #[tokio::test]
+    async fn promotion_reads_returned_usage_events_and_unions_legacy_rows() {
+        use crate::ops::usage::{MemoryEvent, StoreRef, Surface, UsageKind};
+        let (_t, store, mut config) = store_with_task_memory(true).await;
+        let returned = |sid: &str| {
+            MemoryEvent::new(
+                "promo-1",
+                &store.project_id,
+                UsageKind::Returned,
+                Surface::Cli,
+            )
+            .with_session(Some(sid))
+        };
+        // Two later sessions in the usage log, one of them also legacy, and
+        // an injected-only session that must not count.
+        crate::ops::usage::write_events(
+            &StoreRef::of(&store),
+            &[
+                returned("s1"),
+                returned("s2"),
+                MemoryEvent::new(
+                    "promo-1",
+                    &store.project_id,
+                    UsageKind::Returned,
+                    Surface::Cli,
+                ),
+                MemoryEvent::new(
+                    "promo-1",
+                    &store.project_id,
+                    UsageKind::Injected,
+                    Surface::HookPrompt,
+                )
+                .with_session(Some("s9")),
+            ],
+        );
+        crate::telemetry::persistence::append_events(
+            &store.project_id,
+            &[retrieval_event("s2", &["promo-1"])],
+            None,
+        )
+        .await;
+        config.epistemic.auto_promote = false;
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert!(report.suggestions.is_empty(), "two distinct sessions < 3");
+
+        crate::telemetry::persistence::append_events(
+            &store.project_id,
+            &[retrieval_event("s3", &["promo-1"])],
+            None,
+        )
+        .await;
+        config.epistemic.auto_promote = true;
+        let report = promote_reconfirmed_memories(&store, &config).await.unwrap();
+        assert_eq!(report.promoted, vec!["promo-1".to_string()]);
+        let events = crate::telemetry::usage::load_memory_events(&store.project_dir)
+            .unwrap()
+            .events;
+        let promoted: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == UsageKind::Promoted)
+            .collect();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].surface, Surface::Maintenance);
     }
 
     #[tokio::test]

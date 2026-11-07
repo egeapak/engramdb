@@ -306,6 +306,7 @@ pub async fn run_update(
             embed_async: false,
         },
         Some(&engine),
+        engramdb::ops::Surface::Cli,
     )
     .await?;
 
@@ -322,6 +323,7 @@ pub async fn run_update(
                 updated_summary: None,
                 superseded_by: params.superseded_by.clone(),
             },
+            engramdb::ops::Surface::Cli,
         )
         .await?;
         formatter.print_success(&format!(

@@ -9,8 +9,8 @@ pub mod challenge;
 pub mod onnx;
 
 pub use challenge::{
-    challenge_for_contradictions, challenge_memory, route_contradiction, ChallengeResult,
-    ConflictAction, NewMemoryMeta,
+    challenge_for_contradictions, challenge_memory, names_nli_contradiction_with,
+    route_contradiction, ChallengeResult, ConflictAction, NewMemoryMeta,
 };
 #[cfg(feature = "onnxruntime")]
 pub use onnx::{

@@ -79,6 +79,8 @@ engramdb get <id> [--full] [--raw] [--path] [--global]
 
 `<id>` supports prefix matching. `--raw` emits the raw markdown file; `--path` prints the file path on disk.
 
+A memory with links lists them after its fields (outbound and inbound; dangling, invalidated and rejected ones are counted but hidden). `--format json` adds them as an `edges` object; a memory without links prints exactly as before. See [links.md](./links.md).
+
 ## `query` — unified search
 
 ```bash
@@ -104,7 +106,8 @@ engramdb query --mode <rank|filter> [query] [flags...]
 | `--epistemic <fact\|observation\|decision>` | Filter by epistemic class. Repeatable. |
 | `--situation <session_start\|file_edit\|debugging\|design_choice>` | Your situation — reweights classes via `[retrieval.scoring.situation]` (see [configuration.md](./configuration.md)). |
 | `--include-invalidated` | Include invalidated memories (closed validity windows). |
-| `--show-scores` | Print composite score per result. |
+| `--show-scores` | Print composite score per result, plus any link/usage component that moved it (`contradicts -0.10 from <id>`, `supports x1.05 from <id>`, `usage x1.12`; only when those [settings](./configuration.md#links-and-usage-in-scoring) are on). |
+| `--expand-links[=N]` | Add up to N one-hop neighbours of the results over confirmed `supports` / `derived_from` / `related_to` links (bare flag: 5; give another N as `--expand-links=N` — the `=` is required, so a word after the bare flag stays the query; `0` = off; max 20 per query, across every fanned-in store; default `[retrieval].expand_links`, 0). Each is marked `via <id> (<kind>)`. A neighbour passes every filter a direct result would. See [links.md](./links.md#following-links-from-results). |
 | `--include-global` | Merge global-store memories into results. |
 | `--global` | Search the global store instead of the current project. |
 
@@ -166,6 +169,17 @@ engramdb verify <id> [--global]
 
 Stamps `verified_at = now` and clears a doctor-flagged needs-review status. Fact-class memories decay from their last verification, so verifying a fact refreshes its score; `doctor` suggests verification for observations unverified longer than `[epistemic].observation_review_days`.
 
+## `link` / `unlink` / `links` — typed edges between memories
+
+```bash
+engramdb link <src> <kind> <dst> [--note <text>] [--confidence <0-1>] [--status proposed|confirmed|rejected] [--store <spec>] [--global]
+engramdb link <a> contradicts <b> --winner <id> [--note <text>]
+engramdb unlink <src> <kind> <dst> [--store <spec>] [--global]
+engramdb links <id> [--all] [--kind <kind>]... [--global]
+```
+
+Kinds: `contradicts`, `related_to`, `duplicates` (symmetric, stored once and listed on both memories), `supports`, `derived_from`, `supersedes` (directed). Re-linking the same pair and kind updates only the fields you pass (`--status rejected` keeps the note and confidence); a `proposed` link never changes an existing one; `supersedes` takes no `--status` (unlink to reject it). `--store` names the target's store (`global`, `group:<name>`, a project id) when it is not this one. `--winner` resolves a `contradicts` link as `<winner> supersedes <loser>` and invalidates the loser. `links --all` also shows dangling, invalidated and rejected links. Full rules: [links.md](./links.md).
+
 ## `task` — session task lifecycle
 
 ```bash
@@ -180,10 +194,12 @@ engramdb task complete <NAME> [--global]
 ## `challenge` — flag a memory
 
 ```bash
-engramdb challenge <id> --evidence <text> [--source-file <path>] [--global]
+engramdb challenge <id> --evidence <text> [--source-file <path>] [--against <other-id>] [--global]
 ```
 
 Sets the memory's status to `Challenged` and records the evidence. Surface it later with `engramdb review --challenged-only`.
+
+`--against` names the memory this one contradicts: a `proposed` `contradicts` link between the two is added, with the evidence as its note, for a reviewer to confirm, reject or resolve with `engramdb link … --winner` ([links.md](./links.md)). The link is separate from the challenge — `review`'s keep clears the challenge and leaves the link.
 
 ## `review` — interactive review
 
@@ -199,6 +215,8 @@ By default it lists flagged memories (challenged / needs-review). `--stale-after
 
 ```bash
 engramdb stats [--all-projects] [--global] [--daemon]
+engramdb stats --memory <ID>
+engramdb stats --top <N> [--by fetched|injected|returned]
 ```
 
 | Flag | What you see |
@@ -207,6 +225,8 @@ engramdb stats [--all-projects] [--global] [--daemon]
 | `--all-projects` | Cross-project runtime telemetry breakdown. |
 | `--global` | Stats for the global store. |
 | `--daemon` | Embedding-daemon request metrics (see [daemon.md](./daemon.md)). |
+| `--memory <ID>` | One memory's usage instead of store stats (a unique id prefix works). |
+| `--top <N>` | Appends the N most-used memories (N ≥ 1), ordered by `--by` (default `fetched`). Not with `--daemon` or `--all-projects`. |
 
 Without `--global` or `--daemon`, the output also has a **Hook calls** section: for each `engramdb hook <event>`, how many times it ran in this project, how many returned an error, the average, and the p50 / p95 / p99 wall time in milliseconds. When a hook ran both through the daemon and in its own process, a per-path breakdown follows (`daemon` / `in-process`); with one path, the path is named on the hook's line.
 
@@ -214,6 +234,19 @@ Without `--global` or `--daemon`, the output also has a **Hook calls** section: 
 - **Window.** Counts, errors and averages cover the last `[stats].retention_days` (90 by default). Percentiles use the newest 10,000 calls per hook and path.
 - **What the time measures.** For an in-process hook, from command start to handler return. For a daemon hook, the handler inside the daemon. Process start-up (about 6 ms on a release build) is not included in either.
 - Set `[stats].enabled = false` to stop recording. In `--json` output the section is the `hooks` key.
+
+**Per-memory usage.** Every memory keeps three read counts, reported side by side and never added together, because they measure different things:
+
+- **returned** — it was in the answer to a `query` (CLI or MCP), or handed to the agent by the MCP `memory://context/<path>` resource or the `memory-session-start` prompt, with its rank and score;
+- **injected** — a hook put it into an agent's context (only what fit the hook's character budget);
+- **fetched** — someone opened it by id (`get`, CLI or MCP).
+
+Returned and injected also count distinct sessions. Writes are counted too (updates, challenges, and the last write of any kind, including create, resolve, verify, promote, merge and delete); `reindex` and `migrate` record nothing. `--memory` shows all of this plus the active days of the last 30; `--top` sorts by one signal and breaks ties with the others (a memory that was never read is left out; a deleted one is listed without a summary). `--memory` counts exactly; `--top` reads the per-memory rollup plus the not-yet-drained log, so it is cheap on a large store but its *session* counts are an upper bound. The JSON field names are `returned`, `injected`, `fetched`, `returned_sessions`, `injected_sessions`, `updated`, `challenged` and the `last_*_at` instants. In `--json` output they are the whole document (`--memory`) and the `top_used` key; the MCP `stats` tool takes `memory_id`, `top` and `by` and answers with `memory_usage` and `top_used`.
+
+- **Where the data comes from.** The CLI, the MCP server and hooks in their own process append a line to `.engramdb/state/memory_events.jsonl` of the store that owns the memory — a group or global memory's events land in that store, not in the project that found it. Hooks the daemon runs are buffered and written every 60 s and when the daemon stops. The daemon, `gc` and the automatic maintenance pass move the log into the store's `memory_events` table and its `memory_usage` rollup, for the project and every group and global store it reads. `stats` reads table and log, and counts nothing twice.
+- **Window.** Raw events are kept for `[stats].retention_days`; lifetime counts survive in the rollup after the events are pruned. The 30-day series reads raw events, so a shorter retention zeroes its oldest days.
+- **Sessions.** A CLI `query` or `get` records the session in `CLAUDE_SESSION_ID` (or `MCP_SESSION_ID`) when set, the variables `task current` and the MCP server already use, and no session otherwise. Only events with a session count toward promoting a task-bound memory, so a query typed in a plain terminal does not re-confirm one.
+- **What is lost.** A group store's log is drained by its subscribers' maintenance (or `gc` on the group itself); a query into a group nobody subscribed to writes a log that only rotation bounds. A line written by a newer engramdb, with a kind this version does not know, is kept and stored but not counted. A daemon killed with `SIGKILL` loses up to 60 s of buffered hook events; a hook whose daemon reply was lost records nothing; uninitialized directories and `[stats].enabled = false` record nothing. Counts are machine-local: they do not travel with a clone, and deleting a store's `lancedb/` directory deletes them.
 
 ## `doctor` — health check
 
@@ -232,6 +265,8 @@ Without a subcommand: full environment diagnostics (paths, embedding backend, da
 | `--global` | Check the global cross-project store instead of the current project. |
 
 `doctor` exits non-zero when any check fails (see [Exit codes](#exit-codes)).
+
+Two store checks concern memory files and links. A memory file whose hidden `<!-- engramdb -->` block does not parse — typically an unresolved merge conflict — is listed by name under the store check: such a file is refused by `get`/`update` rather than read with its hidden fields silently reset, and `reindex` keeps its existing row, vectors and edges (and warns, naming it) instead of dropping it — resolve the conflict by hand, then reindex. **Memory edges** (shown only once the store has links) warns about dangling links (into a deleted memory), about a committed memory that names a personal one, and about an edges table out of step with the files (rebuilt by `reindex`); none of these changes the exit code.
 
 ## `gc` — garbage collect
 
@@ -390,6 +425,24 @@ The HTTP server listens on `127.0.0.1` only and has no authentication. It refuse
 
 - a request whose `Host` header is not `localhost`, `127.0.0.1` or `::1` (this blocks DNS-rebinding attacks);
 - a request that carries an `Origin` header. Browsers always send one on a cross-site request, so a web page you visit cannot read or change your memories. MCP clients such as Claude Code send no `Origin` header and are not affected. A browser-based MCP client therefore cannot connect to this server.
+
+## `dashboard` — local web dashboard
+
+```bash
+engramdb dashboard [--port <N>] [--bind <addr>] [--no-open] [--assets-dir <dir>] [--allow-writes]
+```
+
+Serves a read-only (unless `--allow-writes`) web view of every store on this machine and opens it in your browser, printing only the bare address (no token). With `--no-open` it launches nothing and prints the sign-in URL (with the token) instead; if the browser cannot be launched, it prints the sign-in URL as a fallback. The project of the directory you ran it in is selected. See [dashboard.md](./dashboard.md).
+
+| Flag | Meaning |
+|---|---|
+| `--port <N>` | Port to listen on. Default `7341`, or a free port when that one is taken; `0` asks for any free port. An explicit port that is taken is an error. |
+| `--bind <addr>` | Address to listen on (default `127.0.0.1`). Any other address prints a warning: the dashboard is then reachable from the network, unencrypted, guarded only by the URL's token. |
+| `--no-open` | Print the sign-in URL (with its token), do not launch a browser. Without it the token is never printed unless the launch fails. |
+| `--assets-dir <dir>` | Serve the web files from `<dir>` (e.g. `crates/engram-dashboard/web`) instead of the copy built into the binary, uncached, so a frontend edit needs only a reload. |
+| `--allow-writes` | Allow the dashboard's one write: confirming or rejecting *proposed* relations between memories ([reviewing proposed relations](./dashboard.md#reviewing-proposed-relations)). Without it the review buttons are disabled and the server answers such a request with `403`. |
+
+The URL carries a token that is new on every run, after `#` (`http://127.0.0.1:7341/#token=…`), so it is never sent to a server. The page keeps it for its tab, removes it from the address bar, and sends it as `Authorization: Bearer` on every `/api` request; one without it is refused with `401`. The page's own static files need no token. Unless `--no-open` is given, the browser is opened through a private temporary file, so the token never appears on a command line. With `--format json` the command prints `{"address", "address_url", "opened_browser", "current_project", "allow_writes"}` once, plus `"url"` (the sign-in URL with the token) only when it would be printed in text mode — with `--no-open` or after a failed launch — and keeps serving.
 
 ## `daemon` — shared embedding daemon
 

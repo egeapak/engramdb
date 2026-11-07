@@ -6,6 +6,7 @@
 //! - [`Decay`] - time-based relevance decay strategies
 //! - [`Provenance`] - source tracking (human, agent, inferred, imported)
 //! - [`Challenge`] - validity challenges to memories
+//! - [`Link`] - typed edges between memories
 //! - [`EngramConfig`] - all configuration for scoring, retrieval, and thresholds
 //!
 //! These types form the foundation of the memory storage and retrieval system,
@@ -16,6 +17,7 @@ pub mod config;
 mod decay;
 pub mod env;
 mod epistemic;
+mod link;
 mod memory;
 pub mod normalize;
 mod project_list_grouping;
@@ -26,16 +28,18 @@ mod title_strategy;
 pub use challenge::Challenge;
 pub use config::{
     ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
-    EngramConfig, EpistemicConfig, GlobalConfig, HarvestConfig, HooksConfig, LogicalBonusConfig,
-    MaintenanceConfig, McpConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
-    ScopeProximityConfig, ScoringConfig, ScoringWeights, SearchConfig, SituationConfig,
-    SituationProfile, ThresholdsConfig, TrustWeights, COMPOSITION_METADATA_V1,
-    CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO, DEFAULT_RERANK_MODEL,
-    DEFAULT_SUMMARY_MAX_CHARS,
+    EngramConfig, EpistemicConfig, GlobalConfig, HarvestConfig, HooksConfig, LinksConfig,
+    LogicalBonusConfig, MaintenanceConfig, McpConfig, NliConfig, ReindexOnModelChange,
+    RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig, ScoringWeights,
+    SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig, TrustWeights,
+    COMPOSITION_METADATA_V1, CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO,
+    DEFAULT_RERANK_MODEL, DEFAULT_SUMMARY_MAX_CHARS, MAX_EXPAND_LINKS, MAX_SUPPORTS_BOOST,
+    MAX_USAGE_WEIGHT,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;
 pub use epistemic::{Epistemic, Generality, Situation, Validity};
+pub use link::{Link, LinkKind, LinkOrigin, LinkStatus};
 pub use memory::{default_decay, Memory, MemoryType, MemoryUpdate, Status, Visibility};
 pub use normalize::{normalize, normalize_counts, normalize_set, KeywordStems, NORMALIZER_STAMP};
 pub use project_list_grouping::ProjectListGrouping;

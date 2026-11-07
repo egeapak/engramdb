@@ -212,6 +212,10 @@ impl Fixture {
         c.env("XDG_RUNTIME_DIR", self.runtime.path());
         c.env_remove("EDITOR");
         c.env_remove("VISUAL");
+        // A CLI query records its usage under these session ids when set;
+        // a developer running the suite inside an agent session has one.
+        c.env_remove("CLAUDE_SESSION_ID");
+        c.env_remove("MCP_SESSION_ID");
         // `doctor` shells out to whatever `engramdb` is on PATH and prints its
         // `--version`. Drop any directory that has one so the check renders
         // its "not on PATH" branch instead of the developer's install.

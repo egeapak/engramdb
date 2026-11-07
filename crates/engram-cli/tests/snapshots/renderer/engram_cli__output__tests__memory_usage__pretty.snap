@@ -1,0 +1,21 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Usage of 018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b
+  Blocking calls deadlock the daemon
+  Store: a1b2c3d4e5f60718
+
+Read signals (each counted on its own, never summed):
+  returned by a query:  3 in 2 sessions (last 2026-10-30 09:15:00 UTC)
+  injected by a hook:   12 in 1 session (last 2026-11-01 14:00:00 UTC)
+  fetched by id:        4 (last 2026-11-02 08:30:00 UTC)
+
+Writes: 2 updates, 1 challenge (last 2026-10-20 12:00:00 UTC)
+
+Last 30 days:
+  2026-11-01  returned 3, injected 0, fetched 0, writes 0
+  2026-11-02  returned 0, injected 12, fetched 0, writes 0
+  2026-11-03  returned 0, injected 0, fetched 4, writes 1
+--- stderr ---

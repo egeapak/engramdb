@@ -106,6 +106,7 @@ pub async fn run_review(
                         updated_summary: None,
                         superseded_by: None,
                     },
+                    engramdb::ops::Surface::Cli,
                 )
                 .await?;
                 formatter.print_success(&format!(
@@ -134,6 +135,7 @@ pub async fn run_review(
                         },
                         superseded_by: None,
                     },
+                    engramdb::ops::Surface::Cli,
                 )
                 .await?;
                 formatter.print_success(&format!(
@@ -157,6 +159,7 @@ pub async fn run_review(
                             Some(successor)
                         },
                     },
+                    engramdb::ops::Surface::Cli,
                 )
                 .await?;
                 formatter.print_success(&format!(
@@ -174,6 +177,7 @@ pub async fn run_review(
                         updated_summary: None,
                         superseded_by: None,
                     },
+                    engramdb::ops::Surface::Cli,
                 )
                 .await?;
                 formatter.print_success(&format!(

@@ -1,0 +1,233 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+{
+  "memory_id": "[ID]",
+  "summary": "Blocking calls deadlock the daemon",
+  "store_id": "[PID]",
+  "returned": 1,
+  "injected": 1,
+  "fetched": 2,
+  "returned_sessions": 1,
+  "injected_sessions": 1,
+  "last_returned_at": "[TS]",
+  "last_injected_at": "[TS]",
+  "last_fetched_at": "[TS]",
+  "updated": 0,
+  "challenged": 0,
+  "daily": [
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 0,
+      "injected": 0,
+      "fetched": 0,
+      "writes": 0
+    },
+    {
+      "day": "[DAY]",
+      "returned": 1,
+      "injected": 1,
+      "fetched": 2,
+      "writes": 0
+    }
+  ]
+}
+--- stderr ---

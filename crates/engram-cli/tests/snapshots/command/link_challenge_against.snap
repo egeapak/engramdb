@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+Challenged memory [ID] (status: Challenged, 1 total challenges)
+Linked [ID13] contradicts [ID13] (proposed)
+memory=[ID] outbound=1 inbound=0 hidden=0
+edge direction=out kind=contradicts other=[ID] store=- status=proposed origin=agent confidence=1.00 state=live at=[TS] note="webpki rejects the gateway CA"
+--- stderr ---

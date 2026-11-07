@@ -1,0 +1,19 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+ID: 550e8400-e29b-41d4-a716-446655440000
+Type: Decision
+Summary: Test summary
+Content: Test content
+Criticality: 0.80
+Confidence: 0.90
+Status: Active
+Visibility: Shared
+edge direction=out kind=related_to other=018f2a1b-1111-7e5f-8a9b-0c1d2e3f4a5d store=__g_0123456789ab status=confirmed origin=human confidence=1.00 state=unknown at=2026-10-30T09:15:00Z
+edge direction=out kind=supports other=018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b store=- status=confirmed origin=human confidence=1.00 state=live at=2026-10-30T09:15:00Z note="measured on the sandbox\nsecond line"
+edge direction=in kind=contradicts other=018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c store=- status=proposed origin=agent confidence=0.60 state=live at=2026-10-30T09:15:00Z note="webpki rejects the gateway CA"
+edge direction=in kind=derived_from other=018f2a1b-2222-7e5f-8a9b-0c1d2e3f4a5e store=- status=confirmed origin=human confidence=1.00 state=invalidated at=2026-10-30T09:15:00Z successor=018f2a1b-3333-7e5f-8a9b-0c1d2e3f4a5f
+hidden=2
+--- stderr ---

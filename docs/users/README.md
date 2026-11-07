@@ -16,6 +16,8 @@
 - [projects-and-worktrees.md](./projects-and-worktrees.md) — project IDs, global store, worktree routing.
 - [embeddings.md](./embeddings.md) — models, backends, fingerprinting, reindex.
 - [daemon.md](./daemon.md) — shared embedding daemon.
+- [dashboard.md](./dashboard.md) — the local web dashboard (`engramdb dashboard`).
+- [links.md](./links.md) — typed links between memories (`link`, `unlink`, `links`, `challenge --against`).
 - Epistemic classes, validity windows, and task-scoped memories: [cli-reference.md](./cli-reference.md) (`verify`, `task`, invalidation flags), [configuration.md](./configuration.md) (`[epistemic]`, situation weighting), and [claude-code.md](./claude-code.md) (the six hooks).
 
 ## [troubleshooting.md](./troubleshooting.md)
