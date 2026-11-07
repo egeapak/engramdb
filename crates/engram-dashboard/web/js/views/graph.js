@@ -1529,7 +1529,26 @@ export async function renderGraph(main, ctx) {
   let limit = PAGE;
   /** The first draw's table, waiting for the frame after it (redraw). */
   let tableLater = false;
-  function renderTable(ks) {
+  let tableKs = null;
+  /** One row of the table: relation `e` (index `k`). */
+  const tableRow = ({ e, k }) =>
+    h(
+      'tr',
+      { class: 'plain-row' },
+      h('td', { class: 't' }, edgeEnd(e, 'src')),
+      h('td', null, h('span', { class: 'kind' }, theme.edgeSample(e.kind, e.status, 30), kindLabel(e.kind))),
+      h('td', { class: 't' }, edgeEnd(e, 'dst')),
+      h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${FAR_END[e.state] || e.state}`) : null),
+      h('td', null, e.origin),
+      h('td', { class: 'n' }, Number(e.confidence).toFixed(2)),
+      h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show in graph')),
+    );
+  /** Rows built per idle slice when the table is built after a paint (each row draws a relation sample). */
+  const TABLE_SLICE = 10;
+  // `sliced`: built after a paint, so its rows past the first slice follow
+  // in later idle slices (a whole page of them was a long task at a 4×
+  // slower CPU); every other build is whole, since its caller may focus a row.
+  function renderTable(ks, sliced = false) {
     tableLater = false;
     const rows = ks
       .map((k) => ({ e: g.edges[k], k }))
@@ -1572,6 +1591,7 @@ export async function renderGraph(main, ctx) {
             `Show ${fmt(Math.min(PAGE, listed.length - limit))} more`,
           )
         : null;
+    let tbody = null;
     mount(
       tableBox,
       secHead(
@@ -1593,28 +1613,21 @@ export async function renderGraph(main, ctx) {
                 null,
                 h('tr', null, ['From', 'Relation', 'To', 'Status', 'Origin', 'Confidence', ''].map((col, i) => h('th', { scope: 'col', class: i === 5 ? 'n' : null }, col))),
               ),
-              h(
-                'tbody',
-                null,
-                listed.slice(0, limit).map(({ e, k }) =>
-                  h(
-                    'tr',
-                    { class: 'plain-row' },
-                    h('td', { class: 't' }, edgeEnd(e, 'src')),
-                    h('td', null, h('span', { class: 'kind' }, theme.edgeSample(e.kind, e.status, 30), kindLabel(e.kind))),
-                    h('td', { class: 't' }, edgeEnd(e, 'dst')),
-                    h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${FAR_END[e.state] || e.state}`) : null),
-                    h('td', null, e.origin),
-                    h('td', { class: 'n' }, Number(e.confidence).toFixed(2)),
-                    h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show in graph')),
-                  ),
-                ),
-              ),
+              (tbody = h('tbody', null, listed.slice(0, sliced ? Math.min(limit, TABLE_SLICE) : limit).map(tableRow))),
             ),
           )
         : h('p', { class: 'muted' }, rows.length ? 'Nothing awaits review here.' : 'No relations with these filters. Agents add relations with the link tool; NLI and embedding similarity propose them as memories are created.'),
       more,
     );
+    if (!sliced || !tbody) return;
+    const all = listed.slice(0, limit);
+    const step = (at) => {
+      // (A later build replaced this one: it stops.)
+      if (at >= all.length || !tbody.isConnected || ctx.isStale()) return;
+      tbody.append(...all.slice(at, at + TABLE_SLICE).map(tableRow));
+      afterPaint(() => step(at + TABLE_SLICE));
+    };
+    afterPaint(() => step(TABLE_SLICE));
   }
 
   // `first`: the initial draw, which sets the bench's `graph:edges` mark.
@@ -1632,14 +1645,15 @@ export async function renderGraph(main, ctx) {
       renderFilters();
       renderNotes(ks);
     }
-    if (first !== true) renderTable(ks);
-    else {
-      // Below the graph, and its rows cost the first paint ~13 ms of layout
-      // (docs/contributors/dashboard-performance.md): built just after it,
-      // unless something rebuilds it first.
+    // Below the graph, and its rows cost the first paint ~13 ms of layout
+    // and a display filter ~4 ms of script (docs/contributors/dashboard-performance.md):
+    // built just after the frame that shows the graph, from the latest
+    // redraw's relations, unless something rebuilds it first.
+    tableKs = ks;
+    if (!tableLater) {
       tableLater = true;
       afterPaint(() => {
-        if (tableLater && !ctx.isStale()) renderTable(ks);
+        if (tableLater && !ctx.isStale()) renderTable(tableKs, true);
       });
     }
     renderCard();

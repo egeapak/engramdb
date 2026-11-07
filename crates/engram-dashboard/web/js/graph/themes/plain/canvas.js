@@ -7,11 +7,12 @@
 // scopes.js `typeShape`. Colours are the tokens of css/themes/plain.css,
 // read once per light/dark switch by the host (`tokens`).
 //
-// **Batching.** Relations are filled once per (kind, rejected): every
-// relation of a group is written into one Path2D, placed by its own matrix
-// (`placedSink`), and the merge is kept until the width factor (`zoomFactor`, the SVG's
-// `--zw`) moves 2 % or the relation set changes, so a settle that only moved
-// the view re-fills ~12 paths. Memories likewise, one Path2D per look
+// **Batching.** Relations are filled once per (kind, proposed / rejected /
+// neither): every relation of a group is written into one Path2D, placed by
+// its own matrix (`placedSink`), and each group's merge is kept until the
+// width factor (`zoomFactor`, the SVG's `--zw`) moves 2 % or that group's
+// relations change, so a settle that only moved the view re-fills ~18 paths
+// and a display filter (which drops whole groups) writes none. Memories likewise, one Path2D per look
 // (fill, stroke, width, dash). A stub (a relation whose far end is not
 // drawn) has its own fading gradient, so it is filled on its own; there are
 // few. Filling by group changes which relation is drawn over which where
@@ -259,24 +260,48 @@ function localPath(r) {
 
 /** Merged relation groups per relation list: the merge is reused while its width factor holds (module docs). */
 const merged = new WeakMap();
+/**
+ * Each group's last merge, by group key (and whether drawn lit): reused when
+ * the group holds the same records at the same width factor, so a display
+ * filter, which drops whole groups (a kind, the proposed, the rejected),
+ * writes no relation again.
+ */
+const lastGroup = new Map();
+const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
-function groupsOf(recs, z) {
+function groupsOf(recs, z, lit) {
   const had = merged.get(recs);
   if (had && Math.abs(z - had.z) / had.z < 0.02) return had;
-  const groups = new Map();
+  const lists = new Map();
   const stubs = [];
   for (const r of recs) {
     if (r.stub) {
       stubs.push(r);
       continue;
     }
-    const key = r.kind + (r.rejected ? '|r' : '');
-    let p = groups.get(key);
-    if (!p) groups.set(key, (p = new Path2D()));
-    relationShape(placedSink(p, r, z), ...r.shape);
+    const key = r.kind + (r.rejected ? '|r' : r.shape[1] === 'proposed' ? '|p' : '');
+    let l = lists.get(key);
+    if (!l) lists.set(key, (l = []));
+    l.push(r);
   }
   const order = [];
-  for (const rej of [true, false]) for (const k of KIND_ORDER) if (groups.has(k + (rej ? '|r' : ''))) order.push({ kind: k, rejected: rej, path: groups.get(k + (rej ? '|r' : '')) });
+  for (const rej of [true, false])
+    for (const k of KIND_ORDER)
+      for (const sfx of rej ? ['|r'] : ['', '|p']) {
+        const key = k + sfx;
+        const l = lists.get(key);
+        if (!l) continue;
+        const ck = key + (lit ? '|lit' : '');
+        const c = lastGroup.get(ck);
+        let path;
+        if (c && Math.abs(z - c.z) / c.z < 0.02 && sameList(c.recs, l)) path = c.path;
+        else {
+          path = new Path2D();
+          for (const r of l) relationShape(placedSink(path, r, z), ...r.shape);
+          lastGroup.set(ck, { z, recs: l, path });
+        }
+        order.push({ kind: k, rejected: rej, path });
+      }
   const out = { z, order, stubs };
   merged.set(recs, out);
   return out;
@@ -309,11 +334,13 @@ if (typeof requestIdleCallback === 'function' && typeof Path2D === 'function') r
 
 /**
  * Where relation `rec` lies in the drawing order (`drawEdges`: rejected
- * groups first, then by `KIND_ORDER`, stubs last), so the host's hit test
- * picks the one drawn on top.
+ * groups first, then by `KIND_ORDER`, a kind's proposed ones over its
+ * others, stubs last), so the host's hit test picks the one drawn on top.
  */
 function edgeRank(rec) {
-  return rec.stub ? 2 * KIND_ORDER.length : (rec.rejected ? 0 : KIND_ORDER.length) + KIND_ORDER.indexOf(rec.kind);
+  const n = KIND_ORDER.length;
+  const k = KIND_ORDER.indexOf(rec.kind);
+  return rec.stub ? 3 * n : rec.rejected ? k : n + 2 * k + (rec.shape[1] === 'proposed' ? 1 : 0);
 }
 
 const rgba = (hex, a) => {
@@ -332,7 +359,7 @@ const rgba = (hex, a) => {
 function drawEdges(ctx, recs, T, o) {
   if (!recs.length) return;
   const z = zoomFactor(o.scale) * (o.lit ? look.litWidth : 1);
-  const { order, stubs } = groupsOf(recs, z);
+  const { order, stubs } = groupsOf(recs, z, !!o.lit);
   for (const gp of order) {
     ctx.globalAlpha = gp.rejected ? REJECTED_ALPHA : 1;
     ctx.fillStyle = T.kinds[gp.kind];

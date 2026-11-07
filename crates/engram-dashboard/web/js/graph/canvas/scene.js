@@ -8,21 +8,21 @@
 // A frame `fr` is { view: { x, y, w, h }, scale (screen px per layout
 // unit), M (the overscan margin, CSS px), dpr, pw, ph (device size), font }.
 //
-// **Parts.** Each layer the page shows is composed from part bitmaps, each
-// drawn by one function of the scene and a frame (`PARTS`), so a change
-// redraws only the parts it touches (a display filter: the relations) and
-// the layers are blits (`compose`):
+// **Drawing by rectangle.** Every drawing here is of a list of device
+// rectangles of a frame (clipped to their union), so the host redraws only
+// what changed or what is on screen now, and the rest in idle time. Two part bitmaps hold what a
+// display filter does not change (`PARTS`):
 //   below   the style's backdrop under the relations (opaque: the background too)
-//   edges   every shown relation, unfaded (faded as a group, by its blit's opacity)
-//   above   the style's backdrop over the relations
-//   labels  the labels the zoom shows
-//   nodes   every memory, unfaded
-//   over    above, labels and nodes in one (the unfaded layer's top)
-// The unfaded layer is below, its relations drawn straight in, and over;
-// the faded copy blits below, edges, above, labels and nodes, each at its
-// own opacity (`LAYER_PARTS`).
-// The opened scope's stubs and tags are drawn straight into each layer
-// (few, and a stub's faded opacity is not its full one times a constant).
+//   over    the style's backdrop over the relations, the labels the zoom
+//           shows, every memory
+// The unfaded picture is below, the relations drawn straight in and over
+// (`composeUnfaded`), or the same straight from the scene
+// (`drawUnfaded`); the faded one (`drawFaded`) lays each group on at its
+// own opacity through a scratch canvas the rectangles' size, so nothing
+// faded is kept between drawings.
+// An opened scope's stubs and tags are drawn straight in (a filter changes
+// them, there are few, and a stub's faded opacity is not its full one times
+// a constant).
 
 import { fmt } from '../../format.js';
 import { scopeName } from '../../scopes.js';
@@ -72,18 +72,6 @@ export function setTokens(S, T, font) {
   S.T = T;
   if (font !== S.font) S.widths.clear();
   S.font = font;
-}
-
-/** Clear `ctx` (to the background when `opaque`) and set the frame's view transform. */
-export function begin(ctx, S, fr, opaque) {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.globalAlpha = 1;
-  if (opaque) {
-    ctx.fillStyle = S.T.bg;
-    ctx.fillRect(0, 0, fr.pw, fr.ph);
-  } else ctx.clearRect(0, 0, fr.pw, fr.ph);
-  viewTransform(ctx, fr);
-  return ctx;
 }
 
 /** The frame's view transform, shifted by (dx, dy) device px (a patch's corner). */
@@ -219,111 +207,268 @@ export function drawTags(ctx, S, fr, hot, focused, onlyMarked) {
 
 const hookFrame = (S, fr) => ({ scale: fr.scale, px: fr.dpr * fr.scale, font: S.font });
 
-const drawAbovePart = (ctx, S, fr) => S.hooks.drawAbove(ctx, backdropOf(S), S.T, hookFrame(S, fr));
-const drawLabelsPart = (ctx, S, fr) => drawLabels(ctx, S, baseLabels(S, fr));
-const drawNodesPart = (ctx, S) => S.hooks.drawNodes(ctx, S.nodes, S.T, { focused: null, version: S.nodeVersion });
+const drawBelow = (ctx, S, fr) => S.hooks.drawBelow(ctx, backdropOf(S), S.T, hookFrame(S, fr));
+const drawEdgesOf = (ctx, S, fr) => S.hooks.drawEdges(ctx, S.recs, S.T, { scale: fr.scale, lit: false });
+const drawAbove = (ctx, S, fr) => S.hooks.drawAbove(ctx, backdropOf(S), S.T, hookFrame(S, fr));
+const drawNodesOf = (ctx, S) => S.hooks.drawNodes(ctx, S.nodes, S.T, { focused: null, version: S.nodeVersion });
 
 /** The parts (module docs): `opaque` (drawn over the background) and the drawing, in layout units. */
 export const PARTS = Object.freeze({
-  below: { opaque: true, draw: (ctx, S, fr) => S.hooks.drawBelow(ctx, backdropOf(S), S.T, hookFrame(S, fr)) },
-  edges: { opaque: false, draw: (ctx, S, fr) => S.hooks.drawEdges(ctx, S.recs, S.T, { scale: fr.scale, lit: false }) },
-  above: { opaque: false, draw: drawAbovePart },
-  labels: { opaque: false, draw: drawLabelsPart },
-  nodes: { opaque: false, draw: drawNodesPart },
+  below: { opaque: true, draw: drawBelow },
+  // (Drawn by `drawFaint`: its groups need a scratch canvas.)
+  faint: { opaque: false, draw: null },
   over: {
     opaque: false,
     draw: (ctx, S, fr) => {
-      drawAbovePart(ctx, S, fr);
+      drawAbove(ctx, S, fr);
       ctx.globalAlpha = 1;
-      drawLabelsPart(ctx, S, fr);
+      drawLabels(ctx, S, baseLabels(S, fr));
       ctx.globalAlpha = 1;
-      drawNodesPart(ctx, S, fr);
+      drawNodesOf(ctx, S, fr);
     },
   },
 });
 
-/**
- * The parts each layer is composed from. The unfaded layer draws its
- * relations straight in, between two blits (a display filter then costs
- * those relations and two blits); the faded copy fades each group on its
- * own, so it blits each part at its own opacity.
- */
-export const LAYER_PARTS = Object.freeze({ base: Object.freeze(['below', 'over']), dim: Object.freeze(['below', 'edges', 'above', 'labels', 'nodes']) });
+/** The bounds of device rectangles `rs`. */
+export function boundsOf(rs) {
+  const b = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const r of rs) {
+    if (r[0] < b[0]) b[0] = r[0];
+    if (r[1] < b[1]) b[1] = r[1];
+    if (r[2] > b[2]) b[2] = r[2];
+    if (r[3] > b[3]) b[3] = r[3];
+  }
+  return b;
+}
+
+/** Clip `ctx` to the union of device rectangles `rs` of the frame, drawn at offset (dx, dy), with the identity transform set. */
+function clipTo(ctx, rs, dx, dy) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.beginPath();
+  for (const r of rs) ctx.rect(r[0] - dx, r[1] - dy, r[2] - r[0], r[3] - r[1]);
+  ctx.clip();
+}
+const fillRects = (ctx, rs, dx, dy) => {
+  for (const r of rs) ctx.fillRect(r[0] - dx, r[1] - dy, r[2] - r[0], r[3] - r[1]);
+};
 
 /**
- * The unfaded layer drawn straight from the scene, no part involved: what
- * `compose(.., false)` gives, primitive by primitive (source-over is
- * associative, so it differs from the blits by rounding only). For the
- * strips a pan uncovers and a settle at a new scale, where no part holds
- * the frame yet.
+ * How far a memory's drawing reaches from its centre, in layout units: its
+ * shape (a hazard's diamond: 1.25 radii) and stroke, or its challenge ring
+ * (radius + 3.5, stroked 2.4 wide), with a little to spare.
  */
-export function drawUnfaded(ctx, S, fr) {
-  begin(ctx, S, fr, true);
+export const nodeReach = (nd) => Math.max(1.25 * nd.r + 1, nd.r + 4.7) + 0.5;
+
+/** Device rectangle `r` of frame `fr` in layout units. */
+function toLayout(fr, r) {
+  const k = fr.dpr * fr.scale;
+  const ox = (fr.M - fr.view.x * fr.scale) * fr.dpr;
+  const oy = (fr.M - fr.view.y * fr.scale) * fr.dpr;
+  return [(r[0] - ox) / k, (r[1] - oy) / k, (r[2] - ox) / k, (r[3] - oy) / k];
+}
+const meets = (b, qs) => qs.some((q) => b[0] < q[2] && b[2] > q[0] && b[1] < q[3] && b[3] > q[1]);
+
+/**
+ * `over` inside small rectangles (memories whose look changed): the
+ * backdrop over the relations whole (under the clip), but only the labels
+ * and memories that reach a rectangle, so a filter that changes a few
+ * hundred memories' looks writes those, not every memory and label again.
+ */
+function drawOverIn(ctx, S, fr, rs) {
+  const qs = rs.map((r) => toLayout(fr, r));
+  drawAbove(ctx, S, fr);
+  ctx.globalAlpha = 1;
+  drawLabels(ctx, S, baseLabels(S, fr).filter((it) => meets(labelBox(S, it.i, it.x, it.y, it.anchor, 600), qs)));
+  ctx.globalAlpha = 1;
+  const recs = S.nodes.filter((nd) => {
+    const q = nodeReach(nd);
+    return meets([nd.x - q, nd.y - q, nd.x + q, nd.y + q], qs);
+  });
+  if (recs.length) S.hooks.drawNodes(ctx, recs, S.T, { focused: null, version: -1 });
+}
+
+/**
+ * Draw part `name` of frame `fr` inside device rectangles `rs` (cleared
+ * there first); `few`: they are small (memories whose look changed), so
+ * `over` draws only what reaches them.
+ */
+export function drawPart(ctx, S, fr, name, rs, few, scratch) {
+  const p = PARTS[name];
+  ctx.save();
+  clipTo(ctx, rs, 0, 0);
+  if (p.opaque) {
+    ctx.fillStyle = S.T.bg;
+    fillRects(ctx, rs, 0, 0);
+  } else for (const r of rs) ctx.clearRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
+  viewTransform(ctx, fr);
+  if (name === 'faint') drawFaint(ctx, S, fr, rs, few, scratch);
+  else if (few && name === 'over') drawOverIn(ctx, S, fr, rs);
+  else p.draw(ctx, S, fr);
+  ctx.restore();
+}
+
+/**
+ * Group `draw` (in layout units) drawn whole into `scratch` inside device
+ * rectangles `rs` of `fr`, then laid onto `ctx` at `alpha` and offset
+ * (dx, dy): a group's own overlaps do not show through, as an SVG group's
+ * opacity.
+ */
+function group(ctx, scratch, S, fr, rs, draw, alpha, dx = 0, dy = 0) {
+  const r = boundsOf(rs);
+  const w = r[2] - r[0];
+  const hh = r[3] - r[1];
+  const sx = scratch.getContext('2d');
+  sx.save();
+  clipTo(sx, rs, r[0], r[1]);
+  sx.clearRect(0, 0, w, hh);
+  viewTransform(sx, fr, r[0], r[1]);
+  draw(sx);
+  sx.restore();
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(scratch, 0, 0, w, hh, r[0] - dx, r[1] - dy, w, hh);
+  ctx.restore();
+}
+
+/** Labels faded (look.fadeLabel), then memories faded (look.fadeNode), each as a group: the `faint` part. */
+function drawFaint(ctx, S, fr, rs, few, scratch) {
+  const lk = S.look;
+  const qs = few ? rs.map((r) => toLayout(fr, r)) : null;
+  let lbl = baseLabels(S, fr);
+  if (qs) lbl = lbl.filter((it) => meets(labelBox(S, it.i, it.x, it.y, it.anchor, 600), qs));
+  if (lbl.length) group(ctx, scratch, S, fr, rs, (c) => drawLabels(c, S, lbl), lk.fadeLabel);
+  const recs = qs
+    ? S.nodes.filter((nd) => {
+        const q = nodeReach(nd);
+        return meets([nd.x - q, nd.y - q, nd.x + q, nd.y + q], qs);
+      })
+    : null;
+  if (!recs) group(ctx, scratch, S, fr, rs, (c) => drawNodesOf(c, S, fr), lk.fadeNode);
+  else if (recs.length) group(ctx, scratch, S, fr, rs, (c) => S.hooks.drawNodes(c, recs, S.T, { focused: null, version: -1 }), lk.fadeNode);
+}
+
+/**
+ * The unfaded picture inside device rectangles `rs` of frame `fr`, straight
+ * from the scene (no part involved): for the strips a pan uncovers and a
+ * frame no part holds yet. What `composeUnfaded` gives, primitive by
+ * primitive (source-over is associative, so it differs from the blits by
+ * rounding only).
+ */
+export function drawUnfaded(ctx, S, fr, rs) {
+  ctx.save();
+  clipTo(ctx, rs, 0, 0);
+  ctx.fillStyle = S.T.bg;
+  fillRects(ctx, rs, 0, 0);
+  viewTransform(ctx, fr);
   PARTS.below.draw(ctx, S, fr);
   ctx.globalAlpha = 1;
   if (S.stubs.length) drawStubs(ctx, S, fr, 'full');
   ctx.globalAlpha = 1;
-  PARTS.edges.draw(ctx, S, fr);
+  drawEdgesOf(ctx, S, fr);
   ctx.globalAlpha = 1;
   PARTS.over.draw(ctx, S, fr);
   ctx.globalAlpha = 1;
   if (S.tags.length) drawTags(ctx, S, fr, -1, -1, false);
-}
-
-/** Draw part `name` of frame `fr` into `ctx` (cleared first: within the clip, when one is set). */
-export function drawPart(ctx, S, fr, name) {
-  const p = PARTS[name];
-  begin(ctx, S, fr, p.opaque);
-  p.draw(ctx, S, fr);
-  ctx.globalAlpha = 1;
+  ctx.restore();
 }
 
 /**
- * A layer from the parts `P` (canvases of frame `fr`, `LAYER_PARTS`):
- * `base` unfaded (below, the relations drawn straight in, `over`), or
- * `faded` (what a focus shows outside the patch: each part at the style's
- * faded opacity, as the SVG fades a group; the tags never fade). Drawn at
- * device offset (dx, dy) (a patch's corner), with `labels` in place of
- * P.labels when given, at that offset already (faded only).
+ * The unfaded picture inside device rectangles `rs` from the parts `P`
+ * ({ below, over }: canvases of frame `fr`, current there): below, the
+ * stubs and relations drawn straight in, over, the tags. A display filter
+ * costs this: the relations and two blits.
  */
-export function compose(ctx, S, fr, P, faded, dx = 0, dy = 0, labels = null) {
-  const px = -dx;
-  const py = -dy;
-  const lk = S.look;
-  const fb = faded && lk.fadeBackdrop !== undefined ? lk.fadeBackdrop : 1;
+export function composeUnfaded(ctx, S, fr, rs, P) {
+  const r = boundsOf(rs);
+  const w = r[2] - r[0];
+  const hh = r[3] - r[1];
+  ctx.save();
+  clipTo(ctx, rs, 0, 0);
+  ctx.drawImage(P.below, r[0], r[1], w, hh, r[0], r[1], w, hh);
+  viewTransform(ctx, fr);
+  if (S.stubs.length) drawStubs(ctx, S, fr, 'full');
+  ctx.globalAlpha = 1;
+  drawEdgesOf(ctx, S, fr);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
-  if (fb < 1) {
-    ctx.fillStyle = S.T.bg;
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.drawImage(P.over, r[0], r[1], w, hh, r[0], r[1], w, hh);
+  if (S.tags.length) {
+    viewTransform(ctx, fr);
+    drawTags(ctx, S, fr, -1, -1, false);
   }
-  ctx.globalAlpha = fb;
-  ctx.drawImage(P.below, px, py);
+  ctx.restore();
+}
+
+/**
+ * What a focus shows outside the patch, inside device rectangles `rs` of
+ * frame `fr`, drawn into `ctx` at offset (dx, dy): the backdrop, then the
+ * relations, labels and memories each faded as a group (the SVG fades a
+ * group: each is drawn whole into `o.scratch`, a canvas at least the size
+ * of the rectangles' bounds, and laid on at the style's faded opacity); the
+ * tags never fade. `o`: { scratch, below (the `below` part of `fr`, current
+ * there, or null: drawn from the scene), skip (memories whose faded label
+ * is left out: the lit ones, under the patch), dx, dy }.
+ */
+export function drawFaded(ctx, S, fr, rs, o) {
+  const lk = S.look;
+  const fb = lk.fadeBackdrop !== undefined ? lk.fadeBackdrop : 1;
+  const dx = o.dx || 0;
+  const dy = o.dy || 0;
+  const r = boundsOf(rs);
+  const w = r[2] - r[0];
+  const hh = r[3] - r[1];
+  const sc = o.scratch;
+  const sx = sc.getContext('2d');
+  // Group `draw` (in layout units) laid on at `alpha`.
+  const group = (draw, alpha) => {
+    sx.save();
+    clipTo(sx, rs, r[0], r[1]);
+    sx.clearRect(0, 0, w, hh);
+    viewTransform(sx, fr, r[0], r[1]);
+    draw(sx);
+    sx.restore();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(sc, 0, 0, w, hh, r[0] - dx, r[1] - dy, w, hh);
+    ctx.globalAlpha = 1;
+  };
+  ctx.save();
+  clipTo(ctx, rs, dx, dy);
+  ctx.fillStyle = S.T.bg;
+  fillRects(ctx, rs, dx, dy);
+  if (o.below) {
+    ctx.globalAlpha = fb;
+    ctx.drawImage(o.below, r[0], r[1], w, hh, r[0] - dx, r[1] - dy, w, hh);
+    ctx.globalAlpha = 1;
+  } else if (fb === 1) {
+    viewTransform(ctx, fr, dx, dy);
+    drawBelow(ctx, S, fr);
+    ctx.globalAlpha = 1;
+  } else group((c) => drawBelow(c, S, fr), fb);
   if (S.stubs.length) {
     viewTransform(ctx, fr, dx, dy);
-    drawStubs(ctx, S, fr, faded ? 'faded' : 'full');
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawStubs(ctx, S, fr, 'faded');
   }
-  if (!faded) {
+  group((c) => drawEdgesOf(c, S, fr), lk.fadeEdge);
+  if (fb === 1) {
     viewTransform(ctx, fr, dx, dy);
-    PARTS.edges.draw(ctx, S, fr);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    drawAbove(ctx, S, fr);
     ctx.globalAlpha = 1;
-    ctx.drawImage(P.over, px, py);
+  } else group((c) => drawAbove(c, S, fr), fb);
+  if (o.faint) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(o.faint, r[0], r[1], w, hh, r[0] - dx, r[1] - dy, w, hh);
   } else {
-    ctx.globalAlpha = lk.fadeEdge;
-    ctx.drawImage(P.edges, px, py);
-    ctx.globalAlpha = fb;
-    ctx.drawImage(P.above, px, py);
-    ctx.globalAlpha = lk.fadeLabel;
-    if (labels) ctx.drawImage(labels, 0, 0);
-    else ctx.drawImage(P.labels, px, py);
-    ctx.globalAlpha = lk.fadeNode;
-    ctx.drawImage(P.nodes, px, py);
+    const lbl = baseLabels(S, fr);
+    const kept = o.skip ? lbl.filter((it) => !o.skip.has(it.i)) : lbl;
+    if (kept.length) group((c) => drawLabels(c, S, kept), lk.fadeLabel);
+    group((c) => drawNodesOf(c, S, fr), lk.fadeNode);
   }
-  ctx.globalAlpha = 1;
   if (S.tags.length) {
     viewTransform(ctx, fr, dx, dy);
     drawTags(ctx, S, fr, -1, -1, false);
   }
+  ctx.restore();
 }

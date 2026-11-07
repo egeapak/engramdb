@@ -35,38 +35,44 @@
 // textures by colour), so nothing tells it about a switch.
 //
 // **Parts and layers** (./scene.js draws them; each the view's box plus an
-// overscan margin, at devicePixelRatio, capped). Six part bitmaps off the
-// page (below, edges, above, labels, nodes, and over = above + labels +
-// nodes), each with its own version and frame key, so a change redraws only
-// its parts and the layers are blits. In the page, at most two canvases at
-// once:
-//   base      everything, unfaded: below, the relations drawn straight in,
-//             over (so a display filter costs the relations and two blits);
-//             at a new frame whose parts are behind (a settle), straight
-//             from the scene, the parts following in idle time
-//   dim       opaque, in place of `base` while something is focused: below,
-//             edges, above, labels and nodes, each at its faded opacity as
-//             a group, the tags unfaded
+// overscan margin, at devicePixelRatio, the whole capped at `LAYER_PX`
+// device pixels, so a DPR 2 box gets a narrower margin). Three part bitmaps
+// off the page, each with its own version and frame key: `below` (the
+// opaque backdrop), `over` (above + labels + memories, unfaded) and `faint`
+// (labels and memories, each faded as a group); the relations, stubs and
+// tags, which a display filter changes, are in no part. In the page, at
+// most two canvases at once:
+//   base      everything, unfaded: below, stubs and relations drawn straight
+//             in, over, tags (so a display filter costs the relations and
+//             two blits); from the scene where its parts are behind
+//   dim       opaque, in place of `base` while something is focused or
+//             hovered: below, the relations faded as a group, above, faint
+//             (so a filter under a hover costs the relations and three blits)
 //   patch     a small canvas over either, just the rectangle the focus,
-//             rings and marked tags cover: what is under it composed again
-//             (with a focus, without the lit memories' faded labels), then
-//             the lit memories, relations and labels, the tags, the rings
-// Each canvas in the page is a compositor layer whose whole backing store
-// is re-sent on every frame that changes it (software compositing), so a
-// hover changes only the patch. A software blit is about 2.5 ms per
-// million device pixels, so the hidden one of base / dim is brought up in
-// idle time a part per callback, then the layer in bands of rows, each
-// forced to raster then (`rasterNow`). A part or layer whose view only
-// moved by whole device pixels at the same scale (a pan, the margin added
-// after the first drawing) is copied at that offset and only the uncovered
-// strips drawn, each under its own rectangle clip; a layer's strips come
-// straight from the scene (`drawUnfaded`) for the unfaded one, so its pan
-// copies one canvas, not every part (they follow when a compose needs
-// them); the faded one's parts shift with it (drawing its strips from the
-// scene through scratch parts measured slower on the big stores).
-// `show` snaps a pan's view to whole device pixels so that this holds. A
-// drawing built from copies is within antialiasing of one drawn whole,
-// not bit-exact (bench/browser/checks.mjs bounds it).
+//             rings and marked tags cover: a copy of the layer under it
+//             (with a focus, the lit memories' label boxes drawn again
+//             without their faded labels), then the lit memories, relations
+//             and labels, the tags, the rings
+// Every layer and part keeps `pend`, the device rectangles it still owes
+// for its version and frame. `bring` moves one to a new frame: when only
+// the view moved by whole device pixels at the same version (a pan) its
+// pixels are copied along and the uncovered strips owed, else all of it;
+// `settle` draws what it owes inside a region, in one pass under a union
+// clip. A flush settles the shown layer's box only; the margin, the parts
+// and the hidden one of base / dim are drawn in idle time (`pump`), parts
+// first, in bands of rows sized from each kind's measured cost per pixel,
+// each forced to raster then (`rasterNow`: a canvas records until
+// something needs its pixels) and at most `ROOM_MS` per callback, so no
+// idle task is a long one; a kind's first band (its backing store's
+// allocation) runs alone. A browser that grants no idle period (headless
+// software compositing) runs the rest in background-priority tasks.
+// Memories whose look a filter changed (`setHub`) are owed as their discs
+// a frame later, by every layer and part that draws memories, and drawn
+// with only what reaches them. Each canvas in the page is a compositor
+// layer whose whole backing store is re-sent on every frame that changes it
+// (software compositing), so a hover changes only the patch. A drawing
+// built from copies and rectangles is within antialiasing of one drawn
+// whole, not bit-exact (bench/browser/checks.mjs bounds it).
 //
 // (A raster worker drawing these layers off the page's thread was built
 // and measured: it lost the first paint, 96 against 53 ms at 1k memories,
@@ -75,7 +81,8 @@
 // **Zoom and pan.** The view's composited gesture moves the canvases (CSS
 // transform on `.g-pane`) and nothing is drawn until it settles (`gesture`
 // first draws the patch into the layer under it, so one canvas moves); the
-// overscan margin is what a pan or zoom-out shows before then. A settle
+// overscan margin is what a pan or zoom-out shows before then (the first
+// drawing has it in its frame, owed to idle time). A settle
 // draws synchronously in the task that removes the transform, so no frame
 // shows the old drawing unmoved or a blank one. The view runs the relation
 // rebuild rules (cut mode, `redrawOnZoom`) in that same task.
@@ -105,18 +112,34 @@ const OVERSCAN = 0.12;
 /** How far a memory catches the pointer beyond its radius (its ring's outer edge, as in the SVG). */
 const RING_REACH = 7.5;
 /** Accessible-list buttons built per idle slice at most. */
-const LIST_SLICE = 200;
+const LIST_SLICE = 60;
 const CORE_TOKENS = { bg: '--bg', bg2: '--bg-2', ink: '--ink', ink2: '--ink-2', ink3: '--ink-3', red: '--red', redInk: '--red-ink', focus: '--focus' };
-const PART_NAMES = Object.keys(sc.PARTS);
 
 /** Whether this browser has what the host draws with. */
 export function canvasSupported() {
   return typeof CanvasRenderingContext2D === 'function' && typeof Path2D === 'function' && typeof DOMMatrix === 'function' && 'addPath' in Path2D.prototype && 'roundRect' in CanvasRenderingContext2D.prototype;
 }
 
-/** Device pixels the hidden layer is composed in per idle callback (rows of them). */
-const BAND_PX = 1.2e6;
+/** At most this many device pixels per layer (with its margin): five full-size canvases are kept (base, dim and the three parts). */
+const LAYER_PX = 3e6;
+/** Idle work: one step aims at this many ms, in bands of rows within these bounds (device px). */
+const STEP_MS = 12;
+/** At most this many ms of idle work per idle callback (a task over 50 ms is a long task). */
+const ROOM_MS = 30;
+const MIN_BAND_PX = 4e4;
+const MAX_BAND_PX = 1.5e6;
+/** Owed rectangles a layer keeps apart before they are merged into their bounds. */
+const PEND_MAX = 400;
+/** Rectangles under this share of the layer draw only the memories and labels that reach them. */
+const FEW_SHARE = 0.15;
+/** A scratch canvas over this many device pixels is let go of after each drawing. */
+const SCRATCH_KEEP = 1e6;
 const idleCall = (fn) => (typeof requestIdleCallback === 'function' ? requestIdleCallback(fn, { timeout: 500 }) : setTimeout(fn, 16));
+// A browser that grants no idle period while nothing changes on screen
+// (headless software compositing does not) runs an idle callback only at
+// its timeout: the owed drawing then goes on in background-priority tasks
+// of one step each, which still yield to input and frames.
+const bgCall = (fn) => (typeof scheduler === 'object' && scheduler && typeof scheduler.postTask === 'function' ? scheduler.postTask(() => fn(null), { priority: 'background' }) : setTimeout(() => fn(null), 0));
 
 /**
  * The surface, or null when a 2D context cannot be had (the view then
@@ -128,18 +151,20 @@ export function canvasSurface(o) {
   const { g, lay, labels, theme, box, boxSize, cb } = o;
   const hooks = theme.canvas;
   const look = hooks.look;
-  const layer = (cls, alpha) => {
-    const cv = cls === null ? document.createElement('canvas') : h('canvas', { class: cls, 'aria-hidden': 'true' });
-    return { cv, ctx: null, alpha, w: 0, h: 0, ver: null, fr: null, fk: null };
+  const layer = (name, cls, alpha) => {
+    const inPage = cls !== null;
+    const cv = inPage ? h('canvas', { class: cls, 'aria-hidden': 'true' }) : document.createElement('canvas');
+    return { name, cv, ctx: null, alpha, inPage, w: 0, h: 0, ver: null, fr: null, fk: null, pend: [], ms: 0, draw: null };
   };
-  const L = { base: layer('g-cv-base', false), dim: layer('g-cv-dim', false), patch: layer('g-cv-patch', true) };
+  const L = { base: layer('base', 'g-cv-base', false), dim: layer('dim', 'g-cv-dim', false), patch: layer('patch', 'g-cv-patch', true) };
   L.base.ctx = L.base.cv.getContext('2d', { alpha: false });
   if (!L.base.ctx) return null;
   for (const k of ['base', 'dim', 'patch']) L[k].cv.hidden = true;
   const ctxOf = (ly) => ly.ctx || (ly.ctx = ly.cv.getContext('2d', { alpha: ly.alpha }));
-  const parts = {};
-  for (const name of PART_NAMES) parts[name] = layer(null, !sc.PARTS[name].opaque);
-  const partCanvases = () => Object.fromEntries(PART_NAMES.map((n) => [n, parts[n].cv]));
+  // The part bitmaps (scene.js PARTS), off the page.
+  const B = layer('below', null, false);
+  const O = layer('over', null, true);
+  const F = layer('faint', null, true);
 
   // ---- data ------------------------------------------------------------------
   const S = sc.makeScene(hooks, g, lay, labels);
@@ -152,19 +177,18 @@ export function canvasSurface(o) {
   let view = null;
   let scale = 1;
   let plan = null;
-  // What each part shows changed: tokens, relations, stubs, tags (memories: S.nodeVersion).
+  // What the layers show changed: tokens, relations, stubs, tags (memories:
+  // `setHub` owes their discs instead).
   let tokVer = 0;
   let edgeVer = 0;
   let stubVer = 0;
   let tagVer = 0;
-  const partVer = (name) => (name === 'edges' ? `${tokVer}|${edgeVer}` : name === 'nodes' || name === 'over' ? `${tokVer}|${S.nodeVersion}` : `${tokVer}`);
-  const layerVer = () => `${tokVer}|${edgeVer}|${S.nodeVersion}|${stubVer}|${tagVer}`;
-  /** Once the first drawing is on screen: from then on every frame has the margin. */
+  /** Once the first drawing is on screen: from then on idle work is scheduled. */
   let warm = false;
   /** For the browser checks and bench: what was drawn, and how. */
-  // (`ms`: the last bring-up of each layer, parts included, in ms; `partMs`:
-  // the parts' share of it.)
-  const stats = { full: 0, shifted: 0, composed: 0, ms: { base: 0, dim: 0 }, partMs: { base: 0, dim: 0 } };
+  // (`ms`: the time spent bringing each layer to its latest frame, idle
+  // bands included; `partMs` is kept at 0 for the bench's older readers.)
+  const stats = { full: 0, shifted: 0, composed: 0, owed: 0, ms: { base: 0, dim: 0 }, partMs: { base: 0, dim: 0 } };
 
   // ---- tokens ------------------------------------------------------------------
   function readTokens() {
@@ -228,13 +252,25 @@ export function canvasSurface(o) {
     const dpr = Math.min(DPR_MAX, window.devicePixelRatio || 1);
     return cw * ch * dpr * dpr > MAX_PIXELS ? Math.sqrt(MAX_PIXELS / (cw * ch)) : dpr;
   }
-  const marginFor = (W, H) => (warm ? Math.round(OVERSCAN * Math.max(W, H)) : 0);
+  /**
+   * The overscan margin (CSS px, each side) for a W × H box: OVERSCAN of its
+   * larger side, cut so a layer holds at most LAYER_PX device pixels (four
+   * full-size canvases are kept, docs at the top); none before the first
+   * drawing is on screen.
+   */
+  function marginFor(W, H) {
+    const d = Math.min(DPR_MAX, window.devicePixelRatio || 1);
+    const A = LAYER_PX / (d * d);
+    if (W * H >= A) return 0;
+    const fit = (-(W + H) + Math.sqrt((W + H) * (W + H) - 4 * (W * H - A))) / 4;
+    return Math.max(0, Math.floor(Math.min(OVERSCAN * Math.max(W, H), fit)));
+  }
   /** The frame for the box and view now: margin, ratio, device size (scene.js docs). */
   function frame() {
     const W = boxSize.w || 800;
     const H = boxSize.h || 500;
-    // The first drawing is the box alone, the margin added once it is on
-    // screen (copied into the centre, only the margin drawn).
+    // (The margin is in the frame from the first drawing on, which draws
+    // the box alone: the margin is owed, for idle time after the paint.)
     const M = marginFor(W, H);
     const cw = W + 2 * M;
     const ch = H + 2 * M;
@@ -243,6 +279,8 @@ export function canvasSurface(o) {
     fr.key = `${view.x}|${view.y}|${view.w}|${view.h}|${scale}|${dpr}|${fr.pw}|${fr.ph}|${M}`;
     return fr;
   }
+  /** The box (what is on screen) as a device rectangle of `fr`. */
+  const boxRect = (fr) => [Math.floor(fr.M * fr.dpr), Math.floor(fr.M * fr.dpr), Math.min(fr.pw, Math.ceil(fr.pw - fr.M * fr.dpr)), Math.min(fr.ph, Math.ceil(fr.ph - fr.M * fr.dpr))];
   /**
    * The whole-device-pixel offset that carries a drawing of frame `a` to
    * frame `b` (same scale and ratio), or null when there is none.
@@ -257,25 +295,35 @@ export function canvasSurface(o) {
     if (rx >= b.pw || -rx >= a.pw || ry >= b.ph || -ry >= a.ph) return null;
     return [rx, ry];
   }
-  /**
-   * The device rectangles [x0, y0, x1, y1] of frame `fr` that a drawing of
-   * frame `old` copied at offset `sh` leaves uncovered: up to four bands.
-   */
-  function strips(fr, sh, old) {
-    const x0 = Math.max(0, sh[0]);
-    const y0 = Math.max(0, sh[1]);
-    const x1 = Math.min(fr.pw, sh[0] + old.pw);
-    const y1 = Math.min(fr.ph, sh[1] + old.ph);
+  // ---- rectangles [x0, y0, x1, y1], device px --------------------------------------
+  const area = (r) => (r[2] - r[0]) * (r[3] - r[1]);
+  const meet = (a, b) => {
+    const r = [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+    return r[2] > r[0] && r[3] > r[1] ? r : null;
+  };
+  /** `a` without `b` (which lies inside it): up to four bands. */
+  function minus(a, b) {
     const out = [];
-    if (y0 > 0) out.push([0, 0, fr.pw, y0]);
-    if (y1 < fr.ph) out.push([0, y1, fr.pw, fr.ph]);
-    if (x0 > 0) out.push([0, y0, x0, y1]);
-    if (x1 < fr.pw) out.push([x1, y0, fr.pw, y1]);
+    if (b[1] > a[1]) out.push([a[0], a[1], a[2], b[1]]);
+    if (b[3] < a[3]) out.push([a[0], b[3], a[2], a[3]]);
+    if (b[0] > a[0]) out.push([a[0], b[1], b[0], b[3]]);
+    if (b[2] < a[2]) out.push([b[2], b[1], a[2], b[3]]);
     return out;
   }
+  /** The rectangles of frame `fr` a drawing of frame `old` copied at offset `sh` leaves uncovered. */
+  const strips = (fr, sh, old) => {
+    const all = [0, 0, fr.pw, fr.ph];
+    const kept = meet(all, [sh[0], sh[1], sh[0] + old.pw, sh[1] + old.ph]);
+    return kept ? minus(all, kept) : [all];
+  };
+
+  // ---- layers and parts ----------------------------------------------------------------
+  // Each holds, besides its canvas, the version and frame it is drawn for
+  // and `pend`: the rectangles of that frame still to draw (the margin, or
+  // anything not needed on screen yet), drawn in idle time.
   let spare = null;
-  /** Size `ly` for `fr` (placed in the page when `inPage`), keeping its pixels at offset `sh` when given. */
-  function sizeLayer(ly, fr, inPage, sh) {
+  /** Size `ly` for `fr`, keeping its pixels at offset `sh` when given. */
+  function sizeLayer(ly, fr, sh) {
     if (ly.w !== fr.pw || ly.h !== fr.ph) {
       if (sh) {
         // A resize clears a canvas: its pixels go through a spare first.
@@ -286,7 +334,7 @@ export function canvasSurface(o) {
       }
       ly.cv.width = ly.w = fr.pw;
       ly.cv.height = ly.h = fr.ph;
-      if (inPage) {
+      if (ly.inPage) {
         ly.cv.style.width = fr.cw + 'px';
         ly.cv.style.height = fr.ch + 'px';
       }
@@ -305,173 +353,250 @@ export function canvasSurface(o) {
       ctx.drawImage(ly.cv, sh[0], sh[1]);
       ctx.globalCompositeOperation = 'source-over';
     }
-    if (inPage) ly.cv.style.left = ly.cv.style.top = -fr.M + 'px';
+    if (ly.inPage) ly.cv.style.left = ly.cv.style.top = -fr.M + 'px';
   }
   /**
-   * Bring `ly` to frame `fr` showing version `ver`: nothing when it does,
-   * a copy and the uncovered strips when only the view moved by whole
-   * pixels, else the whole of `draw(ctx, fr)`.
+   * Make `ly` stand for frame `fr` at version `ver`, drawing nothing: when
+   * only the view moved by whole pixels at the same version, its pixels are
+   * copied along (and so are the rectangles it still owed) and the
+   * uncovered strips are owed; else the whole of it is. A layer in the page
+   * fills what it now owes with the background (the margin a gesture may
+   * show before it is drawn) unless only the version changed (a filter: the
+   * old drawing there is the better stand-in).
    */
-  function ensure(ly, fr, ver, draw, inPage) {
+  function bring(ly, fr, ver) {
     if (ly.ver === ver && ly.fk === fr.key) return false;
     const old = ly.fr;
     const sh = ly.ver === ver && old ? shiftOf(old, fr) : null;
-    sizeLayer(ly, fr, inPage, sh);
-    const ctx = ctxOf(ly);
+    const sameFrame = old && ly.fk === fr.key;
+    sizeLayer(ly, fr, sh);
+    let pend;
     if (sh) {
-      // Each uncovered strip under its own rectangle clip: whole device
-      // pixels, so the browser clips by rectangle (no mask, and a blit
-      // reads only the strip; an even-odd clip of both rectangles cost
-      // 90 ms a pan at ratio 2).
-      for (const r of strips(fr, sh, old)) {
-        ctx.save();
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.beginPath();
-        ctx.rect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
-        ctx.clip();
-        draw(ctx, fr);
-        ctx.restore();
+      const all = [0, 0, fr.pw, fr.ph];
+      pend = strips(fr, sh, old);
+      for (const r of ly.pend) {
+        const m = meet(all, [r[0] + sh[0], r[1] + sh[1], r[2] + sh[0], r[3] + sh[1]]);
+        if (m) pend.push(m);
       }
       stats.shifted++;
     } else {
-      draw(ctx, fr);
+      pend = [[0, 0, fr.pw, fr.ph]];
       stats.full++;
+    }
+    if (ly.inPage && !sameFrame) {
+      const ctx = ctxOf(ly);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = S.T.bg;
+      for (const r of sh ? pend.slice(0, pend.length - ly.pend.length) : pend) ctx.fillRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
     }
     ly.ver = ver;
     ly.fr = fr;
     ly.fk = fr.key;
+    ly.pend = pend.length > PEND_MAX ? [sc.boundsOf(pend)] : pend;
+    ly.ms = 0;
     return true;
   }
-  /** Whether every part of layer `which` (base / dim) shows frame `fr` now. */
-  const partsAt = (which, fr) => sc.LAYER_PARTS[which].every((n) => parts[n].ver === partVer(n) && parts[n].fk === fr.key);
-  const ensurePart = (name, fr) => ensure(parts[name], fr, partVer(name), (c, f) => sc.drawPart(c, S, f, name), false);
-  /** Compose layer `ly` (base, or `faded`: dim) for `fr`, its parts brought up to date first. */
-  function ensureLayer(ly, fr, faded) {
-    const ver = layerVer();
-    if (ly.ver === ver && ly.fk === fr.key) return false;
+  /** Draw what `ly` owes inside `region` (all of it when null) now, in one pass through `ly.draw`. */
+  function settle(ly, region) {
+    if (!ly.pend.length) return false;
     const t0 = performance.now();
-    // A pan of the unfaded layer: a copy and its strips drawn straight from
-    // the scene. Its parts stay where they were and follow when a compose
-    // needs them (each would cost a copy now).
-    // (Faded, the parts shift too and the strips compose from them: drawn
-    // from the scene through scratch parts it measured slower on the big
-    // stores, s2k / s10k at DPR 2: pan settle 59 → 88 ms.)
-    if (!faded && ly.ver === ver && ly.fr && shiftOf(ly.fr, fr)) {
-      const did = ensure(ly, fr, ver, (c, f) => sc.drawUnfaded(c, S, f), true);
-      stats.ms.base = performance.now() - t0;
-      stats.partMs.base = 0;
-      return did;
+    const rest = [];
+    const now = [];
+    for (const r of ly.pend) {
+      const m = region ? meet(r, region) : r;
+      if (!m) {
+        rest.push(r);
+        continue;
+      }
+      now.push(m);
+      if (m !== r) rest.push(...minus(r, m));
     }
-    // The unfaded layer at a new frame with its parts behind too (a settle
-    // at a new scale): drawn straight from the scene, which spares two
-    // full-size blits; its parts follow in idle time, for the next filter.
-    // (Same frame, new versions — a filter, a theme — compose: measured
-    // the cheaper there, and a filter undone then gives the same pixels.)
-    if (!faded && ly.fk !== fr.key && !partsAt('base', fr)) {
-      const did = ensure(ly, fr, ver, (c, f) => sc.drawUnfaded(c, S, f), true);
-      stats.ms.base = performance.now() - t0;
-      stats.partMs.base = 0;
-      return did;
-    }
-    for (const name of sc.LAYER_PARTS[faded ? 'dim' : 'base']) ensurePart(name, fr);
-    const t1 = performance.now();
-    stats.composed++;
-    const did = ensure(ly, fr, ver, (c, f) => sc.compose(c, S, f, partCanvases(), faded), true);
-    const k = faded ? 'dim' : 'base';
-    stats.ms[k] = performance.now() - t0;
-    stats.partMs[k] = t1 - t0;
-    return did;
+    ly.pend = rest;
+    if (!now.length) return false;
+    ly.draw(now);
+    ly.ms += performance.now() - t0;
+    return true;
   }
-  let idleFor = false;
-  /** The hidden layer's compose in progress: { ly, key, y (the next row) }. */
-  let band = null;
-  // A 1 × 1 canvas to draw a finished layer into: that makes the browser
-  // raster the layer now, in idle time, rather than at the paint that first
-  // shows it (a canvas records its drawing until something needs pixels).
+  const verOf = { below: () => `${tokVer}`, over: () => `${tokVer}`, faint: () => `${tokVer}` };
+  const verLayer = () => `${tokVer}|${edgeVer}|${stubVer}|${tagVer}`;
+  /** Whether part `ly` holds frame `fr` (it may still owe rectangles: `settle` them first). */
+  const partAt = (ly, fr) => ly.ver === verOf[ly.name]() && ly.fk === fr.key;
+  // The scratch canvas a faded group is drawn whole into, at least the
+  // rectangle's size; let go of whenever idle work is done and nothing is
+  // focused.
+  let scratch = null;
+  function scratchFor(w, hh) {
+    scratch = scratch || document.createElement('canvas');
+    if (scratch.width < w || scratch.height < hh) {
+      scratch.width = Math.max(scratch.width, w);
+      scratch.height = Math.max(scratch.height, hh);
+    }
+    return scratch;
+  }
+  const dropScratch = (over = 0) => {
+    if (scratch && scratch.width * scratch.height > over) scratch.width = scratch.height = 0;
+  };
+  /** Rows of `r` at most `px` device pixels each. */
+  function bands(r, px) {
+    const rows = Math.max(8, Math.floor(px / (r[2] - r[0])));
+    const out = [];
+    for (let y = r[1]; y < r[3]; y += rows) out.push([r[0], y, r[2], Math.min(r[3], y + rows)]);
+    return out;
+  }
+  B.draw = (rs) => sc.drawPart(ctxOf(B), S, B.fr, 'below', rs);
+  // (Small rectangles, a memory's disc each, draw only what reaches them.)
+  const few = (rs, fr) => rs.reduce((a, r) => a + area(r), 0) < FEW_SHARE * fr.pw * fr.ph;
+  O.draw = (rs) => sc.drawPart(ctxOf(O), S, O.fr, 'over', rs, few(rs, O.fr));
+  F.draw = (rs) => {
+    const b = sc.boundsOf(rs);
+    sc.drawPart(ctxOf(F), S, F.fr, 'faint', rs, few(rs, F.fr), scratchFor(b[2] - b[0], b[3] - b[1]));
+  };
+  L.base.draw = (rs) => {
+    const fr = L.base.fr;
+    if (partAt(B, fr) && partAt(O, fr)) {
+      const b = sc.boundsOf(rs);
+      settle(B, b);
+      settle(O, b);
+      sc.composeUnfaded(ctxOf(L.base), S, fr, rs, { below: B.cv, over: O.cv });
+      stats.composed++;
+    } else sc.drawUnfaded(ctxOf(L.base), S, fr, rs);
+  };
+  /** The faded picture of rectangles `rs` of `fr` into `ctx` at offset (dx, dy). */
+  function faded(ctx, fr, rs, skip, dx, dy) {
+    const useB = partAt(B, fr);
+    // (The faint part holds every label: not for a picture that leaves some out.)
+    const useF = !(skip && skip.size) && partAt(F, fr);
+    const b = sc.boundsOf(rs);
+    if (useB) settle(B, b);
+    if (useF) settle(F, b);
+    sc.drawFaded(ctx, S, fr, rs, { scratch: scratchFor(b[2] - b[0], b[3] - b[1]), below: useB ? B.cv : null, faint: useF ? F.cv : null, skip, dx, dy });
+  }
+  /** The device boxes, inside `r`, of the base labels of the memories in `skip` (frame `fr`). */
+  function labelHoles(fr, r, skip) {
+    const out = [];
+    for (const it of sc.baseLabels(S, fr)) {
+      if (!skip.has(it.i)) continue;
+      const m = meet(toDevice(sc.labelBox(S, it.i, it.x, it.y, it.anchor, 600), fr), r);
+      if (m) out.push(m);
+    }
+    return out;
+  }
+  L.dim.draw = (rs) => faded(ctxOf(L.dim), L.dim.fr, rs, null, 0, 0);
+  // A 1 × 1 canvas to draw a finished band into: that makes the browser
+  // raster it now, in idle time, rather than at the paint that first shows
+  // it (a canvas records its drawing until something needs pixels).
   let sink = null;
   const rasterNow = (cv) => {
     sink = sink || document.createElement('canvas');
     sink.width = sink.height = 1;
     sink.getContext('2d').drawImage(cv, 0, 0, 1, 1, 0, 0, 1, 1);
   };
-  /**
-   * Compose the hidden one of base / dim in idle time, so a focus (or its
-   * end) finds it ready: one part per idle callback, then the layer in
-   * bands of rows, so no step is a long task.
-   */
-  function otherLater() {
-    if (idleFor) return;
-    idleFor = true;
-    const step = () => {
-      idleFor = false;
-      if (!view || !alive() || flat) return;
-      const focus = !!plan;
-      const fr = frame();
-      const faded = !focus;
-      // The shown layer's parts come first, one per callback, when a pan or
-      // a direct drawing left them behind: under a focus the patch
-      // composes from the faded ones, without one a filter from the base's.
-      const own = focus ? 'dim' : 'base';
-      if (!partsAt(own, fr)) {
-        for (const name of sc.LAYER_PARTS[own]) {
-          if (ensurePart(name, fr)) {
-            rasterNow(parts[name].cv);
-            break;
-          }
-        }
-        idleFor = true;
-        idleCall(step);
+  /** Memories whose look changed (`setHub`): their discs are owed by every layer and part that draws memories. */
+  let nodesChanged = [];
+  let nodeFrame = 0;
+  function owe(list) {
+    stats.owed += list.length;
+    for (const ly of [L.base, L.dim, O, F]) {
+      if (!ly.fr) continue;
+      for (const i of list) {
+        const nd = nodes[i];
+        const q = sc.nodeReach(nd);
+        const d = toDevice([nd.x - q, nd.y - q, nd.x + q, nd.y + q], ly.fr);
+        if (d[2] > d[0] && d[3] > d[1]) ly.pend.push(d);
+      }
+      if (ly.pend.length > PEND_MAX) ly.pend = [sc.boundsOf(ly.pend)];
+    }
+  }
+
+  // ---- idle work -------------------------------------------------------------------------
+  // What is not on screen yet, a band per step, as many steps as the idle
+  // period has room for (each step's cost estimated from the last ones of
+  // its kind, so a slow machine takes smaller bands and no step is a long
+  // task): the shown layer's margin, then the parts (a filter composes from
+  // them), then the hidden one of base / dim (a focus, or its end, finds it
+  // ready). Each band is forced to raster then (`rasterNow`).
+  /** ms per device pixel of each kind of step, measured. */
+  const cost = { base: 2e-5, dim: 4e-5, below: 2e-5, over: 2e-5, faint: 3e-5 };
+  const costSeen = {};
+  let pumping = false;
+  // Set when an idle callback ran only at its timeout: the rest of the owed
+  // work goes on in background tasks until none is left.
+  let starved = false;
+  function schedule() {
+    if (pumping || !alive()) return;
+    pumping = true;
+    if (starved) bgCall(pump);
+    else if (typeof requestIdleCallback === 'function') requestIdleCallback(pump, { timeout: 100 });
+    else bgCall(pump);
+  }
+  /** The next owed work for frame `fr`: a layer or part with rectangles left, brought to the frame first. */
+  function nextWork(fr) {
+    const focus = !!plan;
+    const shown = focus ? L.dim : L.base;
+    // The parts first: the shown margin then composes from them, and a
+    // filter toggle (or a hover's faded copy) that lands meanwhile finds
+    // them current.
+    for (const ly of [B, O, F]) {
+      bring(ly, fr, verOf[ly.name]());
+      if (ly.pend.length) return ly;
+    }
+    if (shown.pend.length) return shown;
+    const hidden = focus ? L.base : L.dim;
+    bring(hidden, fr, verLayer());
+    if (hidden.pend.length) return hidden;
+    return null;
+  }
+  function pump(deadline) {
+    pumping = false;
+    if (!view || !alive() || flat) return;
+    const fr = frame();
+    const t0 = performance.now();
+    starved = !deadline || deadline.didTimeout;
+    const room = starved ? STEP_MS : Math.min(ROOM_MS, deadline.timeRemaining());
+    for (let n = 0; ; n++) {
+      const ly = nextWork(fr);
+      if (!ly) {
+        starved = false;
+        dropScratch();
         return;
       }
-      const ly = focus ? L.base : L.dim;
-      const ver = layerVer();
-      if (ly.ver === ver && ly.fk === fr.key) return;
-      // A copy and strips (a pan) are cheap: at once, no part needed. A
-      // whole compose is a blit per part over every device pixel (about
-      // 2.5 ms a million in software raster): first the parts, one per
-      // idle callback, then the layer in bands of rows, one per callback.
-      if (ly.ver === ver && ly.fr && shiftOf(ly.fr, fr)) {
-        if (ensureLayer(ly, fr, faded)) rasterNow(ly.cv);
-        return;
-      }
-      for (const name of sc.LAYER_PARTS[faded ? 'dim' : 'base']) {
-        if (ensurePart(name, fr)) {
-          rasterNow(parts[name].cv);
-          idleFor = true;
-          idleCall(step);
-          return;
-        }
-      }
-      const key = `${ver}|${fr.key}|${faded}`;
-      if (!band || band.ly !== ly || band.key !== key) {
-        band = { ly, key, y: 0 };
-        sizeLayer(ly, fr, true, null);
-        ly.ver = null;
-      }
-      const rows = Math.max(1, Math.ceil(BAND_PX / fr.pw));
-      const ctx = ctxOf(ly);
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.beginPath();
-      ctx.rect(0, band.y, fr.pw, rows);
-      ctx.clip();
-      sc.compose(ctx, S, fr, partCanvases(), faded);
-      ctx.restore();
+      const left = room - (performance.now() - t0);
+      // (A step can cost twice its estimate: none starts without room for one.)
+      if (n > 0 && left < STEP_MS) break;
+      const k = ly.name;
+      // A kind's first step (its canvas's first drawing: the backing store
+      // is allocated then, ~30 ms at a 4x slower CPU whatever the band) is
+      // the smallest band, alone in its callback, and teaches no cost.
+      const first = !costSeen[k];
+      if (first && n > 0) break;
+      const px = first ? MIN_BAND_PX : Math.max(MIN_BAND_PX, Math.min(MAX_BAND_PX, Math.min(left - 2, STEP_MS) / (1.5 * cost[k])));
+      const r = ly.pend[0];
+      const band = area(r) <= px ? r : bands(r, px)[0];
+      if (band === r) ly.pend.shift();
+      else ly.pend[0] = [r[0], band[3], r[2], r[3]];
+      const t1 = performance.now();
+      ly.draw([band]);
       rasterNow(ly.cv);
-      band.y += rows;
-      if (band.y < fr.ph) {
-        idleFor = true;
-        idleCall(step);
-        return;
+      const ms = performance.now() - t1;
+      ly.ms += ms;
+      costSeen[k] = true;
+      if (first) {
+        if (k === 'base' || k === 'dim') stats.ms[k] = ly.ms;
+        break;
       }
-      band = null;
-      ly.ver = ver;
-      ly.fr = fr;
-      ly.fk = fr.key;
-      stats.composed++;
-      stats.full++;
-    };
-    afterPaint(step, 400);
+      cost[k] = 0.5 * cost[k] + (0.5 * ms) / area(band);
+      if (k === 'base' || k === 'dim') stats.ms[k] = ly.ms;
+    }
+    dropScratch();
+    schedule();
+  }
+  /** Whether nothing is owed (for the browser checks). */
+  function idleNow() {
+    if (!view || pumping || queued) return false;
+    const fr = frame();
+    const cur = (ly, ver) => ly.ver === ver && ly.fk === fr.key && !ly.pend.length;
+    return cur(L.base, verLayer()) && cur(L.dim, verLayer()) && cur(B, verOf.below()) && cur(O, verOf.over()) && cur(F, verOf.faint());
   }
 
   // ---- the patch ------------------------------------------------------------------------
@@ -538,33 +663,6 @@ export function canvasSurface(o) {
     ctx.arc(nd.x, nd.y, nd.r + 6, 0, 2 * Math.PI);
     ctx.stroke();
   }
-  let labelScratch = null;
-  /** The faded labels inside rectangle `r` of `fr` (all but `skip`), on a scratch canvas at r's corner. */
-  function fadedLabels(fr, r, skip) {
-    const w = r[2] - r[0];
-    const hh = r[3] - r[1];
-    if (!labelScratch) {
-      const c = document.createElement('canvas');
-      labelScratch = { c, ctx: c.getContext('2d') };
-    }
-    const { c, ctx } = labelScratch;
-    if (c.width < w || c.height < hh) {
-      c.width = Math.max(c.width, w);
-      c.height = Math.max(c.height, hh);
-    } else {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, w, hh);
-    }
-    sc.viewTransform(ctx, fr, r[0], r[1]);
-    const items = [];
-    for (const it of sc.baseLabels(S, fr)) {
-      if (skip.has(it.i)) continue;
-      const d = toDevice(sc.labelBox(S, it.i, it.x, it.y, it.anchor, 600), fr);
-      if (d[0] < r[2] && d[2] > r[0] && d[1] < r[3] && d[3] > r[1]) items.push(it);
-    }
-    sc.drawLabels(ctx, S, items);
-    return c;
-  }
   /** Draw the patch for frame `fr` (layers above), or hide it when nothing is marked. */
   function drawPatch(fr) {
     const P = L.patch;
@@ -576,11 +674,13 @@ export function canvasSurface(o) {
     }
     const w = r[2] - r[0];
     const hh = r[3] - r[1];
-    // The canvas only grows (to the largest patch at this ratio): a resize
-    // reallocates it and makes the next font set re-resolve its style.
-    if (P.w < w || P.h < hh || P.dpr !== fr.dpr) {
-      P.cv.width = P.w = Math.max(P.dpr === fr.dpr ? P.w : 0, w);
-      P.cv.height = P.h = Math.max(P.dpr === fr.dpr ? P.h : 0, hh);
+    // The canvas grows to the largest patch at this ratio (a resize
+    // reallocates it and makes the next font set re-resolve its style), and
+    // shrinks back once a patch needs under a quarter of it.
+    if (P.w < w || P.h < hh || P.dpr !== fr.dpr || P.w * P.h > 4 * w * hh) {
+      const keep = P.dpr === fr.dpr && P.w * P.h <= 4 * w * hh;
+      P.cv.width = P.w = Math.max(keep ? P.w : 0, w);
+      P.cv.height = P.h = Math.max(keep ? P.h : 0, hh);
       P.dpr = fr.dpr;
       P.cv.style.width = P.w / fr.dpr + 'px';
       P.cv.style.height = P.h / fr.dpr + 'px';
@@ -596,17 +696,21 @@ export function canvasSurface(o) {
     ctx.beginPath();
     ctx.rect(0, 0, w, hh);
     ctx.clip();
-    // What is under it: with a focus, `dim` without the lit memories'
-    // faded labels; else `base`.
+    // What is under it: the shown layer, whatever it owes there drawn
+    // first; with a focus, the faded copy without the lit memories' faded
+    // labels.
+    // (With a focus: the faded copy, current there, and the lit memories'
+    // label boxes drawn again without their faded labels.)
     if (plan) {
-      const lbl = fadedLabels(fr, r, new Set(plan.on));
-      // (The faded parts are current whenever dim is: it is composed from
-      // them, a pan of it included. Brought up here should that ever not
-      // hold.)
-      for (const name of sc.LAYER_PARTS.dim) ensurePart(name, fr);
-      sc.compose(ctx, S, fr, partCanvases(), true, r[0], r[1], lbl);
+      settle(L.dim, r);
+      ctx.drawImage(L.dim.cv, -r[0], -r[1]);
+      const skip = new Set(plan.on);
+      const holes = labelHoles(fr, r, skip);
+      if (holes.length) faded(ctx, fr, holes, skip, r[0], r[1]);
+    } else {
+      settle(L.base, r);
+      ctx.drawImage(L.base.cv, -r[0], -r[1]);
     }
-    else ctx.drawImage(L.base.cv, -r[0], -r[1]);
     sc.viewTransform(ctx, fr, r[0], r[1]);
     if (plan) {
       const recs = [];
@@ -638,26 +742,30 @@ export function canvasSurface(o) {
   /** The patch (or the layers) changed since the last flush. */
   let dirty = true;
   let queued = false;
-  /** Mid-gesture: the opaque layer the patch was drawn into (`gesture`). */
+  /** Mid-gesture: the opaque layer the patch was drawn into, and where (`gesture`). */
   let flat = false;
+  let flatRect = null;
   function invalidate() {
     dirty = true;
     if (queued) return;
     queued = true;
     queueMicrotask(flush);
   }
-  // Set by the first drawing, never cleared: a flattened gesture (which
-  // marks the layers stale) must not take the first-drawing path again.
+  // Set by the first drawing, never cleared.
   let drawnOnce = false;
   function flush() {
     queued = false;
     if (!view || !alive() || flat) return;
     const fr = frame();
     const focus = !!plan;
-    // Only the shown one of base / dim is brought up to date now; the
-    // other follows in idle time.
-    if (ensureLayer(focus ? L.dim : L.base, fr, focus)) {
+    // Only the shown one of base / dim is brought to the frame now, and
+    // only the box of it drawn; the rest follows in idle time.
+    const shown = focus ? L.dim : L.base;
+    const t0 = performance.now();
+    bring(shown, fr, verLayer());
+    if (settle(shown, boxRect(fr))) {
       dirty = true;
+      stats.ms[shown.name] = performance.now() - t0;
       if (!drawnOnce) {
         drawnOnce = true;
         afterPaint(() => {
@@ -669,7 +777,7 @@ export function canvasSurface(o) {
           listQueued = true;
           afterPaint(listSlice);
         }
-      } else otherLater();
+      }
     }
     // With a focus the opaque faded copy covers the base: only it and the
     // patch are shown (every visible canvas is a compositor layer).
@@ -679,6 +787,9 @@ export function canvasSurface(o) {
       dirty = false;
       drawPatch(fr);
     }
+    // (A box-sized scratch from a faded drawing is let go of at once.)
+    dropScratch(SCRATCH_KEEP);
+    if (warm && !idleNow()) schedule();
   }
 
   // ---- light / dark, device pixel ratio ----------------------------------------------
@@ -823,14 +934,23 @@ export function canvasSurface(o) {
   host.graphDebug = {
     stats,
     /** Device bytes of every canvas the host holds now (backing stores, 4 per pixel). */
-    backingBytes: () => [L.base, L.dim, L.patch, ...Object.values(parts)].reduce((a, ly) => a + 4 * ly.cv.width * ly.cv.height, 0) + (labelScratch ? 4 * labelScratch.c.width * labelScratch.c.height : 0),
+    backingBytes: () => [L.base, L.dim, L.patch, B, O, F].reduce((a, ly) => a + 4 * ly.cv.width * ly.cv.height, 0) + (scratch ? 4 * scratch.width * scratch.height : 0),
     relationsDrawn: () => S.recs.length,
     listBuilt: () => made.length,
     listDone: () => !!buttons,
-    parts: () => parts,
-    /** Mark every part and layer stale, so the next flush draws each one whole. */
+    /** Whether every layer and part is drawn whole for the frame now (nothing left for idle time). */
+    idle: idleNow,
+    /** Mark every part and layer stale, so each one is drawn whole again. */
+    // (The parts first, so the layers compose from them as a filter does.)
     redrawAll: () => {
-      for (const ly of [L.base, L.dim, ...Object.values(parts)]) ly.ver = 'stale';
+      if (!view) return;
+      const fr = frame();
+      for (const ly of [B, O, F]) {
+        ly.ver = 'stale';
+        bring(ly, fr, verOf[ly.name]());
+        settle(ly, null);
+      }
+      for (const ly of [L.base, L.dim]) ly.ver = 'stale';
       invalidate();
     },
   };
@@ -847,7 +967,20 @@ export function canvasSurface(o) {
       if (nodes[i].hub === on) return;
       nodes[i].hub = on;
       S.nodeVersion++;
-      invalidate();
+      // Owed a frame later: a filter's frame shows its relations, the one
+      // after it the looks it changed (a few hundred memories drawn again cost a
+      // 2k-memory filter ~7 ms at ratio 2, which made its frame miss a vsync).
+      nodesChanged.push(i);
+      if (!nodeFrame)
+        nodeFrame = requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            nodeFrame = 0;
+            if (!alive()) return;
+            owe(nodesChanged);
+            nodesChanged = [];
+            invalidate();
+          }),
+        );
     },
     setCur(i, on) {
       if (on) curNode = i;
@@ -949,10 +1082,11 @@ export function canvasSurface(o) {
         ctx.drawImage(P.cv, 0, 0, P.rect[2] - P.rect[0], P.rect[3] - P.rect[1], P.rect[0], P.rect[1], P.rect[2] - P.rect[0], P.rect[3] - P.rect[1]);
         P.cv.hidden = true;
         flat = under;
+        flatRect = P.rect;
       } else if (flat) {
-        // That layer now holds the patch: composed afresh (from the parts,
-        // which are still current) at the settle.
-        flat.ver = 'stale';
+        // That layer now holds the patch there: owed again (copied along
+        // with it by a pan, and drawn with the box at the settle).
+        flat.pend.push(flatRect);
         flat = false;
         invalidate();
       }

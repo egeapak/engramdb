@@ -22,7 +22,8 @@
 //                  carded; the pointer at its middle names it, a click pins it
 //   filters        a display filter moves no memory, and (canvas) changes the
 //                  drawn pixels when it hides relations, which come back
-//                  identical when it is undone; the picture's label counts
+//                  when it is undone (to antialiasing: < 0.05 % of pixels
+//                  off by more than 8 levels); the picture's label counts
 //                  the relations shown; a drawing built from copies (margin,
 //                  pans) is within antialiasing of one drawn whole (< 0.2 %
 //                  of pixels off by more than 8 levels)
@@ -157,6 +158,9 @@ const PIXEL_DIFF = () => {
   }
   return { share: n / (d.length / 4), max };
 };
+
+/** Until the canvas host owes nothing (its margin and hidden layer are drawn in idle time). */
+const layersIdle = (p) => p.waitForFunction(() => { const c = document.querySelector('.g-canvas'); return !c || c.graphDebug.idle(); }, null, { timeout: 10000 });
 
 /** Hover `n` memories inside the box: how many the tooltip names. */
 async function hoverHits(p, n) {
@@ -335,26 +339,32 @@ async function check(browser, url, size, view, style) {
   // A drawing built from copies (the margin grown, a pan) is not bit-exact
   // with one drawn whole: Skia antialiases a path the canvas edge clips by a
   // different route, a few levels on edge pixels. So the copies are held to
-  // a bound here, and the baseline for the exact undo below is drawn whole.
+  // a bound here, and the baseline for the undo below is drawn whole.
   let copied = null;
   if (canvas) {
     await p.evaluate(LAYER_PIXELS, true);
     await p.evaluate(() => document.querySelector('.g-canvas').graphDebug.redrawAll());
-    await p.waitForTimeout(150);
+    await layersIdle(p);
     copied = await p.evaluate(PIXEL_DIFF);
     await p.evaluate(LAYER_PIXELS, true);
   }
   await p.evaluate(() => [...document.querySelectorAll('.chip')].find((b) => b.textContent === 'Proposed').click());
   await p.waitForTimeout(150);
+  if (canvas) await layersIdle(p);
   const after = await p.evaluate(MEMORIES);
   const d1 = await drawn();
   const px1 = canvas ? await p.evaluate(PIXEL_DIFF) : null;
   await p.evaluate(() => [...document.querySelectorAll('.chip')].find((b) => b.textContent === 'Proposed').click());
   await p.waitForTimeout(150);
+  if (canvas) await layersIdle(p);
   const px2 = canvas ? await p.evaluate(PIXEL_DIFF) : null;
   const moved = before.filter((m, k) => !after[k] || Math.abs(m.x - after[k].x) >= 0.01 || Math.abs(m.y - after[k].y) >= 0.01);
-  // Hiding relations must show in the pixels (and the label), and undoing it restore them exactly.
-  const drew = !canvas || ((d1.n < d0.n ? px1.share > 0 && d1.label !== d0.label : px1.max === 0) && px2.max === 0 && copied.share < 0.002);
+  // Hiding relations must show in the pixels (and the label), and undoing it
+  // restore them: to antialiasing, since a filter redraws only what changed
+  // (the memories whose look it changed, by rectangle) and a path clipped by
+  // a rectangle is antialiased by another route (< 0.05 % of pixels off by
+  // more than 8 levels).
+  const drew = !canvas || ((d1.n < d0.n ? px1.share > 0 && d1.label !== d0.label : px1.max === 0) && px2.share < 0.0005 && copied.share < 0.002);
   ok('filters', before.length === after.length && moved.length === 0 && drew, { before: before.length, after: after.length, moved: moved.length, drawn: [d0, d1], pixels: [px1, px2], copiedVsWhole: copied });
 
   // zoom gesture settles
@@ -427,15 +437,17 @@ async function check(browser, url, size, view, style) {
     // (The baseline is drawn whole, as the switch draws: a drawing straight
     // from the scene or built from copies differs from it by rounding.)
     await p.evaluate(() => document.querySelector('.g-canvas').graphDebug.redrawAll());
-    await p.waitForTimeout(150);
+    await layersIdle(p);
     await p.evaluate(LAYER_PIXELS, true);
     await p.click('#theme-btn');
     await p.waitForTimeout(150);
+  if (canvas) await layersIdle(p);
     const dark = await p.evaluate(PIXEL_DIFF);
     await p.click('#theme-btn');
     await p.waitForTimeout(150);
+  if (canvas) await layersIdle(p);
     const back = await p.evaluate(PIXEL_DIFF);
-    ok('theme', dark.share > 0.5 && back.max === 0, { dark, back });
+    ok('theme', dark.share > 0.5 && back.share < 0.0005, { dark, back });
 
     // a height-only resize: the pointer still names the memory under it
     await p.setViewportSize({ width: 1280, height: 700 });
