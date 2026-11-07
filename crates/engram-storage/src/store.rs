@@ -2041,6 +2041,9 @@ impl MemoryStore {
             Vec::new()
         };
         // Their edges cannot be re-derived either; keep the rows they own.
+        // A failed read is fatal, before anything is cleared: the rebuild
+        // below overwrites the whole table, so carrying on would delete the
+        // rows these files own until each is fixed and reindexed again.
         let kept_edges: Vec<crate::edge_index::EdgeRow> = if existing_kept.is_empty() {
             Vec::new()
         } else {
@@ -2048,10 +2051,14 @@ impl MemoryStore {
                 existing_kept.iter().map(String::as_str).collect();
             crate::edge_index::load_all(self.lance_index.connection())
                 .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("could not read the edges of unparseable memories: {e:#}");
-                    Vec::new()
-                })
+                .map_err(|e| {
+                    StorageError::Validation(format!(
+                        "could not read the edges of {} unparseable memor{} (their rows would \
+                         be lost by the rebuild); reindex refused: {e:#}",
+                        owners.len(),
+                        if owners.len() == 1 { "y" } else { "ies" }
+                    ))
+                })?
                 .into_iter()
                 .filter(|r| owners.contains(r.owner_id.as_str()))
                 .collect()
@@ -4882,6 +4889,52 @@ mod tests {
         );
         // The file itself is untouched throughout.
         assert_eq!(async_fs::read_to_string(&path).await.unwrap(), conflicted);
+    }
+
+    /// When the edges of an unparseable file cannot be read, a full reindex
+    /// refuses before clearing anything: its whole-table edge rebuild would
+    /// otherwise delete the rows that file owns.
+    #[tokio::test]
+    async fn reindex_refuses_when_an_unparseable_files_edges_cannot_be_read() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let other = Memory::new(MemoryType::Decision, "other", "c", Provenance::human());
+        store.create(&other).await.unwrap();
+        let mut m = Memory::new(MemoryType::Decision, "conflicted", "c", Provenance::human());
+        m.supersedes = vec!["old-1".into()];
+        m.links = vec![engram_types::Link::new(
+            other.id.clone(),
+            engram_types::LinkKind::Supports,
+            engram_types::LinkOrigin::Human,
+        )];
+        store.create(&m).await.unwrap();
+        let path = paths::memories_dir(tmp.path()).join(memory_file::memory_filename(&m));
+        let clean = async_fs::read_to_string(&path).await.unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted, "fixture did not inject the conflict");
+        async_fs::write(&path, &conflicted).await.unwrap();
+
+        // Break the edges table so it lists but will not open.
+        let versions = paths::lancedb_dir(&store.project_id)
+            .unwrap()
+            .join(format!("{}.lance", crate::edge_index::EDGES_TABLE))
+            .join("_versions");
+        assert!(versions.is_dir(), "fixture: no edges table at {versions:?}");
+        std::fs::remove_dir_all(&versions).unwrap();
+
+        let err = store.reindex_counted().await.unwrap_err();
+        assert!(
+            err.to_string().contains("unparseable"),
+            "the refusal names its cause: {err}"
+        );
+        assert!(
+            store.list_ids().await.unwrap().contains(&m.id),
+            "nothing was cleared"
+        );
     }
 
     #[test]

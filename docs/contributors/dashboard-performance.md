@@ -179,18 +179,23 @@ answers with a `layout` object computed in Rust (`src/layout/`, a port of
 builder `graph/input.js`). The page decodes it and skips its own layout; it
 lays out as before (scope-force in the worker, the overview on the main
 thread) when the response has none, or the header (`v`, name, node/edge
-counts, aspect, width, `groups`, and `check`, a checksum of the input the
-page recomputes) does not match its own input, or a decoded number is not
-finite. Parity (`node bench/server-layout.mjs`, every key compared with
+counts, aspect, width, `check`, a checksum of the input the page
+recomputes — `inputCheck` for scope-force, `overviewCheck` for the overview,
+whose band `k` is drawn along route `k`, so pair order is checked too — and
+for scope-force `groups`) does not match its own input, or a decoded number
+is not finite. Parity (`node bench/server-layout.mjs`, every key compared with
 `Object.is`, so bit for bit, not within a tolerance): **0 differences** for
 positions, routes, labels and scope names on every bench store and path
 (tab, opened scope, show all) at 1280 and 390 px, the same labels placed
 and the same crossings. The same comparison runs in CI on three committed
-fixtures (`bench/golden.mjs`, `the_ports_match_the_js_on_the_golden_fixtures`),
-and a hash of the layout JS pinned to `LAYOUT_VERSION` fails CI when the JS
-changes without the port.
+fixtures: `node bench/golden.mjs --check` (the CI *Check & Lint* job) fails
+when the JS output no longer matches them, and
+`the_ports_match_the_js_on_the_golden_fixtures` when the Rust output does
+not. A hash of the layout JS (everything an input is built from: the
+layouts, `input.js` with its overview pairing `scopePairs`, and the decoder)
+pinned to `LAYOUT_VERSION` fails CI when the JS changes without the port.
 
-Encoding (`layout.v = 2`): positions as little-endian f64 in base64,
+Encoding (`layout.v = 3`): positions as little-endian f64 in base64,
 one byte per label (the `spotsAt` index, 255 = unplaced), stub ends only
 (straight routes come from positions), scope names and region radii as
 JSON. For 800 memories: ~20 KB (14 KB gzipped) inside a ~450–530 KB

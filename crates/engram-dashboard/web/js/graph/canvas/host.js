@@ -35,8 +35,16 @@
 // textures by colour), so nothing tells it about a switch.
 //
 // **Parts and layers** (./scene.js draws them; each the view's box plus an
-// overscan margin, at devicePixelRatio, the whole capped at `LAYER_PX`
-// device pixels, so a DPR 2 box gets a narrower margin). Three part bitmaps
+// overscan margin, at devicePixelRatio). `LAYER_PX` bounds the margin:
+// it shrinks so box + margin stay within it. The box itself is bounded by
+// the page's CSS (`.wrap`'s 1240 px less the 300 px card, or the whole
+// width under 980 px; min(70vh, 720px) tall), so it is at most ~950 × 720
+// CSS px, 2.7 M device px at DPR 2: under LAYER_PX, which then holds as a
+// cap. At DPR 2 the margin is what is left, 20–60 px (measured: 61 px on a
+// 914 × 600 box, 27 on 914 × 718, 20 on 946 × 718; ~57 MB of canvases on
+// each), at DPR 1 the full OVERSCAN. A box over LAYER_PX on its own (a
+// stylesheet change) would get no margin, bounded by `MAX_PIXELS` only.
+// Three part bitmaps
 // off the page, each with its own version and frame key: `below` (the
 // opaque backdrop), `over` (above + labels + memories, unfaded) and `faint`
 // (labels and memories, each faded as a group); the relations, stubs and
@@ -120,7 +128,12 @@ export function canvasSupported() {
   return typeof CanvasRenderingContext2D === 'function' && typeof Path2D === 'function' && typeof DOMMatrix === 'function' && 'addPath' in Path2D.prototype && 'roundRect' in CanvasRenderingContext2D.prototype;
 }
 
-/** At most this many device pixels per layer (with its margin): five full-size canvases are kept (base, dim and the three parts). */
+/**
+ * The margin keeps each layer (box + margin) within this many device
+ * pixels, five full-size canvases being kept (base, dim and the three
+ * parts); a box over it alone gets no margin and is bounded by MAX_PIXELS
+ * (module docs).
+ */
 const LAYER_PX = 3e6;
 /** Idle work: one step aims at this many ms, in bands of rows within these bounds (device px). */
 const STEP_MS = 12;
@@ -245,7 +258,16 @@ export function canvasSurface(o) {
   }
   let tagEls = [];
   const host = h('div', { class: 'graph g-canvas' }, pic, L.base.cv, L.dim.cv, L.patch.cv, list);
-  const alive = () => host.isConnected;
+  // Gone once it was in the page and is no longer: `dispose` then lets go
+  // of everything (a host left behind must not keep its canvases).
+  let placed = false;
+  let disposed = false;
+  const alive = () => {
+    if (disposed) return false;
+    if (host.isConnected) return (placed = true);
+    if (placed) dispose();
+    return false;
+  };
 
   // ---- frames ----------------------------------------------------------------------
   function dprFor(cw, ch) {
@@ -254,9 +276,9 @@ export function canvasSurface(o) {
   }
   /**
    * The overscan margin (CSS px, each side) for a W × H box: OVERSCAN of its
-   * larger side, cut so a layer holds at most LAYER_PX device pixels (four
-   * full-size canvases are kept, docs at the top); none before the first
-   * drawing is on screen.
+   * larger side, cut so box + margin hold at most LAYER_PX device pixels
+   * (five full-size canvases are kept, docs at the top); none when the box
+   * alone is over that (no box the page's CSS allows is: module docs).
    */
   function marginFor(W, H) {
     const d = Math.min(DPR_MAX, window.devicePixelRatio || 1);
@@ -371,9 +393,13 @@ export function canvasSurface(o) {
     const sameFrame = old && ly.fk === fr.key;
     sizeLayer(ly, fr, sh);
     let pend;
+    // (What a copied pan uncovers, filled with the background below; the
+    // rectangles it owed and kept are drawn copies, not filled.)
+    let fill;
     if (sh) {
       const all = [0, 0, fr.pw, fr.ph];
-      pend = strips(fr, sh, old);
+      fill = strips(fr, sh, old);
+      pend = fill.slice();
       for (const r of ly.pend) {
         const m = meet(all, [r[0] + sh[0], r[1] + sh[1], r[2] + sh[0], r[3] + sh[1]]);
         if (m) pend.push(m);
@@ -381,6 +407,7 @@ export function canvasSurface(o) {
       stats.shifted++;
     } else {
       pend = [[0, 0, fr.pw, fr.ph]];
+      fill = pend;
       stats.full++;
     }
     if (ly.inPage && !sameFrame) {
@@ -388,7 +415,7 @@ export function canvasSurface(o) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalAlpha = 1;
       ctx.fillStyle = S.T.bg;
-      for (const r of sh ? pend.slice(0, pend.length - ly.pend.length) : pend) ctx.fillRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
+      for (const r of fill) ctx.fillRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
     }
     ly.ver = ver;
     ly.fr = fr;
@@ -397,13 +424,37 @@ export function canvasSurface(o) {
     ly.ms = 0;
     return true;
   }
-  /** Draw what `ly` owes inside `region` (all of it when null) now, in one pass through `ly.draw`. */
+  /**
+   * Draw what `ly` owes inside `region` (all of it when null; a rectangle,
+   * or a list of them) now, in one pass through `ly.draw`. An owed
+   * rectangle that more than one region of a list cuts is drawn there and
+   * stays owed whole (cutting it into the bands around many discs would
+   * only be merged back into its bounds).
+   */
   function settle(ly, region) {
     if (!ly.pend.length) return false;
     const t0 = performance.now();
     const rest = [];
     const now = [];
+    const many = region && Array.isArray(region[0]);
     for (const r of ly.pend) {
+      if (many) {
+        const ms = [];
+        for (const q of region) {
+          const m = meet(r, q);
+          if (m) ms.push(m);
+        }
+        if (ms.length === 1 && ms[0][0] === r[0] && ms[0][1] === r[1] && ms[0][2] === r[2] && ms[0][3] === r[3]) now.push(r);
+        else {
+          rest.push(r);
+          if (ms.length === 1) {
+            rest.pop();
+            rest.push(...minus(r, ms[0]));
+          }
+          now.push(...ms);
+        }
+        continue;
+      }
       const m = region ? meet(r, region) : r;
       if (!m) {
         rest.push(r);
@@ -455,9 +506,11 @@ export function canvasSurface(o) {
   L.base.draw = (rs) => {
     const fr = L.base.fr;
     if (partAt(B, fr) && partAt(O, fr)) {
-      const b = sc.boundsOf(rs);
-      settle(B, b);
-      settle(O, b);
+      // (The rectangles themselves, not their bounds: a few hundred
+      // scattered discs span the box, and a part still owing all of it
+      // would be drawn whole here.)
+      settle(B, rs);
+      settle(O, rs);
       sc.composeUnfaded(ctxOf(L.base), S, fr, rs, { below: B.cv, over: O.cv });
       stats.composed++;
     } else sc.drawUnfaded(ctxOf(L.base), S, fr, rs);
@@ -468,8 +521,8 @@ export function canvasSurface(o) {
     // (The faint part holds every label: not for a picture that leaves some out.)
     const useF = !(skip && skip.size) && partAt(F, fr);
     const b = sc.boundsOf(rs);
-    if (useB) settle(B, b);
-    if (useF) settle(F, b);
+    if (useB) settle(B, rs);
+    if (useF) settle(F, rs);
     sc.drawFaded(ctx, S, fr, rs, { scratch: scratchFor(b[2] - b[0], b[3] - b[1]), below: useB ? B.cv : null, faint: useF ? F.cv : null, skip, dx, dy });
   }
   /** The device boxes, inside `r`, of the base labels of the memories in `skip` (frame `fr`). */
@@ -793,35 +846,75 @@ export function canvasSurface(o) {
   }
 
   // ---- light / dark, device pixel ratio ----------------------------------------------
+  // The tokens are read again only when what they depend on changed: the
+  // app sets `data-graph-style` on every route, to the same value mostly.
+  const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  const themeKey = () => {
+    const de = document.documentElement;
+    return `${de.getAttribute('data-theme')}|${de.getAttribute('data-graph-style')}|${mq ? mq.matches : ''}`;
+  };
+  let themeNow = themeKey();
   const retheme = () => {
-    if (!alive()) {
-      mo.disconnect();
-      if (mq) mq.removeEventListener('change', retheme);
-      return;
-    }
+    if (!alive()) return;
+    const k = themeKey();
+    if (k === themeNow) return;
+    themeNow = k;
     readTokens();
     invalidate();
   };
   const mo = new MutationObserver(retheme);
   mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-graph-style'] });
-  const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   if (mq) mq.addEventListener('change', retheme);
   // A move to a screen of another ratio changes no CSS size, so no resize
-  // observer fires: a resolution query does, re-armed at each new ratio.
+  // observer fires: a resolution query does, re-armed at each new ratio
+  // (and removed by `dispose`).
+  let ratioQ = null;
+  function onRatio() {
+    ratioQ = null;
+    if (!alive()) return;
+    watchRatio();
+    invalidate();
+  }
   function watchRatio() {
     if (!window.matchMedia) return;
-    const q = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
-    q.addEventListener(
-      'change',
-      () => {
-        if (!alive()) return;
-        watchRatio();
-        invalidate();
-      },
-      { once: true },
-    );
+    ratioQ = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+    ratioQ.addEventListener('change', onRatio, { once: true });
   }
   watchRatio();
+  /**
+   * Let go of everything once the host left the page (the view calls it, and
+   * so does the first callback that finds the host gone): the listeners on
+   * the document and media queries, which would keep the host alive, and
+   * every canvas's backing store (each layer and part up to `MAX_PIXELS`).
+   */
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    mo.disconnect();
+    if (mq) mq.removeEventListener('change', retheme);
+    if (ratioQ) ratioQ.removeEventListener('change', onRatio);
+    ratioQ = null;
+    if (nodeFrame) cancelAnimationFrame(nodeFrame);
+    nodeFrame = 0;
+    for (const ly of [L.base, L.dim, L.patch, B, O, F]) {
+      ly.cv.width = ly.cv.height = 0;
+      ly.w = ly.h = 0;
+      ly.ver = ly.fr = ly.fk = null;
+      ly.pend = [];
+    }
+    L.patch.rect = null;
+    for (const cv of [scratch, spare, sink]) if (cv) cv.width = cv.height = 0;
+    scratch = spare = sink = null;
+    view = null;
+    plan = null;
+    built = [];
+    want = new Uint8Array(0);
+    hitEdge = null;
+    tags = [];
+    S.recs = [];
+    S.stubs = [];
+    S.tags = [];
+  }
 
   // ---- pointer: hover, cursor, click --------------------------------------------------
   let pointerNode = -1;
@@ -992,6 +1085,9 @@ export function canvasSurface(o) {
       return { k, pts, rec: hooks.edge(e, pts, ends) };
     },
     placeEdges(b, w) {
+      // The same relations shown again: nothing to draw, so the layers keep
+      // their version and a pan is copied.
+      if (b === built && w.length === want.length && w.every((x, k) => x === want[k])) return;
       built = b;
       want = w;
       S.recs = [];
@@ -1007,12 +1103,21 @@ export function canvasSurface(o) {
       invalidate();
     },
     setStubs(next, many) {
+      const same = (a, c) => a.i === c.i && a.x1 === c.x1 && a.y1 === c.y1 && a.x2 === c.x2 && a.y2 === c.y2 && a.w === c.w && a.contra === c.contra;
+      if (many === S.stubsMany && next.length === S.stubs.length && next.every((st, j) => same(st, S.stubs[j]))) return;
       S.stubs = next;
       S.stubsMany = many;
       stubVer++;
       invalidate();
     },
     setTags(next) {
+      // The same tags again (a settled view in cut mode): only their actions
+      // are taken, no element is rebuilt and nothing is drawn again.
+      const same = (a, c) => a.tg === c.tg && a.name === c.name && a.count === c.count && a.contradictions === c.contradictions && a.aria === c.aria;
+      if (next.length === tags.length && next.every((tag, j) => same(tag, tags[j]))) {
+        tags = next;
+        return;
+      }
       // Marks follow a tag by name across a rebuild (a filter can drop an
       // earlier one); focus moves to the rebuilt element of the same name.
       const nameOf = (j) => (j >= 0 && tags[j] ? tags[j].name : null);
@@ -1065,6 +1170,7 @@ export function canvasSurface(o) {
       invalidate();
     },
     settled() {},
+    dispose,
     gesture(on) {
       // Mid-gesture the layers move as one picture: the patch is drawn into
       // the opaque layer under it and only that one is shown. In software

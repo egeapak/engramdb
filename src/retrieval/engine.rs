@@ -764,6 +764,27 @@ impl RetrievalEngine {
         &self.config
     }
 
+    /// Score and expand with `from`'s graph and usage knobs
+    /// (`[retrieval.scoring]` `contradicts_penalty` / `supports_boost` /
+    /// `usage_weight`, `[retrieval]` `expand_links` / `expand_links_decay`)
+    /// instead of this store's own.
+    ///
+    /// The cross-store fan-in calls it on every group / global engine with
+    /// the querying project's config: those knobs are a property of the
+    /// query, and a shared store scored by its own (normally default) knobs
+    /// would rank systematically differently from the project's memories in
+    /// the same merged list. The evidence itself (edges, usage) stays the
+    /// shared store's own.
+    pub fn adopt_graph_knobs(&mut self, from: &EngramConfig) {
+        let s = &from.retrieval.scoring;
+        let mine = &mut self.config.retrieval.scoring;
+        mine.contradicts_penalty = s.contradicts_penalty;
+        mine.supports_boost = s.supports_boost;
+        mine.usage_weight = s.usage_weight;
+        self.config.retrieval.expand_links = from.retrieval.expand_links;
+        self.config.retrieval.expand_links_decay = from.retrieval.expand_links_decay;
+    }
+
     /// Embed arbitrary text with the engine's embedding provider. `None`
     /// when no provider is configured or the embed fails (logged). Used by
     /// the §11.4 consolidation pass; NOT a retrieval path.
@@ -1072,6 +1093,20 @@ impl RetrievalEngine {
     /// similarity. Only memories with no chunks at all (created while
     /// embeddings were unavailable) take the no-semantic-evidence paths.
     pub async fn query(&self, query: &RetrievalQuery) -> Result<RetrievalResult> {
+        self.query_expanding_from(query, None).await
+    }
+
+    /// [`query`](Self::query), with one-hop link expansion seeded from at
+    /// most the first `expansion_parents` direct hits (`None` ⇒ every hit
+    /// returned). The cross-store fan-in over-fetches each store far past
+    /// the caller's `max_results` and then cuts the merge back to it, so it
+    /// passes the caller's `max` here: neighbours of hits the cut will drop
+    /// must not spend the expansion budget.
+    pub async fn query_expanding_from(
+        &self,
+        query: &RetrievalQuery,
+        expansion_parents: Option<usize>,
+    ) -> Result<RetrievalResult> {
         use crate::search::{keyword_search_stems, normalize_keyword_score, query_token_count};
 
         let query_started = std::time::Instant::now();
@@ -1260,6 +1295,7 @@ impl RetrievalEngine {
                     query_started,
                     graph,
                     signals.as_ref(),
+                    expansion_parents,
                 )
                 .await;
         }
@@ -1606,10 +1642,10 @@ impl RetrievalEngine {
         }
 
         // Step 8.5: Rank threshold, on the reranked (sorted) candidates.
-        let dropped_below_threshold = if query.mode == RetrievalMode::Rank {
+        let below_threshold = if query.mode == RetrievalMode::Rank {
             self.apply_rank_threshold(&mut candidates, query)
         } else {
-            0
+            Vec::new()
         };
 
         let total = candidates.len();
@@ -1632,8 +1668,10 @@ impl RetrievalEngine {
                 &filtered_entries,
                 graph,
                 signals.as_ref(),
+                expansion_parents,
             )
             .await;
+        let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
         // Expanded neighbours are results the caller sees, so `total` counts
         // them ("Found 3 memories (out of 2 total)" would read as a bug) —
         // only those it did not already count as a cut candidate.
@@ -1694,29 +1732,34 @@ impl RetrievalEngine {
     /// returning nothing: rank mode is "browse by relevance", and an empty
     /// answer sent agents to read the store files directly. Returns how many
     /// candidates were removed, so the caller can report the loss.
+    ///
+    /// Returns the candidates it removed (moved, not cloned), so a caller can
+    /// tell which of them link expansion brought back.
     fn apply_rank_threshold(
         &self,
         candidates: &mut Vec<ScoredCandidate>,
         query: &RetrievalQuery,
-    ) -> usize {
+    ) -> Vec<ScoredCandidate> {
         let threshold = self.config.retrieval.relevance_threshold;
         if threshold <= 0.0 {
-            return 0;
+            return Vec::new();
         }
-        let before = candidates.len();
         let fallback = query
             .rank_fallback
             .unwrap_or(self.config.retrieval.rank_fallback);
         let clears = |c: &ScoredCandidate| c.breakdown.gate_score.unwrap_or(c.score) >= threshold;
         if fallback == 0 || candidates.iter().any(clears) {
-            candidates.retain(clears);
+            let (kept, dropped): (Vec<_>, Vec<_>) =
+                std::mem::take(candidates).into_iter().partition(clears);
+            *candidates = kept;
+            dropped
         } else {
-            candidates.truncate(fallback);
+            let dropped = candidates.split_off(fallback.min(candidates.len()));
             for c in candidates.iter_mut() {
                 c.breakdown.below_threshold = true;
             }
+            dropped
         }
-        before - candidates.len()
     }
 
     /// R2 no-query Rank fast path: score every candidate straight from the
@@ -1729,6 +1772,7 @@ impl RetrievalEngine {
     /// again here from `query.path` once dropped the empty-string collapse, so
     /// the no-query Rank shape (the SessionStart hook) with `path: ""` zeroed
     /// every scope multiplier and returned nothing.
+    #[allow(clippy::too_many_arguments)]
     async fn rank_scope_only_from_index(
         &self,
         query: &RetrievalQuery,
@@ -1737,6 +1781,7 @@ impl RetrievalEngine {
         query_started: std::time::Instant,
         graph: Option<GraphSnapshot>,
         signals: Option<&HashMap<String, ScoreSignals>>,
+        expansion_parents: Option<usize>,
     ) -> Result<RetrievalResult> {
         let now = Utc::now();
 
@@ -1791,7 +1836,7 @@ impl RetrievalEngine {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let dropped_below_threshold = self.apply_rank_threshold(&mut candidates, query);
+        let below_threshold = self.apply_rank_threshold(&mut candidates, query);
 
         let total = candidates.len();
         let max_results = query
@@ -1799,8 +1844,17 @@ impl RetrievalEngine {
             .unwrap_or(self.config.retrieval.max_results);
         let tail = candidates.split_off(max_results.min(candidates.len()));
         let (expanded, new_in_total) = self
-            .expand_candidates(query, &candidates, tail, filtered_entries, graph, signals)
+            .expand_candidates(
+                query,
+                &candidates,
+                tail,
+                filtered_entries,
+                graph,
+                signals,
+                expansion_parents,
+            )
             .await;
+        let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
         let total = total + new_in_total;
         if !expanded.is_empty() {
             candidates.extend(expanded);
@@ -1905,7 +1959,8 @@ impl RetrievalEngine {
     /// query scored it and that is higher. Its breakdown is its own (the
     /// query's, or a scope-only one built with its signals and the query's
     /// situation), so `contradicted_by` / `contradicts_penalty` still say it
-    /// is disputed.
+    /// is disputed. Only the first `parents` hits (`None` ⇒ all) expand.
+    #[allow(clippy::too_many_arguments)]
     async fn expand_candidates(
         &self,
         query: &RetrievalQuery,
@@ -1914,6 +1969,7 @@ impl RetrievalEngine {
         entries: &[crate::storage::IndexForFiltering],
         graph: Option<GraphSnapshot>,
         signals: Option<&HashMap<String, ScoreSignals>>,
+        parents: Option<usize>,
     ) -> (Vec<ScoredCandidate>, usize) {
         let n = query
             .expand_links
@@ -1921,6 +1977,7 @@ impl RetrievalEngine {
             .min(crate::types::MAX_EXPAND_LINKS);
         let parents: Vec<&ScoredCandidate> = hits
             .iter()
+            .take(parents.unwrap_or(usize::MAX))
             .filter(|c| !c.breakdown.below_threshold)
             .collect();
         if n == 0 || parents.is_empty() {
@@ -2046,6 +2103,20 @@ impl RetrievalEngine {
         let new_in_total = out.iter().filter(|c| !tail.contains_key(&c.id)).count();
         (out, new_in_total)
     }
+}
+
+/// `dropped_below_threshold` for a query: the candidates the rank threshold
+/// removed, less any link expansion brought back — a neighbour the caller is
+/// shown was not dropped.
+fn dropped_minus_returned(dropped: &[ScoredCandidate], expanded: &[ScoredCandidate]) -> usize {
+    if expanded.is_empty() || dropped.is_empty() {
+        return dropped.len();
+    }
+    let back: std::collections::HashSet<&str> = expanded.iter().map(|c| c.id.as_str()).collect();
+    dropped
+        .iter()
+        .filter(|c| !back.contains(c.id.as_str()))
+        .count()
 }
 
 /// Sort by score descending, stably (ties keep their order, so a direct hit
@@ -7377,5 +7448,87 @@ mod graph_signal_tests {
         assert_eq!(d.score_breakdown.contradicts_penalty, Some(0.1));
         let want = (hit * 0.5 - challenge - 0.1).max(0.0);
         assert!((d.score - want).abs() < 1e-12, "{} vs {want}", d.score);
+    }
+
+    /// The fan-in over-fetches each store past the caller's `max` and cuts
+    /// the merge back to it, so it passes `max` as the expansion parents:
+    /// a hit past it must not spend the budget.
+    #[tokio::test]
+    async fn expansion_parents_limit_which_hits_expand() {
+        use crate::types::{Link, LinkKind, LinkOrigin, LinkStatus};
+        let (_tmp, store) = graph_fixture().await;
+        // E ("token refresh might race") gets a neighbour of its own: G.
+        store
+            .update_with(GE, |m| {
+                let mut l = Link::new(GG, LinkKind::RelatedTo, LinkOrigin::Human);
+                l.status = LinkStatus::Confirmed;
+                m.links.push(l);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let engine = RetrievalEngine::new(store, EngramConfig::default());
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Filter,
+            query: Some("token".to_string()),
+            max_results: Some(5),
+            expand_links: Some(5),
+            ..Default::default()
+        };
+        let all = engine.query(&q).await.unwrap();
+        let g = find(&all, GG).expect("E's neighbour expands with every hit a parent");
+        assert_eq!(g.score_breakdown.via.as_ref().unwrap().from, GE);
+
+        let top = engine.query_expanding_from(&q, Some(1)).await.unwrap();
+        let first = top.memories[0].memory.id.clone();
+        assert_ne!(first, GE, "premise: E is not the top hit");
+        assert!(find(&top, GG).is_none(), "E is past the parents limit");
+        assert!(top
+            .memories
+            .iter()
+            .filter_map(|sm| sm.score_breakdown.via.as_ref())
+            .all(|v| v.from == first));
+
+        let none = engine.query_expanding_from(&q, Some(0)).await.unwrap();
+        assert!(none
+            .memories
+            .iter()
+            .all(|sm| sm.score_breakdown.via.is_none()));
+    }
+
+    /// A neighbour the rank threshold dropped and expansion brought back is
+    /// shown, so it is no longer counted in `dropped_below_threshold`.
+    #[tokio::test]
+    async fn expansion_returned_neighbour_is_not_counted_as_dropped() {
+        let (_tmp, store) = graph_fixture().await;
+        let config = knobs(|c| c.retrieval.relevance_threshold = 0.3);
+        let engine = RetrievalEngine::new(store, config);
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            logical: vec!["logging".to_string()],
+            max_results: Some(10),
+            expand_links: Some(0),
+            ..Default::default()
+        };
+        let off = engine.query(&q).await.unwrap();
+        assert!(find(&off, GG).is_some());
+        assert!(
+            find(&off, GD).is_none(),
+            "premise: the threshold drops D (no tail at max 10)"
+        );
+        let on = engine
+            .query(&RetrievalQuery {
+                expand_links: Some(3),
+                ..q.clone()
+            })
+            .await
+            .unwrap();
+        assert!(find(&on, GD).is_some_and(|d| d.score_breakdown.via.is_some()));
+        assert_eq!(
+            on.dropped_below_threshold,
+            off.dropped_below_threshold - 1,
+            "D is shown, not dropped"
+        );
+        assert_eq!(on.total, off.total + 1);
     }
 }

@@ -191,8 +191,15 @@ pub fn record_returned(
 /// Drain one store's usage log into its tables, prune raw events past
 /// `retention_days` (folding them into the rollup first), reconcile rollup
 /// rows a failed refresh left behind, and compact. Best-effort: failures
-/// are logged.
-pub async fn maintain_store_usage(store: &StoreRef, enabled: bool, retention_days: Option<u64>) {
+/// are logged. The reconcile (a full scan of the rollup and the raw window,
+/// under the rollup lock) and the compaction run only when `housekeeping`
+/// is set: the daemon drains on every maintenance pass but throttles those.
+pub async fn maintain_store_usage(
+    store: &StoreRef,
+    enabled: bool,
+    retention_days: Option<u64>,
+    housekeeping: bool,
+) {
     use crate::telemetry::usage as u;
     if enabled {
         if let Err(e) = u::drain_to_table(&store.root, &store.id).await {
@@ -203,6 +210,9 @@ pub async fn maintain_store_usage(store: &StoreRef, enabled: bool, retention_day
         if let Err(e) = u::prune_memory_events(&store.id, days).await {
             tracing::debug!(store = %store.id, "usage stats: prune failed (non-fatal): {e}");
         }
+    }
+    if !housekeeping {
+        return;
     }
     if let Err(e) = u::reconcile_rollup(&store.id).await {
         tracing::debug!(store = %store.id, "usage stats: reconcile failed (non-fatal): {e}");
@@ -227,25 +237,38 @@ pub async fn maintain_memory_events(store: &MemoryStore) {
         store.is_group() || store.is_global(),
         config.stats.enabled,
         config.stats.retention_days,
+        &|_| true,
     )
     .await;
 }
 
 /// [`maintain_memory_events`] for a store known by id and root. `shared`
 /// marks a group or the global store, which has no subscriptions to follow.
+/// `housekeeping_due(store_id)` decides, per store, whether the reconcile and
+/// compaction run this time ([`maintain_store_usage`]): `gc` and the CLI pass
+/// are already throttled and always run them; the daemon, which calls this
+/// for every project it serves (and so reaches the global store once per
+/// project), throttles them per store.
 pub async fn maintain_project_usage(
     store: &StoreRef,
     shared: bool,
     enabled: bool,
     retention_days: Option<u64>,
+    housekeeping_due: &(dyn Fn(&str) -> bool + Send + Sync),
 ) {
-    maintain_store_usage(store, enabled, retention_days).await;
+    maintain_store_usage(store, enabled, retention_days, housekeeping_due(&store.id)).await;
     if shared {
         return;
     }
     for other in shared_stores_of(&store.id).await {
         let own = config_at(&other.root).await;
-        maintain_store_usage(&other, own.stats.enabled, own.stats.retention_days).await;
+        maintain_store_usage(
+            &other,
+            own.stats.enabled,
+            own.stats.retention_days,
+            housekeeping_due(&other.id),
+        )
+        .await;
     }
 }
 

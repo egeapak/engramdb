@@ -103,6 +103,8 @@ const afterReviewPins = new Map();
 let refocusStyle = false;
 /** The live graph box's resize observer; a new render disconnects the old one. */
 let resizeObs = null;
+/** The drawn graph's surface `dispose` (canvas), run when the graph leaves the page or the next one renders. */
+let liveSurface = null;
 
 function failWorker() {
   workerBroken = true;
@@ -365,6 +367,10 @@ function buildFilters(filterBox, ctx, f, g, theme, setFilters) {
 // ---------------------------------------------------------------------------
 
 export async function renderGraph(main, ctx) {
+  if (liveSurface) {
+    liveSurface();
+    liveSurface = null;
+  }
   if (resizeObs) {
     resizeObs.disconnect();
     resizeObs = null;
@@ -691,6 +697,7 @@ export async function renderGraph(main, ctx) {
   // transform on the <svg> itself re-lays it out and re-paints it.
   const pane = h('div', { class: 'g-pane' }, surface.el);
   mount(graphBox, pane, tip, hint);
+  if (surface.dispose) liveSurface = surface.dispose;
   performance.mark('graph:mounted');
 
   // ---- an opened scope's far scopes: one tag each, stubs into it ----------
@@ -806,7 +813,21 @@ export async function renderGraph(main, ctx) {
     cutMode = big && !!view && fitView().w / view.w >= CUT_ZOOM;
     const pad = 8 / scale;
     const onScreen = (q) => q[0] >= view.x - pad && q[0] <= view.x + view.w + pad && q[1] >= view.y - pad && q[1] <= view.y + view.h + pad;
-    const key = cutMode ? `cut|${scale}|${view.x}|${view.y}|${view.w}|${view.h}` : `${scale}`;
+    // In cut mode a relation's build depends on the view only through which
+    // of its ends are on screen: the key is that, per relation, so a
+    // settled pan that put no relation on or off screen rebuilds nothing
+    // (and a canvas then copies the pan instead of drawing it again).
+    let key = `${scale}`;
+    if (cutMode) {
+      const ends = new Array(g.edges.length);
+      const on = (i) => onScreen([lay.pos[2 * i], lay.pos[2 * i + 1]]);
+      for (let k = 0; k < g.edges.length; k++) {
+        const e = g.edges[k];
+        const ti = e.dst_store || !byId.has(e.dst) ? -1 : byId.get(e.dst);
+        ends[k] = ti < 0 ? 0 : (on(byId.get(e.src)) ? 1 : 0) + (on(ti) ? 2 : 0);
+      }
+      key = `cut|${scale}|${ends.join('')}`;
+    }
     if (key !== builtKey) {
       builtKey = key;
       built = new Array(g.edges.length);
@@ -1100,6 +1121,7 @@ export async function renderGraph(main, ctx) {
       if (!graphBox.isConnected) {
         obs.disconnect();
         if (resizeObs === obs) resizeObs = null;
+        if (surface.dispose) surface.dispose();
         return;
       }
       // Layout is clean here: reading the box costs nothing.
@@ -1400,7 +1422,12 @@ export async function renderGraph(main, ctx) {
   // unless the Invalidated filter is on, so its other end takes over).
   const afterReview = (ids) => (out, text) => {
     afterReviewPins.set(p.id, { ids, text });
-    setTimeout(() => ctx.refresh(), 900);
+    // (Not after a navigation: the result would be pinned and announced the
+    // next time this graph is opened, however much later.)
+    setTimeout(() => {
+      if (!ctx.isStale()) ctx.refresh();
+      else if (afterReviewPins.get(p.id) && afterReviewPins.get(p.id).ids === ids) afterReviewPins.delete(p.id);
+    }, 900);
   };
   const otherEnd = (e, id) => (e.dst_store ? null : e.src === id ? e.dst : e.src);
   /** The review's result line: empty when inserted, its text set a moment

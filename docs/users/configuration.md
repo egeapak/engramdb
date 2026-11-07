@@ -280,6 +280,8 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 | `ENGRAMDB_CONFIG_DIR` | Override platform global config dir (the registry and the global `config.toml` with `[daemon]`). Used by tests. |
 | `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
 | `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
+| `ENGRAMDB_DASHBOARD_CACHE_DIR` | Where `engramdb dashboard` keeps its layout cache (default `<cache dir>/engramdb/dashboard/layouts/`; must be yours with mode 0700). See [dashboard.md](./dashboard.md#what-it-reads-and-what-it-never-does). |
+| `ENGRAMDB_DASHBOARD_LAYOUT_CACHE` | `0` turns the dashboard's layout cache off (memory and disk). |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own config root (default `~/.claude`). Read, never written — it is how `harvest` locates session transcripts. |
 | `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |

@@ -195,7 +195,7 @@ fn same_input_same_digest_and_any_change_moves_it() {
 fn the_layout_js_is_pinned_to_the_layout_version() {
     assert_eq!(
         (LAYOUT_VERSION, LAYOUT_JS_HASH),
-        (2, "46ee3d62895a7278"),
+        (3, "c1f1f35a8599a26f"),
         "a layout JS file changed: port the change to src/layout/, regenerate \
          the golden fixtures (node bench/golden.mjs), bump LAYOUT_VERSION and \
          re-pin this pair"
@@ -217,6 +217,19 @@ fn the_layout_js_is_pinned_to_the_layout_version() {
     ] {
         assert!(LAYOUT_JS_FILES.contains(&f), "{f} is not hashed");
     }
+}
+
+#[test]
+fn the_page_never_asks_for_a_width_the_server_refuses() {
+    let js = std::str::from_utf8(crate::assets::find("js/graph/input.js").unwrap().bytes).unwrap();
+    assert!(
+        js.contains(&format!(
+            "export const MAX_LAYOUT_WIDTH = {MAX_LAYOUT_WIDTH};"
+        )),
+        "graph/input.js must clamp roundWidth to the server's MAX_LAYOUT_WIDTH"
+    );
+    assert!(js.contains("Math.min(MAX_LAYOUT_WIDTH, w)"));
+    assert_eq!(MAX_LAYOUT_WIDTH % 40, 0, "the cap is itself a valid width");
 }
 
 #[test]
@@ -432,6 +445,11 @@ fn check_overview(name: &str, fx: &Value) {
         .collect();
     let aspect = fx["aspect20"].as_f64().unwrap() / 20.0;
     let input = build_overview_input(&scopes, &rows, aspect, fx["width"].as_f64().unwrap());
+    assert_eq!(
+        u64::from(overview_check(&input)),
+        fx["check"].as_u64().unwrap(),
+        "{name}: overview input check (the input builders or scopePairs differ)"
+    );
     let out = overview::layout(&input);
     let want = &fx["out"];
     let f = |k: &str| unb64_f64(want[k].as_str().unwrap());
@@ -588,6 +606,72 @@ fn the_disk_cache_evicts_the_oldest_past_its_cap() {
     assert_eq!(left.len(), 2, "{left:?}");
     assert!(left.contains(&format!("{:064x}.bin", 5)));
     assert!(left.contains(&format!("{:064x}.bin", 4)));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn prune_touches_only_the_caches_own_file_names() {
+    use cache::{cache_file_kind, FileKind};
+    let key = "a".repeat(64);
+    assert_eq!(cache_file_kind(&format!("{key}.bin")), Some(FileKind::Bin));
+    assert_eq!(
+        cache_file_kind(&format!("{key}.json")),
+        Some(FileKind::OldJson)
+    );
+    assert_eq!(
+        cache_file_kind(&format!(".{key}.12.3.tmp")),
+        Some(FileKind::Tmp)
+    );
+    for other in [
+        "notes.json".to_string(),
+        "photo.bin".to_string(),
+        ".swap.tmp".to_string(),
+        format!("{}.bin", "A".repeat(64)),
+        format!(".{key}.12.tmp"),
+        format!(".{key}.1.2.3.tmp"),
+        format!("{key}.bin.bak"),
+    ] {
+        assert_eq!(cache_file_kind(&other), None, "{other}");
+    }
+    // A directory the user pointed the cache at keeps their files, however
+    // old, under any cap.
+    let dir = temp_cache_dir();
+    let c = cache::LayoutCache::new(Some(dir.clone()), true);
+    assert!(c.dir().is_some());
+    let theirs = ["notes.json", "photo.bin", "editor.tmp"];
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for f in theirs {
+        std::fs::write(dir.join(f), vec![0u8; 5000]).unwrap();
+        std::fs::File::options()
+            .append(true)
+            .open(dir.join(f))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+    cache::prune_for_test(&dir, 0);
+    for f in theirs {
+        assert!(dir.join(f).exists(), "{f} was deleted");
+    }
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_corrupt_overview_on_disk_is_a_miss() {
+    let dir = temp_cache_dir();
+    let key = "b".repeat(64);
+    let c = cache::LayoutCache::new(Some(dir.clone()), true);
+    c.fill(&key, || Cached::Overview("{\"v\":3,".into()));
+    // A fresh process (an empty memory tier) reads the file: invalid JSON
+    // is never spliced into a response, so it is computed again.
+    let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
+    let mut ran = false;
+    let v = c2.fill(&key, || {
+        ran = true;
+        Cached::Overview("{\"v\":3}".into())
+    });
+    assert!(ran, "a corrupt overview file is a miss");
+    assert_eq!(*v, Cached::Overview("{\"v\":3}".into()));
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 

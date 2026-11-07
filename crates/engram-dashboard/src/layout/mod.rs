@@ -56,7 +56,8 @@
 //! `anchor` from the position, radius and width with `labels.js::spotsAt`);
 //! only the stub ends of the routes (a straight relation's route is its two
 //! positions); bounds, scope names and `region_r` as JSON. The overview is
-//! small and goes as plain JSON.
+//! small and goes as plain JSON, with its own header `check`
+//! ([`overview_check`]).
 //!
 //! **Cache** ([`cache`]): in memory, and on disk under the OS cache dir —
 //! the dashboard's one declared write outside a store (see `cache.rs`).
@@ -74,7 +75,7 @@ use sha2::{Digest, Sha256};
 
 /// The encoding and algorithm version: part of every digest, so a change to
 /// either (bump it) never serves an old cached layout.
-pub const LAYOUT_VERSION: u32 = 2;
+pub const LAYOUT_VERSION: u32 = 3;
 
 // `LAYOUT_JS_FILES` and `LAYOUT_JS_HASH` (build.rs).
 include!(concat!(env!("OUT_DIR"), "/layout_js.rs"));
@@ -781,6 +782,41 @@ pub fn input_check(input: &ForceInput) -> u32 {
     h
 }
 
+/// `graph/input.js::overviewCheck`: [`input_check`] for the overview's
+/// input (each disc's id as UTF-16 units, its count and both label
+/// lengths; then every band's ends and count), so the page draws an
+/// overview only of the input it built — pair order included, since band
+/// `k` is drawn along route `k`.
+pub fn overview_check(input: &overview::OverviewInput) -> u32 {
+    fn mix(h: &mut u32, v: u32) {
+        *h = (*h ^ v).wrapping_mul(16_777_619);
+    }
+    // JS `^` takes a count through ToInt32: modulo 2^32.
+    let word = |v: f64| v as u64 as u32;
+    let mut h: u32 = 0x811c_9dc5;
+    for nd in &input.nodes {
+        for c in nd.id.encode_utf16() {
+            mix(&mut h, u32::from(c));
+        }
+        mix(&mut h, 0x10000);
+        mix(&mut h, word(nd.count));
+        mix(&mut h, nd.full_len as u32);
+        mix(&mut h, nd.short_len as u32);
+    }
+    for e in &input.edges {
+        mix(&mut h, e.s as u32);
+        mix(&mut h, e.t as u32);
+        mix(&mut h, word(e.n));
+    }
+    h
+}
+
+/// The widest box laid out, in px. `graph/input.js::roundWidth` clamps to
+/// the same `MAX_LAYOUT_WIDTH`, so a page wider than this (an ultrawide
+/// window zoomed out) still asks for a width the server accepts rather
+/// than turning the whole `/graph` into a 400.
+pub const MAX_LAYOUT_WIDTH: u32 = 20_000;
+
 /// Which layout a request asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutName {
@@ -849,7 +885,7 @@ impl LayoutRequest {
         let width: f64 = q
             .get("layout_width")
             .and_then(|w| w.parse::<u32>().ok())
-            .filter(|w| *w <= 20_000 && w % 40 == 0)
+            .filter(|w| *w <= MAX_LAYOUT_WIDTH && w % 40 == 0)
             .ok_or_else(|| bad("layout_width must be a whole multiple of 40 pixels".into()))?
             .into();
         let open_over = if opened {
@@ -1022,6 +1058,7 @@ pub fn encode_overview(
         "v": LAYOUT_VERSION,
         "name": LayoutName::ScopeOverview.as_str(),
         "key": key,
+        "check": overview_check(input),
         "n": input.nodes.len(),
         "e": input.edges.len(),
         "aspect": input.aspect,

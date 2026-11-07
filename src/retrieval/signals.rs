@@ -27,8 +27,9 @@
 //! # Declared losses
 //!
 //! - **A failed read means no signal, never an error.** An unreadable edges
-//!   table scores as if no edge existed; an unreadable usage view as if no
-//!   memory had usage. Both are logged at debug level. A query must never
+//!   table scores as if no edge existed (and expands nothing); an unreadable
+//!   far-end liveness lookup scores as if no edge existed but still expands;
+//!   an unreadable usage view as if no memory had usage. Both are logged at debug level. A query must never
 //!   fail because evidence *about* its results could not be read.
 //! - **Cross-store edges carry no signal and are not expanded.** Whether the
 //!   far end is live would need another store opened per query, and an
@@ -79,14 +80,19 @@ fn is_live(entry: &IndexForFiltering, now: DateTime<Utc>) -> bool {
 pub struct GraphSnapshot {
     edges: Vec<EdgeRow>,
     live: HashSet<String>,
+    /// The far-end liveness lookup failed: the edges are kept for link
+    /// expansion (which needs no liveness — its neighbours must be in the
+    /// filtered candidate set anyway), but they carry no score signal.
+    liveness_unknown: bool,
 }
 
 impl GraphSnapshot {
     /// Load the edges touching `entries` — one query — and, when
     /// `with_liveness`, which endpoints are live. An endpoint among `entries`
     /// is judged from its own row; only the others are looked up, in one
-    /// more query (`IN` lists of at most 500). A failure of either reads as
-    /// an empty snapshot (module docs, "Declared losses"). Expansion alone
+    /// more query (`IN` lists of at most 500). A failed edges read is an
+    /// empty snapshot (module docs, "Declared losses"); a failed liveness
+    /// read keeps the edges for expansion but scores none of them. Expansion alone
     /// passes `with_liveness = false`: its neighbours must be in the
     /// filtered candidate set anyway, which is a stricter test.
     pub async fn load(
@@ -111,6 +117,7 @@ impl GraphSnapshot {
             return Self {
                 edges,
                 live: HashSet::new(),
+                liveness_unknown: false,
             };
         }
         let known: HashMap<&str, &IndexForFiltering> =
@@ -140,17 +147,29 @@ impl GraphSnapshot {
                     tracing::debug!(
                         "graph signals: liveness unreadable, scoring without edges: {e}"
                     );
-                    return Self::default();
+                    return Self {
+                        edges,
+                        live: HashSet::new(),
+                        liveness_unknown: true,
+                    };
                 }
             }
         }
-        Self { edges, live }
+        Self {
+            edges,
+            live,
+            liveness_unknown: false,
+        }
     }
 
     /// Build a snapshot from rows already in hand (tests).
     #[cfg(test)]
     pub fn from_parts(edges: Vec<EdgeRow>, live: HashSet<String>) -> Self {
-        Self { edges, live }
+        Self {
+            edges,
+            live,
+            liveness_unknown: false,
+        }
     }
 
     /// Per-memory `contradicted_by` / `supported_by` for every id in `ids`
@@ -160,8 +179,14 @@ impl GraphSnapshot {
     ///   when the other is live.
     /// - `supports` counts only *incoming* edges (`X supports id`) from a live
     ///   `X`: supporting something is not evidence for oneself.
+    ///
+    /// Empty when the liveness lookup failed: an end whose liveness is
+    /// unknown is not evidence.
     pub fn score_signals(&self, ids: &HashSet<&str>) -> HashMap<String, ScoreSignals> {
         let mut out: HashMap<String, ScoreSignals> = HashMap::new();
+        if self.liveness_unknown {
+            return out;
+        }
         for r in &self.edges {
             match r.kind {
                 LinkKind::Contradicts => {
@@ -390,6 +415,27 @@ mod tests {
         assert!(g
             .score_signals(&["a", "b"].into_iter().collect())
             .is_empty());
+    }
+
+    /// A failed far-end liveness lookup removes the score signals only:
+    /// expansion needs no liveness, so it must still see the edges.
+    #[test]
+    fn unknown_liveness_scores_nothing_but_still_expands() {
+        let g = GraphSnapshot {
+            edges: vec![
+                row("a", LinkKind::Contradicts, "b"),
+                row("c", LinkKind::Supports, "a"),
+            ],
+            live: HashSet::new(),
+            liveness_unknown: true,
+        };
+        assert!(g
+            .score_signals(&["a", "b", "c"].into_iter().collect())
+            .is_empty());
+        assert_eq!(
+            g.neighbours("a").map(|(id, _)| id).collect::<Vec<_>>(),
+            vec!["c"]
+        );
     }
 
     #[test]

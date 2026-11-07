@@ -79,7 +79,8 @@ a prefix that is unique today stops being unique as the store grows.
 
 Proposed links can also be reviewed in the
 [dashboard](./dashboard.md#reviewing-proposed-relations) (`engramdb dashboard
---allow-writes`), which offers the same three resolutions plus reject.
+--allow-writes`), which offers the same choices as `link`: confirm, `--winner`
+either way, or reject.
 
 ## Automatic proposals
 
@@ -233,7 +234,16 @@ a memory you cannot see is dropped too. Hooks never expand.
 - **Invalidated memories keep their links**, hidden by default. A link into a
   superseded memory names its successor.
 - **Links are not challenges.** `resolve --keep` clears a memory's challenges
-  and leaves its links alone. `gc` never edits links.
+  and leaves its links alone. `gc` never edits links. The one crossing point:
+  a reviewer's verdict on a `contradicts` link (`link --winner`, `link
+  --status confirmed|rejected`, MCP `link_status`, the dashboard) settles the
+  pair, so it also clears the NLI challenge each memory carries about the
+  other.
 - **`compress`** moves the sources' outbound links onto the summary (as
   `origin: compress`). Links *into* a source keep pointing at it; since the
-  source is now superseded, they show the summary as its successor.
+  source is now superseded, they show the summary as its successor. A
+  source's link replaces any automatic proposal the summary already got to
+  the same memory, so a rejected link is not proposed again by its own
+  compress. A shared summary takes a source's cross-store link only when the
+  target is shown to be shared in its own store; otherwise it stays on the
+  source.

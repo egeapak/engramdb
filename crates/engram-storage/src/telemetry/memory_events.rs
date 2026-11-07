@@ -26,7 +26,8 @@
 //!
 //! **Kinds and surfaces are strings on disk.** A line or row whose kind or
 //! surface this binary does not know (a newer binary's) is kept and stored
-//! verbatim ([`EventRow`]), and only left out of the counts. Parsing strictly
+//! verbatim ([`EventRow`]), and only left out of the counts. A prune folds such
+//! rows into the rollup's `other_kinds` before deleting them (below). Parsing strictly
 //! would make a drain delete a newer binary's events as "unreadable".
 //!
 //! **Three read signals, never summed.** `returned` means a memory survived
@@ -81,6 +82,19 @@
 //!   totals, only its `base` and `watermark`.
 //! - **The daily series covers raw events only.** With `retention_days`
 //!   shorter than the series, its oldest days read as zero.
+//! - **Kinds and counters a newer binary added.** A prune folds old events of
+//!   a kind this binary does not know into the row's `base` under
+//!   [`OTHER_KINDS_KEY`] (`{"<kind>": n}`, counts only: no sessions, no
+//!   timestamps) instead of deleting them uncounted, and every `base` key
+//!   this binary's [`UsageCounts`] does not know is carried through each
+//!   rewrite verbatim. A binary that learns a kind must adopt its
+//!   `other_kinds` entry into its own counter; until then those counts are
+//!   kept but read by nobody.
+//! - **An unreadable rollup row.** A `base` that does not parse freezes its
+//!   row (warned on every read): it reads as base zero (its lifetime counts
+//!   are missing from reads), no refresh or prune rewrites it, and its raw
+//!   events are never pruned, so nothing is destroyed and a fixed row picks
+//!   up exactly where it was. Every other row works as before.
 //! - Metrics do not travel with a clone and are lost with `lancedb/`. Accepted:
 //!   counts are churn and never belong in the `.md` files.
 //!
@@ -762,6 +776,63 @@ struct RollupRow {
     totals: UsageCounts,
     watermark: Option<DateTime<Utc>>,
     base: UsageCounts,
+    /// The keys of the stored `base` JSON this binary's [`UsageCounts`] does
+    /// not know (a newer binary's counters, and [`OTHER_KINDS_KEY`]), carried
+    /// through every rewrite verbatim.
+    base_extra: serde_json::Map<String, serde_json::Value>,
+    /// The stored `base` did not parse. Its counts are unknown, so the row is
+    /// read as base zero, never rewritten, and its raw events never pruned
+    /// (module docs, "An unreadable rollup row").
+    base_unreadable: bool,
+}
+
+/// Key, inside a rollup row's `base` JSON, of the lifetime counts of event
+/// kinds this binary does not know, by kind string: `{"<kind>": n}`. A prune
+/// folds such events here instead of deleting them uncounted; a binary that
+/// learns a kind adopts its entry from here into its own counter.
+pub const OTHER_KINDS_KEY: &str = "other_kinds";
+
+/// The JSON keys [`UsageCounts`] reads and writes (all of them, including
+/// the optional ones it omits when empty).
+const USAGE_COUNTS_KEYS: &[&str] = &[
+    "returned",
+    "injected",
+    "fetched",
+    "returned_sessions",
+    "injected_sessions",
+    "last_returned_at",
+    "last_injected_at",
+    "last_fetched_at",
+    "updated",
+    "challenged",
+    "last_written_at",
+];
+
+/// Parse a stored `base`: the counts this binary knows, and every other key
+/// verbatim.
+fn parse_base(text: &str) -> Result<(UsageCounts, serde_json::Map<String, serde_json::Value>)> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let counts: UsageCounts = serde_json::from_value(value.clone())?;
+    let mut extra = match value {
+        serde_json::Value::Object(map) => map,
+        _ => anyhow::bail!("base is not an object"),
+    };
+    extra.retain(|k, _| !USAGE_COUNTS_KEYS.contains(&k.as_str()));
+    Ok((counts, extra))
+}
+
+/// The `base` JSON to store for `row`, or `None` when there is nothing.
+fn base_text(row: &RollupRow) -> Option<String> {
+    if row.base.is_empty() && row.base_extra.is_empty() {
+        return None;
+    }
+    let mut value = serde_json::to_value(&row.base).ok()?;
+    if let serde_json::Value::Object(map) = &mut value {
+        for (k, v) in &row.base_extra {
+            map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    serde_json::to_string(&value).ok()
 }
 
 impl RollupRow {
@@ -787,14 +858,7 @@ fn usage_batch(rows: &[(String, RollupRow)]) -> Result<RecordBatch> {
                 .collect(),
         ))
     };
-    let base: Vec<Option<String>> = rows
-        .iter()
-        .map(|(_, r)| {
-            (!r.base.is_empty())
-                .then(|| serde_json::to_string(&r.base).ok())
-                .flatten()
-        })
-        .collect();
+    let base: Vec<Option<String>> = rows.iter().map(|(_, r)| base_text(r)).collect();
     let arrays: Vec<ArrayRef> = vec![
         Arc::new(StringArray::from(
             rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
@@ -878,7 +942,18 @@ pub(crate) struct RawEvent {
 async fn for_each_event(
     table: &Table,
     filter: Option<String>,
+    visit: impl FnMut(RawEvent),
+) -> Result<()> {
+    for_each_event_and_other(table, filter, visit, |_, _, _| {}).await
+}
+
+/// [`for_each_event`], handing rows of a kind this binary does not know to
+/// `other` as `(memory_id, kind, ts)` instead of skipping them.
+async fn for_each_event_and_other(
+    table: &Table,
+    filter: Option<String>,
     mut visit: impl FnMut(RawEvent),
+    mut other: impl FnMut(&str, &str, DateTime<Utc>),
 ) -> Result<()> {
     let mut query = table.query().select(Select::Columns(vec![
         "memory_id".into(),
@@ -897,10 +972,11 @@ async fn for_each_event(
         let ts = col::<TimestampMicrosecondArray>(&batch, "ts")?;
         let sid = col::<StringArray>(&batch, "session_id")?;
         for i in 0..batch.num_rows() {
-            let (Some(k), Some(t)) = (
-                UsageKind::parse(kind.value(i)),
-                DateTime::<Utc>::from_timestamp_micros(ts.value(i)),
-            ) else {
+            let Some(t) = DateTime::<Utc>::from_timestamp_micros(ts.value(i)) else {
+                continue;
+            };
+            let Some(k) = UsageKind::parse(kind.value(i)) else {
+                other(mid.value(i), kind.value(i), t);
                 continue;
             };
             visit(RawEvent {
@@ -952,13 +1028,23 @@ async fn load_rollup_rows(
         );
         let base = col::<StringArray>(&batch, "base")?;
         for i in 0..batch.num_rows() {
-            let base = match opt_str(base, i) {
-                None => UsageCounts::default(),
-                // A base that does not parse would silently zero lifetime
-                // counts on the next write: refuse instead.
-                Some(b) => serde_json::from_str(b).with_context(|| {
-                    format!("memory_usage: unreadable base for {}", mid.value(i))
-                })?,
+            // A base that does not parse would silently zero lifetime counts
+            // on the next write, so its row is frozen instead: read as base
+            // zero, never rewritten, its raw events never pruned. Per row:
+            // one bad row must not take the whole store's usage down.
+            let (base, base_extra, base_unreadable) = match opt_str(base, i) {
+                None => (UsageCounts::default(), Default::default(), false),
+                Some(b) => match parse_base(b) {
+                    Ok((counts, extra)) => (counts, extra, false),
+                    Err(e) => {
+                        tracing::warn!(
+                            "memory_usage: unreadable base for memory {} ({e}); its usage \
+                             is left as it is and its raw events are kept",
+                            mid.value(i)
+                        );
+                        (UsageCounts::default(), Default::default(), true)
+                    }
+                },
             };
             let row = RollupRow {
                 store_id: sid.value(i).to_string(),
@@ -977,6 +1063,8 @@ async fn load_rollup_rows(
                 },
                 watermark: opt_ts(wm, i),
                 base,
+                base_extra,
+                base_unreadable,
             };
             out.insert(mid.value(i).to_string(), row);
         }
@@ -1129,6 +1217,9 @@ async fn refresh_chunk(
     for (id, acc) in &accs {
         seen.insert(id.as_str());
         let current = existing.get(id);
+        if current.is_some_and(|c| c.base_unreadable) {
+            continue;
+        }
         // `base` and `watermark` are copied through from the read above,
         // made under the same lock: a refresh never moves them.
         let mut row = current.cloned().unwrap_or_else(|| RollupRow::new(store_id));
@@ -1142,7 +1233,7 @@ async fn refresh_chunk(
     }
     // A row whose raw window is empty (every event pruned) totals its base.
     for (id, row) in &existing {
-        if !seen.contains(id.as_str()) && row.totals != row.base {
+        if !seen.contains(id.as_str()) && !row.base_unreadable && row.totals != row.base {
             let mut row = row.clone();
             row.totals = row.base.clone();
             rows.push((id.clone(), row));
@@ -1182,23 +1273,66 @@ async fn prune_at(store_id: &str, cutoff: DateTime<Utc>) -> Result<()> {
     let rows = load_rollup_rows(&usage, None).await?;
 
     // Fold the old events (those not already folded by an earlier prune).
+    // A frozen row (unreadable base) is not folded and its raw events are
+    // not deleted: folding into a base we cannot read would lose it.
+    let frozen: Vec<String> = {
+        let mut f: Vec<String> = rows
+            .iter()
+            .filter(|(_, r)| r.base_unreadable)
+            .map(|(id, _)| id.clone())
+            .collect();
+        f.sort();
+        f
+    };
     let mut old: HashMap<String, UsageAccumulator> = HashMap::new();
-    let mut newest_old: Option<DateTime<Utc>> = None;
-    for_each_event(&events, Some(old_filter), |e| {
-        newest_old = max_ts(newest_old, Some(e.ts));
-        let wm = rows.get(&e.memory_id).and_then(|r| r.watermark);
-        fold(&mut old, e, wm);
-    })
+    // Old events of a kind this binary does not know, counted by kind into
+    // the base's `other_kinds` rather than deleted uncounted.
+    let mut other: HashMap<String, BTreeMap<String, u64>> = HashMap::new();
+    // One per closure (each visitor owns its own); combined below.
+    let mut newest_known: Option<DateTime<Utc>> = None;
+    let mut newest_other: Option<DateTime<Utc>> = None;
+    let is_frozen = |id: &str| frozen.binary_search_by(|f| f.as_str().cmp(id)).is_ok();
+    for_each_event_and_other(
+        &events,
+        Some(old_filter),
+        |e| {
+            if is_frozen(&e.memory_id) {
+                return;
+            }
+            newest_known = max_ts(newest_known, Some(e.ts));
+            let wm = rows.get(&e.memory_id).and_then(|r| r.watermark);
+            fold(&mut old, e, wm);
+        },
+        |mid, kind, ts| {
+            if is_frozen(mid) {
+                return;
+            }
+            newest_other = max_ts(newest_other, Some(ts));
+            if rows
+                .get(mid)
+                .and_then(|r| r.watermark)
+                .is_some_and(|w| ts < w)
+            {
+                return;
+            }
+            *other
+                .entry(mid.to_string())
+                .or_default()
+                .entry(kind.to_string())
+                .or_default() += 1;
+        },
+    )
     .await?;
     // Never past the newest event folded: a prune under a clock that jumped
     // ahead must not hide events recorded after the clock came back.
-    let cut = match newest_old {
+    let cut = match max_ts(newest_known, newest_other) {
         Some(n) => cutoff.min(n + chrono::Duration::microseconds(1)),
         None => cutoff,
     };
 
-    let mut affected: Vec<String> = old.keys().cloned().collect();
+    let mut affected: Vec<String> = old.keys().chain(other.keys()).cloned().collect();
     affected.sort();
+    affected.dedup();
     let mut out = Vec::with_capacity(affected.len());
     for chunk in affected.chunks(MAX_IN_LIST) {
         let mut recent: HashMap<String, UsageAccumulator> = HashMap::new();
@@ -1219,6 +1353,9 @@ async fn prune_at(store_id: &str, cutoff: DateTime<Utc>) -> Result<()> {
             if let Some(acc) = old.get(id) {
                 row.base.merge(&acc.finish());
             }
+            if let Some(kinds) = other.get(id) {
+                fold_other_kinds(&mut row.base_extra, kinds);
+            }
             // Never move a watermark backwards.
             row.watermark = max_ts(row.watermark, Some(cut));
             let mut totals = row.base.clone();
@@ -1233,11 +1370,48 @@ async fn prune_at(store_id: &str, cutoff: DateTime<Utc>) -> Result<()> {
     // that are older than every watermark, which every read ignores. Nothing
     // can insert in between: inserts hold the same lock.
     write_rollup(&usage, out).await?;
+    let mut delete = format!("ts < {}", ts_literal(cut));
+    if !frozen.is_empty() {
+        if frozen.len() > MAX_IN_LIST {
+            tracing::warn!(
+                "memory_events: {} memories of store {store_id} have an unreadable rollup \
+                 row; pruning nothing",
+                frozen.len()
+            );
+            return Ok(());
+        }
+        let list: Vec<String> = frozen.iter().map(|s| str_literal(s)).collect();
+        delete = format!("({delete}) AND memory_id NOT IN ({})", list.join(", "));
+    }
     events
-        .delete(&format!("ts < {}", ts_literal(cut)))
+        .delete(&delete)
         .await
         .with_context(|| format!("pruning memory_events for store {store_id}"))?;
     Ok(())
+}
+
+/// Add `kinds` (unknown kind → count) into a base's [`OTHER_KINDS_KEY`]
+/// object. An entry (or the whole key) that is not what this binary writes
+/// belongs to another binary: it is left as it is, never overwritten.
+fn fold_other_kinds(
+    extra: &mut serde_json::Map<String, serde_json::Value>,
+    kinds: &BTreeMap<String, u64>,
+) {
+    let slot = extra
+        .entry(OTHER_KINDS_KEY.to_string())
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    let serde_json::Value::Object(map) = slot else {
+        tracing::warn!("memory_usage: base.{OTHER_KINDS_KEY} is not an object; left as it is");
+        return;
+    };
+    for (kind, n) in kinds {
+        let entry = map
+            .entry(kind.clone())
+            .or_insert_with(|| serde_json::Value::from(0u64));
+        if let Some(cur) = entry.as_u64() {
+            *entry = serde_json::Value::from(cur.saturating_add(*n));
+        }
+    }
 }
 
 /// Compact both tables. Best-effort, like the other telemetry tables.
@@ -1601,6 +1775,152 @@ mod tests {
         optimize_memory_events(&sid).await.unwrap();
     }
 
+    /// An older binary's prune must not destroy what a newer binary wrote:
+    /// old events of a kind it does not know are counted into the base's
+    /// `other_kinds` (not deleted uncounted), and base keys it does not know
+    /// survive the rewrite verbatim.
+    #[tokio::test]
+    async fn prune_carries_unknown_kinds_and_unknown_base_keys() {
+        let sid = store().await;
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(200);
+        let unknown = |mid: &str| {
+            let mut r = EventRow::from(&ev(&sid, mid, UsageKind::Fetched, old, None));
+            r.kind = "cited".to_string();
+            r
+        };
+        let mut rows = vec![
+            EventRow::from(&ev(&sid, "m1", UsageKind::Fetched, old, None)),
+            unknown("m1"),
+            unknown("m1"),
+            unknown("m2"),
+        ];
+        rows.push(EventRow::from(&ev(
+            &sid,
+            "m1",
+            UsageKind::Fetched,
+            now,
+            None,
+        )));
+        ingest_rows(&sid, &rows, false).await.unwrap();
+        // A newer binary's base key on m1.
+        let conn = connect_for(&sid).await.unwrap();
+        let usage = usage_table(&conn).await.unwrap();
+        let mut m1 = rollup_rows(&sid).await["m1"].clone();
+        m1.base_extra
+            .insert("future_count".to_string(), serde_json::json!(7));
+        write_rollup(&usage, vec![("m1".to_string(), m1)])
+            .await
+            .unwrap();
+
+        prune_memory_events(&sid, 90).await.unwrap();
+        assert_eq!(raw_rows(&sid).await, 1, "only the recent event is left");
+        let after = rollup_rows(&sid).await;
+        let m1 = &after["m1"];
+        assert_eq!(m1.base.fetched, 1);
+        assert_eq!(m1.totals.fetched, 2);
+        assert_eq!(m1.base_extra["future_count"], serde_json::json!(7));
+        assert_eq!(
+            m1.base_extra[OTHER_KINDS_KEY],
+            serde_json::json!({"cited": 2})
+        );
+        assert_eq!(
+            after["m2"].base_extra[OTHER_KINDS_KEY],
+            serde_json::json!({"cited": 1})
+        );
+        // A refresh keeps them too.
+        ingest_memory_events(
+            &sid,
+            &[ev(&sid, "m1", UsageKind::Fetched, now, None)],
+            false,
+        )
+        .await
+        .unwrap();
+        let again = rollup_rows(&sid).await;
+        assert_eq!(again["m1"].base_extra, m1.base_extra);
+        assert_eq!(again["m1"].totals.fetched, 3);
+    }
+
+    #[test]
+    fn usage_counts_keys_list_every_field() {
+        let now = Some(Utc::now());
+        let full = UsageCounts {
+            last_returned_at: now,
+            last_injected_at: now,
+            last_fetched_at: now,
+            last_written_at: now,
+            ..Default::default()
+        };
+        let serde_json::Value::Object(map) = serde_json::to_value(&full).unwrap() else {
+            panic!("not an object");
+        };
+        let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+        keys.sort();
+        let mut want = USAGE_COUNTS_KEYS.to_vec();
+        want.sort();
+        assert_eq!(keys, want);
+    }
+
+    /// One unreadable rollup row must not take the store's usage down: reads,
+    /// drains and prunes keep working, and that row is frozen — never
+    /// rewritten, its raw events never pruned.
+    #[tokio::test]
+    async fn an_unreadable_base_freezes_its_row_only() {
+        let sid = store().await;
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(200);
+        let events = vec![
+            ev(&sid, "m1", UsageKind::Fetched, old, None),
+            ev(&sid, "m2", UsageKind::Fetched, old, None),
+        ];
+        ingest_memory_events(&sid, &events, false).await.unwrap();
+        prune_memory_events(&sid, 90).await.unwrap();
+        // Both folded; now corrupt m1's base.
+        let conn = connect_for(&sid).await.unwrap();
+        let usage = usage_table(&conn).await.unwrap();
+        usage
+            .update()
+            .only_if("memory_id = 'm1'")
+            .column("base", "'{not json'")
+            .execute()
+            .await
+            .unwrap();
+        let old2 = now - chrono::Duration::days(150);
+        let more = vec![
+            ev(&sid, "m1", UsageKind::Fetched, old2, None),
+            ev(&sid, "m2", UsageKind::Fetched, old2, None),
+        ];
+        ingest_memory_events(&sid, &more, false)
+            .await
+            .expect("a refresh skips the frozen row instead of failing");
+        load_rollup(&sid).await.expect("reads still work");
+        prune_memory_events(&sid, 90)
+            .await
+            .expect("a prune skips the frozen row instead of failing");
+        assert_eq!(raw_rows(&sid).await, 1, "m1's raw event is kept");
+        let rows = rollup_rows(&sid).await;
+        assert!(rows["m1"].base_unreadable);
+        assert_eq!(
+            rows["m2"].base.fetched, 2,
+            "the healthy row folds as before"
+        );
+        let base: Option<String> = {
+            let conn = connect_for(&sid).await.unwrap();
+            let mut stream = usage_table(&conn)
+                .await
+                .unwrap()
+                .query()
+                .only_if("memory_id = 'm1'")
+                .execute()
+                .await
+                .unwrap();
+            let batch = stream.next().await.unwrap().unwrap();
+            let col = col::<StringArray>(&batch, "base").unwrap();
+            opt_str(col, 0).map(str::to_owned)
+        };
+        assert_eq!(base.as_deref(), Some("{not json"), "never rewritten");
+    }
+
     #[tokio::test]
     async fn series_and_promotion_sessions_read_the_raw_window() {
         let sid = store().await;
@@ -1651,6 +1971,15 @@ mod tests {
         assert!(load_rollup(&ghost).await.unwrap().is_empty());
         let e = ev(&ghost, "m", UsageKind::Fetched, Utc::now(), None);
         assert!(ingest_memory_events(&ghost, &[e], false).await.is_err());
+    }
+
+    /// The rollup rows, through a fresh table handle (a handle opened earlier
+    /// can serve an older version).
+    async fn rollup_rows(sid: &str) -> HashMap<String, RollupRow> {
+        let conn = connect_for(sid).await.unwrap();
+        load_rollup_rows(&usage_table(&conn).await.unwrap(), None)
+            .await
+            .unwrap()
     }
 
     async fn raw_rows(sid: &str) -> usize {

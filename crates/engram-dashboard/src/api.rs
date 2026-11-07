@@ -451,9 +451,9 @@ async fn list_memories(
             "criticality" => SortKey::Num(e.criticality),
             "created" => micros(e.created_at),
             "updated" => micros(e.updated_at),
-            "summary" => SortKey::Text(e.summary.to_lowercase()),
-            "type" => SortKey::Text(wire(&e.type_)),
-            "scope" => SortKey::Text(top_scope_of(&e.logical).unwrap_or_default()),
+            "summary" => SortKey::text(e.summary.to_lowercase()),
+            "type" => SortKey::text(wire(&e.type_)),
+            "scope" => SortKey::text(top_scope_of(&e.logical).unwrap_or_default()),
             "returned" => num(e, |c| c.returned),
             "injected" => num(e, |c| c.injected),
             "fetched" => num(e, |c| c.fetched),
@@ -566,6 +566,22 @@ async fn list_memories(
 enum SortKey {
     Num(f64),
     Text(String),
+}
+
+/// A text sort key keeps this many characters. The cursor carries the key,
+/// and [`unhex_json`] refuses a cursor over 4,096 hex digits, so a whole
+/// long summary (or one full of JSON-escaped characters) made page 2 a 400.
+/// Rows sharing these first characters are ordered by id, which is still
+/// one total order for the cursor to point into.
+const TEXT_KEY_CHARS: usize = 200;
+
+impl SortKey {
+    fn text(mut s: String) -> Self {
+        if let Some((cut, _)) = s.char_indices().nth(TEXT_KEY_CHARS) {
+            s.truncate(cut);
+        }
+        SortKey::Text(s)
+    }
 }
 
 fn cmp_key(a: &SortKey, b: &SortKey) -> std::cmp::Ordering {

@@ -28,9 +28,11 @@
 //! the project ([`maintain`]): it drains the project's hook JSONL (lines
 //! written by hooks that ran in-process) into `hook_events` and its usage
 //! JSONL (and that of the shared stores it reads) into `memory_events`, and
-//! runs the
-//! existing cheap fragment-count compaction check, so hooks keep reading a
-//! compact table.
+//! runs the existing cheap fragment-count compaction check, so hooks keep
+//! reading a compact table. The usage rollup reconcile and the usage-table
+//! compaction are heavier (a full scan under the rollup lock, a Lance
+//! compaction) and every project reaches the global store, so they run at
+//! most once per [`HOOK_PRUNE_INTERVAL`] per **store**, not per pass.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -60,6 +62,9 @@ pub const HOOK_FLUSH_BATCH: usize = 1_024;
 /// Retention prune and table compaction run for a project at most this
 /// often, on a flush that writes that project's events.
 const HOOK_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
+
+/// How many await-and-drain rounds one [`HookTelemetry::flush`] runs at most.
+const FLUSH_ROUNDS: usize = 4;
 
 /// Background maintenance runs at most this often per project.
 pub const HOOK_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
@@ -256,24 +261,50 @@ impl HookTelemetry {
     /// Write every buffered event, after waiting for the background batch
     /// writes. Failures are logged and the events dropped: telemetry must
     /// never wedge the daemon.
+    ///
+    /// Hooks can still be served while a flush runs (a shutdown flush
+    /// included), and one of them can fill a batch and spawn its write after
+    /// the handles were taken, or buffer events after the buffers were
+    /// drained. So the flush repeats — await the writes, drain and write the
+    /// buffers — until a round finds nothing, at most [`FLUSH_ROUNDS`] times.
+    /// Past that (hooks arriving faster than the writes commit) the rest is
+    /// left for the next flush; at shutdown it is lost with the process,
+    /// like a `SIGKILL`'s interval.
     pub(crate) async fn flush(&self) {
-        let writes = std::mem::take(&mut *self.writes.lock().unwrap_or_else(|e| e.into_inner()));
-        for handle in writes {
-            let _ = handle.await;
+        let mut hook_ids: Vec<String> = Vec::new();
+        let mut usage_ids: Vec<String> = Vec::new();
+        for _ in 0..FLUSH_ROUNDS {
+            let writes =
+                std::mem::take(&mut *self.writes.lock().unwrap_or_else(|e| e.into_inner()));
+            let awaited = !writes.is_empty();
+            for handle in writes {
+                let _ = handle.await;
+            }
+            let drained: Vec<(String, Vec<HookEvent>)> = {
+                let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+                buf.drain().collect()
+            };
+            let usage: Vec<(String, Vec<MemoryEvent>)> = {
+                let mut buf = self.usage.lock().unwrap_or_else(|e| e.into_inner());
+                buf.drain().collect()
+            };
+            if !awaited && drained.is_empty() && usage.is_empty() {
+                break;
+            }
+            for (sid, events) in usage {
+                write_usage_batch(&sid, &events).await;
+                if !usage_ids.contains(&sid) {
+                    usage_ids.push(sid);
+                }
+            }
+            for (pid, events) in drained {
+                write_batch(&pid, &events).await;
+                if !hook_ids.contains(&pid) {
+                    hook_ids.push(pid);
+                }
+            }
         }
-        let drained: Vec<(String, Vec<HookEvent>)> = {
-            let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
-            buf.drain().collect()
-        };
-        let usage: Vec<(String, Vec<MemoryEvent>)> = {
-            let mut buf = self.usage.lock().unwrap_or_else(|e| e.into_inner());
-            buf.drain().collect()
-        };
-        for (sid, events) in &usage {
-            write_usage_batch(sid, events).await;
-        }
-        for (pid, events) in drained {
-            write_batch(&pid, &events).await;
+        for pid in hook_ids {
             if self.prune_due(&pid) {
                 let retention = self.retention_of(&pid);
                 if let Some(days) = retention {
@@ -288,7 +319,7 @@ impl HookTelemetry {
         }
         // Usage tables on their own throttle: a store's usage can be written
         // by a project whose hook events go elsewhere.
-        for (sid, _) in usage {
+        for sid in usage_ids {
             let key = format!("usage:{sid}");
             if !self.prune_due(&key) {
                 continue;
@@ -390,6 +421,26 @@ pub(crate) fn spawn_flush_task(
     });
 }
 
+/// Whether the usage reconcile and compaction are due for `store_id` on the
+/// daemon's maintenance path; marks them as run. Per store, process-wide
+/// (one daemon per process), every [`HOOK_PRUNE_INTERVAL`].
+fn usage_housekeeping_due(store_id: &str) -> bool {
+    static LAST: std::sync::OnceLock<Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    let mut last = LAST
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    match last.get(store_id) {
+        Some(t) if now.duration_since(*t) < HOOK_PRUNE_INTERVAL => false,
+        _ => {
+            last.retain(|_, t| now.duration_since(*t) < HOOK_PRUNE_INTERVAL);
+            last.insert(store_id.to_string(), now);
+            true
+        }
+    }
+}
+
 /// Background maintenance for a project the daemon just served: drain its
 /// hook JSONL into `hook_events`, then the cheap compaction check. Both are
 /// best-effort.
@@ -417,6 +468,7 @@ pub(crate) async fn maintain(project: HookProject) {
         false,
         project.stats_enabled,
         None,
+        &usage_housekeeping_due,
     )
     .await;
     let config_path = project.root.join(".engramdb").join("config.toml");
@@ -492,12 +544,48 @@ mod tests {
         assert_eq!(t.buffered_usage("a"), 1, "the remainder stays buffered");
     }
 
+    /// A batch write spawned while a flush is running (a hook served during
+    /// shutdown filling a batch) is awaited by that flush too.
+    #[tokio::test]
+    async fn flush_awaits_writes_spawned_while_it_runs() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let t = Arc::new(HookTelemetry::default());
+        let done = Arc::new(AtomicBool::new(false));
+        let (t2, done2) = (Arc::clone(&t), Arc::clone(&done));
+        // The first write, awaited by the flush, spawns a second one — as a
+        // hook served mid-flush would.
+        let first = tokio::spawn(async move {
+            let late = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                done2.store(true, Ordering::SeqCst);
+            });
+            t2.writes.lock().unwrap().push(late);
+        });
+        t.writes.lock().unwrap().push(first);
+        t.flush().await;
+        assert!(
+            done.load(Ordering::SeqCst),
+            "the late batch must commit before flush returns"
+        );
+    }
+
     #[test]
     fn maintenance_is_throttled_per_project() {
         let t = HookTelemetry::default();
         assert!(t.maintenance_due(Path::new("/a")));
         assert!(!t.maintenance_due(Path::new("/a")));
         assert!(t.maintenance_due(Path::new("/b")));
+    }
+
+    /// The daemon's per-pass maintenance drains every time but reconciles
+    /// and compacts a store's usage at most once per interval, however many
+    /// projects reach that store (every project reaches the global one).
+    #[test]
+    fn usage_housekeeping_is_throttled_per_store() {
+        assert!(usage_housekeeping_due("usage-throttle-a"));
+        assert!(!usage_housekeeping_due("usage-throttle-a"));
+        assert!(usage_housekeeping_due("usage-throttle-b"));
+        assert!(!usage_housekeeping_due("usage-throttle-b"));
     }
 
     #[test]

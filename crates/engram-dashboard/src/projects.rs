@@ -12,7 +12,11 @@
 //! [`ROW_TIMEOUT`]: a registered project on a hung network mount reads as
 //! "timed out", and neither stalls a runtime worker nor the other rows. The
 //! stuck probe thread itself is not cancellable and finishes (or not) on its
-//! own — that is the declared cost.
+//! own — that is the declared cost. [`off_runtime`] keeps that cost bounded:
+//! at most one probe per key (a path, a store) is ever running, and a key
+//! whose probe timed out is answered "timed out" without a new thread for
+//! [`PROBE_RETRY_AFTER`], so reloading a page over a hung mount cannot fill
+//! the blocking pool (every `tokio::fs` call queues behind a full one).
 //!
 //! A project's store is keyed by the id computed from its path *now*
 //! (`compute_project_id`, which prefers the git remote), exactly as
@@ -104,6 +108,108 @@ async fn load_registry() -> Result<Registry, ApiError> {
 /// How long one store's probes may take before its row reads as timed out.
 pub const ROW_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long a key whose probe timed out is refused without a new probe.
+pub const PROBE_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Keys kept in [`off_runtime`]'s table before idle ones are dropped.
+const GATE_TABLE_MAX: usize = 512;
+
+/// Why [`off_runtime`] has no result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refused {
+    /// It ran (or waited for the key's running probe) past its limit.
+    TimedOut(Duration),
+    /// The key's last probe timed out less than [`PROBE_RETRY_AFTER`] ago
+    /// (or one is still stuck): not retried yet.
+    RecentlyTimedOut,
+    /// The work panicked.
+    Failed,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::TimedOut(d) => write!(f, "timed out after {}s", d.as_secs()),
+            Refused::RecentlyTimedOut => write!(
+                f,
+                "timed out less than {}s ago (not retried yet)",
+                PROBE_RETRY_AFTER.as_secs()
+            ),
+            Refused::Failed => f.write_str("the probe failed"),
+        }
+    }
+}
+
+struct Gate {
+    one: std::sync::Arc<tokio::sync::Semaphore>,
+    timed_out: Option<std::time::Instant>,
+}
+
+fn gates() -> &'static std::sync::Mutex<HashMap<String, Gate>> {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Gate>>> =
+        std::sync::OnceLock::new();
+    GATES.get_or_init(Default::default)
+}
+
+/// Run `work` off the runtime workers — on the blocking pool, under its own
+/// `block_on`, so a synchronous syscall inside it (`is_dir`, `canonicalize`,
+/// `read_to_string` of a `.git` file) on a hung mount pins a blocking thread
+/// and never a worker — within `limit`, and **at most one at a time per
+/// `key`**: a second caller waits for the running one (within its own
+/// `limit`), and once one times out the key is refused for
+/// [`PROBE_RETRY_AFTER`] without starting another. So a hung mount costs one
+/// stuck thread per key, however often a page reloads. A timed-out work is
+/// left to finish on its own (it cannot be cancelled) and holds its key
+/// until it does.
+pub(crate) async fn off_runtime<T, F>(key: String, limit: Duration, work: F) -> Result<T, Refused>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let one = {
+        let mut table = gates().lock().unwrap_or_else(|p| p.into_inner());
+        if table.len() >= GATE_TABLE_MAX {
+            table.retain(|_, g| {
+                g.one.available_permits() == 0
+                    || g.timed_out.is_some_and(|t| t.elapsed() < PROBE_RETRY_AFTER)
+            });
+        }
+        let gate = table.entry(key.clone()).or_insert_with(|| Gate {
+            one: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            timed_out: None,
+        });
+        if let Some(t) = gate.timed_out {
+            if t.elapsed() < PROBE_RETRY_AFTER || gate.one.available_permits() == 0 {
+                return Err(Refused::RecentlyTimedOut);
+            }
+            gate.timed_out = None;
+        }
+        gate.one.clone()
+    };
+    let rt = tokio::runtime::Handle::current();
+    let run = async move {
+        // Never closed, so `acquire_owned` only waits.
+        let permit = one.acquire_owned().await.ok()?;
+        tokio::task::spawn_blocking(move || {
+            let _held_until_done = permit;
+            rt.block_on(work)
+        })
+        .await
+        .ok()
+    };
+    match tokio::time::timeout(limit, run).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(Refused::Failed),
+        Err(_) => {
+            let mut table = gates().lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(g) = table.get_mut(&key) {
+                g.timed_out = Some(std::time::Instant::now());
+            }
+            Err(Refused::TimedOut(limit))
+        }
+    }
+}
+
 /// `try_exists` with an error counted as present-but-unreadable, so an
 /// unreadable mount reads as "cannot read", not "gone".
 fn probe(path: &Path) -> Result<bool, String> {
@@ -194,14 +300,10 @@ fn probe_blocking(root: &Path, index: &IndexDir) -> StoreFacts {
 /// What the directory and the manifest say about a store rooted at `root`,
 /// read without opening it, off the runtime workers, within [`ROW_TIMEOUT`].
 async fn facts(root: PathBuf, index: IndexDir) -> StoreFacts {
+    let key = format!("dir:{}", root.display());
     let work = async move {
-        let r = root.clone();
-        let mut f = tokio::task::spawn_blocking(move || probe_blocking(&r, &index))
-            .await
-            .unwrap_or_else(|e| StoreFacts {
-                reason: Some(format!("probe failed: {e}")),
-                ..StoreFacts::default()
-            });
+        // Already on a blocking thread (`off_runtime`).
+        let mut f = probe_blocking(&root, &index);
         if f.has_store_dir {
             let engramdb_dir = paths::project_dir(&root);
             if let Ok(m) = manifest::load_manifest(&engramdb_dir.join("manifest.toml")).await {
@@ -212,13 +314,14 @@ async fn facts(root: PathBuf, index: IndexDir) -> StoreFacts {
         }
         f
     };
-    match tokio::time::timeout(ROW_TIMEOUT, work).await {
+    match off_runtime(key, ROW_TIMEOUT, work).await {
         Ok(f) => f,
-        Err(_) => StoreFacts {
-            reason: Some(format!(
-                "timed out after {}s reading the directory (an unreachable mount?)",
-                ROW_TIMEOUT.as_secs()
-            )),
+        Err(Refused::Failed) => StoreFacts {
+            reason: Some("probe failed".into()),
+            ..StoreFacts::default()
+        },
+        Err(e) => StoreFacts {
+            reason: Some(format!("{e} reading the directory (an unreachable mount?)")),
             ..StoreFacts::default()
         },
     }
@@ -529,25 +632,22 @@ pub async fn locate(id: &str, current: Option<&CurrentProject>) -> Result<Locati
     };
     let root = PathBuf::from(&entry.project_path);
     let has_parent = entry.parent_project_id.clone();
-    // Off the runtime workers, bounded like a catalog row.
+    // Off the runtime workers, bounded like a catalog row (and sharing its
+    // key, so a hung directory has one probe in flight at most).
     let probe_root = root.clone();
-    let probed = tokio::time::timeout(
-        ROW_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            (
-                paths::project_dir(&probe_root).is_dir(),
-                probe_root.is_dir(),
-            )
-        }),
-    )
+    let probed = off_runtime(format!("dir:{}", root.display()), ROW_TIMEOUT, async move {
+        (
+            paths::project_dir(&probe_root).is_dir(),
+            probe_root.is_dir(),
+        )
+    })
     .await;
     let (has_store, root_is_dir) = match probed {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => return Err(ApiError::internal(format!("probe failed: {e}"))),
-        Err(_) => {
+        Ok(v) => v,
+        Err(Refused::Failed) => return Err(ApiError::internal("probe failed")),
+        Err(e) => {
             return Err(ApiError::unavailable(format!(
-                "timed out after {}s reading {} (an unreachable mount?)",
-                ROW_TIMEOUT.as_secs(),
+                "{e} reading {} (an unreachable mount?)",
                 root.display()
             )))
         }

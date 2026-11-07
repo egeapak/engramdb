@@ -348,7 +348,8 @@ fn overview_input(
 
 /// The encoded layout for `input`: from the cache, else computed on the
 /// blocking pool within the state's layout timeout, once per key at a time
-/// (module docs). `None` when not ready, busy, or not the page's layout.
+/// (module docs), then finished for the request's width on the blocking
+/// pool within the same timeout. `None` when not ready, busy, or not the page's layout.
 async fn layout_of(
     state: &Arc<AppState>,
     input: LayoutInput,
@@ -387,7 +388,11 @@ async fn layout_of(
             }
         }
     };
-    input.render(&cached, &key, groups)
+    // Finishing scope-force places the scope names for this width: CPU work
+    // whose cost grows with the names' length (they come from memory
+    // files), so it runs on the blocking pool too, within the same deadline.
+    let render = tokio::task::spawn_blocking(move || input.render(&cached, &key, groups));
+    tokio::time::timeout_at(deadline, render).await.ok()?.ok()?
 }
 
 /// A memory's sub-scope: the first two segments of its first logical scope,
@@ -440,14 +445,6 @@ pub(crate) fn flag(
 }
 
 /// Probe the stores the external edges point into (module docs).
-///
-/// Each probe runs on the blocking pool — opening a store stats its
-/// directory and reads the registry synchronously, and on a hung mount that
-/// would stall a runtime worker where no timeout could fire — and all of
-/// them run at once, each bounded by [`crate::projects::ROW_TIMEOUT`], so the
-/// whole step takes one timeout at most, not one per store. A probe that
-/// times out is `None` (its edges are `unknown`) and its blocking thread is
-/// left to finish on its own, as `projects` does.
 pub(crate) async fn foreign_states(
     edges: &[&GraphEdge],
 ) -> HashMap<String, Option<HashSet<String>>> {
@@ -457,40 +454,50 @@ pub(crate) async fn foreign_states(
             by_store.entry(s.clone()).or_default().push(e.dst.clone());
         }
     }
+    probe_stores(by_store).await
+}
+
+/// Which of `ids` exist in each far store (`None`: it would not open).
+///
+/// Each probe runs off the runtime workers through
+/// [`crate::projects::off_runtime`] — opening a store stats its directory
+/// and reads the registry synchronously, and on a hung mount that would
+/// stall a runtime worker where no timeout could fire — keyed by the store,
+/// so a hung one has one probe in flight at most and is not retried for
+/// [`crate::projects::PROBE_RETRY_AFTER`] after it timed out. They all run
+/// at once, each bounded by [`crate::projects::ROW_TIMEOUT`], so the whole
+/// step takes one timeout at most, not one per store; at most
+/// [`MAX_FOREIGN_STORES`] are probed. A store that was not probed, timed out
+/// or panicked stays out of the map, and the caller reads a missing entry as
+/// "could not check" (`unknown`), never as dangling.
+pub(crate) async fn probe_stores(
+    by_store: BTreeMap<String, Vec<String>>,
+) -> HashMap<String, Option<HashSet<String>>> {
     let mut out = HashMap::new();
     let mut probes = tokio::task::JoinSet::new();
-    let runtime = tokio::runtime::Handle::current();
     for (i, (sid, ids)) in by_store.into_iter().enumerate() {
         if i >= MAX_FOREIGN_STORES {
             out.insert(sid, None);
             continue;
         }
-        let rt = runtime.clone();
         probes.spawn(async move {
-            let probe = tokio::task::spawn_blocking(move || {
-                rt.block_on(async {
+            let key = format!("store:{sid}");
+            let probe = crate::projects::off_runtime(key, crate::projects::ROW_TIMEOUT, {
+                let sid = sid.clone();
+                async move {
                     let other = engramdb::ops::links::open_store_by_id(&sid, true)
                         .await
                         .ok()?;
                     other.batch_exists(&ids).await.ok()
-                })
-                .map(|found| (sid.clone(), found))
-                .ok_or(sid)
-            });
-            tokio::time::timeout(crate::projects::ROW_TIMEOUT, probe).await
+                }
+            })
+            .await;
+            (sid, probe)
         });
     }
     while let Some(done) = probes.join_next().await {
-        match done {
-            Ok(Ok(Ok(Ok((sid, found))))) => {
-                out.insert(sid, Some(found));
-            }
-            Ok(Ok(Ok(Err(sid)))) => {
-                out.insert(sid, None);
-            }
-            // Timed out or panicked: the store stays out of `out`, and the
-            // caller reads a missing entry as "could not check" (`unknown`).
-            _ => {}
+        if let Ok((sid, Ok(found))) = done {
+            out.insert(sid, found);
         }
     }
     out

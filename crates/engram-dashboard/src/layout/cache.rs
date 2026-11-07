@@ -274,6 +274,11 @@ impl LayoutCache {
             return None;
         }
         let v = Cached::from_bytes(body)?;
+        // The overview is spliced into the response as text: a corrupt one
+        // would make every `/graph` of this key invalid JSON until evicted.
+        if let Cached::Overview(text) = &v {
+            serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
+        }
         // Refresh the LRU stamp on the same handle; a failure only makes it
         // evict sooner.
         let _ = f.set_modified(SystemTime::now());
@@ -377,18 +382,21 @@ fn prune(dir: &Path, cap: u64) {
         let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.ends_with(".tmp") {
-            if now.duration_since(mtime).unwrap_or_default() > STALE_TMP {
-                let _ = std::fs::remove_file(&path);
+        // Only names this cache writes: the directory may be one the user
+        // pointed `ENGRAMDB_DASHBOARD_CACHE_DIR` at, holding files of theirs.
+        match cache_file_kind(&name) {
+            Some(FileKind::Tmp) => {
+                if now.duration_since(mtime).unwrap_or_default() > STALE_TMP {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
             }
-            continue;
-        }
-        if name.ends_with(".json") {
-            let _ = std::fs::remove_file(&path);
-            continue;
-        }
-        if !name.ends_with(".bin") {
-            continue;
+            Some(FileKind::OldJson) => {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            Some(FileKind::Bin) => {}
+            None => continue,
         }
         total += meta.len();
         files.push((mtime, meta.len(), path));
@@ -406,6 +414,44 @@ fn prune(dir: &Path, cap: u64) {
             total -= len;
         }
     }
+}
+
+/// A file name this cache writes, by kind.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FileKind {
+    /// `<key>.bin`: a layout.
+    Bin,
+    /// `<key>.json`: the older format's layout.
+    OldJson,
+    /// `.<key>.<pid>.<seq>.tmp`: a write in progress (or a crashed one).
+    Tmp,
+}
+
+fn is_key(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn is_number(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Which of the cache's own names `name` is: `<64 hex>.bin`, `<64 hex>.json`
+/// or `.<64 hex>.<digits>.<digits>.tmp`; `None` for anything else, which
+/// prune never touches.
+pub(crate) fn cache_file_kind(name: &str) -> Option<FileKind> {
+    if let Some(key) = name.strip_suffix(".bin") {
+        return is_key(key).then_some(FileKind::Bin);
+    }
+    if let Some(key) = name.strip_suffix(".json") {
+        return is_key(key).then_some(FileKind::OldJson);
+    }
+    let rest = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let mut parts = rest.split('.');
+    let ok = parts.next().is_some_and(is_key)
+        && parts.next().is_some_and(is_number)
+        && parts.next().is_some_and(is_number)
+        && parts.next().is_none();
+    ok.then_some(FileKind::Tmp)
 }
 
 #[cfg(test)]

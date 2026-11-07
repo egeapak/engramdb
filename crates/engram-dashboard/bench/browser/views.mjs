@@ -8,7 +8,7 @@
 //   NODE_PATH=$(npm root -g) node bench/browser/views.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--assets web] [--style plain] [--theme light]
 //     [--views s1k:all,s2k:all,s10k:open,s10k:all] [--modes cold,cached]
-//     [--runs 5] [--cpu-throttle 4] [--gpu] [--dpr 2] [--paint-only] [--label after] [--json out.json]
+//     [--runs 5] [--cpu-throttle 4] [--gpu] [--dpr 2] [--viewport 1280x860] [--paint-only] [--label after] [--json out.json]
 //
 // `cold`: the server's layout cache off and a fresh browser context, so the
 // layout is computed (server or worker) on every load; `cached`: one untimed
@@ -69,6 +69,8 @@ if (!args.stores) {
   process.exit(2);
 }
 const stores = resolve(args.stores);
+// `--viewport 1600x1100`: the page size (the graph box is the page's width less the card, and min(70vh, 720px) tall).
+const VIEWPORT = (([w, hh]) => ({ width: Number(w) || 1280, height: Number(hh) || 860 }))(String(args.viewport || '1280x860').split('x'));
 const bin = args.bin ? resolve(args.bin) : fileURLToPath(new URL('../../../../target/release/engramdb', import.meta.url));
 const views = list('views', 's1k:all,s2k:all,s10k:open,s10k:all').map((v) => v.split(':'));
 const modes = list('modes', 'cold,cached');
@@ -232,7 +234,7 @@ async function ready(url) {
 }
 
 async function load(browser, url, size, view) {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: Number(args.dpr || 1), colorScheme: theme });
+  const ctx = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: Number(args.dpr || 1), colorScheme: theme });
   await ctx.addInitScript(initScript);
   await ctx.addInitScript((st) => {
     try {

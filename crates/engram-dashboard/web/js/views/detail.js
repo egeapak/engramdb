@@ -103,7 +103,7 @@ function review(d, ctx) {
           null,
           h('div', { class: 'ttl' }, currentStyle().edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
           h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`),
-          reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => ctx.refresh(), 600) }),
+          reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => !ctx.isStale() && ctx.refresh(), 600) }),
         );
       }),
     ),

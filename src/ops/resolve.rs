@@ -127,8 +127,34 @@ async fn resolve_memory_unrecorded(
             })
         }
         ResolveAction::Invalidate => {
+            // `superseded_by` is an edge (mirrored as a `supersedes` row), so
+            // it obeys the personal-id rule like every other one: a shared,
+            // committed file must not name a personal successor. A successor
+            // that resolves is recorded by its full id; one that does not is
+            // kept as given (dangling is legal).
+            let superseded_by = match params.superseded_by {
+                Some(succ) => {
+                    let succ = match store.resolve_id(&succ).await {
+                        Ok(full) => full,
+                        Err(crate::storage::StorageError::NotFound(_)) => succ,
+                        Err(e) => return Err(e.into()),
+                    };
+                    let holder = store.get(&params.id).await?;
+                    super::links::check_privacy(
+                        store,
+                        Some(&holder.id),
+                        holder.visibility,
+                        std::slice::from_ref(&succ),
+                        &[],
+                        false,
+                    )
+                    .await?;
+                    Some(succ)
+                }
+                None => None,
+            };
             store
-                .invalidate_with(&params.id, params.superseded_by, Utc::now())
+                .invalidate_with(&params.id, superseded_by, Utc::now())
                 .await?;
             Ok(ResolveResult {
                 resolved: true,
@@ -515,5 +541,66 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    /// `--superseded-by` names an edge: a shared (committed) memory cannot
+    /// record a personal successor, and a successor prefix is stored as the
+    /// full id.
+    #[tokio::test]
+    async fn invalidate_superseded_by_obeys_the_personal_id_rule() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mk = |summary: &str, vis: crate::types::Visibility| {
+            let mut m = Memory::new(MemoryType::Decision, summary, "c", Provenance::human());
+            m.visibility = vis;
+            m
+        };
+        let shared = store
+            .create(&mk("shared", crate::types::Visibility::Shared))
+            .await
+            .unwrap();
+        let personal = store
+            .create(&mk("personal", crate::types::Visibility::Personal))
+            .await
+            .unwrap();
+        let successor = store
+            .create(&mk("successor", crate::types::Visibility::Shared))
+            .await
+            .unwrap();
+        let invalidate = |id: &str, by: &str| ResolveParams {
+            id: id.to_string(),
+            action: ResolveAction::Invalidate,
+            updated_content: None,
+            updated_summary: None,
+            superseded_by: Some(by.to_string()),
+        };
+        let err = resolve_memory(
+            &store,
+            invalidate(&shared, &personal),
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(
+            err.downcast_ref::<crate::ops::links::LinkRefused>()
+                .is_some(),
+            "{err:#}"
+        );
+        let m = store.get(&shared).await.unwrap();
+        assert!(!m.is_invalidated() && m.superseded_by.is_none());
+
+        resolve_memory(
+            &store,
+            invalidate(&shared, &successor[..24]),
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let m = store.get(&shared).await.unwrap();
+        assert!(m.is_invalidated());
+        assert_eq!(m.superseded_by.as_deref(), Some(successor.as_str()));
     }
 }

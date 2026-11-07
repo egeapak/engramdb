@@ -261,12 +261,15 @@ function localPath(r) {
 /** Merged relation groups per relation list: the merge is reused while its width factor holds (module docs). */
 const merged = new WeakMap();
 /**
- * Each group's last merge, by group key (and whether drawn lit): reused when
- * the group holds the same records at the same width factor, so a display
- * filter, which drops whole groups (a kind, the proposed, the rejected),
- * writes no relation again.
+ * Each group's last merge, by its first record (a group's records are one
+ * graph's: a display filter drops whole groups, so a group shown again
+ * starts with the same record) and then by whether it is drawn lit: reused
+ * when the group holds the same records at the same width factor, so a
+ * display filter, which drops whole groups (a kind, the proposed, the
+ * rejected), writes no relation again. Weak, so a graph that left the page
+ * takes its merges with it.
  */
-const lastGroup = new Map();
+const lastGroup = new WeakMap();
 const sameList = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 function groupsOf(recs, z, lit) {
@@ -291,14 +294,16 @@ function groupsOf(recs, z, lit) {
         const key = k + sfx;
         const l = lists.get(key);
         if (!l) continue;
-        const ck = key + (lit ? '|lit' : '');
-        const c = lastGroup.get(ck);
+        const ck = lit ? 'lit' : 'base';
+        let byLit = lastGroup.get(l[0]);
+        if (!byLit) lastGroup.set(l[0], (byLit = {}));
+        const c = byLit[ck];
         let path;
         if (c && Math.abs(z - c.z) / c.z < 0.02 && sameList(c.recs, l)) path = c.path;
         else {
           path = new Path2D();
           for (const r of l) relationShape(placedSink(path, r, z), ...r.shape);
-          lastGroup.set(ck, { z, recs: l, path });
+          byLit[ck] = { z, recs: l, path };
         }
         order.push({ kind: k, rejected: rej, path });
       }

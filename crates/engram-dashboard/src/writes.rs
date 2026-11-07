@@ -132,11 +132,13 @@ async fn open_writable(location: &Location) -> Result<MemoryStore, ApiError> {
 }
 
 /// How a failed review maps to HTTP. The request's problem gets 4xx: no such
-/// edge or memory (404); an edge already reviewed elsewhere (409
-/// `not_proposed`, naming its status); an `ops::links` refusal — a loser
-/// already superseded, a personal-id leak — which is an `anyhow` message with
-/// no storage error inside (409 `edge_write_refused`). Anything from storage
-/// itself (I/O, the index) is the server's problem: 500.
+/// edge or memory (404); an ambiguous id prefix (400); an edge already
+/// reviewed elsewhere (409 `not_proposed`, naming its status); an
+/// `ops::links` refusal — a loser already superseded, a personal-id leak, a
+/// bad store spec — which ops types as [`links::LinkRefused`] (409
+/// `edge_write_refused`). Anything else — storage (I/O, the index, which
+/// reports every LanceDB failure as `Validation`) or an untyped `anyhow`
+/// error from below — is the server's problem: 500.
 fn write_error(e: anyhow::Error) -> ApiError {
     if let Some(missing) = e.downcast_ref::<links::EdgeNotFound>() {
         return ApiError::not_found("unknown_edge", missing.to_string());
@@ -144,12 +146,21 @@ fn write_error(e: anyhow::Error) -> ApiError {
     if let Some(np) = e.downcast_ref::<links::NotProposed>() {
         return ApiError::new(StatusCode::CONFLICT, "not_proposed", np.to_string());
     }
-    match e.downcast::<StorageError>() {
-        Ok(StorageError::NotFound(id)) => {
+    if let Some(refused) = e.downcast_ref::<links::LinkRefused>() {
+        return ApiError::new(
+            StatusCode::CONFLICT,
+            "edge_write_refused",
+            refused.to_string(),
+        );
+    }
+    match e.downcast_ref::<StorageError>() {
+        Some(StorageError::NotFound(id)) => {
             ApiError::not_found("unknown_memory", format!("no memory {id} in this store"))
         }
-        Ok(other) => ApiError::internal(other),
-        Err(e) => ApiError::new(StatusCode::CONFLICT, "edge_write_refused", format!("{e:#}")),
+        Some(StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix") => {
+            ApiError::new(StatusCode::BAD_REQUEST, "ambiguous_id", msg.clone())
+        }
+        _ => ApiError::internal(format!("{e:#}")),
     }
 }
 
@@ -286,4 +297,52 @@ pub(crate) async fn reject_edge(
         .await
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a typed refusal is the caller's 409; an untyped error from below
+    /// (an index failure ops did not type) is a 500, never "refused".
+    #[test]
+    fn write_errors_map_typed_refusals_to_409_and_the_rest_to_500() {
+        let refused = write_error(links::LinkRefused("would leak a personal id".into()).into());
+        assert_eq!(
+            (refused.status, refused.code),
+            (StatusCode::CONFLICT, "edge_write_refused")
+        );
+        let np = write_error(
+            links::NotProposed {
+                current: LinkStatus::Rejected,
+            }
+            .into(),
+        );
+        assert_eq!((np.status, np.code), (StatusCode::CONFLICT, "not_proposed"));
+        let gone = write_error(links::EdgeNotFound("no edge".into()).into());
+        assert_eq!(gone.status, StatusCode::NOT_FOUND);
+        let missing = write_error(
+            anyhow::Error::from(StorageError::NotFound("abc".into())).context("target memory"),
+        );
+        assert_eq!(
+            (missing.status, missing.code),
+            (StatusCode::NOT_FOUND, "unknown_memory")
+        );
+        let ambiguous = write_error(
+            StorageError::Validation("Ambiguous ID prefix 'a': matches 2 memories".into()).into(),
+        );
+        assert_eq!(ambiguous.status, StatusCode::BAD_REQUEST);
+        for e in [
+            anyhow::anyhow!("Failed to query edges"),
+            StorageError::Validation("LanceDB upsert failed".into()).into(),
+        ] {
+            let mapped = write_error(e);
+            assert_eq!(
+                mapped.status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{}",
+                mapped.message
+            );
+        }
+    }
 }

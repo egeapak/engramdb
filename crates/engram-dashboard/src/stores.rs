@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engramdb::ops;
 use engramdb::ops::usage::{DailyUsage, UsageView};
@@ -29,8 +29,36 @@ pub struct ReadStore {
     location: Location,
 }
 
+/// How long opening a store (a directory stat, the project id's `.git`
+/// reads, the LanceDB connect) may take before the request is a 409.
+pub const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a whole-store read that hashes every file (`doctor`, the
+/// staleness check at its `content` tier) may take.
+pub const SLOW_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
 impl ReadStore {
+    /// Opened off the runtime workers ([`crate::projects::off_runtime`],
+    /// keyed by the location): `open_read_only` stats the directory and
+    /// computes the project id with synchronous reads, which on a hung
+    /// mount would pin a worker where no timeout could fire.
     async fn open(location: &Location) -> Result<Self, ApiError> {
+        let loc = location.clone();
+        let key = format!("open:{}:{}", loc.id, loc.root.display());
+        match crate::projects::off_runtime(key, OPEN_TIMEOUT, Self::open_here(loc)).await {
+            Ok(r) => r,
+            Err(crate::projects::Refused::Failed) => {
+                Err(ApiError::internal("opening the store failed"))
+            }
+            Err(e) => Err(ApiError::unavailable(format!(
+                "opening the store in {} {e} (an unreachable mount?)",
+                location.root.display()
+            ))),
+        }
+    }
+
+    async fn open_here(location: Location) -> Result<Self, ApiError> {
+        let location = &location;
         let opened = match location.kind {
             StoreKind::Global => MemoryStore::open_global_read_only().await,
             StoreKind::Group => MemoryStore::open_group_read_only(&location.id).await,
@@ -165,25 +193,60 @@ impl ReadStore {
         }
     }
 
+    /// Off the runtime workers (`doctor` canonicalizes and stats the
+    /// registered checkout's path, which may be on another mount).
     pub async fn doctor(&self) -> Result<ops::DoctorResult, ApiError> {
-        match ops::doctor(&self.inner).await {
-            Ok(v) => Ok(v),
-            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+        let store = self.inner.clone();
+        let ran = crate::projects::off_runtime(
+            format!("doctor:{}", self.store_id()),
+            SLOW_READ_TIMEOUT,
+            async move { ops::doctor(&store).await },
+        )
+        .await;
+        match ran {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+            Err(crate::projects::Refused::Failed) => Err(ApiError::internal("doctor failed")),
+            Err(e) => Err(ApiError::unavailable(format!("doctor {e}"))),
         }
     }
 
-    /// The tiered drift check every `query` runs, as a warning string.
+    /// The tiered drift check every `query` runs, as a warning string. Off
+    /// the runtime workers, like [`Self::doctor`]; one that does not finish
+    /// says so rather than reading as "fresh".
     pub async fn staleness(&self) -> Option<String> {
         let cfg = self.config().await;
-        self.inner.check_staleness(&cfg.index).await.ok().flatten()
+        let store = self.inner.clone();
+        let ran = crate::projects::off_runtime(
+            format!("staleness:{}", self.store_id()),
+            SLOW_READ_TIMEOUT,
+            async move { store.check_staleness(&cfg.index).await.ok().flatten() },
+        )
+        .await;
+        match ran {
+            Ok(v) => v,
+            Err(crate::projects::Refused::Failed) => None,
+            Err(e) => Some(format!("the index freshness check {e}")),
+        }
     }
 
     pub async fn schema_state(&self) -> SchemaState {
         self.inner.schema_state().await
     }
 
+    /// Off the runtime workers and bounded: it canonicalizes and stats the
+    /// *other* checkout's path, which may be on a dead mount. One that does
+    /// not answer in time is `None`, as an unreadable registry already is.
     pub async fn checkout_conflict(&self) -> Option<PathBuf> {
-        self.inner.checkout_conflict().await
+        let store = self.inner.clone();
+        crate::projects::off_runtime(
+            format!("conflict:{}", self.store_id()),
+            crate::projects::ROW_TIMEOUT,
+            async move { store.checkout_conflict().await },
+        )
+        .await
+        .ok()
+        .flatten()
     }
 
     /// Usage of every memory: the rollup plus the undrained log.
@@ -226,13 +289,99 @@ impl ReadStore {
     }
 
     /// One memory's edges in both directions, every state and status shown
-    /// (the page says which are dangling, invalidated or rejected). A
-    /// cross-store far end is checked by opening that store read-only.
+    /// (the page says which are dangling, invalidated or rejected): what
+    /// `ops::links::links_of` with `LinkFilter::all()` answers, except that
+    /// a cross-store far end is checked through the dashboard's bounded
+    /// prober ([`crate::graph::probe_stores`]: off the runtime workers,
+    /// concurrently, under `ROW_TIMEOUT` each, at most 8 stores, one probe
+    /// per store in flight) rather than `links_of`'s serial, unbounded opens
+    /// on the calling worker. An unprobed or timed-out store is `unknown`.
     pub async fn links_of(&self, id: &str) -> Result<ops::links::LinksView, ApiError> {
-        match ops::links::links_of(&self.inner, id, &ops::links::LinkFilter::all()).await {
-            Ok(v) => Ok(v),
-            Err(e) => Err(self.index_error(ApiError::from_anyhow(e)).await),
+        use ops::links::{Direction, EdgeState, EdgeView, LinksView};
+        let storage = |e| ApiError::from_storage(e);
+        let full = match self.inner.resolve_id(id).await {
+            Ok(f) => f,
+            Err(e) => return Err(self.index_error(storage(e)).await),
+        };
+        let rows = match self.inner.edges_touching(&full).await {
+            Ok(r) => r,
+            Err(e) => return Err(self.index_error(storage(e)).await),
+        };
+        // The far end: an inbound edge's is always in this store (the table
+        // holds only edges this store's files declare).
+        let other = |r: &ops::links::EdgeRow| {
+            if r.src_id == full {
+                (r.dst_id.clone(), r.dst_store.clone())
+            } else {
+                (r.src_id.clone(), None)
+            }
+        };
+        let mut local_ids: Vec<String> = Vec::new();
+        let mut by_store: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for r in &rows {
+            match other(r) {
+                (oid, None) => local_ids.push(oid),
+                (oid, Some(sid)) => by_store.entry(sid).or_default().push(oid),
+            }
         }
+        let local: std::collections::HashMap<String, Memory> =
+            match self.inner.get_batch(&local_ids).await {
+                Ok(v) => v.into_iter().collect(),
+                Err(e) => return Err(self.index_error(storage(e)).await),
+            };
+        let foreign = crate::graph::probe_stores(by_store).await;
+        let mut view = LinksView {
+            id: full.clone(),
+            outbound: Vec::new(),
+            inbound: Vec::new(),
+            hidden: 0,
+        };
+        for row in rows {
+            let out = row.src_id == full;
+            let (other_id, other_store) = other(&row);
+            let (state, summary, successor) = match &other_store {
+                None => match local.get(&other_id) {
+                    Some(m) if m.is_invalidated() => (
+                        EdgeState::Invalidated,
+                        Some(m.summary.clone()),
+                        m.superseded_by.clone(),
+                    ),
+                    Some(m) => (EdgeState::Live, Some(m.summary.clone()), None),
+                    None => (EdgeState::Dangling, None, None),
+                },
+                Some(sid) => match foreign.get(sid) {
+                    Some(Some(found)) if found.contains(&other_id) => (EdgeState::Live, None, None),
+                    Some(Some(_)) => (EdgeState::Dangling, None, None),
+                    _ => (EdgeState::Unknown, None, None),
+                },
+            };
+            let edge = EdgeView {
+                direction: if out { Direction::Out } else { Direction::In },
+                other_id,
+                other_store,
+                other_summary: summary,
+                symmetric: row.kind.is_symmetric(),
+                kind: row.kind,
+                confidence: row.confidence,
+                origin: row.origin,
+                status: row.status,
+                created_at: row.created_at,
+                note: row.note,
+                state,
+                successor,
+            };
+            if out {
+                view.outbound.push(edge);
+            } else {
+                view.inbound.push(edge);
+            }
+        }
+        let order = |a: &EdgeView, b: &EdgeView| {
+            (a.kind.as_str(), &a.other_id).cmp(&(b.kind.as_str(), &b.other_id))
+        };
+        view.outbound.sort_by(order);
+        view.inbound.sort_by(order);
+        Ok(view)
     }
 
     /// The daily series of the last 30 days, for one memory or the store.

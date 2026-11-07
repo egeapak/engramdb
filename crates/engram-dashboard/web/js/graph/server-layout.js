@@ -8,9 +8,10 @@
 // another input, a malformed field) returns null and the page lays out as
 // before: in its worker, or for the overview on the main thread.
 //
-// Encoding (`v` 2): the header names the layout, its grouping (`groups`:
+// Encoding (`v` 3): the header names the layout, its grouping (`groups`:
 // top or sub-scopes), the input's node and edge counts, aspect, width and
-// `check` (graph/input.js `inputCheck`, recomputed here). scope-force's
+// `check` (graph/input.js `inputCheck`, or `overviewCheck` for the
+// overview, recomputed here). scope-force's
 // positions are little-endian doubles in base64, one byte per label (the
 // spot index into labels.js's `spotsAt`, rebuilt with `spotAt`; 255 for
 // unplaced), the stub ends
@@ -19,10 +20,10 @@
 // the width it names this layout, so the page caches it under that.
 
 import { spotAt, labelWidth } from './labels.js';
-import { inputCheck } from './input.js';
+import { inputCheck, overviewCheck } from './input.js';
 
 /** The encoding this page reads. */
-export const SERVER_LAYOUT_VERSION = 2;
+export const SERVER_LAYOUT_VERSION = 3;
 
 /** The layouts the server offers. */
 export const SERVER_LAYOUTS = Object.freeze({ 'scope-force': true, 'scope-overview': true });
@@ -53,7 +54,7 @@ const finite = (v) => typeof v === 'number' && Number.isFinite(v);
 const allFinite = (a) => Array.isArray(a) && a.every(finite);
 const boundsOk = (b) => !!b && finite(b.x) && finite(b.y) && finite(b.w) && finite(b.h);
 
-/** Whether `L`'s header is for `input` (and, for scope-force, `groups`). */
+/** Whether `L`'s header is for `input` (its `check` too, and for scope-force `groups`). */
 export function isFor(L, input, groups = 'top') {
   if (!L || typeof L !== 'object') return false;
   const head =
@@ -65,7 +66,7 @@ export function isFor(L, input, groups = 'top') {
     L.width === input.width &&
     Object.keys(input.options || {}).length === 0;
   if (!head) return false;
-  if (L.name !== 'scope-force') return true;
+  if (L.name !== 'scope-force') return L.check === overviewCheck(input);
   return L.groups === groups && L.check === inputCheck(input);
 }
 

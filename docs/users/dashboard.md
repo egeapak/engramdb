@@ -197,8 +197,8 @@ expands it to every one, for keyboard and screen-reader use.
 
 A large store shows its most connected memories first (800 by default); the
 page says when it is partial, and picking a top-level scope shows the rest of it. The
-layout runs in a background worker and is deterministic: the same store
-draws the same graph.
+layout is computed by the dashboard (or, as a fallback, in the page) and is
+deterministic: the same store draws the same graph.
 
 ### Scope overview and opened scopes
 
@@ -362,6 +362,17 @@ migration. (A relation review with `--allow-writes` opens that one store for
 writing, like any `engramdb` command, and may therefore do those things.) A store whose schema is behind this binary is shown with a note;
 run any `engramdb` command in that project to upgrade it. A store that was
 never indexed on this machine (a fresh clone) is listed as unavailable.
+
+**The one thing it writes is a layout cache**, never under a store, your
+project or `.engramdb/`: graph layouts it computed, kept in
+`<cache dir>/engramdb/dashboard/layouts/` (`~/.cache` on Linux,
+`~/Library/Caches` on macOS), a folder it creates with mode 0700 and refuses
+to use if anyone else can read it. The files hold memory positions, label
+spots and scope names only, never summaries or memory text, and the folder
+is kept under 64 MiB (oldest first); it touches only files it wrote. Delete
+it at any time. `ENGRAMDB_DASHBOARD_CACHE_DIR` moves it and
+`ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` turns it off (layouts are then computed
+on every load).
 
 It records no usage either, so browsing does not inflate the counts that
 decide which memories get promoted. Counts include events still waiting in a

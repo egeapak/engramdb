@@ -23,7 +23,7 @@ import { scopeName, slot } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { runNamedLayout } from '../graph/layouts.js';
 import { fromServer } from '../graph/server-layout.js';
-import { overviewInput } from '../graph/input.js';
+import { overviewInput, scopePairs as pairRows } from '../graph/input.js';
 import { filtered, merge, dominant } from '../graph/tally.js';
 import { projHead, secHead, alertBanner } from './common.js';
 
@@ -64,18 +64,12 @@ function layoutOf(input, server) {
 
 /**
  * Pairs of different top scopes, unordered, each the sum of its server rows
- * (a directed kind has one row per direction): `[{ a, b, tally }]`.
+ * (a directed kind has one row per direction): `[{ a, b, n, tally }]`. The
+ * pairing and order are graph/input.js's (hashed with the layouts, since the
+ * overview's band k is pair k); `n` is the pair's relation count.
  */
 export function scopePairs(g) {
-  const pairs = new Map();
-  for (const row of g.scope_edges || []) {
-    if (row.a === row.b) continue;
-    const [a, b] = row.a < row.b ? [row.a, row.b] : [row.b, row.a];
-    const key = JSON.stringify([a, b]);
-    if (!pairs.has(key)) pairs.set(key, { a, b, tally: { count: 0, kinds: {} } });
-    merge(pairs.get(key).tally, row);
-  }
-  return [...pairs.values()];
+  return pairRows(g.scope_edges).map((p) => ({ a: p.a, b: p.b, n: p.n, tally: p.rows.reduce(merge, { count: 0, kinds: {} }) }));
 }
 
 /**
@@ -89,7 +83,7 @@ export function overviewLayout(g, width, aspect) {
   const pairs = scopePairs(g).filter((p) => index.has(p.a) && index.has(p.b));
   const input = overviewInput(
     scopes,
-    pairs.map((p) => ({ a: p.a, b: p.b, n: p.tally.count })),
+    pairs.map((p) => ({ a: p.a, b: p.b, n: p.n })),
     width,
     aspect,
   );

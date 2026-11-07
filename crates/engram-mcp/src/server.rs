@@ -1023,6 +1023,39 @@ fn is_not_found(e: &anyhow::Error) -> bool {
     )
 }
 
+/// True for the one `StorageError::Validation` that is the caller's to fix:
+/// an ambiguous id prefix. Storage reports every LanceDB failure as
+/// `Validation` too, and those must never read as the caller's fault.
+fn is_ambiguous_prefix(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<engramdb::storage::StorageError>(),
+        Some(engramdb::storage::StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix")
+    )
+}
+
+/// The error code of a failed `link` / `unlink` / `link_status`. The
+/// request's problem: a missing memory or edge (`MEMORY_NOT_FOUND`), a
+/// refusal `ops::links` typed as its own (`LinkRefused`, `NotProposed`) or an
+/// ambiguous prefix (`VALIDATION_ERROR`). Anything else — an I/O or index
+/// failure inside a write — is `INTERNAL_ERROR`, so an agent does not retry
+/// with different arguments for a fault that is not theirs.
+fn link_error_code(e: &anyhow::Error) -> ErrorCode {
+    if is_not_found(e) || e.downcast_ref::<ops::links::EdgeNotFound>().is_some() {
+        ErrorCode::MemoryNotFound
+    } else if e.downcast_ref::<ops::links::LinkRefused>().is_some()
+        || e.downcast_ref::<ops::links::NotProposed>().is_some()
+        || is_ambiguous_prefix(e)
+    {
+        ErrorCode::ValidationError
+    } else {
+        ErrorCode::InternalError
+    }
+}
+
+fn link_error(e: anyhow::Error) -> String {
+    error_response(link_error_code(&e), &format!("{e:#}"))
+}
+
 #[derive(Serialize)]
 struct ScoreBreakdownOutput {
     final_score: f64,
@@ -3175,14 +3208,7 @@ impl EngramDbServer {
         };
         let result = ops::links::link(&store, params, ops::Surface::Mcp)
             .await
-            .map_err(|e| {
-                let code = if is_not_found(&e) {
-                    ErrorCode::MemoryNotFound
-                } else {
-                    ErrorCode::ValidationError
-                };
-                error_response(code, &format!("{e:#}"))
-            })?;
+            .map_err(link_error)?;
         let r = serde_json::to_string(&result)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -3209,7 +3235,7 @@ impl EngramDbServer {
         };
         let result = ops::links::unlink(&store, edge, ops::Surface::Mcp)
             .await
-            .map_err(|e| error_response(ErrorCode::ValidationError, &format!("{e:#}")))?;
+            .map_err(link_error)?;
         let r = serde_json::to_string(&result)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
         _scope.mark_success();
@@ -3235,8 +3261,7 @@ impl EngramDbServer {
             .transpose()?
             .unwrap_or(ops::links::LinkKind::Contradicts);
         let status = parse_link_status(&input.status)?;
-        let invalid =
-            |e: anyhow::Error| error_response(ErrorCode::ValidationError, &format!("{e:#}"));
+        let invalid = link_error;
         let value = if kind == ops::links::LinkKind::Contradicts && input.dst_store.is_none() {
             let verdict = match (status, input.winner) {
                 (ops::links::LinkStatus::Confirmed, Some(winner)) => {
@@ -3579,11 +3604,9 @@ impl EngramDbServer {
             let report = ops::memory_usage_report(&store, id).await.map_err(|e| {
                 let code = if is_not_found(&e) {
                     ErrorCode::MemoryNotFound
-                } else if matches!(
-                    e.downcast_ref::<engramdb::storage::StorageError>(),
-                    Some(engramdb::storage::StorageError::Validation(_))
-                ) {
-                    // An ambiguous prefix is the caller's to fix.
+                } else if is_ambiguous_prefix(&e) {
+                    // An ambiguous prefix is the caller's to fix; every other
+                    // `Validation` is a backend failure.
                     ErrorCode::ValidationError
                 } else {
                     ErrorCode::InternalError
@@ -5651,3 +5674,57 @@ pub async fn run_sse(
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+    use engramdb::storage::StorageError;
+
+    #[test]
+    fn link_errors_keep_backend_failures_internal() {
+        let code = |e: anyhow::Error| link_error_code(&e).as_str();
+        assert_eq!(
+            code(ops::links::EdgeNotFound("no edge".into()).into()),
+            ErrorCode::MemoryNotFound.as_str()
+        );
+        assert_eq!(
+            code(anyhow::Error::from(StorageError::NotFound("x".into())).context("target")),
+            ErrorCode::MemoryNotFound.as_str()
+        );
+        assert_eq!(
+            code(ops::links::LinkRefused("leak".into()).into()),
+            ErrorCode::ValidationError.as_str()
+        );
+        assert_eq!(
+            code(
+                ops::links::NotProposed {
+                    current: ops::links::LinkStatus::Confirmed
+                }
+                .into()
+            ),
+            ErrorCode::ValidationError.as_str()
+        );
+        assert_eq!(
+            code(StorageError::Validation("Ambiguous ID prefix 'a': matches 2".into()).into()),
+            ErrorCode::ValidationError.as_str()
+        );
+        assert_eq!(
+            code(StorageError::Validation("LanceDB upsert failed".into()).into()),
+            ErrorCode::InternalError.as_str()
+        );
+        assert_eq!(
+            code(anyhow::anyhow!("Failed to query edges")),
+            ErrorCode::InternalError.as_str()
+        );
+    }
+
+    #[test]
+    fn only_an_ambiguous_prefix_is_the_callers_validation_error() {
+        assert!(is_ambiguous_prefix(
+            &StorageError::Validation("Ambiguous ID prefix 'a': matches 2 memories".into()).into()
+        ));
+        assert!(!is_ambiguous_prefix(
+            &StorageError::Validation("LanceDB open failed".into()).into()
+        ));
+    }
+}

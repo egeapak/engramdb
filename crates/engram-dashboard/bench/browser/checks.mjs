@@ -5,7 +5,7 @@
 //
 //   NODE_PATH=$(npm root -g) node bench/browser/checks.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--assets web] [--views s60:full,s1k:all,s10k:open]
-//     [--styles plain,grid] [--json out.json]
+//     [--styles plain,grid] [--dpr 2] [--viewport 1280x860] [--json out.json]
 //
 // Per view and style it checks:
 //   a11y_list      one focusable element per drawn memory, with the SVG `<g>`'s
@@ -41,6 +41,7 @@
 //                  pointer still names the memory under it
 //   tags           (opened scope) the pointer over a far-scope tag shows the
 //                  pointer cursor, a click and Enter on its link open that scope
+//   dispose        (canvas) leaving the graph empties every canvas the host held
 //   console        no page error, no console error (a CSP violation is one)
 //
 // `--dpr 2` runs every check at device scale 2.
@@ -62,6 +63,8 @@ if (!args.stores) {
   process.exit(2);
 }
 const stores = resolve(args.stores);
+// `--viewport 1600x1100`: the page size (the graph box is the page's width less the card, and min(70vh, 720px) tall).
+const VIEWPORT = (([w, hh]) => ({ width: Number(w) || 1280, height: Number(hh) || 860 }))(String(args.viewport || '1280x860').split('x'));
 const bin = args.bin ? resolve(args.bin) : fileURLToPath(new URL('../../../../target/release/engramdb', import.meta.url));
 const VIEWS = (args.views || 's60:full,s1k:all,s10k:open').split(',').map((v) => v.split(':'));
 const STYLES = (args.styles || 'plain,grid').split(',');
@@ -203,7 +206,7 @@ async function openView(p, view) {
 const summaryOf = (label) => label.replace(/ \([^()]*\)$/, '');
 
 async function check(browser, url, size, view, style) {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: Number(args.dpr || 1), colorScheme: 'light' });
+  const ctx = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: Number(args.dpr || 1), colorScheme: 'light' });
   await ctx.addInitScript((st) => {
     try {
       localStorage.setItem('engramdb.graphStyle', st);
@@ -490,6 +493,20 @@ async function check(browser, url, size, view, style) {
       detail = { cur, hash0, hash1, hash2 };
     }
     ok('tags', pass, detail);
+  }
+  if (canvas) {
+    // Leaving the graph lets go of the host: its canvases are emptied (the
+    // listeners it kept on the document and media queries are removed with
+    // them, host.js `dispose`).
+    const gone = await p.evaluate(async () => {
+      const host = document.querySelector('.g-canvas');
+      if (!host) return { missing: true };
+      const before = host.graphDebug.backingBytes();
+      location.hash = location.hash.replace(/\/graph.*$/, '/memories');
+      await new Promise((r) => setTimeout(r, 600));
+      return { before, connected: host.isConnected, after: host.graphDebug.backingBytes(), canvases: [...host.querySelectorAll('canvas')].map((c) => c.width * c.height) };
+    });
+    ok('dispose', gone.before > 0 && !gone.connected && gone.after === 0 && gone.canvases.every((n) => n === 0), gone);
   }
   ok('console', errors.length === 0, errors.slice(0, 5));
   await ctx.close();

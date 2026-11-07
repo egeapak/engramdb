@@ -111,16 +111,18 @@ pub async fn serve(State(state): State<Arc<AppState>>, req: Request) -> Response
         }
         AssetSource::Disk(root) => {
             // Canonicalize both and compare by components, never by text: a
-            // symlink inside the asset dir must not lead outside it.
-            let (Ok(root), Ok(file)) = (
-                std::fs::canonicalize(root),
-                std::fs::canonicalize(root.join(&rel)),
-            ) else {
+            // symlink inside the asset dir must not lead outside it. On the
+            // blocking pool: these are synchronous syscalls.
+            let (root, joined) = (root.clone(), root.join(&rel));
+            let checked = tokio::task::spawn_blocking(move || {
+                let root = std::fs::canonicalize(root).ok()?;
+                let file = std::fs::canonicalize(joined).ok()?;
+                (file.starts_with(&root) && file.is_file()).then_some(file)
+            })
+            .await;
+            let Ok(Some(file)) = checked else {
                 return not_found();
             };
-            if !file.starts_with(&root) || !file.is_file() {
-                return not_found();
-            }
             match tokio::fs::read(&file).await {
                 Ok(bytes) => {
                     let mut res = bytes.into_response();

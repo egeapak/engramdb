@@ -309,6 +309,28 @@ pub fn is_group_id(id: &str) -> bool {
     id.starts_with("__g_")
 }
 
+/// Whether `id` is *exactly* a group id [`compute_group_id`] can produce:
+/// `__g_` followed by twelve lowercase hex digits. [`is_group_id`] checks
+/// only the prefix, which is enough for an id this binary computed; an id
+/// read from a file someone else wrote (a memory edge's `store`) must pass
+/// this before it reaches [`group_store_dir`], or `__g_/../..` names an
+/// arbitrary directory.
+pub fn is_canonical_group_id(id: &str) -> bool {
+    id.strip_prefix("__g_").is_some_and(|hex| {
+        hex.len() == 12 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Whether `id` is a well-formed store id: [`GLOBAL_PROJECT_ID`], a
+/// canonical group id ([`is_canonical_group_id`]), or a 16-hex-digit
+/// project id. Anything else must be refused before it is used to find a
+/// store on disk.
+pub fn is_canonical_store_id(id: &str) -> bool {
+    id == GLOBAL_PROJECT_ID
+        || is_canonical_group_id(id)
+        || (id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 /// Returns the global registry path (`<global_config_dir>/registry.json`).
 ///
 /// Respects `ENGRAMDB_REGISTRY_PATH` env var for testing isolation.
@@ -756,6 +778,27 @@ mod tests {
         assert!(is_group_id("__g_0123456789ab"));
         assert!(!is_group_id("abc123def4567890")); // real 16-hex project id
         assert!(!is_group_id(GLOBAL_PROJECT_ID)); // the global store is not a group
+    }
+
+    #[test]
+    fn canonical_store_ids_refuse_anything_path_like() {
+        assert!(is_canonical_group_id(&compute_group_id("anything")));
+        assert!(is_canonical_store_id(&compute_group_id("anything")));
+        assert!(is_canonical_store_id(GLOBAL_PROJECT_ID));
+        assert!(is_canonical_store_id("0123456789abcdef"));
+        for bad in [
+            "__g_/../../../../etc",
+            "__g_..",
+            "__g_0123456789AB",
+            "__g_0123456789abc",
+            "__g_0123456789a",
+            "../0123456789abc",
+            "0123456789abcdeg",
+            "",
+            "__global_store__/..",
+        ] {
+            assert!(!is_canonical_store_id(bad), "{bad:?}");
+        }
     }
 
     #[test]

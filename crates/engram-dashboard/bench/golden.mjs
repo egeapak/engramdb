@@ -14,7 +14,7 @@
 // test (`the_layout_js_is_pinned_to_the_layout_version`) says when.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { forceInput, overviewInput, inputCheck } from '../web/js/graph/input.js';
+import { forceInput, overviewInput, inputCheck, overviewCheck, scopePairs } from '../web/js/graph/input.js';
 import { LAYOUTS } from '../web/js/graph/layouts.js';
 import { SERVER_LAYOUT_VERSION } from '../web/js/graph/server-layout.js';
 
@@ -124,18 +124,12 @@ function overviewFixture(seed, aspect20, width) {
     const b = rand() < 0.15 ? a : names[Math.floor(rand() * names.length)];
     rows.push({ a, b, count: 1 + Math.floor(rand() * 60 * rand()) });
   }
-  // The page's scopePairs: unordered pairs of different scopes, summed.
+  // The page's own pairing (graph/input.js scopePairs, as
+  // views/graph-overview.js calls it), not a copy.
   const shown = scopes.filter((l) => l.count > 0);
   const index = new Map(shown.map((l, i) => [l.name, i]));
-  const pairs = new Map();
-  for (const r of rows) {
-    if (r.a === r.b) continue;
-    const [a, b] = r.a < r.b ? [r.a, r.b] : [r.b, r.a];
-    const key = JSON.stringify([a, b]);
-    if (!pairs.has(key)) pairs.set(key, { a, b, n: 0 });
-    pairs.get(key).n += r.count;
-  }
-  const input = overviewInput(shown, [...pairs.values()].filter((p) => index.has(p.a) && index.has(p.b)), width, aspect20 / 20);
+  const pairs = scopePairs(rows).filter((p) => index.has(p.a) && index.has(p.b));
+  const input = overviewInput(shown, pairs.map((p) => ({ a: p.a, b: p.b, n: p.n })), width, aspect20 / 20);
   const out = LAYOUTS['scope-overview'](input);
   return {
     v: SERVER_LAYOUT_VERSION,
@@ -144,6 +138,7 @@ function overviewFixture(seed, aspect20, width) {
     width,
     scopes,
     scope_edges: rows,
+    check: overviewCheck(input),
     out: {
       pos: b64(out.pos),
       r: b64(out.r),

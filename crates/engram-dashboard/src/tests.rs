@@ -691,6 +691,47 @@ async fn paging_is_keyed_so_a_new_row_never_repeats_one() {
 }
 
 #[tokio::test]
+async fn a_long_summary_never_breaks_the_summary_sort_cursor() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // Longer than the cursor cap even before hex (multi-byte, escaped), and
+    // two sharing their first few thousand characters.
+    let long = "é\u{1}".repeat(1500);
+    let mut ids = Vec::new();
+    for tail in ["a", "b", "c"] {
+        let m = memory(MemoryType::Decision, &format!("{long}{tail}"), &[], &[]);
+        ids.push(m.id.clone());
+        store.create(&m).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    let base = format!("/api/projects/{}/memories?sort=summary&limit=1", fx.id);
+    let (s, mut page) = get_json(&app, &base).await;
+    assert_eq!(s, StatusCode::OK, "{page}");
+    let mut seen = Vec::new();
+    loop {
+        for m in page["items"].as_array().unwrap() {
+            seen.push(m["id"].as_str().unwrap().to_string());
+        }
+        let Some(c) = page["next_cursor"].as_str().map(str::to_string) else {
+            break;
+        };
+        assert!(c.len() <= 4096, "cursor of {} hex digits", c.len());
+        let (s, next) = get_json(&app, &format!("{base}&cursor={c}")).await;
+        assert_eq!(s, StatusCode::OK, "{next}");
+        page = next;
+    }
+    // Every live row once (4 of the fixture + 3).
+    assert_eq!(seen.len(), 7, "{seen:?}");
+    let mut uniq = seen.clone();
+    uniq.sort();
+    uniq.dedup();
+    assert_eq!(uniq.len(), 7);
+    for id in &ids {
+        assert!(seen.contains(id), "{id} never listed");
+    }
+}
+
+#[tokio::test]
 async fn a_store_with_a_genuinely_old_table_answers_409_not_400() {
     let fx = fixture().await;
     // The pre-0.3.0 shape: the epistemic columns are not in the table.
@@ -4005,4 +4046,48 @@ async fn relations_fold_both_copies_keep_unknown_statuses_and_probe_far_stores()
     let long = "x".repeat(257);
     let (s, _) = get_json(&app, &format!("{base}&q={long}")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// A hung probe holds its key until it returns, so reloading a page over a
+/// hung mount starts no second thread for it, and once it timed out the key
+/// is refused at once rather than waited on again (review: blocked threads
+/// piling up in the blocking pool).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hung_probe_is_single_flight_and_not_retried_at_once() {
+    use crate::projects::{off_runtime, Refused};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let started = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let hang = {
+        let (started, release) = (started.clone(), release.clone());
+        move || {
+            let (started, release) = (started.clone(), release.clone());
+            async move {
+                started.fetch_add(1, Ordering::SeqCst);
+                // A synchronous wait, like a stat on a hung mount.
+                release.wait();
+            }
+        }
+    };
+    let key = "test:hung".to_string();
+    let limit = Duration::from_millis(150);
+    let (a, b) = tokio::join!(
+        off_runtime(key.clone(), limit, hang()),
+        off_runtime(key.clone(), limit, hang()),
+    );
+    assert_eq!(a, Err(Refused::TimedOut(limit)));
+    assert_eq!(b, Err(Refused::TimedOut(limit)));
+    assert_eq!(started.load(Ordering::SeqCst), 1, "one thread per key");
+    // Refused at once, without a new probe.
+    let t0 = std::time::Instant::now();
+    let c = off_runtime(key.clone(), Duration::from_secs(5), hang()).await;
+    assert_eq!(c, Err(Refused::RecentlyTimedOut));
+    assert!(t0.elapsed() < Duration::from_secs(1));
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    // Another key is not affected, and a finished probe answers.
+    let other = off_runtime("test:fine".into(), limit, async { 7 }).await;
+    assert_eq!(other, Ok(7));
+    release.wait();
 }

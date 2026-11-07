@@ -27,13 +27,41 @@ const reviews = new Map();
  * A box built while a review of its edge is in flight shows "Saving…"; when
  * that review settles, every box still on the page is re-rendered (the
  * result, or the choices again after an error), so none is left saying
- * "Saving…". Boxes that left the page are dropped as they are seen.
+ * "Saving…". Boxes that left the page are dropped as they are seen, and swept in
+ * `watch`.
  */
 const watchers = new Map();
 
+// Boxes are only seen by a review of their own edge, and most edges are
+// never reviewed: every so often (when the count doubles since the last
+// sweep) the ones that left the page are dropped, so rebuilding a page of
+// controls again and again keeps no detached box alive. Only boxes made in
+// an earlier task: one made in this one may not be in the page yet (its
+// caller mounts it after `reviewControls` returns).
+let watched = 0;
+let sweepAt = 256;
+let tick = 0;
+let tickQueued = false;
+
 function watch(key, fn, box) {
+  if (!tickQueued) {
+    tickQueued = true;
+    queueMicrotask(() => {
+      tick++;
+      tickQueued = false;
+    });
+  }
+  if (++watched >= sweepAt) {
+    watched = 0;
+    for (const [k, set] of watchers) {
+      for (const w of set) if (w.tick < tick && !w.box.isConnected) set.delete(w);
+      if (set.size) watched += set.size;
+      else watchers.delete(k);
+    }
+    sweepAt = Math.max(256, 2 * watched);
+  }
   if (!watchers.has(key)) watchers.set(key, new Set());
-  watchers.get(key).add({ fn, box });
+  watchers.get(key).add({ fn, box, tick });
 }
 
 function settle(key, except) {

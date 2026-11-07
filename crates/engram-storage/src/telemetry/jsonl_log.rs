@@ -23,7 +23,14 @@
 //! - **No double counting.** Readers never read a file a drain has claimed.
 //!   The other side of that: lines in a claimed file are missing from reads
 //!   until a drain inserts them — for the length of a drain, or, after a drain
-//!   that crashed before its delete, until the next drain.
+//!   that crashed or failed before its delete, until a drain succeeds.
+//! - **A drain that keeps failing.** A drain that finds claimed files still
+//!   pending retries only those and claims nothing new, so the backlog stays
+//!   at what one failed drain claimed (at most two generations) and the live
+//!   log keeps rotating and stays visible to reads. While the failure lasts,
+//!   only the pending files' lines are missing from reads; new lines beyond
+//!   two generations are lost to rotation, as without a drainer. Each failed
+//!   retry warns with the number of pending files.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -98,7 +105,9 @@ impl JsonlLog {
     ///
     /// 1. Claim: rename the rotated and live files to
     ///    `<draining_prefix><pid>.<n>.<i>.jsonl`. New writers then start a
-    ///    fresh live file. Files left by a drain that crashed are picked up.
+    ///    fresh live file. When files left by a drain that crashed or failed
+    ///    are still pending, nothing new is claimed: this drain retries only
+    ///    those (module docs, "A drain that keeps failing").
     /// 2. Wait `grace`, then read every claimed file.
     /// 3. Hand the texts to `ingest`, which inserts them idempotently.
     /// 4. Delete the claimed files — only after `ingest` succeeded. A crash or
@@ -139,21 +148,70 @@ impl JsonlLog {
         let _guard = crate::write_lock::acquire_lock_file(store_data.join(self.lock_file)).await?;
 
         let dir = state_dir(project_root);
-        let stamp = format!(
-            "{}.{}",
-            std::process::id(),
-            Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        );
+        let pending = self.claimed_files(&dir)?;
+        let retrying = !pending.is_empty();
         let mut claimed_new = false;
-        for (i, name) in [self.rotated, self.live].iter().enumerate() {
-            let target = dir.join(format!("{}{stamp}.{i}.jsonl", self.draining_prefix));
-            match std::fs::rename(dir.join(name), &target) {
-                Ok(()) => claimed_new = true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+        if !retrying {
+            let stamp = format!(
+                "{}.{}",
+                std::process::id(),
+                Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            );
+            for (i, name) in [self.rotated, self.live].iter().enumerate() {
+                let target = dir.join(format!("{}{stamp}.{i}.jsonl", self.draining_prefix));
+                match std::fs::rename(dir.join(name), &target) {
+                    Ok(()) => claimed_new = true,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
-        let mut claimed: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+        let claimed = if retrying {
+            pending
+        } else {
+            self.claimed_files(&dir)?
+        };
+        if claimed.is_empty() {
+            return Ok(None);
+        }
+        if claimed_new {
+            tokio::time::sleep(grace).await;
+        }
+
+        let mut texts = Vec::with_capacity(claimed.len());
+        for path in &claimed {
+            if let Some(text) = read_state_file(path)? {
+                texts.push(text);
+            }
+        }
+        let out = match ingest(texts).await {
+            Ok(out) => out,
+            Err(e) => {
+                if retrying {
+                    tracing::warn!(
+                        "{} claimed file(s) under {} still fail to drain; new lines stay \
+                         in the live log until they do: {e}",
+                        claimed.len(),
+                        dir.display()
+                    );
+                }
+                return Err(e);
+            }
+        };
+        let mut files = 0;
+        for path in &claimed {
+            match std::fs::remove_file(path) {
+                Ok(()) => files += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!("could not delete drained {}: {e}", path.display()),
+            }
+        }
+        Ok(Some((out, files)))
+    }
+
+    /// Every file under `dir` a drain has claimed and not deleted, sorted.
+    fn claimed_files(&self, dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+        let mut claimed: Vec<PathBuf> = match std::fs::read_dir(dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
@@ -166,29 +224,7 @@ impl JsonlLog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        if claimed.is_empty() {
-            return Ok(None);
-        }
         claimed.sort();
-        if claimed_new {
-            tokio::time::sleep(grace).await;
-        }
-
-        let mut texts = Vec::with_capacity(claimed.len());
-        for path in &claimed {
-            if let Some(text) = read_state_file(path)? {
-                texts.push(text);
-            }
-        }
-        let out = ingest(texts).await?;
-        let mut files = 0;
-        for path in &claimed {
-            match std::fs::remove_file(path) {
-                Ok(()) => files += 1,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => tracing::warn!("could not delete drained {}: {e}", path.display()),
-            }
-        }
-        Ok(Some((out, files)))
+        Ok(claimed)
     }
 }

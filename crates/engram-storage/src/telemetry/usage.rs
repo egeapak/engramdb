@@ -586,6 +586,57 @@ mod tests {
         assert_eq!(load_rollup(&sid).await.unwrap()["m1"].counts.fetched, 1);
     }
 
+    /// A drain that keeps failing retries the files it already claimed and
+    /// claims no new generation, so the backlog stays bounded and new lines
+    /// stay in the live log, visible to reads.
+    #[tokio::test]
+    async fn a_failing_drain_claims_no_new_generation() {
+        let (tmp, sid) = store_with_id();
+        let state = tmp.path().join(".engramdb/state");
+        let claimed = || {
+            std::fs::read_dir(&state)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with(MEMORY_EVENTS_DRAINING_PREFIX)
+                })
+                .count()
+        };
+        let fail = |_: Vec<String>| async { Err::<(), _>(anyhow::anyhow!("ingest down")) };
+        record_memory_events(tmp.path(), &[ev(&sid, "m1", UsageKind::Fetched, None)]).unwrap();
+        assert!(LOG
+            .drain(tmp.path(), &sid, Duration::ZERO, fail)
+            .await
+            .is_err());
+        let pending = claimed();
+        assert_eq!(pending, 1);
+        record_memory_events(tmp.path(), &[ev(&sid, "m2", UsageKind::Fetched, None)]).unwrap();
+        assert!(LOG
+            .drain(tmp.path(), &sid, Duration::ZERO, fail)
+            .await
+            .is_err());
+        assert_eq!(claimed(), pending, "no new generation claimed");
+        let unclaimed = LOG.read_unclaimed(tmp.path()).unwrap().concat();
+        assert!(unclaimed.contains("m2"), "the new line stays readable");
+        assert!(!unclaimed.contains("m1"));
+
+        // Once ingest works: the pending file first, then the live log.
+        let first = drain_with_grace(tmp.path(), &sid, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(first.files, 1);
+        assert!(memory_events_path(tmp.path()).exists());
+        drain_with_grace(tmp.path(), &sid, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(claimed(), 0);
+        let rollup = load_rollup(&sid).await.unwrap();
+        assert_eq!(rollup["m1"].counts.fetched, 1);
+        assert_eq!(rollup["m2"].counts.fetched, 1);
+    }
+
     #[tokio::test]
     async fn drain_without_a_store_data_dir_leaves_the_log_alone() {
         let tmp = project();
