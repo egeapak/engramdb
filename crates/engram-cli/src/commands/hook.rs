@@ -775,8 +775,23 @@ async fn process_session_start(
         input,
         &StoreSource::Fresh,
         &UsageSink::Log,
+        None,
     )
     .await
+}
+
+/// Register an initialized project that the registry does not know, and
+/// return the notice the agent should pass on to the user. Best-effort: a
+/// failure is logged and costs only the notice.
+async fn registration_notice(dir: &Path, registry: Option<&dyn RegistryBackend>) -> Option<String> {
+    let registry = registry?;
+    match engramdb::ops::projects::ensure_registered(dir, registry).await {
+        Ok(check) => check.agent_notice(),
+        Err(e) => {
+            tracing::warn!("engramdb hook: registry check failed (continuing): {e}");
+            None
+        }
+    }
 }
 
 async fn process_session_start_in(
@@ -785,12 +800,21 @@ async fn process_session_start_in(
     input: &str,
     stores: &StoreSource<'_>,
     usage: &UsageSink<'_>,
+    registry: Option<&dyn RegistryBackend>,
 ) -> Result<Option<String>> {
+    // Before the store opens, so the notice survives a failed open or query:
+    // it reports a change already made to the registry.
+    let notice = registration_notice(dir, registry).await;
+    let notice_only = |notice: Option<String>| -> Result<Option<String>> {
+        notice
+            .map(|n| build_hook_response("SessionStart", &n))
+            .transpose()
+    };
     let store = match stores.open(dir).await {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!("Hook store open failed (non-fatal): {}", e);
-            return Ok(None);
+            return notice_only(notice);
         }
     };
 
@@ -824,7 +848,7 @@ async fn process_session_start_in(
         Ok(r) => r,
         Err(e) => {
             tracing::debug!("Hook retrieval failed (non-fatal): {}", e);
-            return Ok(None);
+            return notice_only(notice);
         }
     };
 
@@ -844,13 +868,19 @@ async fn process_session_start_in(
             "\n({suppressed} task-scoped memories hidden — declare task_current to surface yours.)"
         )
     });
-    let reserved = hint.as_ref().map(|h| h.len()).unwrap_or(0);
-    let mut context = build_session_start_context_reserving(
+    // The registration notice leads, and its length comes out of the same
+    // budget as the hint's.
+    let notice_prefix = notice.map(|n| format!("{n}\n\n"));
+    let reserved = hint.as_ref().map(|h| h.len()).unwrap_or(0)
+        + notice_prefix.as_ref().map(|n| n.len()).unwrap_or(0);
+    let body = build_session_start_context_reserving(
         &memories,
         class_order.as_deref(),
         reserved,
         engine.config().hooks.preview_chars,
     );
+    let mut context = notice_prefix.unwrap_or_default();
+    context.push_str(&body);
     if let Some(hint) = hint {
         context.push_str(&hint);
     }
@@ -2083,6 +2113,10 @@ pub struct HookEnv<'a> {
     /// Where `injected` usage events go: the JSONL log, or the daemon's
     /// buffer.
     pub usage: UsageSink<'a>,
+    /// The registry SessionStart checks the project against (see
+    /// [`engramdb::ops::projects::ensure_registered`]). `None` skips the
+    /// check, which unit tests use so the machine registry is never read.
+    pub registry: Option<&'a dyn RegistryBackend>,
 }
 
 /// Run one hook and return what it would print. The single entry point for
@@ -2110,7 +2144,15 @@ pub async fn execute_hook(
         }
         HookCall::SessionStart { min_criticality } => {
             let min_criticality = sanitize_min_criticality(*min_criticality);
-            process_session_start_in(dir, min_criticality, input, &env.stores, &env.usage).await
+            process_session_start_in(
+                dir,
+                min_criticality,
+                input,
+                &env.stores,
+                &env.usage,
+                env.registry,
+            )
+            .await
         }
         HookCall::UserPromptSubmit => {
             Ok(
@@ -2184,6 +2226,10 @@ pub async fn run_in_process(
     input: &str,
     in_process: bool,
 ) -> Result<()> {
+    // Best-effort: without a registry SessionStart only skips its check.
+    let registry = engramdb::storage::FileRegistry::global()
+        .map_err(|e| tracing::debug!("engramdb hook: registry unavailable: {e}"))
+        .ok();
     let env = HookEnv {
         stores: StoreSource::Fresh,
         situation: if in_process {
@@ -2192,6 +2238,7 @@ pub async fn run_in_process(
             SituationModel::DaemonOrInProcess
         },
         usage: UsageSink::Log,
+        registry: registry.as_ref().map(|r| r as &dyn RegistryBackend),
     };
     let output = execute_hook(call, dir, input, &env).await?;
     print_hook_output(output.as_deref());
@@ -2260,6 +2307,7 @@ impl DaemonHookExecutor {
             stores: StoreSource::Cached(&self.stores),
             situation,
             usage: UsageSink::Collect(&usage_events),
+            registry: Some(&self.registry),
         };
         let (stdout, ok) = match execute_hook(call, &root, stdin, &env).await {
             Ok(out) => (out, true),
@@ -4498,6 +4546,89 @@ mod tests {
         assert!(out.is_none(), "missing store must return None silently");
     }
 
+    /// The SessionStart context, from the hook's JSON.
+    fn session_start_context(out: &str) -> String {
+        let parsed: serde_json::Value = serde_json::from_str(out).unwrap();
+        parsed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn session_start_registers_an_unregistered_store_and_says_so() {
+        // A project on a removable drive, set up against another registry.
+        let temp_dir =
+            store_with_criticality(&[(0.9, "Use the drive"), (0.8, "Keep it dry")]).await;
+        let registry = InMemoryRegistry::new();
+
+        let out = process_session_start_in(
+            temp_dir.path(),
+            0.5,
+            "",
+            &StoreSource::Fresh,
+            &UsageSink::Log,
+            Some(&registry),
+        )
+        .await
+        .unwrap()
+        .expect("SessionStart still emits context");
+        let ctx = session_start_context(&out);
+        assert!(
+            ctx.starts_with("[EngramDB] This project ("),
+            "the notice leads the context: {ctx}"
+        );
+        assert!(ctx.contains("Tell the user"), "{ctx}");
+        assert!(
+            ctx.contains("[EngramDB] Key project memories:"),
+            "memories still follow the notice: {ctx}"
+        );
+        assert!(
+            ctx.chars().count() <= SESSION_CONTEXT_BUDGET + REFLECTION_NUDGE.len() + 2,
+            "the notice comes out of the memory budget"
+        );
+        let id = engramdb::storage::project_id::compute_project_id(temp_dir.path());
+        assert!(registry
+            .load()
+            .await
+            .unwrap()
+            .projects
+            .iter()
+            .any(|e| e.project_id == id));
+
+        // The next session finds it registered and says nothing about it.
+        let out = process_session_start_in(
+            temp_dir.path(),
+            0.5,
+            "",
+            &StoreSource::Fresh,
+            &UsageSink::Log,
+            Some(&registry),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!session_start_context(&out).contains("registered it now"));
+    }
+
+    #[tokio::test]
+    async fn session_start_does_not_register_an_uninitialized_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let out = process_session_start_in(
+            temp_dir.path(),
+            0.5,
+            "",
+            &StoreSource::Fresh,
+            &UsageSink::Log,
+            Some(&registry),
+        )
+        .await
+        .unwrap();
+        assert!(out.is_none());
+        assert!(registry.load().await.unwrap().projects.is_empty());
+    }
+
     #[tokio::test]
     async fn session_start_empty_store_emits_nudge_only() {
         let temp_dir = TempDir::new().unwrap();
@@ -4789,9 +4920,15 @@ mod daemon_executor_tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
         std::fs::write(tmp.path().join("src/main.rs"), "").unwrap();
-        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
-            .await
-            .unwrap();
+        // Registered in this test process's own registry (the `#[ctor]` arm
+        // points it at a temp dir), like a real project: the daemon path
+        // checks SessionStart's project against it.
+        let store = MemoryStore::init(
+            tmp.path(),
+            &engramdb::storage::FileRegistry::global().unwrap(),
+        )
+        .await
+        .unwrap();
         for (type_, summary, crit) in [
             (MemoryType::Decision, "Use async everywhere", 0.9),
             (MemoryType::Hazard, "Avoid blocking calls in async", 0.8),
@@ -4832,6 +4969,7 @@ mod daemon_executor_tests {
             stores: StoreSource::Fresh,
             situation: SituationModel::KeywordOnly,
             usage: UsageSink::Log,
+            registry: None,
         };
         execute_hook(call, dir, input, &env).await.unwrap()
     }
@@ -4954,6 +5092,29 @@ mod daemon_executor_tests {
             assert_eq!(run.stdout, here, "{} differs", call.name());
             assert!(run.ok);
         }
+    }
+
+    /// The daemon path runs the SessionStart registry check too.
+    #[tokio::test]
+    async fn daemon_executor_registers_an_unregistered_store() {
+        let tmp = TempDir::new().unwrap();
+        MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let exec = DaemonHookExecutor::new().unwrap();
+        let call = HookCall::SessionStart {
+            min_criticality: 0.5,
+        };
+        let run = daemon_run(&exec, &call, tmp.path(), "{\"session_id\":\"r1\"}").await;
+        let out = run.stdout.expect("SessionStart printed");
+        assert!(out.contains("registered it now"), "{out}");
+        let id = engramdb::storage::project_id::compute_project_id(tmp.path());
+        let reg = engramdb::storage::FileRegistry::global()
+            .unwrap()
+            .load()
+            .await
+            .unwrap();
+        assert!(reg.projects.iter().any(|e| e.project_id == id));
     }
 
     /// A store the daemon has cached still sees a memory written afterwards by

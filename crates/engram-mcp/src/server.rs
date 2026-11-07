@@ -1095,21 +1095,23 @@ impl StartupStatus {
     }
 }
 
-/// The embedding-model-change warning, and whether the agent has seen it.
+/// A startup notice for the agent, and whether the agent has seen it. Used
+/// for the embedding-model-change warning and for the auto-registration
+/// notice (see [`EngramDbServer::check_registration`]).
 ///
-/// The warning used to ride only in the `initialize` instructions. Since the
+/// The embedding warning used to ride only in the `initialize` instructions. Since the
 /// check that produces it now runs after `initialize` (it resolves the
 /// embedding providers, which can take seconds on a cold start), it is often
 /// not known yet when the instructions are sent. So whichever comes first
 /// delivers it once: the instructions (when the check already finished) or
 /// the first tool result after the check finished.
 #[derive(Debug, Default)]
-struct EmbeddingNotice {
+struct StartupNotice {
     warning: std::sync::Mutex<Option<String>>,
     delivered: std::sync::atomic::AtomicBool,
 }
 
-impl EmbeddingNotice {
+impl StartupNotice {
     fn new(warning: Option<String>) -> Self {
         Self {
             warning: std::sync::Mutex::new(warning),
@@ -1195,9 +1197,13 @@ pub struct EngramDbServer {
     ///
     /// Shared, because on stdio the check runs in the deferred startup task
     /// (see [`serve_with_deferred_startup`]) on a clone of this server, after
-    /// `initialize` was already answered. See [`EmbeddingNotice`] for how it
+    /// `initialize` was already answered. See [`StartupNotice`] for how it
     /// still reaches the agent.
-    embedding_notice: Arc<EmbeddingNotice>,
+    embedding_notice: Arc<StartupNotice>,
+    /// Set at startup when the project had a store but no registry entry (or
+    /// an entry at a path that is gone) and was registered. Delivered the
+    /// same way as `embedding_notice`.
+    registration_notice: Arc<StartupNotice>,
     /// Progress of the startup work deferred past the MCP handshake. Tool
     /// calls and resource reads wait on it; `initialize`, `server/discover`
     /// and the list calls do not. Servers built without deferral start
@@ -1250,6 +1256,7 @@ impl EngramDbServer {
             provider_cache: ops::ProviderCache::new(),
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_notice: Arc::default(),
+            registration_notice: Arc::default(),
             startup: StartupStatus::ready_receiver(),
             tool_router: Self::default_tool_router(),
         })
@@ -1297,6 +1304,7 @@ impl EngramDbServer {
             provider_cache: ops::ProviderCache::new(),
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_notice: Arc::default(),
+            registration_notice: Arc::default(),
             startup: StartupStatus::ready_receiver(),
             tool_router: Self::default_tool_router(),
         }
@@ -1934,6 +1942,9 @@ impl EngramDbServer {
         }
         // Detect git worktrees and register/init the main project if needed.
         self.ensure_hierarchy().await?;
+        // A store whose registry entry is missing (a removable drive set up on
+        // another computer, a reset registry) is registered again here.
+        self.check_registration().await;
         // On the main worktree, run throttled housekeeping (orphan cleanup +
         // a quick store health check). Best-effort: never fails startup.
         self.maintain_main_project().await;
@@ -1945,6 +1956,21 @@ impl EngramDbServer {
         // self-heal it if it dies/restarts.
         self.spawn_daemon_heartbeat();
         Ok(())
+    }
+
+    /// Register the project if it has a store but the registry does not know
+    /// it, and keep the notice for the agent. Best-effort: never fails
+    /// startup.
+    async fn check_registration(&self) {
+        match ops::projects::ensure_registered(&self.effective_dir, self.registry.as_ref()).await {
+            Ok(check) => {
+                if let Some(notice) = check.agent_notice() {
+                    tracing::warn!("{notice}");
+                    self.registration_notice.set(Some(notice));
+                }
+            }
+            Err(e) => tracing::warn!("EngramDB: registry check failed (continuing): {e}"),
+        }
     }
 
     /// Embedding-model-change check: warn (default), auto-reindex, or — in
@@ -1979,7 +2005,11 @@ impl EngramDbServer {
 
     /// The server's `initialize` / `server/discover` info. The instructions
     /// carry `embedding_warning` when there is one.
-    fn server_config(&self, embedding_warning: Option<&str>) -> ServerConfig {
+    fn server_config(
+        &self,
+        embedding_warning: Option<&str>,
+        registration_notice: Option<&str>,
+    ) -> ServerConfig {
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -2043,6 +2073,10 @@ impl EngramDbServer {
             if let Some(w) = embedding_warning {
                 s.push_str("\n\n");
                 s.push_str(&embedding_notice_text(w));
+            }
+            if let Some(n) = registration_notice {
+                s.push_str("\n\n");
+                s.push_str(n);
             }
             s
         };
@@ -4853,12 +4887,18 @@ impl ServerHandler for EngramDbServer {
                     .content
                     .push(ContentBlock::text(embedding_notice_text(&w)));
             }
+            if let Some(n) = self.registration_notice.take_undelivered() {
+                result.content.push(ContentBlock::text(n));
+            }
         }
         Ok(response)
     }
 
     fn get_info(&self) -> ServerConfig {
-        self.server_config(self.embedding_notice.get().as_deref())
+        self.server_config(
+            self.embedding_notice.get().as_deref(),
+            self.registration_notice.get().as_deref(),
+        )
     }
 
     /// Same as rmcp's default, except that the instructions and the
@@ -4872,10 +4912,16 @@ impl ServerHandler for EngramDbServer {
     ) -> Result<InitializeResult, rmcp::ErrorData> {
         context.peer.set_peer_info(request.clone());
         let warning = self.embedding_notice.get();
+        let registration = self.registration_notice.get();
         let mut result = self.negotiate_initialize(&request)?;
-        result.instructions = self.server_config(warning.as_deref()).instructions;
+        result.instructions = self
+            .server_config(warning.as_deref(), registration.as_deref())
+            .instructions;
         if warning.is_some() {
             self.embedding_notice.mark_delivered();
+        }
+        if registration.is_some() {
+            self.registration_notice.mark_delivered();
         }
         Ok(result)
     }
@@ -4887,12 +4933,16 @@ impl ServerHandler for EngramDbServer {
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<DiscoverResult, rmcp::ErrorData> {
         let warning = self.embedding_notice.get();
+        let registration = self.registration_notice.get();
         let result = DiscoverResult::from_server_info(
             self.supported_protocol_versions().into_owned(),
-            self.server_config(warning.as_deref()),
+            self.server_config(warning.as_deref(), registration.as_deref()),
         );
         if warning.is_some() {
             self.embedding_notice.mark_delivered();
+        }
+        if registration.is_some() {
+            self.registration_notice.mark_delivered();
         }
         Ok(result)
     }
@@ -5355,7 +5405,12 @@ const ABANDONED_PROBE_WINDOW: std::time::Duration = std::time::Duration::from_mi
 /// A stdio transport wrapper that drops a `server/discover` probe the client
 /// has already given up on.
 ///
-/// **This works around rmcp 3.4.0 behavior.** When the first request on a
+/// **This worked around rmcp 3.4.0 behavior**, which rmcp 3.8 fixed (see
+/// `rmcp_answers_an_abandoned_discover_probe`): the session lock described
+/// next is gone, but rmcp still *answers* the stale probe, and that response
+/// alone makes Claude Code drop the connection — so the filter stays.
+///
+/// Under rmcp 3.4.0, when the first request on a
 /// connection is anything but `initialize`, rmcp's `serve_server` marks the
 /// whole session as the 2026-07-28 inline lifecycle
 /// (`Peer::require_request_metadata`), and nothing clears that mark. A later
@@ -5532,9 +5587,12 @@ pub async fn run_sse(
         (
             warmup.embedding_notice.get(),
             warmup.configured_always_load().await,
+            // Shared by every connection, so the one-time registration
+            // notice reaches the first session that can see it, once.
+            warmup.registration_notice.clone(),
         )
     };
-    let (embedding_warning, always_load) = embedding_warning;
+    let (embedding_warning, always_load, registration_notice) = embedding_warning;
 
     let config = http_server_config();
     let ct = config.cancellation_token.clone();
@@ -5545,6 +5603,7 @@ pub async fn run_sse(
             let provider_cache = provider_cache.clone();
             let daemon = daemon.clone();
             let always_load = always_load.clone();
+            let registration_notice = registration_notice.clone();
             move || {
                 let mut server =
                     EngramDbServer::new_with_stats(dir.clone(), embedding_backend, stats.clone())
@@ -5552,7 +5611,8 @@ pub async fn run_sse(
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
                 // A notice per connection: each session's instructions
                 // carry the warning, not only the first one's.
-                server.embedding_notice = Arc::new(EmbeddingNotice::new(embedding_warning.clone()));
+                server.embedding_notice = Arc::new(StartupNotice::new(embedding_warning.clone()));
+                server.registration_notice = registration_notice.clone();
                 server.set_always_load(&always_load);
                 Ok(server)
             }

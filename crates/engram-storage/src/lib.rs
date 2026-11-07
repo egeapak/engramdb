@@ -31,6 +31,7 @@ pub mod telemetry;
 pub mod test_support;
 pub mod transcript_archive;
 pub mod transcripts;
+pub mod volume;
 pub mod worktree;
 pub mod write_lock;
 

@@ -25,7 +25,7 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
     ignore:
-      # Pinned to `=2.0.0-rc.13` by fastembed 7.1. The C API level (24, so
+      # Pinned to `=2.0.0-rc.15` by fastembed 7.5. The C API level (24, so
       # ONNX Runtime >= 1.24) comes from the `api-24` feature, not the ort
       # version. A bump here that fastembed hasn't made would fail to resolve;
       # one it *has* made arrives via fastembed anyway.

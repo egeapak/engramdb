@@ -429,7 +429,8 @@ impl OnnxProvider {
         // budgets chunks against `max_tokens()` and trusts the full window.
         let mut options = TextInitOptions::new(spec.fastembed_model)
             .with_cache_dir(cache_dir)
-            .with_max_length(spec.max_tokens);
+            .with_max_length(spec.max_tokens)
+            .with_environment(engram_onnx::environment()?);
         if let Some(n) = intra_threads {
             options = options.with_intra_threads(n.max(1));
         }
@@ -496,7 +497,8 @@ impl OnnxProvider {
 
         let mut options = InitOptionsUserDefined::new()
             .with_execution_providers(engram_onnx::providers_for(backend))
-            .with_max_length(spec.max_tokens);
+            .with_max_length(spec.max_tokens)
+            .with_environment(engram_onnx::environment()?);
         if let Some(n) = intra_threads {
             options = options.with_intra_threads(n.max(1));
         }

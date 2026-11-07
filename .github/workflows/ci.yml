@@ -18,6 +18,38 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 
+# A newer push to the same PR makes the older run's result worthless; cancel
+# it instead of letting it hold ~12 runners. Pushes to master are never
+# cancelled, so every master commit still gets a complete run (and saves the
+# caches every PR restores from).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# No job writes to the repository: caches and artifacts use the runner's own
+# token, not GITHUB_TOKEN. Keep the token read-only.
+permissions:
+  contents: read
+
+# Caching policy: every `Swatinem/rust-cache` step below restores everywhere but
+# saves only on master (`save-if`). One run saves ~6.5 GB of caches (nine
+# compiling jobs at 0.45-0.9 GB each) against the repository's 10 GB cache
+# quota, so when PR branches saved too, each PR run evicted master's entries:
+# in a 12-run sample, the Linux `Test` job restored nothing on all four master
+# pushes and had to compile ~580 crates from scratch (5-9 min) each time. A PR
+# branch's own cache only ever helped a PR that changed Cargo.lock, since
+# rust-cache never stores workspace crates anyway.
+#
+# That includes Dependabot PRs, deliberately. Their Cargo.lock differs, so the
+# exact key misses, but rust-cache's restore key (`v0-rust-<job>-<os>-<env
+# hash>`, no lockfile hash) still matches master's newest entry for the same
+# job: the run restores master's dependencies and rebuilds only the bumped
+# crates and their dependents. Saving there would buy a full-hit second push
+# at ~6.5 GB per run, scoped to that PR's ref alone, which is exactly the
+# eviction of master's entries this policy exists to stop. (The Dependabot run
+# 41399668398, before this policy, restored nothing: by then PR saves had
+# evicted master's `test` entry, so it compiled all 584 crates in 9 min.)
+
 # Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
 # they need the full ONNX runtime plus downloaded embedding models, and
 # shared-runner variance makes any timing threshold flaky. They are local
@@ -195,6 +227,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -231,8 +265,8 @@ jobs:
 
   # Linux full tests run in the `test` job below; this matrix covers the
   # non-Linux targets that `release.yml` actually ships (macOS + Windows):
-  # a full-workspace `cargo check` so every platform-gated line compiles on
-  # every PR, plus a small filtered nextest subset so the platform-divergent
+  # a full-workspace build so every platform-gated line compiles on every PR,
+  # plus a small filtered nextest subset so the platform-divergent
   # IPC/filesystem code — most importantly the Windows named-pipe daemon
   # transport (`#[cfg(windows)]` in src/daemon/transport.rs) vs the
   # `#[cfg(unix)]` Unix-socket path, path resolution, and the advisory write
@@ -261,17 +295,28 @@ jobs:
         run: choco install protoc -y
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Check
-        # ONNX Runtime is downloaded + statically linked by fastembed's
-        # `download-binaries` (same as release.yml), so no manual ORT setup.
-        run: cargo check --workspace --all-features --locked
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         # Prebuilt binary, same rationale as the `test` job below.
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
+
+      # There used to be a `cargo check --workspace --all-features` step here.
+      # It was pure overhead (median ~4 min per OS, measured): the test build
+      # below compiles every lib and bin target of every workspace crate with
+      # full codegen (the integration tests link the libs and spawn the
+      # binary), which type-checks strictly more than `check` did, and `check`
+      # shares only build scripts and proc-macros with that build (its
+      # dependency artifacts are rmeta-only and get rebuilt). Everything is
+      # compiled exactly once now, in the step below; it is split out from the
+      # run only so the step timings show build and test separately.
+      - name: Build (full workspace, all features)
+        # ONNX Runtime is downloaded + statically linked by fastembed's
+        # `download-binaries` (same as release.yml), so no manual ORT setup.
+        run: cargo nextest run --workspace --all-features --locked --no-run
 
       - name: Test platform-gated IPC and filesystem code
         # `daemon::transport` exercises the Unix-socket/named-pipe transports
@@ -283,11 +328,27 @@ jobs:
           cargo nextest run --workspace --all-features --locked
           -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
 
-  test:
-    name: Test
+  # Build once, run sharded. The suite is ~26 CPU-minutes of test time that
+  # nextest already spreads across all 4 cores of one runner (~6.8 min wall,
+  # measured), so it is CPU-bound and splits almost linearly across runners.
+  # `test-build` compiles every test binary exactly once and packs them with
+  # `cargo nextest archive`; each `test` shard downloads that archive and runs a
+  # third of the tests with no Rust build (and no rust-cache restore) at all.
+  #
+  # Things the archive has to carry, and does:
+  #   - the `engramdb` binary the tier-2 CLI tests spawn: nextest archives the
+  #     workspace's bin targets and sets `CARGO_BIN_EXE_engramdb` at run time,
+  #     which is the first place `assert_cmd::Command::cargo_bin` looks;
+  #   - fixtures and insta snapshots: those are read from the source tree, and
+  #     every shard checks out the same commit at the same path, which
+  #     `--workspace-remap` points the archived binaries at;
+  #   - `.config/nextest.toml`: read from that checkout too, so the
+  #     `ml-models` group keeps `max-threads = 1` within every shard.
+  # ONNX models come from the shared model cache (restored, never saved,
+  # here); anything it lacks is downloaded at run time exactly as before.
+  test-build:
+    name: Test (build)
     runs-on: ubuntu-latest
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -298,12 +359,56 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         # Use the prebuilt binary instead of `cargo install cargo-nextest`,
         # which compiles nextest from source (~7 min on a cache miss). This
         # downloads a prebuilt release in seconds, every run, regardless of
         # cache state.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build and archive the test binaries
+        run: >-
+          cargo nextest archive --workspace --all-features --locked
+          --archive-file nextest-all-features.tar.zst
+
+      - name: Upload the test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-all-features
+          path: nextest-all-features.tar.zst
+          # Already zstd: re-deflating it costs time and saves nothing.
+          # Measured (run 41599658093): `nextest archive` packs 536 files in
+          # 5.3 s, the 571 MB upload takes 8 s, a shard's download 6-39 s and
+          # nextest's extraction ~6 s. That is under a minute of a ~3 min
+          # shard, so the archive is not worth splitting or recompressing.
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  test:
+    name: Test (shard ${{ matrix.shard }}/3)
+    needs: test-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        # Nothing is compiled here; the toolchain is only what `cargo nextest`
+        # is dispatched through.
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install nextest
         uses: taiki-e/install-action@v2
         with:
           tool: nextest
@@ -321,8 +426,29 @@ jobs:
                   /usr/local/lib/libonnxruntime.so
           sudo ldconfig
 
-      - name: Run tests
-        run: cargo nextest run --workspace --all-features --locked
+      - name: Restore the ONNX model cache
+        # Saved by the `coverage` job (see there); restore-only here, so three
+        # shards never race to save it.
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
+      - name: Download the test archive
+        uses: actions/download-artifact@v8
+        with:
+          name: nextest-all-features
+
+      - name: Run tests (shard ${{ matrix.shard }}/3)
+        # `count:` deals each binary's tests round-robin across the shards, so
+        # every shard gets a third of the slow tier-2 CLI binary rather than
+        # one shard getting all of it.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-all-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --partition count:${{ matrix.shard }}/3
 
   # `ops::compress::dot_unit` is `fearless_simd`, whose `dispatch!` normalises
   # *up* to the best SIMD level the CPU supports and offers no runtime way down.
@@ -360,6 +486,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: simd-${{ matrix.level }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         uses: taiki-e/install-action@v2
@@ -383,11 +510,17 @@ jobs:
   # ship: default features, where the runtime is `dlopen`ed at run time. This job
   # covers that path — including the case that used to abort the process, a
   # *missing* runtime, which must degrade to "embeddings unavailable" instead.
-  test-load-dynamic:
-    name: Test (default features, runtime-loaded ONNX)
+  #
+  # Split the same way as `test` (build once, three shards), and for the same
+  # reason: this was the slowest Linux job (median 14.3 min: ~6 min build,
+  # ~1.2 min test-target build, ~6.5 min of tests). The build-only assertions
+  # (ldd, start-up, the missing-runtime probe) stay in the build job, which
+  # deliberately never installs a runtime — so "must start with no runtime
+  # installed" now really runs with none, rather than with the one the old
+  # single job had already put in /usr/local/lib for its test step.
+  test-load-dynamic-build:
+    name: Test (default features, runtime-loaded ONNX) (build)
     runs-on: ubuntu-latest
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -398,21 +531,12 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - uses: taiki-e/install-action@v2
         with:
           tool: nextest
-
-      - name: Install ONNX Runtime
-        # The official Microsoft build. Deliberately not the one `ort` would
-        # download: that prebuilt executes quantized models incorrectly on
-        # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
 
       - name: Build with default features
         # No ONNX Runtime is required to build under `load-dynamic`; this must
@@ -439,21 +563,87 @@ jobs:
       - name: Binary must start with no runtime installed
         run: ./target/debug/engramdb --version
 
-      - name: Test with the runtime discovered from /usr/local/lib
-        # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
-        # system-installed runtime the way a Homebrew or distro install would.
-        run: cargo nextest run --workspace --locked
+      - name: Build and archive the test binaries
+        run: >-
+          cargo nextest archive --workspace --locked
+          --archive-file nextest-default-features.tar.zst
 
       - name: Missing runtime must degrade, not abort
         # The regression guard for the whole change. `ort`'s own loader panics
         # when the dylib is absent and the release profile is `panic = "abort"`,
         # so without the pre-flight probe in `engram_onnx::runtime` this aborts.
+        # No runtime was ever installed on this runner, so nothing to remove.
         run: |
-          sudo rm /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+          if ldconfig -p | grep -qi onnxruntime; then
+            echo "::error::an ONNX Runtime is installed on this runner; the missing-runtime checks would not test anything."
+            exit 1
+          fi
           cargo nextest run --workspace --locked -E 'test(runtime::tests::)'
           echo "Probe reports:"
           cargo run --quiet --locked --bin engramdb -- doctor || true
+
+      - name: Upload the test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: nextest-default-features
+          path: nextest-default-features.tar.zst
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  test-load-dynamic:
+    name: Test (default features, runtime-loaded ONNX) (shard ${{ matrix.shard }}/3)
+    needs: test-load-dynamic-build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      ONNXRUNTIME_VERSION: "1.24.2"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install ONNX Runtime
+        # The official Microsoft build. Deliberately not the one `ort` would
+        # download: that prebuilt executes quantized models incorrectly on
+        # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
+        run: |
+          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
+          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+                  /usr/local/lib/libonnxruntime.so
+          sudo ldconfig
+
+      - name: Restore the ONNX model cache
+        # Saved by the `coverage` job (see there); restore-only here, so three
+        # shards never race to save it.
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
+      - name: Download the test archive
+        uses: actions/download-artifact@v8
+        with:
+          name: nextest-default-features
+
+      - name: Test with the runtime discovered from /usr/local/lib (shard ${{ matrix.shard }}/3)
+        # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
+        # system-installed runtime the way a Homebrew or distro install would.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-default-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --partition count:${{ matrix.shard }}/3
 
   coverage:
     name: Coverage
@@ -472,6 +662,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest and cargo-llvm-cov
         # Prebuilt binaries (same rationale as the test job): avoids a
@@ -493,11 +685,51 @@ jobs:
                   /usr/local/lib/libonnxruntime.so
           sudo ldconfig
 
+      # The HuggingFace models the suite loads (embedding, T5, NLI, reranker)
+      # live in `model_cache_dir()` = ~/.cache/engramdb/models. Without a
+      # cache, all seven test jobs of a run (two suites x three shards, plus
+      # this one) download them from HuggingFace anonymously, ~7x per run:
+      # seconds each, but a rate limit or an HF outage fails the run.
+      #
+      # This job is the one that saves it, because it is the only one that
+      # runs the *whole* suite in one place, so it is the only one guaranteed
+      # to have touched every model a test loads (a shard sees a third of the
+      # tests, and would save a third of the models under a key nothing ever
+      # refreshes). It saves on master only, like every other cache here.
+      #
+      # Keyed on the files that name the model repos and files. Editing one
+      # restores the previous set through `restore-keys` and downloads only
+      # the difference; the union is saved under the new key. Bump `v1` to
+      # drop models no spec names any more. Not keyed on Cargo.lock: a
+      # fastembed bump that changes a registry model's files just downloads
+      # that model at run time, rather than writing a new entry every week.
+      - name: Restore the ONNX model cache
+        id: models
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
       - name: Run tests under coverage instrumentation
         # Mirror the `test` job's invocation so coverage reflects the real
         # suite. `--no-report` defers report generation so we can emit
         # multiple formats from the one profdata set below.
         run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
+
+      - name: Report the ONNX model cache
+        run: |
+          du -sh ~/.cache/engramdb/models/models--*/ 2>/dev/null | sort -h || true
+          du -sh ~/.cache/engramdb/models 2>/dev/null || echo "no model cache"
+
+      - name: Save the ONNX model cache
+        # Only after a green run: a test that falls back when a download fails
+        # could otherwise leave a model out of the saved set.
+        if: github.ref == 'refs/heads/master' && steps.models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/engramdb/models
+          key: ${{ steps.models.outputs.cache-primary-key }}
 
       - name: Generate coverage reports
         # Exclude integration-test harness files and the test-isolation crate
@@ -520,3 +752,42 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: error
+
+  # One stable check name for branch protection. Required checks match job
+  # names exactly, and the matrix/shard names here change whenever a job is
+  # split or a shard count moves (`Test` became `Test (shard N/3)`), which
+  # silently drops a required check: a rule naming a job that no longer runs
+  # waits forever, or is removed and protects nothing. Require `CI result`
+  # instead and this job carries every other job's verdict.
+  #
+  # `if: always()` so it reports even when a dependency failed; without it a
+  # failed `needs` would skip this job, and GitHub counts a skipped required
+  # check as passing. Anything other than success (failure, cancelled, or a
+  # shard skipped because its build failed) fails it.
+  ci-result:
+    name: CI result
+    if: always()
+    needs:
+      - manifest-version
+      - fuzz-lockfile-parity
+      - formatter-output
+      - check
+      - check-cross
+      - test-build
+      - test
+      - simd-levels
+      - test-load-dynamic-build
+      - test-load-dynamic
+      - coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          failed=$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')
+          if [ -n "$failed" ]; then
+            echo "::error::not successful: $failed"
+            exit 1
+          fi
