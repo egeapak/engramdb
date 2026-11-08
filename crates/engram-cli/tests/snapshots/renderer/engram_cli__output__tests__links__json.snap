@@ -1,0 +1,65 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "outbound": [
+    {
+      "direction": "out",
+      "other_id": "018f2a1b-1111-7e5f-8a9b-0c1d2e3f4a5d",
+      "other_store": "__g_0123456789ab",
+      "kind": "related_to",
+      "symmetric": true,
+      "confidence": 1.0,
+      "origin": "human",
+      "status": "confirmed",
+      "created_at": "2026-10-30T09:15:00Z",
+      "state": "unknown"
+    },
+    {
+      "direction": "out",
+      "other_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+      "other_summary": "Custom CA breaks webpki downloads",
+      "kind": "supports",
+      "symmetric": false,
+      "confidence": 1.0,
+      "origin": "human",
+      "status": "confirmed",
+      "created_at": "2026-10-30T09:15:00Z",
+      "note": "measured on the sandbox\nsecond line",
+      "state": "live"
+    }
+  ],
+  "inbound": [
+    {
+      "direction": "in",
+      "other_id": "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c",
+      "other_summary": "Custom CA breaks webpki downloads",
+      "kind": "contradicts",
+      "symmetric": true,
+      "confidence": 0.6,
+      "origin": "agent",
+      "status": "proposed",
+      "created_at": "2026-10-30T09:15:00Z",
+      "note": "webpki rejects the gateway CA",
+      "state": "live"
+    },
+    {
+      "direction": "in",
+      "other_id": "018f2a1b-2222-7e5f-8a9b-0c1d2e3f4a5e",
+      "other_summary": "Custom CA breaks webpki downloads",
+      "kind": "derived_from",
+      "symmetric": false,
+      "confidence": 1.0,
+      "origin": "human",
+      "status": "confirmed",
+      "created_at": "2026-10-30T09:15:00Z",
+      "state": "invalidated",
+      "successor": "018f2a1b-3333-7e5f-8a9b-0c1d2e3f4a5f"
+    }
+  ],
+  "hidden": 2
+}
+--- stderr ---

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>EngramDB Dashboard</title>
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/themes/grid.css">
+<link rel="stylesheet" href="css/themes/plain.css">
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#/">
+      <svg width="38" height="38" viewBox="0 0 38 38" aria-hidden="true">
+        <rect class="logo-bg" x="1" y="1" width="36" height="36" rx="7"></rect>
+        <path class="logo-a" d="M6 25 H14 L24 13 H32"></path>
+        <path class="logo-b" d="M19 6 V32"></path>
+        <circle class="logo-st" cx="19" cy="19" r="5"></circle>
+      </svg>
+      <div>
+        <div class="brand-name">EngramDB</div>
+        <div class="brand-sub" id="brand-sub">Memory dashboard</div>
+      </div>
+    </a>
+    <div class="tools">
+      <label class="sel"><span class="sr-only">Project</span>
+        <select id="proj-select" aria-label="Project"></select>
+      </label>
+      <button class="btn" id="theme-btn" type="button">Dark</button>
+      <span class="tag" id="mode-tag">Read-only</span>
+    </div>
+  </header>
+
+  <nav class="nav" aria-label="Views" id="nav">
+    <a href="#/" data-v="overview"><span class="n">01</span>Overview</a>
+    <a href="#/" data-v="memories"><span class="n">02</span>Memories</a>
+    <a href="#/" data-v="graph"><span class="n">03</span>Graph</a>
+    <a href="#/" data-v="relations"><span class="n">04</span>Relations</a>
+    <a href="#/" data-v="doctor"><span class="n">05</span>Health</a>
+    <a href="#/projects" data-v="projects"><span class="n">06</span>Projects</a>
+  </nav>
+
+  <main id="main" tabindex="-1">
+    <p class="loading">Loading…</p>
+  </main>
+
+  <footer>
+    <span id="foot-version">engramdb · dashboard served by <span class="mono">engramdb dashboard</span></span>
+    <span id="foot-mode">Read-only view · nothing here changes your stores</span>
+  </footer>
+</div>
+</body>
+</html>

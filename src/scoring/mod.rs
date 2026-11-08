@@ -21,7 +21,18 @@
 //! 3. **Degraded / degraded_keyword** (query, no embeddings): `base = 1.0*relevance`
 //! 4. **Scope-only** (no query): `base = 1.0*relevance`
 //!
-//! Then: `score = base * scope_multiplier * trust_multiplier - challenge_penalty`
+//! Then:
+//!
+//! ```text
+//! score = base * scope_multiplier * trust_multiplier * situation_multiplier
+//!              * supports_multiplier * usage_multiplier
+//!         - challenge_penalty - contradicts_penalty
+//! ```
+//!
+//! clamped to `[0, 1]` (a non-finite result reads as 0). The two graph terms
+//! and the usage term are **off by default** (their knobs are 0, and the
+//! engine then attaches no [`ScoreSignals`], so the formula is bit-identical
+//! to the one without them).
 //!
 //! # Post-multipliers
 //!
@@ -39,6 +50,24 @@
 //!   Prevents low-trust memories from being suppressed too aggressively.
 //! - **Challenge**: flat subtraction `score -= challenge_penalty` (default 0.10).
 //!   Applied uniformly regardless of trust/scope combination.
+//! - **Contradicts** (`retrieval.scoring.contradicts_penalty`, default 0):
+//!   flat subtraction, once, for a memory with a *confirmed* `contradicts`
+//!   edge to a *live* memory (exists, not invalidated, not expired, same
+//!   store). Both ends of an undirected contradiction pay it. Proposed edges
+//!   never count; a reviewer-chosen direction becomes `supersedes`, whose
+//!   target is invalidated and so hidden by the validity filter instead.
+//! - **Supports** (`retrieval.scoring.supports_boost`, default 0, ≤ 0.1):
+//!   `1 + boost * min(n, 3)` for `n` live confirmed incoming `supports` edges.
+//! - **Usage** (`retrieval.scoring.usage_weight` = α, default 0, ≤ 0.2):
+//!   `1 + α * min(3, ρ * ln(1 + fetched + 0.3 * injected_sessions))`, with the
+//!   exposure ratio `ρ = min(1, (fetched + 1) / (injected + returned + 1))` so a memory
+//!   that is injected but never opened cannot reward itself (see
+//!   [`usage_term`]).
+//! - **Expansion** (`expand_links`) is not a scoring term: an expanded
+//!   neighbour's score is its hit's score × `expand_links_decay` × its own
+//!   situation multiplier, minus its own challenge and `contradicts`
+//!   penalties (or its own query score when higher), and its breakdown — its
+//!   own, so a contradiction stays visible — carries [`LinkVia`].
 //! - Decay strategies include None, Linear, Exponential, and Step functions.
 //! - Final score is clamped to [0.0, 1.0].
 mod composite;
@@ -48,7 +77,9 @@ mod trust;
 // Re-export public API
 pub use composite::{
     composite_score, composite_score_ignore_decay, composite_score_target,
-    composite_score_target_ignore_decay, ScoreBreakdown, ScoreTarget, ScoringContext,
+    composite_score_target_ignore_decay, supports_multiplier, usage_multiplier, usage_term,
+    LinkVia, ScoreBreakdown, ScoreSignals, ScoreTarget, ScoringContext, UsageSignal,
+    INJECTED_SESSION_WEIGHT, SUPPORTS_COUNTED_MAX, USAGE_TERM_CAP,
 };
 pub use decay::{decay_factor, effective_relevance};
 pub use trust::{trust_weight, trust_weight_from_config};

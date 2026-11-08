@@ -12,6 +12,7 @@ pub mod bash_retry;
 pub mod config;
 pub mod conversation_index;
 pub mod digest;
+pub mod edge_index;
 pub mod error;
 pub mod harvest_state;
 pub mod hook_seen;
@@ -36,6 +37,7 @@ pub mod write_lock;
 
 pub use conversation_index::{ConversationHit, ConversationIndex, ConversationRow, MatchedOn};
 pub use digest::FileDigest;
+pub use edge_index::{EdgeField, EdgeRow};
 pub use error::{Result, StorageError};
 pub use lance_index::{
     Fragmentation, IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary,
@@ -48,7 +50,7 @@ pub use registry::{
     resolve_root_project_id, stale_registrations_for, subscriptions_of, FileRegistry, GroupEntry,
     InMemoryRegistry, Registry, RegistryBackend, RegistryEntry,
 };
-pub use store::MemoryStore;
+pub use store::{MemoryStore, ReindexCounts, SchemaState, UnparseableMemoryFile};
 pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 
 // Test isolation: link `engram-test-support` so its `#[ctor]` redirects

@@ -15,6 +15,12 @@
 //! short-lived process, so it appends a line to a per-project JSONL log
 //! instead of going through the collector and its flush task.
 //!
+//! Per-memory usage (`returned` / `injected` / `fetched` and write events)
+//! is recorded by [`usage`] (the JSONL writer, drain and combined reads) and
+//! [`memory_events`] (the `memory_events` table and its `memory_usage`
+//! rollup), on the same JSONL-then-drain design as hook calls
+//! ([`jsonl_log`]).
+//!
 //! Persistence is handled by [`persistence`]: events are appended to a
 //! per-project LanceDB `stats_events` table so counters survive restarts.
 //!
@@ -27,6 +33,9 @@ pub(crate) mod collector;
 // collector; see the module docs.
 pub mod hook_events;
 pub mod hooks;
+pub(crate) mod jsonl_log;
+pub mod memory_events;
+pub mod usage;
 // `persistence` is `pub` (not `pub(crate)`) because the top-level `engramdb`
 // crate's `ops` / `mcp` / `cli` layers drive flush/hydrate directly across the
 // crate boundary.

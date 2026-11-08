@@ -1,0 +1,24 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+Linked [ID13] supports [ID13] (confirmed)
+Linked [ID13] related_to [ID13] (confirmed)
+memory=[ID] outbound=1 inbound=1 hidden=0
+edge direction=out kind=related_to other=[ID] store=- status=confirmed origin=human confidence=1.00 state=live at=[TS]
+edge direction=in kind=supports other=[ID] store=- status=confirmed origin=human confidence=1.00 state=live at=[TS] note="the reason"
+memory=[ID] outbound=1 inbound=1 hidden=0
+edge direction=out kind=supports other=[ID] store=- status=confirmed origin=human confidence=1.00 state=live at=[TS] note="the reason"
+edge direction=in kind=related_to other=[ID] store=- status=confirmed origin=human confidence=1.00 state=live at=[TS]
+Updated edge [ID13] related_to [ID13] (rejected)
+memory=[ID] outbound=0 inbound=1 hidden=1
+edge direction=in kind=supports other=[ID] store=- status=confirmed origin=human confidence=1.00 state=live at=[TS] note="the reason"
+hidden=1
+memory=[ID] outbound=1 inbound=0 hidden=1
+edge direction=out kind=related_to other=[ID] store=- status=rejected origin=human confidence=1.00 state=live at=[TS]
+hidden=1
+Unlinked [ID13] supports [ID13]
+memory=[ID] outbound=1 inbound=0 hidden=0
+edge direction=out kind=related_to other=[ID] store=- status=rejected origin=human confidence=1.00 state=live at=[TS]
+--- stderr ---

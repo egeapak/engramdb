@@ -1,0 +1,58 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "total": 3,
+  "by_type": [
+    [
+      "decision",
+      3
+    ]
+  ],
+  "by_status": [
+    [
+      "Active",
+      3
+    ]
+  ],
+  "by_scope": [],
+  "expired": 0,
+  "oldest": null,
+  "newest": null,
+  "avg_criticality": 0.5,
+  "top_used": {
+    "by": "fetched",
+    "memories": [
+      {
+        "memory_id": "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b",
+        "summary": "Blocking calls deadlock the daemon",
+        "returned": 3,
+        "injected": 12,
+        "fetched": 4,
+        "returned_sessions": 2,
+        "injected_sessions": 1,
+        "last_returned_at": "2026-10-30T09:15:00Z",
+        "last_injected_at": "2026-11-01T14:00:00Z",
+        "last_fetched_at": "2026-11-02T08:30:00Z",
+        "updated": 2,
+        "challenged": 1,
+        "last_written_at": "2026-10-20T12:00:00Z"
+      },
+      {
+        "memory_id": "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c",
+        "returned": 0,
+        "injected": 1,
+        "fetched": 0,
+        "returned_sessions": 0,
+        "injected_sessions": 1,
+        "last_injected_at": "2026-11-01T14:00:00Z",
+        "updated": 2,
+        "challenged": 1,
+        "last_written_at": "2026-10-20T12:00:00Z"
+      }
+    ]
+  }
+}
+--- stderr ---

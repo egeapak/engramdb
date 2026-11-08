@@ -1,0 +1,19 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Usage of 018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b
+  Blocking calls deadlock the daemon
+  Store: a1b2c3d4e5f60718
+
+Read signals (each counted on its own, never summed):
+  returned by a query:  0
+  injected by a hook:   0
+  fetched by id:        0
+
+Writes: 0 updates, 0 challenges
+
+Last 30 days:
+  (no activity)
+--- stderr ---

@@ -26,6 +26,8 @@ relevance_threshold = 0.45     # minimum score to return (rank mode: after the r
 rank_fallback = 3              # rank mode: weak matches returned, marked, when nothing clears it
 max_results = 10
 include_expired = false        # set true to surface decayed memories
+expand_links = 0               # default for query --expand-links: one-hop neighbours added (0 = off, max 20)
+expand_links_decay = 0.5       # an added neighbour scores hit score x this, in (0, 1]
 
 [retrieval.scoring.with_query]
 semantic = 0.55
@@ -51,6 +53,9 @@ challenge_penalty = { fact = 0.15, observation = 0.20, decision = 0.05 }
 depth_decay_base = 0.82        # base for exponential scope-depth decay
 depth_decay_floor = 0.3        # minimum scope score regardless of depth
 scope_multiplier_floor = 0.5   # neutral base for logical-only scope context
+contradicts_penalty = 0.0      # subtracted for a confirmed contradiction with a live memory (0 = off)
+supports_boost = 0.0           # x(1 + b*min(n,3)) for n live confirmed supporters (0 = off, max 0.1)
+usage_weight = 0.0             # usage boost weight (0 = off, max 0.2); see below
 
 [retrieval.scoring.situation]
 floor = 0.6                    # multiplier floor; 1.0 disables situation weighting
@@ -125,6 +130,14 @@ model = "Xenova/nli-deberta-v3-xsmall"
 contradiction_threshold = 0.7
 max_comparisons = 10
 similarity_threshold = 0.3
+
+[links]                        # automatic edge proposals (see links.md)
+propose_contradictions = true  # NLI contradictions → proposed `contradicts` (needs [nli].enabled)
+propose_similar = true         # embedding neighbours → proposed `related_to` / `duplicates`
+related_threshold = 0.80       # similarity at or above → `related_to`
+duplicate_threshold = 0.92     # at or above, and NLI found no contradiction → `duplicates` (>= related_threshold)
+similar_candidates = 5         # neighbours considered per memory (max 50)
+max_proposals_per_memory = 3   # unreviewed automatic proposals a memory may carry (max 32; 0 = off)
 
 [rerank]
 enabled = true
@@ -248,9 +261,10 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
 - **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.
+- **`[links]`** — the automatic edge proposers ([links.md](./links.md#automatic-proposals)). They run when a memory is created (and when an MCP `update` re-embeds it), never in a hook, and only *propose*: a proposed edge changes no score until someone confirms it (`engramdb link … --status confirmed`, or the dashboard with `--allow-writes`). Defaults are conservative: a neighbour must reach `related_threshold` (0.80) to be proposed at all, and `max_proposals_per_memory` (3) caps the unreviewed proposals on each end of an edge, contradictions first. Similarity is the vector index's score, `1 / (1 + d²)` over the embeddings' squared L2 distance — for the default normalized MiniLM vectors, 0.80 is a cosine of about 0.88 and 0.92 about 0.96. Contradiction proposals ride `[nli]` and need it enabled; similarity proposals need only embeddings, but a neighbour is proposed as `duplicates` only when NLI also ran on the pair and found no contradiction (without NLI it is `related_to`). Proposing makes no extra model call: the search reuses the vectors `create` just computed. An existing edge of any kind or status between two memories — including a rejected one — blocks every proposal for that pair. Every field is optional; set `max_proposals_per_memory = 0`, or both `propose_*` to `false`, to switch proposals off. Validation requires both thresholds in `[0, 1]` with `duplicate_threshold >= related_threshold`.
 - **`[rerank]`** — on by default since the quantized cross-encoder (`jina-turbo-q`, ~36.5 MB, uint8) never lost to the unreranked baseline on any measured corpus, at an estimated ~150 ms/query (noisy; see the linked doc for the range). `top_n = 10` is both cheaper and more accurate than the historical default of 50 — reranking is deep-or-not-at-all, so there is no partial/gated mode. Final score blends original and reranker: `(1 - weight) * original + weight * rerank_score`. Set `enabled = false` to opt back out. This never affects the Claude Code hook handlers (`PreToolUse` / `SessionStart` / `UserPromptSubmit`): they build their retrieval engine with no model providers at all, so they cannot pay reranker latency regardless of this config. See [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) for the measured evidence.
 - **`[review]`** — the recency trigger for reviewing old memories. `recency_days` (default **90**) is the age past which an *active* memory that hasn't been updated (every edit and every `resolve`/keep/update bumps `updated_at`) is suggested for review. It never deletes or hides anything — it only surfaces a suggestion: the MCP `review` tool folds these stale memories in alongside flagged (challenged / needs-review) ones by default, and the MCP `memory-session-end` prompt reports how many are due so an agent can offer to revisit them. Stale memories are ranked by criticality so the ones most worth re-verifying come first. Omit the field to keep the 90-day default; validation accepts 1–3650. On the CLI, `engramdb review --stale-after-days [N]` opts a single run into the trigger (bare flag = 90).
-- **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event". Hook call stats (the per-project `hook_events` table and `.engramdb/state/hook_stats.jsonl`) honor the same switch and window: `enabled = false` stops hooks from recording, and rows older than `retention_days` are pruned and left out of the summary.
+- **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event". Hook call stats (the per-project `hook_events` table and `.engramdb/state/hook_stats.jsonl`) honor the same switch and window: `enabled = false` stops hooks from recording, and rows older than `retention_days` are pruned and left out of the summary. Per-memory usage events (`memory_events` / `memory_usage`, `.engramdb/state/memory_events.jsonl`; see `stats --memory` in the [CLI reference](./cli-reference.md)) follow the same switch; raw events are pruned at `retention_days`, but each memory's lifetime counts are kept in the rollup.
 - **`[title]`** — how a memory's title is generated when the caller doesn't supply one. `t5` (default) is abstractive T5-small summarization; the shared daemon / MCP server loads (and pools) the encoder+decoder **once machine-wide**, so the per-`create` cost is amortized. `keyword` is in-process RAKE extraction (no model); `none` skips automatic titling. The one-shot CLI's `engramdb add` always uses `keyword` so a single command never pays a cold T5 load. The MCP `create` tool's per-call `title_strategy` overrides this.
 - **`[daemon]`** — **global config file only**; see [daemon.md](./daemon.md#configuration). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading. `enabled` and `use_for_cli` are per user, so the daemon is used the same way in every project; for a one-off opt-out use `--in-process` or `ENGRAMDB_IN_PROCESS=1`.
 - **`[security]`** — `allow_cross_project_writes` (default `true`, preserving historical behavior) gates the MCP server's confused-deputy surface. Nearly every MCP tool accepts an optional `project` override that resolves to *any* project in the global registry, so a steered agent operating in project A could otherwise mutate a different registered project B on the same machine. Setting it to `false` blocks the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`, `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) from writing to a **different** registered project. `doctor` is gated as well, but only when called with `fix: true` — reading the diagnosis is not a write, flipping memories to `needs_review` is. The session's own project (`project` omitted) and the shared global store (`project = "global"`) are always allowed; a linked worktree of the session's own project is not treated as cross-project. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_*`, `doctor` without `fix`, `harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search`) are never gated. `allow_all_projects_harvest` (default **false**) is separate because it gates a *read*: the harvest tools' `all_projects` option reads every Claude Code conversation on the machine rather than this project's, and naming another `project` reads that project's raw transcripts. Both need this flag — it gates the *read* tools (`harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search` — search returns conversation-derived text, and even a result *count* says something about a project you may not read), and also `harvest_mark`, which despite being a write resolves a session-id prefix against the target's transcripts and names every match in its error, so the write gate alone made it a session-id oracle for a project the read gate refuses; `harvest_mark` therefore needs **both** flags for a cross-project target — and both read it from **your own** project's config — never the target's, so a permissive setting in one repo cannot open the gate for the rest. Cross-project *memory* reads are unaffected: memories are curated, a transcript is the raw conversation.
@@ -266,7 +280,80 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 | `ENGRAMDB_CONFIG_DIR` | Override platform global config dir (the registry and the global `config.toml` with `[daemon]`). Used by tests. |
 | `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
 | `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
+| `ENGRAMDB_DASHBOARD_CACHE_DIR` | Where `engramdb dashboard` keeps its layout cache (default `<cache dir>/engramdb/dashboard/layouts/`; must be yours with mode 0700). See [dashboard.md](./dashboard.md#what-it-reads-and-what-it-never-does). |
+| `ENGRAMDB_DASHBOARD_LAYOUT_CACHE` | `0` turns the dashboard's layout cache off (memory and disk). |
 | `CLAUDE_CONFIG_DIR` | Claude Code's own config root (default `~/.claude`). Read, never written — it is how `harvest` locates session transcripts. |
 | `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |
 
+## Links and usage in scoring
+
+Four settings let [links](./links.md#links-in-retrieval-opt-in) and recorded
+usage take part in retrieval. All are off by default, and off means exactly
+off: no extra lookup runs and every score is bit-for-bit what it was without
+them. The full formula is
+
+```text
+score = base × scope × trust × situation × supports_multiplier × usage_multiplier
+        − challenge_penalty − contradicts_penalty        (clamped to [0, 1])
+```
+
+**`usage_weight`** (α) boosts memories agents actually open:
+
+```text
+usage_multiplier = 1 + α × min(3, ρ × ln(1 + fetched + 0.3 × injected_sessions))
+ρ                = min(1, (fetched + 1) / (injected + returned + 1))
+```
+
+`fetched` counts explicit opens by id (`get`), `injected` the times a hook put
+the memory into an agent's context, `injected_sessions` the distinct sessions
+it was injected into, `returned` the times a `query` answer carried it (direct
+results only; a result reached through `--expand-links` is not counted). The
+exposure ratio ρ is what stops a feedback loop: a memory is shown *because* it
+already ranks well, so counting exposure as reward would let it reward itself
+— and an agent that opens whatever `query` hands back would otherwise keep
+ρ = 1 for exactly the memories ranking already favours. A memory that is shown
+but never opened keeps ρ = 1/(injected + returned + 1), and its term stays
+below about 0.17 however often it is shown; one that agents open as often as
+they are shown it keeps ρ = 1. Usage is read from the store's usage tables and
+log (see `engramdb stats --memory`), at most once every 30 seconds per store
+per process — a long-running MCP server or the daemon (which runs the hooks)
+reads it once per 30 seconds, while each one-shot CLI command pays one read;
+a failed read means no boost, never a failed query. Usage is recorded only
+when `[stats].enabled` is on.
+
+**`contradicts_penalty` and the hooks.** The penalty counts against the
+relevance test a file-scoped memory uses to clear the rank threshold, so with
+it on, a memory whose criticality × freshness is below `relevance_threshold +
+contradicts_penalty` stops clearing it — and both ends of a contradiction pay.
+The SessionStart and PreToolUse hooks then inject *neither* memory, on the
+very file the conflict is about. That is a consequence of turning the knob
+on, not something the hooks are exempted from; resolve the contradiction
+(`engramdb link <a> contradicts <b> --winner <id>`, or reject it) rather than
+leaving a confirmed one standing, or keep the penalty small. See
+[links](./links.md#links-in-retrieval-opt-in).
+
+With any of these on, `query --show-scores` lists what moved each score
+(`contradicts -0.10 from <id>`, `supports x1.05 from <id>`, `usage x1.12`),
+and the JSON breakdown (CLI `--show-scores`, MCP `score_breakdown`) carries
+`contradicts_penalty` / `contradicted_by`, `supports_multiplier` /
+`supported_by` and `usage_multiplier`, present only when they changed the
+score.
+
+Cost: each edge knob adds one `edges` query per query, over the whole
+candidate set after the hard filters (an `IN` list up to 500 memories, one
+scan of the edges table above that — hooks included, since only expansion is
+off for them), plus one index lookup for linked memories outside the
+candidate set; usage one read per store per process, cached for 30 seconds;
+and expansion one `edges` query when the scoring knobs did not already load
+it. Measured with `examples/graph_scoring_eval.rs` (`--profile eval`, 1,000
+memories, ~400 edges, no embedding model, p50, on a shared and noisy
+machine — read the deltas as ±3 ms): the no-query rank shape the hooks use
+goes from 11.6 ms to 15.6 ms with the edge knobs, 13.9 ms with usage, and
+16.4 ms with everything plus `expand_links 5`; keyword queries (~30 ms) gain
+2–9 ms. A *cold* query — a fresh engine and no cached usage view, which is
+what each one-shot CLI command pays — goes from 13.2 ms to 17.5 ms with
+usage and 19.6 ms with everything on. When a reranker is on, it blends over
+the composite score, so a penalty shown in the breakdown is scaled by
+`1 − [rerank].weight` in the final score, exactly like the challenge
+penalty. With every knob off nothing is looked up.

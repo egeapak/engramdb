@@ -35,6 +35,7 @@ fn sample_memory() -> Memory {
         audience: None,
         source_sessions: vec![],
         challenges: vec![],
+        links: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
         updated_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -72,6 +73,7 @@ fn full_memory() -> Memory {
         audience: None,
         source_sessions: vec![],
         challenges: vec![],
+        links: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
         updated_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -908,6 +910,7 @@ fn test_v2_output_format_readable() {
         audience: None,
         source_sessions: vec![],
         challenges: vec![],
+        links: vec![],
         verified_at: None,
         created_at: "2026-01-15T10:00:00Z".parse().unwrap(),
         updated_at: "2026-01-15T10:00:00Z".parse().unwrap(),
@@ -2217,4 +2220,139 @@ fn test_v2_yaml_scalar_edge_cases_round_trip() {
             "{value:?}: the write is not a fixed point"
         );
     }
+}
+
+// ===========================================================================
+// Typed edges (schema 0.9.0) and the fail-loudly hidden block
+// ===========================================================================
+
+#[test]
+fn test_v2_links_roundtrip_including_unknown_values() {
+    use engram_types::{Link, LinkKind, LinkOrigin, LinkStatus};
+    let mut memory = sample_memory();
+    let mut known = Link::new(
+        "018f2a1b-3c4d-7e5f-8a9b-000000000001",
+        LinkKind::Contradicts,
+        LinkOrigin::Nli,
+    );
+    known.confidence = 0.87;
+    known.status = LinkStatus::Proposed;
+    known.at = Some("2026-11-02T10:00:00Z".parse().unwrap());
+    known.note = Some("NLI: entailment 0.02, contradiction 0.87".into());
+    let mut cross = Link::new(
+        "018f2a1b-3c4d-7e5f-8a9b-000000000002",
+        LinkKind::Supports,
+        LinkOrigin::Human,
+    );
+    cross.store = Some("group:infra".into());
+    cross.at = Some("2026-11-02T10:00:00Z".parse().unwrap());
+    // A newer binary's values: must survive this binary's rewrite verbatim.
+    let mut future = Link::new(
+        "018f2a1b-3c4d-7e5f-8a9b-000000000003",
+        LinkKind::Other("refines".into()),
+        LinkOrigin::Other("crowd".into()),
+    );
+    future.status = LinkStatus::Other("disputed".into());
+    future.at = Some("2026-11-02T10:00:00Z".parse().unwrap());
+    memory.links = vec![known, cross, future];
+
+    let text = write_memory_file(&memory).unwrap();
+    assert!(text.contains("kind: refines"), "{text}");
+    let parsed = parse_memory_file(&text).unwrap();
+    assert_eq!(parsed.links, memory.links);
+    // Fixed point: the rewrite of a parsed file is byte-identical.
+    assert_eq!(write_memory_file(&parsed).unwrap(), text);
+}
+
+#[test]
+fn test_v2_hand_written_link_takes_lenient_defaults() {
+    let text = write_memory_file(&sample_memory()).unwrap().replace(
+        "-->\n",
+        "links:\n- to: 018f2a1b-3c4d-7e5f-8a9b-000000000009\n  kind: derived_from\n-->\n",
+    );
+    let parsed = parse_memory_file(&text).unwrap();
+    assert_eq!(parsed.links.len(), 1);
+    let link = &parsed.links[0];
+    assert_eq!(link.kind, engram_types::LinkKind::DerivedFrom);
+    assert_eq!(link.origin, engram_types::LinkOrigin::Human);
+    assert_eq!(link.status, engram_types::LinkStatus::Confirmed);
+    assert!(link.at.is_none() && link.store.is_none());
+}
+
+/// The risk the plan names: a merge-conflict marker inside the hidden block
+/// used to reset EVERY hidden field to its default, and the next update then
+/// wrote those defaults back — erasing challenges, supersedes, source sessions
+/// and links in one go. It must now be an error, which also makes the store
+/// refuse to rewrite the file.
+#[test]
+fn test_v2_conflicted_hidden_block_is_an_error_not_a_reset() {
+    let mut memory = sample_memory();
+    memory.supersedes = vec!["old-1".into()];
+    memory.source_sessions = vec!["sess-1".into()];
+    let clean = write_memory_file(&memory).unwrap();
+    let conflicted = clean.replace(
+        "supersedes:\n- old-1\n",
+        "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes:\n- old-2\n>>>>>>> topic\n",
+    );
+    assert_ne!(
+        conflicted, clean,
+        "fixture must actually inject the conflict"
+    );
+    let err = parse_memory_file(&conflicted).unwrap_err().to_string();
+    assert!(err.contains("merge conflict"), "{err}");
+
+    // A conflict AROUND two whole blocks parses as YAML on either side, so it
+    // would silently pick one; it is refused too.
+    let block_start = clean.find("<!-- engramdb").unwrap();
+    let block = &clean[block_start..];
+    let around = format!(
+        "{}<<<<<<< HEAD\n{block}=======\n{block}>>>>>>> topic\n",
+        &clean[..block_start]
+    );
+    assert!(parse_memory_file(&around).is_err());
+}
+
+#[test]
+fn test_v2_unparseable_or_unclosed_hidden_block_is_an_error() {
+    let clean = write_memory_file(&sample_memory()).unwrap();
+    let garbage = clean.replace("visibility: Shared\n", "visibility: [unclosed\n");
+    let err = parse_memory_file(&garbage).unwrap_err().to_string();
+    assert!(err.contains("unparseable engramdb metadata block"), "{err}");
+
+    let unclosed = clean.trim_end().trim_end_matches("-->").to_string();
+    let err = parse_memory_file(&unclosed).unwrap_err().to_string();
+    assert!(err.contains("never closed"), "{err}");
+
+    // Not every oddity is an error: an empty block is just "no metadata", and
+    // a setext heading underline in content (no provenance section) is markdown.
+    let empty = clean[..clean.find("<!-- engramdb").unwrap()].to_string() + "<!-- engramdb\n-->\n";
+    assert!(parse_memory_file(&empty).is_ok());
+}
+
+#[test]
+fn test_v2_conflict_marker_in_content_is_content() {
+    let mut memory = sample_memory();
+    memory.content = "Title\n=======\n<<<<<<< HEAD\nwhat a conflict looks like".into();
+    let text = write_memory_file(&memory).unwrap();
+    assert_eq!(parse_memory_file(&text).unwrap().content, memory.content);
+}
+
+/// The committed fuzz seeds stay meaningful: the links seed parses (and is a
+/// write fixed point after one normalization), the conflicted one is refused.
+#[test]
+fn test_fuzz_seeds_for_links_behave() {
+    let seed = include_str!("../../../../fuzz/corpus/memory_file_roundtrip/v2_links.md");
+    let parsed = parse_memory_file(seed).unwrap();
+    assert_eq!(parsed.links.len(), 3);
+    assert_eq!(parsed.links[1].kind.as_str(), "refines");
+    assert_eq!(parsed.links[1].store.as_deref(), Some("group:infra"));
+    let once = write_memory_file(&parsed).unwrap();
+    assert_eq!(
+        write_memory_file(&parse_memory_file(&once).unwrap()).unwrap(),
+        once
+    );
+
+    let conflicted =
+        include_str!("../../../../fuzz/corpus/memory_file/v2_conflicted_hidden_block.md");
+    assert!(parse_memory_file(conflicted).is_err());
 }

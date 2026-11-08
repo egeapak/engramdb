@@ -1,0 +1,20 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "total": 0,
+  "by_type": [],
+  "by_status": [],
+  "by_scope": [],
+  "expired": 0,
+  "oldest": null,
+  "newest": null,
+  "avg_criticality": 0.0,
+  "top_used": {
+    "by": "injected",
+    "memories": []
+  }
+}
+--- stderr ---

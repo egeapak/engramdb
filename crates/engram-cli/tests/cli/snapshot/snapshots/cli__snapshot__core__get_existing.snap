@@ -16,6 +16,12 @@ exit: 0
     "floor": 0.0,
     "strategy": "none"
   },
+  "edges": {
+    "hidden": 0,
+    "id": "[UUID]",
+    "inbound": [],
+    "outbound": []
+  },
   "epistemic": "decision",
   "id": "[UUID]",
   "logical": [],

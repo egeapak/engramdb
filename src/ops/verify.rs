@@ -40,7 +40,26 @@ pub struct VerifyResult {
 }
 
 /// Stamp `verified_at = now`; clear a doctor-initiated `NeedsReview`.
-pub async fn verify_memory(store: &MemoryStore, id: &str) -> Result<VerifyResult> {
+///
+/// Records a `verified` usage event from `surface`.
+pub async fn verify_memory(
+    store: &MemoryStore,
+    id: &str,
+    surface: super::usage::Surface,
+) -> Result<VerifyResult> {
+    let result = verify_memory_unrecorded(store, id).await?;
+    super::usage::record_write(
+        store,
+        &result.id,
+        super::usage::UsageKind::Verified,
+        surface,
+        None,
+    )
+    .await;
+    Ok(result)
+}
+
+async fn verify_memory_unrecorded(store: &MemoryStore, id: &str) -> Result<VerifyResult> {
     let mut review_cleared = false;
     let saved = store
         .update_with(id, |memory| {
@@ -98,7 +117,9 @@ mod tests {
         store.create(&memory("v-1")).await.unwrap();
 
         let before = Utc::now();
-        let result = verify_memory(&store, "v-1").await.unwrap();
+        let result = verify_memory(&store, "v-1", crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert!(!result.review_cleared);
 
         let m = store.get("v-1").await.unwrap();
@@ -119,7 +140,9 @@ mod tests {
         m.status = Status::NeedsReview;
         store.create(&m).await.unwrap();
 
-        let result = verify_memory(&store, "v-2").await.unwrap();
+        let result = verify_memory(&store, "v-2", crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert!(result.review_cleared);
 
         let m = store.get("v-2").await.unwrap();
@@ -136,7 +159,9 @@ mod tests {
         m.status = Status::NeedsReview;
         store.create(&m).await.unwrap();
 
-        let result = verify_memory(&store, "v-3").await.unwrap();
+        let result = verify_memory(&store, "v-3", crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert!(!result.review_cleared);
 
         let m = store.get("v-3").await.unwrap();
@@ -156,7 +181,9 @@ mod tests {
         m.status = Status::NeedsReview;
         store.create(&m).await.unwrap();
 
-        let result = verify_memory(&store, "v-4").await.unwrap();
+        let result = verify_memory(&store, "v-4", crate::ops::Surface::Cli)
+            .await
+            .unwrap();
         assert!(result.review_cleared);
 
         let m = store.get("v-4").await.unwrap();

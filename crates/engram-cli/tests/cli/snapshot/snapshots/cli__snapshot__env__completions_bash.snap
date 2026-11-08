@@ -41,6 +41,9 @@ _engramdb() {
             engramdb,daemon)
                 cmd="engramdb__subcmd__daemon"
                 ;;
+            engramdb,dashboard)
+                cmd="engramdb__subcmd__dashboard"
+                ;;
             engramdb,delete)
                 cmd="engramdb__subcmd__delete"
                 ;;
@@ -67,6 +70,12 @@ _engramdb() {
                 ;;
             engramdb,init)
                 cmd="engramdb__subcmd__init"
+                ;;
+            engramdb,link)
+                cmd="engramdb__subcmd__link"
+                ;;
+            engramdb,links)
+                cmd="engramdb__subcmd__links"
                 ;;
             engramdb,list)
                 cmd="engramdb__subcmd__list"
@@ -100,6 +109,9 @@ _engramdb() {
                 ;;
             engramdb,task)
                 cmd="engramdb__subcmd__task"
+                ;;
+            engramdb,unlink)
+                cmd="engramdb__subcmd__unlink"
                 ;;
             engramdb,update)
                 cmd="engramdb__subcmd__update"
@@ -314,6 +326,9 @@ _engramdb() {
             engramdb__subcmd__help,daemon)
                 cmd="engramdb__subcmd__help__subcmd__daemon"
                 ;;
+            engramdb__subcmd__help,dashboard)
+                cmd="engramdb__subcmd__help__subcmd__dashboard"
+                ;;
             engramdb__subcmd__help,delete)
                 cmd="engramdb__subcmd__help__subcmd__delete"
                 ;;
@@ -340,6 +355,12 @@ _engramdb() {
                 ;;
             engramdb__subcmd__help,init)
                 cmd="engramdb__subcmd__help__subcmd__init"
+                ;;
+            engramdb__subcmd__help,link)
+                cmd="engramdb__subcmd__help__subcmd__link"
+                ;;
+            engramdb__subcmd__help,links)
+                cmd="engramdb__subcmd__help__subcmd__links"
                 ;;
             engramdb__subcmd__help,list)
                 cmd="engramdb__subcmd__help__subcmd__list"
@@ -373,6 +394,9 @@ _engramdb() {
                 ;;
             engramdb__subcmd__help,task)
                 cmd="engramdb__subcmd__help__subcmd__task"
+                ;;
+            engramdb__subcmd__help,unlink)
+                cmd="engramdb__subcmd__help__subcmd__unlink"
                 ;;
             engramdb__subcmd__help,update)
                 cmd="engramdb__subcmd__help__subcmd__update"
@@ -630,7 +654,7 @@ _engramdb() {
 
     case "${cmd}" in
         engramdb)
-            opts="-q -v -h -V --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help --version init add get query list update delete task verify config stats doctor projects harvest groups challenge gc compress serve daemon completions migrate rollback reindex hook setup review help"
+            opts="-q -v -h -V --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help --version init add get query list update delete task verify link unlink links config stats doctor projects harvest groups challenge gc compress serve dashboard daemon completions migrate rollback reindex hook setup review help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -806,7 +830,7 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__challenge)
-            opts="-e -q -v -h --evidence --source-file --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            opts="-e -q -v -h --evidence --source-file --against --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -821,6 +845,10 @@ _engramdb() {
                     return 0
                     ;;
                 --source-file)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --against)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1149,6 +1177,44 @@ _engramdb() {
             fi
             case "${prev}" in
                 --socket)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --format)
+                    COMPREPLY=($(compgen -W "pretty json plain" -- "${cur}"))
+                    return 0
+                    ;;
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --embedding-backend)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__dashboard)
+            opts="-q -v -h --port --bind --no-open --assets-dir --allow-writes --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --port)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --bind)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --assets-dir)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -2386,7 +2452,7 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__help)
-            opts="init add get query list update delete task verify config stats doctor projects harvest groups challenge gc compress serve daemon completions migrate rollback reindex hook setup review help"
+            opts="init add get query list update delete task verify link unlink links config stats doctor projects harvest groups challenge gc compress serve dashboard daemon completions migrate rollback reindex hook setup review help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2528,6 +2594,20 @@ _engramdb() {
         engramdb__subcmd__help__subcmd__daemon__subcmd__stop)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__help__subcmd__dashboard)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -3029,6 +3109,34 @@ _engramdb() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        engramdb__subcmd__help__subcmd__link)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__help__subcmd__links)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         engramdb__subcmd__help__subcmd__list)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -3326,6 +3434,20 @@ _engramdb() {
         engramdb__subcmd__help__subcmd__task__subcmd__current)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__help__subcmd__unlink)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
@@ -3671,6 +3793,82 @@ _engramdb() {
             fi
             case "${prev}" in
                 --template)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --format)
+                    COMPREPLY=($(compgen -W "pretty json plain" -- "${cur}"))
+                    return 0
+                    ;;
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --embedding-backend)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__link)
+            opts="-q -v -h --store --confidence --note --status --winner --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --store)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --confidence)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --note)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --status)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --winner)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --format)
+                    COMPREPLY=($(compgen -W "pretty json plain" -- "${cur}"))
+                    return 0
+                    ;;
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --embedding-backend)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__links)
+            opts="-q -v -h --all --kind --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --kind)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -4212,7 +4410,7 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__query)
-            opts="-p -l -t -n -q -v -h --mode --query --path --logical --type --tags --min-criticality --max-results --detail-level --include-expired --epistemic --situation --include-invalidated --show-scores --include-global --global --group --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            opts="-p -l -t -n -q -v -h --mode --query --path --logical --type --tags --min-criticality --max-results --detail-level --include-expired --epistemic --situation --include-invalidated --show-scores --expand-links --include-global --global --group --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -4275,6 +4473,10 @@ _engramdb() {
                     return 0
                     ;;
                 --situation)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --expand-links)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -4464,12 +4666,24 @@ _engramdb() {
             return 0
             ;;
         engramdb__subcmd__stats)
-            opts="-q -v -h --all-projects --global --daemon --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            opts="-q -v -h --all-projects --global --daemon --memory --top --by --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --memory)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --top)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --by)
+                    COMPREPLY=($(compgen -W "fetched injected returned" -- "${cur}"))
+                    return 0
+                    ;;
                 --format)
                     COMPREPLY=($(compgen -W "pretty json plain" -- "${cur}"))
                     return 0
@@ -4620,6 +4834,36 @@ _engramdb() {
                 return 0
             fi
             case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        engramdb__subcmd__unlink)
+            opts="-q -v -h --store --global --format --json --quiet --verbose --no-color --dir --embedding-backend --in-process --spawn-daemon --no-maintenance --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --store)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --format)
+                    COMPREPLY=($(compgen -W "pretty json plain" -- "${cur}"))
+                    return 0
+                    ;;
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --embedding-backend)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 *)
                     COMPREPLY=()
                     ;;

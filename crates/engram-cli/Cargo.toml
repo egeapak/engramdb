@@ -22,18 +22,19 @@ default = ["onnxruntime", "load-dynamic", "ollama"]
 # `onnxruntime` (ONNX Runtime stack) is on by default; a pure-Rust build for a
 # platform with no prebuilt ORT (Intel Mac) uses
 # `--no-default-features --features tract`.
-onnxruntime = ["engramdb/onnxruntime", "engram-mcp/onnxruntime"]
-ollama = ["engramdb/ollama", "engram-mcp/ollama"]
+onnxruntime = ["engramdb/onnxruntime", "engram-mcp/onnxruntime", "engram-dashboard/onnxruntime"]
+ollama = ["engramdb/ollama", "engram-mcp/ollama", "engram-dashboard/ollama"]
 coreml = ["engramdb/coreml"]
 xnnpack = ["engramdb/xnnpack"]
 # ONNX Runtime linking strategy; see the workspace root. `load-dynamic` is in
 # `default`, so another strategy needs `--no-default-features`.
-load-dynamic = ["engramdb/load-dynamic", "engram-mcp/load-dynamic"]
-bundled-onnxruntime = ["engramdb/bundled-onnxruntime", "engram-mcp/bundled-onnxruntime"]
+load-dynamic = ["engramdb/load-dynamic", "engram-mcp/load-dynamic", "engram-dashboard/load-dynamic"]
+bundled-onnxruntime = ["engramdb/bundled-onnxruntime", "engram-mcp/bundled-onnxruntime", "engram-dashboard/bundled-onnxruntime"]
 
 [dependencies]
 engramdb = { path = "../..", default-features = false }
 engram-mcp = { path = "../engram-mcp", default-features = false }
+engram-dashboard = { path = "../engram-dashboard", default-features = false }
 
 clap = { version = "4", features = ["derive"] }
 # Not test-only: `harvest show` decompresses an archived transcript to a temp

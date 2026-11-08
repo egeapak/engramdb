@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/admin.rs
+expression: "f.run(&[\"--format\", \"plain\", \"stats\", \"--memory\", \"zzzzzzzz\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain stats --memory zzzzzzzz
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: Memory not found: zzzzzzzz

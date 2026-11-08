@@ -31,9 +31,13 @@
 pub mod engine;
 pub mod filters;
 pub mod reranker;
+pub mod signals;
 
 // Re-export main types and functions
-pub use engine::{DetailLevel, RetrievalEngine, RetrievalQuery, RetrievalResult, ScoredMemory};
+pub use engine::{
+    DetailLevel, IngestFindings, IngestFollowUp, RetrievalEngine, RetrievalQuery, RetrievalResult,
+    ScoredMemory,
+};
 pub use filters::{
     apply_index_filters, build_filter_expr, build_filter_predicate, Filterable, SearchFilters,
 };

@@ -1,0 +1,63 @@
+[package]
+name = "engram-dashboard"
+version.workspace = true
+edition = "2021"
+license = "MIT"
+description = "Read-only local web dashboard for EngramDB (`engramdb dashboard`)"
+repository = "https://github.com/egeapak/engramdb"
+
+[lib]
+name = "engram_dashboard"
+path = "src/lib.rs"
+
+[features]
+# Forward the model/backend feature flags to the engramdb core, like
+# engram-mcp does. Nothing here loads a model yet; the forwarding keeps
+# `--no-default-features` builds of the binary consistent.
+default = ["onnxruntime", "load-dynamic", "ollama"]
+onnxruntime = ["engramdb/onnxruntime"]
+load-dynamic = ["engramdb/load-dynamic"]
+bundled-onnxruntime = ["engramdb/bundled-onnxruntime"]
+ollama = ["engramdb/ollama"]
+
+[dependencies]
+engramdb = { path = "../..", default-features = false }
+
+# Already in the binary for the MCP HTTP transport (`run_sse`). No `json` /
+# `query` features: they would pull in `serde_path_to_error`, and the two
+# helpers they provide are a dozen lines here (`api::json`, `api::query`).
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+# Query-string parsing (already in the tree through `url`).
+form_urlencoded = "1"
+# The per-run token. Already in the tree through `uuid`.
+getrandom = "0.4"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
+tracing = "0.1"
+anyhow = "1"
+# The layout cache's digest (already in the tree through engram-storage).
+sha2 = "0.11"
+# The 0600 launch file `open_browser` hands the browser (already in the tree).
+tempfile = "3"
+
+# `O_NOFOLLOW` / `O_NONBLOCK` and `geteuid` for the layout cache's files
+# (already in the tree through engram-storage).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+engramdb = { path = "../..", default-features = false, features = ["test-support"] }
+engram-test-support = { path = "../engram-test-support" }
+ctor = "1"
+# `ServiceExt::oneshot` drives the router in-process in the tests.
+tower = { version = "0.5", default-features = false, features = ["util"] }
+# The in-process handler bench (`benches/dashboard_graph.rs`), the same
+# version and features as the core crate's benches.
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "dashboard_graph"
+harness = false

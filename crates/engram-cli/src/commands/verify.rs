@@ -20,7 +20,7 @@ pub async fn run_verify(
         MemoryStore::open(dir).await?
     };
 
-    let result = ops::verify_memory(&store, id).await?;
+    let result = ops::verify_memory(&store, id, engramdb::ops::Surface::Cli).await?;
 
     if formatter.is_json() {
         outln!(

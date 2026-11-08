@@ -391,6 +391,8 @@ pub async fn auto_maintain_with_engine(
                 // `hook_events` — the backup for users without a daemon,
                 // which otherwise drains it.
                 maintain_hook_events(&store).await;
+                // Usage events, the same backup role for the same users.
+                super::usage::maintain_memory_events(&store).await;
 
                 // 3) Compact fragments and prune old dataset versions. Every
                 // mutation commits a new immutable LanceDB version, so a

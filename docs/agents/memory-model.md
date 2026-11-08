@@ -57,6 +57,16 @@ origin_task    = "epistemic-memory"     # task/feature this was created for
 generality     = "project"              # project | task
 derived_from   = []                     # memory IDs this was consolidated from
 
+# Typed edges to other memories (outbound; stored in the file's hidden block).
+# See docs/users/links.md.
+[[links]]
+to         = "01933d40-..."             # full id of the target
+kind       = "supports"                 # contradicts | supersedes | supports | derived_from | related_to | duplicates
+store      = null                       # null = same store; else a project / group / global store id
+confidence = 1.0
+origin     = "human"                    # human | agent | nli | similarity | compress
+status     = "confirmed"                # proposed | confirmed | rejected
+
 # nested:
 [decay]
 strategy   = "none"   # none | linear | exponential | step

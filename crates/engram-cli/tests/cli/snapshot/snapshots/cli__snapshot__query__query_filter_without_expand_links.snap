@@ -1,0 +1,11 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/query.rs
+expression: "f.run(&[\"--format\", \"plain\", \"query\", \"--mode\", \"filter\", \"--query\", \"rust\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] --format plain query --mode filter --query rust
+exit: 0
+--- stdout ---
+Found 1 memories (out of 1 total):
+
+  [SHORT_ID] Decision  Use Rust for the backend
+--- stderr ---

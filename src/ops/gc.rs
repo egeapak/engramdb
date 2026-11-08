@@ -216,6 +216,22 @@ pub async fn execute_gc_plan(
     removed.extend(deleted);
     skipped.extend(not_deleted);
 
+    if !removed.is_empty() && super::usage::usage_enabled(store).await {
+        use super::usage::{MemoryEvent, StoreRef, Surface, UsageKind};
+        let events: Vec<MemoryEvent> = removed
+            .iter()
+            .map(|id| {
+                MemoryEvent::new(
+                    id,
+                    &store.project_id,
+                    UsageKind::Deleted,
+                    Surface::Maintenance,
+                )
+            })
+            .collect();
+        super::usage::write_events(&StoreRef::of(store), &events);
+    }
+
     let count = removed.len();
     Ok(GcResult {
         removed,
@@ -249,6 +265,9 @@ async fn run_maintenance(store: &MemoryStore, config: &EngramConfig) -> Option<G
     }
     // Hook stats: drain the in-process hooks' JSONL, prune, compact.
     super::maintenance::maintain_hook_events(store).await;
+    // Usage events: drain this store's (and its shared stores') JSONL, fold
+    // and prune past retention, compact.
+    super::usage::maintain_memory_events(store).await;
 
     // Memories + chunks tables: compaction plus version pruning is where
     // monotonic disk growth from create/update/delete is actually reclaimed.

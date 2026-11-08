@@ -122,6 +122,66 @@ When you run a memory command inside a git worktree, the CLI dispatch (`engram_c
 
 Five commands are exempt: `init`, `serve`, `completions`, `setup`, `daemon`. They have their own working-directory semantics; auto-routing would silently target the wrong place.
 
+## Memory file format
+
+A memory is one markdown file (`memory_file/v2.rs`): a small YAML frontmatter
+(`version: 2`, `id`, `type`, `status`, and the epistemic fields when they
+differ from the type default), a human-readable body (`## Content`,
+`## Details`, `## Scope`, `## Provenance`), and a trailing **hidden block**
+that carries the machine fields a reader does not need to see:
+
+```markdown
+<!-- engramdb
+visibility: Shared
+accessed_at: 2026-01-15T10:00:00Z
+supersedes:
+- 018f2a1b-…-0011
+source_sessions: [...]
+challenges: [...]
+links:
+- to: 018f2a1b-…-0012      # full id, never a prefix
+  kind: contradicts         # contradicts|supersedes|supports|derived_from|related_to|duplicates
+  store: null               # null = same store; else a project id, `__g_…` group id or `__global_store__`
+  confidence: 0.87          # default 1.0
+  origin: nli               # human|agent|nli|similarity|compress (default human)
+  status: proposed          # proposed|confirmed|rejected (default confirmed)
+  at: 2026-11-02T10:00:00Z  # optional
+  note: "…"                 # optional
+-->
+```
+
+Two rules govern the block:
+
+- **Lenient per field, strict per block.** Every `links` field but `to` and
+  `kind` has a default, and an unknown `kind` / `origin` / `status` parses into
+  an `Other(String)` variant that round-trips verbatim (`engram_types::link`),
+  so a file written by a newer binary survives an `update` here. But a block
+  that is unclosed, unparseable, or contains a merge-conflict marker is an
+  **error**, not a default: a conflicted block used to parse silently as
+  "no hidden fields", and the next rewrite erased visibility, supersession,
+  challenges and links. Now `get`/`update` refuse the file, `reindex` skips it
+  with a warning, and `doctor`'s store check lists it under `unparseable`.
+  Conflict markers in the *body* are content and parse as before.
+- **Outbound only.** A file records the edges it declares. Inbound edges are
+  answered by the derived `edges` table, below.
+
+### The `edges` table
+
+`crates/engram-storage/src/edge_index.rs` keeps one LanceDB table per store,
+derived from the files exactly like the memories table: rebuilt by `reindex`
+(and by the 0.9.0 schema migration), maintained on every write path under the
+write lock (`sync_edges_locked`, `delete_edges_locked`). Each row is owned by
+the file that declares it (`owner_id`), so a rewrite replaces precisely that
+file's rows in one `merge_insert`. `supersedes` / `superseded_by` are mirrored
+in as edges of kind `supersedes` (the fields stay canonical); a pair declared
+from both ends is folded into one edge at read time. Symmetric kinds are
+stored once and queried from both ends. Reads (`list_edges`, `edges_touching`)
+never create the table — a store that has never been linked has none, and a
+missing table means "no edges". The policy — the personal-id rule, dangling
+vs unknown, compress carrying edges, the contradiction verdicts — is in
+`src/ops/links.rs`'s module docs; phase-4 consumers use its read-only
+`links_of` / `load_graph` / `edge_health`.
+
 ## The model-fingerprint invariant
 
 Every store records a fingerprint of the embedding model it was built with: `model_id()` + `dimensions`, stored in `.engramdb/manifest.toml`. The fingerprint table and the provider resolver **both derive from one map**, `provider_specs(provider_str)` in `src/ops/mod.rs`. Adding a new provider requires updating exactly one place — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the silent-vector-corruption footgun this prevents.

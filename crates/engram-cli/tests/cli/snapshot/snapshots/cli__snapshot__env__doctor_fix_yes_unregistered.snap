@@ -196,7 +196,8 @@ exit: 0
     "on_disk": 1,
     "orphaned_files": [],
     "stale_entries": [],
-    "undetermined": []
+    "undetermined": [],
+    "unparseable": []
   }
 }
 --- stderr ---

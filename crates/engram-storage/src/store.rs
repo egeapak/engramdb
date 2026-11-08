@@ -93,6 +93,20 @@ fn parse_batch(read: Vec<(String, PathBuf, String)>) -> Vec<(String, Memory)> {
         .collect()
 }
 
+/// Where a store's on-disk schema stands against this binary's
+/// ([`MemoryStore::schema_state`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SchemaState {
+    /// The `schema_version` recorded in `manifest.toml`; `None` when the
+    /// manifest is missing or unreadable.
+    pub stored: Option<String>,
+    /// This binary's [`manifest::CURRENT_SCHEMA_VERSION`].
+    pub current: &'static str,
+    /// The next ordinary open would migrate (schema behind, or stems written
+    /// by another normalizer).
+    pub needs_migration: bool,
+}
+
 /// Main storage interface for EngramDB operations.
 ///
 /// Manages memory files, a unified LanceDB index, manifest, and coordinates
@@ -507,6 +521,115 @@ impl MemoryStore {
         Ok(store)
     }
 
+    /// Open an existing project store for reading only, with no side effects.
+    ///
+    /// [`Self::open`] is not side-effect free, and must not be for its
+    /// callers: it backfills `.engramdb/.gitignore`, creates the LanceDB
+    /// directory and tables when missing, and runs the schema migration (a
+    /// full reindex under the write lock). A long-running viewer (the
+    /// dashboard) opening every store on the machine must do none of that —
+    /// looking at a store is not a reason to rewrite it, and a migration run
+    /// by a viewer would race the CLI the user is actually typing into. So
+    /// this path writes nothing, creates no directory, table or lock, and a
+    /// store behind the current schema is *reported* through
+    /// [`Self::schema_state`], never fixed: reads that project a column the
+    /// old table lacks fail on their own and say so.
+    ///
+    /// `NotInitialized` when `dir` has no `.engramdb/`; `Validation` naming
+    /// the remedy when the store has never been indexed on this machine (a
+    /// fresh clone with committed memories and no `lancedb/` yet).
+    ///
+    /// The returned value is still a full `MemoryStore`, so the type does not
+    /// stop a caller from writing through it: a read-only consumer should
+    /// wrap it in a type that exposes reads only (the dashboard does).
+    pub async fn open_read_only(dir: &Path) -> Result<Self> {
+        let engramdb_dir = paths::project_dir(dir);
+        if !engramdb_dir.is_dir() {
+            return Err(StorageError::NotInitialized);
+        }
+        let project_id = project_id::compute_project_id(dir);
+        let lance_path = paths::lancedb_dir(&project_id)?;
+        Self::open_read_only_at(dir.to_path_buf(), project_id, &lance_path).await
+    }
+
+    /// [`Self::open_read_only`] for the global store. `NotInitialized` when
+    /// it was never created (unlike [`Self::open_global`], which creates it).
+    pub async fn open_global_read_only() -> Result<Self> {
+        let global_dir = paths::global_store_dir()?;
+        if !paths::project_dir(&global_dir).is_dir() {
+            return Err(StorageError::NotInitialized);
+        }
+        let lance_path = paths::global_lancedb_dir()?;
+        Self::open_read_only_at(
+            global_dir,
+            paths::GLOBAL_PROJECT_ID.to_string(),
+            &lance_path,
+        )
+        .await
+    }
+
+    /// [`Self::open_read_only`] for a group store. `NotInitialized` when it
+    /// was never created (unlike [`Self::open_group`], which creates it).
+    pub async fn open_group_read_only(group_id: &str) -> Result<Self> {
+        let group_dir = paths::group_store_dir(group_id)?;
+        if !paths::project_dir(&group_dir).is_dir() {
+            return Err(StorageError::NotInitialized);
+        }
+        let lance_path = paths::group_lancedb_dir(group_id)?;
+        Self::open_read_only_at(group_dir, group_id.to_string(), &lance_path).await
+    }
+
+    async fn open_read_only_at(
+        project_dir: PathBuf,
+        project_id: String,
+        lance_path: &Path,
+    ) -> Result<Self> {
+        let config_path = paths::project_dir(&project_dir).join("config.toml");
+        let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
+        let lance_index = LanceIndex::open_existing(lance_path, config.embeddings.dimensions)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?
+            .ok_or_else(|| {
+                StorageError::Validation(format!(
+                    "{} has not been indexed on this machine yet: run any engramdb \
+                     command there (or `engramdb reindex`) to build its index",
+                    project_dir.display()
+                ))
+            })?;
+        Ok(Self {
+            project_dir,
+            project_id,
+            lance_index,
+        })
+    }
+
+    /// Where this store's on-disk schema stands against this binary's, read
+    /// from `manifest.toml` without changing anything — what
+    /// [`Self::migrate_schema_if_needed`] would act on, for a caller that must
+    /// only report it ([`Self::open_read_only`]).
+    pub async fn schema_state(&self) -> SchemaState {
+        Self::schema_state_at(&self.project_dir).await
+    }
+
+    /// [`Self::schema_state`] for the store rooted at `project_dir`, without
+    /// opening it: a listing of every store on the machine reads this per row
+    /// and must not connect to each LanceDB to do so.
+    pub async fn schema_state_at(project_dir: &Path) -> SchemaState {
+        let manifest_path = paths::project_dir(project_dir).join("manifest.toml");
+        let loaded = manifest::load_manifest(&manifest_path).await.ok();
+        let stored = loaded.as_ref().map(|m| m.schema_version.clone());
+        let schema_stale = stored
+            .as_deref()
+            .is_none_or(|v| !manifest::schema_version_is_current(v));
+        let normalizer_stale = loaded.as_ref().and_then(|m| m.normalizer.as_deref())
+            != Some(engram_types::NORMALIZER_STAMP);
+        SchemaState {
+            stored,
+            current: manifest::CURRENT_SCHEMA_VERSION,
+            needs_migration: schema_stale || normalizer_stale,
+        }
+    }
+
     /// Create a new memory.
     pub async fn create(&self, memory: &Memory) -> Result<String> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
@@ -580,6 +703,7 @@ impl MemoryStore {
             .upsert(&entry)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+        self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -709,6 +833,7 @@ impl MemoryStore {
             .upsert_batch(&entries)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e)))?;
+        self.sync_edges_locked(memories).await?;
 
         self.update_manifest_stats().await?;
 
@@ -971,6 +1096,7 @@ impl MemoryStore {
         let mut updated: Vec<String> = Vec::new();
         let mut errors: Vec<(String, String)> = Vec::new();
         let mut entries: Vec<IndexEntry> = Vec::new();
+        let mut written: Vec<Memory> = Vec::new();
 
         for given in ids {
             let key = aliases.get(given).unwrap_or(given);
@@ -1008,6 +1134,7 @@ impl MemoryStore {
                 StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
             })?;
             entries.push(entry);
+            written.push(memory);
             updated.push(canonical);
         }
 
@@ -1015,6 +1142,7 @@ impl MemoryStore {
             self.lance_index.upsert_batch(&entries).await.map_err(|e| {
                 StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e))
             })?;
+            self.sync_edges_locked(&written).await?;
             // One refresh for the whole batch instead of one per memory.
             self.update_manifest_stats().await?;
         }
@@ -1141,11 +1269,110 @@ impl MemoryStore {
             .upsert(&entry)
             .await
             .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+        self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
 
         Ok(())
+    }
+
+    /// Replace the `edges` rows owned by `memories` with what their files now
+    /// declare (`edge_index` module docs). Callers MUST hold the write lock.
+    ///
+    /// Runs on every write rather than only on writes that touched an edge
+    /// field: `src_invalidated` follows `invalidated_at`, and an ordinary
+    /// update can change that too. A memory that had no edges and still has
+    /// none costs one read and no commit (`replace_owned`).
+    ///
+    /// **Never fails the write.** The table is derived and the `.md` file is
+    /// already on disk when this runs: an error here used to fail a create
+    /// whose file existed, and the retry then created the memory twice. A
+    /// failure is logged; the next `reindex` rebuilds the table, and `doctor`'s
+    /// "Memory edges" check reports a table that disagrees with the files.
+    async fn sync_edges_locked(&self, memories: &[Memory]) -> Result<()> {
+        let owners: Vec<String> = memories.iter().map(|m| m.id.clone()).collect();
+        let rows: Vec<crate::edge_index::EdgeRow> = memories
+            .iter()
+            .flat_map(crate::edge_index::edges_of)
+            .collect();
+        if let Err(e) =
+            crate::edge_index::replace_owned(self.lance_index.connection(), &owners, &rows).await
+        {
+            tracing::warn!(
+                "edges table not updated for {} memor{} (the files are written; run \
+                 `engramdb reindex` to rebuild it): {e:#}",
+                owners.len(),
+                if owners.len() == 1 { "y" } else { "ies" }
+            );
+        }
+        Ok(())
+    }
+
+    /// Every edge in this store, deduplicated (`edge_index::dedupe`). Empty
+    /// when the table does not exist yet. Read-only: creates nothing, so it
+    /// is safe on a store from [`Self::open_read_only`].
+    pub async fn list_edges(&self) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_all(self.lance_index.connection())
+            .await
+            .map(crate::edge_index::dedupe)
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+    }
+
+    /// Every row of the edges table, **not** deduplicated: one per declaring
+    /// file. What the personal-id leak check needs — dedupe folds a
+    /// `superseded_by` mirror into its `supersedes` row, and the mirror is
+    /// the one written into the *other* memory's file.
+    pub async fn list_edge_rows(&self) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_all(self.lance_index.connection())
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+    }
+
+    /// The rows with `id` at either end, not deduplicated (see
+    /// [`Self::list_edge_rows`]).
+    pub async fn list_edge_rows_touching(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_touching(self.lance_index.connection(), id)
+            .await
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+    }
+
+    /// The edges touching any of `ids` (full ids), deduplicated, in one
+    /// query (`edge_index::load_touching_any`). Read-only.
+    pub async fn edges_touching_any(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_touching_any(self.lance_index.connection(), ids)
+            .await
+            .map(crate::edge_index::dedupe)
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+    }
+
+    /// Index rows for exactly `ids` (full ids; unknown ids are simply
+    /// absent), in `IN` lists of at most 500. Read-only.
+    pub async fn list_for_filtering_by_ids(
+        &self,
+        ids: &[String],
+    ) -> Result<Vec<IndexForFiltering>> {
+        use lancedb::expr::{col, is_in, lit};
+        let mut out = Vec::new();
+        for chunk in ids.chunks(500) {
+            let expr = is_in(col("id"), chunk.iter().map(lit).collect());
+            out.extend(self.list_for_filtering_where_expr(expr).await?);
+        }
+        Ok(out)
+    }
+
+    /// The edges with `id` (a full id) at either end, deduplicated.
+    pub async fn edges_touching(&self, id: &str) -> Result<Vec<crate::edge_index::EdgeRow>> {
+        crate::edge_index::load_touching(self.lance_index.connection(), id)
+            .await
+            .map(crate::edge_index::dedupe)
+            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
     }
 
     /// Delete a memory.
@@ -1271,6 +1498,7 @@ impl MemoryStore {
             .map_err(|e| {
                 StorageError::Validation(format!("LanceDB delete_chunks_batch failed: {}", e))
             })?;
+        self.delete_edges_locked(&to_delete).await?;
 
         // One refresh for the whole sweep instead of one per deletion.
         self.update_manifest_stats().await?;
@@ -1309,10 +1537,30 @@ impl MemoryStore {
         self.lance_index.delete_chunks(full_id).await.map_err(|e| {
             StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
         })?;
+        self.delete_edges_locked(&[full_id.to_string()]).await?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
 
+        Ok(())
+    }
+
+    /// Drop the edge rows the deleted memories' files declared. Edges *into*
+    /// them, declared by other files, stay: a dangling edge is legal, and the
+    /// readers report it rather than this path silently rewriting other
+    /// memories' files.
+    ///
+    /// Like [`Self::sync_edges_locked`], a failure is logged, never returned:
+    /// the files are already gone.
+    async fn delete_edges_locked(&self, ids: &[String]) -> Result<()> {
+        if let Err(e) = crate::edge_index::delete_owned(self.lance_index.connection(), ids).await {
+            tracing::warn!(
+                "edges of {} deleted memor{} left in the edges table (run `engramdb reindex`): \
+                 {e:#}",
+                ids.len(),
+                if ids.len() == 1 { "y" } else { "ies" }
+            );
+        }
         Ok(())
     }
 
@@ -1604,6 +1852,12 @@ impl MemoryStore {
         Ok(self.reindex_with(false, false).await?.indexed)
     }
 
+    /// [`Self::reindex`] with the full counts — including the files that did
+    /// not parse, which a surface must report.
+    pub async fn reindex_counted(&self) -> Result<ReindexCounts> {
+        self.reindex_with(false, false).await
+    }
+
     /// Rebuild only the rows whose file has changed since it was indexed.
     ///
     /// Every file is still enumerated, read, hashed and deduplicated — the skip
@@ -1715,7 +1969,102 @@ impl MemoryStore {
             (HashMap::new(), Vec::new())
         };
 
+        // Parse everything BEFORE touching the table: the files that do not
+        // parse decide which existing rows must survive the rebuild.
+        let shared_dir = paths::memories_dir(&self.project_dir);
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
+        let mut shared = if shared_dir.exists() {
+            self.scan_dir(&shared_dir).await?
+        } else {
+            ScannedDir {
+                owned: Vec::new(),
+                unparseable: Vec::new(),
+            }
+        };
+        let mut personal = if personal_dir.exists() {
+            self.scan_dir(&personal_dir).await?
+        } else {
+            ScannedDir {
+                owned: Vec::new(),
+                unparseable: Vec::new(),
+            }
+        };
+        let parsed_ids: std::collections::HashSet<&str> = shared
+            .owned
+            .iter()
+            .chain(personal.owned.iter())
+            .map(|(id, _, _)| id.as_str())
+            .collect();
+        let mut unparseable: Vec<UnparseableMemoryFile> = shared
+            .unparseable
+            .drain(..)
+            .chain(personal.unparseable.drain(..))
+            .collect();
+        // An id a parseable file also claims is that file's (it wins, as a
+        // duplicate would); only the rest are kept.
+        let mut kept_ids: Vec<String> = unparseable
+            .iter()
+            .filter_map(|u| u.id.clone())
+            .filter(|id| !parsed_ids.contains(id.as_str()))
+            .collect();
+        kept_ids.sort();
+        kept_ids.dedup();
+        drop(parsed_ids);
+
         let foreign_checkout = self.checkout_conflict().await;
+        let will_clear = !incremental && (foreign_checkout.is_none() || force_schema_reset);
+        let existing_kept: Vec<String> = if kept_ids.is_empty() {
+            Vec::new()
+        } else {
+            let all: std::collections::HashSet<String> = self
+                .lance_index
+                .list_ids()
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {e}")))?
+                .into_iter()
+                .collect();
+            kept_ids
+                .iter()
+                .filter(|id| all.contains(*id))
+                .cloned()
+                .collect()
+        };
+        for u in &mut unparseable {
+            u.preserved = u.id.as_ref().is_some_and(|id| existing_kept.contains(id));
+        }
+        let kept_rows = if will_clear {
+            self.lance_index
+                .snapshot_rows(&existing_kept)
+                .await
+                .map_err(|e| StorageError::Validation(format!("LanceDB snapshot failed: {e:#}")))?
+        } else {
+            Vec::new()
+        };
+        // Their edges cannot be re-derived either; keep the rows they own.
+        // A failed read is fatal, before anything is cleared: the rebuild
+        // below overwrites the whole table, so carrying on would delete the
+        // rows these files own until each is fixed and reindexed again.
+        let kept_edges: Vec<crate::edge_index::EdgeRow> = if existing_kept.is_empty() {
+            Vec::new()
+        } else {
+            let owners: std::collections::HashSet<&str> =
+                existing_kept.iter().map(String::as_str).collect();
+            crate::edge_index::load_all(self.lance_index.connection())
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!(
+                        "could not read the edges of {} unparseable memor{} (their rows would \
+                         be lost by the rebuild); reindex refused: {e:#}",
+                        owners.len(),
+                        if owners.len() == 1 { "y" } else { "ies" }
+                    ))
+                })?
+                .into_iter()
+                .filter(|r| owners.contains(r.owner_id.as_str()))
+                .collect()
+        };
+        let kept_ids = existing_kept;
+        let mut cleared = false;
         if incremental {
             // No clear: the surviving rows ARE the result. Deletions are
             // reconciled after the dir passes below.
@@ -1738,6 +2087,7 @@ impl MemoryStore {
                 self.lance_index.clear_memories().await.map_err(|e| {
                     StorageError::Validation(format!("LanceDB clear failed: {}", e))
                 })?;
+                cleared = true;
             } else {
                 tracing::warn!(
                     "Project ID is shared with another checkout at {} — running a \
@@ -1754,8 +2104,13 @@ impl MemoryStore {
                 .clear_memories()
                 .await
                 .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+            cleared = true;
         }
 
+        debug_assert_eq!(
+            cleared, will_clear,
+            "snapshot taken iff the table is cleared"
+        );
         let mut indexed_ids = Vec::new();
 
         // The set of memories that currently have embedding chunks. Gathered
@@ -1773,34 +2128,51 @@ impl MemoryStore {
             .collect();
 
         let mut skipped = 0;
+        let mut edges: Vec<crate::edge_index::EdgeRow> = Vec::new();
 
-        // Reindex shared memories
-        let shared_dir = paths::memories_dir(&self.project_dir);
-        if shared_dir.exists() {
-            skipped += self
-                .reindex_dir(
-                    &shared_dir,
-                    Visibility::Shared,
-                    &chunk_ids,
-                    &mut indexed_ids,
-                    &recorded,
-                )
-                .await?;
-        }
+        skipped += self
+            .write_dir(
+                &shared.owned,
+                Visibility::Shared,
+                &chunk_ids,
+                &mut indexed_ids,
+                &recorded,
+                &mut edges,
+            )
+            .await?;
+        skipped += self
+            .write_dir(
+                &personal.owned,
+                Visibility::Personal,
+                &chunk_ids,
+                &mut indexed_ids,
+                &recorded,
+                &mut edges,
+            )
+            .await?;
 
-        // Reindex personal memories
-        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
-        if personal_dir.exists() {
-            skipped += self
-                .reindex_dir(
-                    &personal_dir,
-                    Visibility::Personal,
-                    &chunk_ids,
-                    &mut indexed_ids,
-                    &recorded,
-                )
-                .await?;
+        // Carry the unparseable files' rows across the clear, and count them
+        // as indexed so neither the deletion reconciliation nor the orphan
+        // prune below takes their row or their vectors.
+        if !kept_rows.is_empty() {
+            let (_, lost) = self
+                .lance_index
+                .restore_rows(kept_rows)
+                .await
+                .map_err(|e| {
+                    StorageError::Validation(format!(
+                        "LanceDB restore of unparseable rows failed: {e:#}"
+                    ))
+                })?;
+            if lost > 0 {
+                tracing::warn!(
+                    "{lost} unparseable memory row(s) could not be carried across this schema \
+                     change; they reappear once their files are fixed and reindexed"
+                );
+            }
         }
+        indexed_ids.extend(kept_ids.iter().cloned());
+        edges.extend(kept_edges);
 
         // Reconcile deletions. The unconditional path gets this free by
         // clearing the table first; the incremental path never clears, so a row
@@ -1847,12 +2219,29 @@ impl MemoryStore {
                 })?;
         }
 
+        // The derived edges table (schema 0.9.0). Rebuilt whole in one commit
+        // unless another checkout shares this index: its files are invisible
+        // here, so its memories' rows would all look deleted — replace only
+        // the rows this checkout's memories own, like the upsert-only rows
+        // above. That same per-owner path is also correct for an incremental
+        // pass, whose removed ids were reconciled above; their rows go too.
+        let conn = self.lance_index.connection();
+        let edge_result = if foreign_checkout.is_none() {
+            crate::edge_index::rebuild(conn, &edges).await
+        } else {
+            crate::edge_index::replace_owned(conn, &indexed_ids, &edges).await
+        };
+        edge_result.map_err(|e| {
+            StorageError::Validation(format!("LanceDB edges rebuild failed: {e:#}"))
+        })?;
+
         // Update manifest stats
         self.update_manifest_stats().await?;
 
         Ok(ReindexCounts {
             indexed: indexed_ids.len(),
             skipped,
+            unparseable,
         })
     }
 
@@ -2206,6 +2595,13 @@ impl MemoryStore {
 
     /// Resolve a prefix ID to a full ID using a LanceDB WHERE filter.
     async fn resolve_full_id(&self, id: &str) -> Result<String> {
+        self.resolve_id(id).await
+    }
+
+    /// The full id a unique prefix (or a full id) names, from the index.
+    /// `NotFound` when nothing matches, `Validation` when the prefix is
+    /// ambiguous.
+    pub async fn resolve_id(&self, id: &str) -> Result<String> {
         let matches = self.lance_index.find_ids_by_prefix(id).await.map_err(|e| {
             StorageError::Validation(format!("LanceDB prefix search failed: {}", e))
         })?;
@@ -2239,14 +2635,7 @@ impl MemoryStore {
     /// `recorded` maps memory id → the content digest its current row was built
     /// from. Non-empty only in incremental mode; a file whose hash matches its
     /// entry has its row left untouched. Returns how many rows were skipped.
-    async fn reindex_dir(
-        &self,
-        dir: &Path,
-        visibility: Visibility,
-        chunk_ids: &std::collections::HashSet<String>,
-        indexed_ids: &mut Vec<String>,
-        recorded: &HashMap<String, RowIdentity>,
-    ) -> Result<usize> {
+    async fn scan_dir(&self, dir: &Path) -> Result<ScannedDir> {
         use rayon::prelude::*;
 
         use crate::digest::FileDigest;
@@ -2305,21 +2694,44 @@ impl MemoryStore {
         // writer we are not excluding (a foreign editor, not another EngramDB
         // process). Hashing inside this closure rides the rayon pool that is
         // already parallelising the parse, over bytes that are already hot.
-        let parsed: Vec<(PathBuf, std::time::SystemTime, Memory, FileDigest)> = read
+        // A file that does not parse is NOT dropped silently: its id is
+        // recovered (frontmatter line, else filename stem) so the caller can
+        // keep its existing row and vectors, and it is reported. Dropping it
+        // made a merge conflict in a hidden block delete the memory from the
+        // index — and its vectors with it — on the next reindex.
+        let results: Vec<std::result::Result<_, UnparseableMemoryFile>> = read
             .into_par_iter()
-            .filter_map(
+            .map(
                 |(path, mtime, content)| match memory_file::parse_memory_file(&content) {
                     Ok(memory) => {
                         let digest = FileDigest::of(content.as_bytes());
-                        Some((path, mtime, memory, digest))
+                        Ok((path, mtime, memory, digest))
                     }
-                    Err(e) => {
-                        tracing::warn!("Skipping {}: failed to parse: {}", path.display(), e);
-                        None
-                    }
+                    Err(e) => Err(UnparseableMemoryFile {
+                        id: memory_file::recover_id(&content, &path),
+                        path,
+                        error: e.to_string(),
+                        preserved: false,
+                    }),
                 },
             )
             .collect();
+        let mut parsed: Vec<(PathBuf, std::time::SystemTime, Memory, FileDigest)> = Vec::new();
+        let mut unparseable = Vec::new();
+        for r in results {
+            match r {
+                Ok(p) => parsed.push(p),
+                Err(u) => {
+                    tracing::warn!(
+                        "{} does not parse ({}); its index row and vectors are kept as they \
+                         were — fix the file (an unresolved merge conflict?) and reindex",
+                        u.path.display(),
+                        u.error
+                    );
+                    unparseable.push(u);
+                }
+            }
+        }
 
         // Phase 4 — resolve duplicate IDs. Sequential by nature (it is a
         // fold over a shared map) and cheap: no I/O, no parsing.
@@ -2357,6 +2769,25 @@ impl MemoryStore {
             }
         }
 
+        let owned: Vec<(String, Memory, FileDigest)> = by_id
+            .into_iter()
+            .map(|(id, (_path, _mtime, memory, digest))| (id, memory, digest))
+            .collect();
+        Ok(ScannedDir { owned, unparseable })
+    }
+
+    /// Phase 5 of a reindex: write the rows [`Self::scan_dir`] derived.
+    async fn write_dir(
+        &self,
+        owned: &[(String, Memory, crate::digest::FileDigest)],
+        visibility: Visibility,
+        chunk_ids: &std::collections::HashSet<String>,
+        indexed_ids: &mut Vec<String>,
+        recorded: &HashMap<String, RowIdentity>,
+        edges: &mut Vec<crate::edge_index::EdgeRow>,
+    ) -> Result<usize> {
+        use rayon::prelude::*;
+
         // Phase 5 — build the index rows, in parallel. `IndexEntry::for_file`
         // derives the memory's keyword stems (tokenize → stoplist → Snowball
         // stem → dedup for three fields), the second-largest CPU cost here at
@@ -2366,10 +2797,6 @@ impl MemoryStore {
         // One batched merge_insert instead of one commit (and one LanceDB
         // dataset version) per memory — reindexing a 1,000-memory store used
         // to perform 1,000 sequential commits that optimize() then compacted.
-        let owned: Vec<(String, Memory, FileDigest)> = by_id
-            .into_iter()
-            .map(|(id, (_path, _mtime, memory, digest))| (id, memory, digest))
-            .collect();
 
         // Incremental mode drops the rows whose file still hashes to what the
         // row was built from. This happens AFTER phase 4, never before: phase 4
@@ -2400,7 +2827,7 @@ impl MemoryStore {
         // `visibility` needs no check: it is serialized into the file's hidden
         // metadata block, so changing it rewrites the bytes and moves the hash.
         let mut skipped = 0;
-        let to_write: Vec<&(String, Memory, FileDigest)> = owned
+        let to_write: Vec<&(String, Memory, crate::digest::FileDigest)> = owned
             .iter()
             .filter(|(id, _, digest)| {
                 let current = recorded.get(id).is_some_and(|row| {
@@ -2428,6 +2855,15 @@ impl MemoryStore {
             })
             .collect();
         indexed_ids.extend(owned.iter().map(|(id, _, _)| id.clone()));
+        // Every memory's edges, skipped rows included: the edges table is
+        // rebuilt whole (or per owner) from this, and deriving it is a walk
+        // over already-parsed memories — no I/O, so the incremental skip has
+        // nothing to save here.
+        edges.extend(
+            owned
+                .iter()
+                .flat_map(|(_, memory, _)| crate::edge_index::edges_of(memory)),
+        );
         if !entries_batch.is_empty() {
             self.lance_index
                 .upsert_batch(&entries_batch)
@@ -2741,6 +3177,33 @@ impl MemoryStore {
         manifest::save_manifest(&manifest_path, &manifest).await?;
         Ok(())
     }
+
+    /// Stamp `fingerprint` only if the store has none yet; returns whether it
+    /// wrote. The unset check and the write happen under one write lock.
+    ///
+    /// This is the first-embed stamp's writer (`embed_memory_with`), and the
+    /// check has to be repeated here rather than trusted from the caller:
+    /// the caller decides "the store is unstamped" *before* its embed and its
+    /// chunk upsert, then stamps after them, and anything may stamp the store
+    /// in between — a `reindex --embeddings-only` for a newly configured
+    /// model, or a concurrent first embed. Acting on the stale answer wrote
+    /// the ingest's model over that newer stamp, so the manifest no longer
+    /// described the vectors. Lock rules as [`Self::set_embedding_fingerprint`].
+    pub async fn stamp_embedding_fingerprint_if_unset(
+        &self,
+        fingerprint: manifest::EmbeddingFingerprint,
+    ) -> Result<bool> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
+        let mut manifest = manifest::load_manifest(&manifest_path).await?;
+        if manifest.embedding.is_some() {
+            return Ok(false);
+        }
+        manifest.embedding = Some(fingerprint);
+        manifest::save_manifest(&manifest_path, &manifest).await?;
+        Ok(true)
+    }
 }
 
 /// Write content atomically and durably using write-to-temp-then-rename.
@@ -2919,15 +3382,41 @@ struct RowIdentity {
     has_embedding: bool,
 }
 
+/// One directory's parse result ([`MemoryStore::scan_dir`]).
+struct ScannedDir {
+    owned: Vec<(String, Memory, crate::digest::FileDigest)>,
+    unparseable: Vec<UnparseableMemoryFile>,
+}
+
+/// A memory file `reindex` could not parse.
+///
+/// Its row and vectors are kept as they were (`preserved`) rather than
+/// dropped: the file still exists, it is just unreadable right now — most
+/// often an unresolved merge conflict — and dropping the row would delete the
+/// memory from every query until someone noticed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UnparseableMemoryFile {
+    pub path: PathBuf,
+    /// Recovered from the frontmatter or the filename; `None` when neither
+    /// yields an id (nothing can be kept then).
+    pub id: Option<String>,
+    pub error: String,
+    /// Whether an existing row was carried across the rebuild.
+    pub preserved: bool,
+}
+
 /// What a metadata rebuild did.
 ///
 /// `indexed` counts every memory now represented in the index — skipped rows
 /// included, since they are still correctly indexed. `skipped` is how many of
 /// those needed no rewrite, and is always 0 for a full rebuild.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReindexCounts {
     pub indexed: usize,
     pub skipped: usize,
+    /// Files that did not parse. Their rows, vectors and edges were kept
+    /// (see [`UnparseableMemoryFile`]); every surface must show these.
+    pub unparseable: Vec<UnparseableMemoryFile>,
 }
 
 /// Scan a directory for `.md` files, recording each one's path and length.
@@ -4242,69 +4731,279 @@ mod tests {
         downgrade_dropping(dir, &["content_sha256", "content_len"], "0.7.0").await
     }
 
-    /// Rewrite a store's `memories` table with `drop_cols` removed from the
-    /// Arrow schema, and stamp the manifest at `version`.
-    ///
-    /// The other migration tests here downgrade only the manifest stamp, which
-    /// exercises the backfill but never the case that actually breaks: a table
-    /// whose Arrow schema is genuinely missing the new column. This builds that
-    /// table by reading the current one, dropping the fields and their arrays,
-    /// and recreating the table from the reduced batches — so the fixture is the
-    /// previous version's on-disk shape rather than a stand-in for it, and it
-    /// stays honest if a later version adds another column.
     async fn downgrade_dropping(dir: &Path, drop_cols: &[&str], version: &str) {
-        use arrow_array::RecordBatchIterator;
-        use futures_util::stream::StreamExt;
-        use lancedb::query::ExecutableQuery;
-        use std::sync::Arc;
+        crate::test_support::downgrade_dropping(dir, drop_cols, version).await
+    }
 
+    /// Reproduce a 0.8.0 store: no `edges` table at all, manifest stamped
+    /// 0.8.0. The table is new in 0.9.0 rather than a column, so dropping it
+    /// IS the previous version's on-disk shape.
+    async fn downgrade_to_0_8_0(dir: &Path) {
         let project_id = project_id::compute_project_id(dir);
         let lance_path = paths::lancedb_dir(&project_id).unwrap();
         let conn = lancedb::connect(lance_path.to_str().unwrap())
             .execute()
             .await
             .unwrap();
-        let table = conn.open_table("memories").execute().await.unwrap();
+        conn.drop_table(crate::edge_index::EDGES_TABLE, &[])
+            .await
+            .unwrap();
+        let manifest_path = paths::project_dir(dir).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.8.0".to_string();
+        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+    }
 
-        let mut stream = table.query().execute().await.unwrap();
-        let mut reduced = Vec::new();
-        let mut reduced_schema = None;
-        while let Some(batch) = stream.next().await {
-            let batch = batch.unwrap();
-            let schema = batch.schema();
-            let keep: Vec<usize> = (0..schema.fields().len())
-                .filter(|i| !drop_cols.contains(&schema.field(*i).name().as_str()))
-                .collect();
-            assert_eq!(
-                keep.len() + drop_cols.len(),
-                schema.fields().len(),
-                "fixture must actually remove every named column"
-            );
-            let fields: Vec<_> = keep.iter().map(|i| schema.field(*i).clone()).collect();
-            let new_schema = Arc::new(arrow_schema::Schema::new(fields));
-            let columns: Vec<_> = keep.iter().map(|i| batch.column(*i).clone()).collect();
-            reduced.push(arrow_array::RecordBatch::try_new(new_schema.clone(), columns).unwrap());
-            reduced_schema = Some(new_schema);
+    /// The 0.9.0 migration (edges), against a real 0.8.0 store whose files
+    /// already carry `supersedes` / `superseded_by`: a plain open creates the
+    /// table AND mirrors those fields into it, so inbound queries work at
+    /// once rather than after the next write.
+    #[tokio::test]
+    async fn schema_migration_to_0_9_0_builds_edges_from_a_real_0_8_0_store() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            let mut new = create_test_memory("mig9-new", Visibility::Shared);
+            new.supersedes = vec!["mig9-old".into()];
+            store.create(&new).await.unwrap();
+            let mut old = create_test_memory("mig9-old", Visibility::Shared);
+            old.superseded_by = Some("mig9-new".into());
+            store.create(&old).await.unwrap();
         }
-        let schema = reduced_schema.expect("fixture needs at least one memory");
-
-        conn.drop_table("memories", &[]).await.unwrap();
-        let batches: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
-            RecordBatchIterator::new(reduced.into_iter().map(Ok), schema),
-        );
-        conn.create_table("memories", batches)
+        downgrade_to_0_8_0(tmp.path()).await;
+        {
+            let conn = lancedb::connect(
+                paths::lancedb_dir(&project_id::compute_project_id(tmp.path()))
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
             .execute()
             .await
             .unwrap();
+            assert!(
+                crate::edge_index::open(&conn).await.unwrap().is_none(),
+                "fixture still has the edges table, so the test proves nothing"
+            );
+        }
 
-        let manifest_path = paths::project_dir(dir).join("manifest.toml");
-        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
-        m.schema_version = version.to_string();
-        // Only the schema axis may trigger: leaving the normalizer stale would
-        // migrate for the wrong reason and the test would pass with the version
-        // gate broken.
-        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
-        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        assert_eq!(
+            manifest::load_manifest(&manifest_path)
+                .await
+                .unwrap()
+                .schema_version,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        let edges = store.list_edges().await.unwrap();
+        assert_eq!(
+            edges.len(),
+            1,
+            "both fields describe one edge and fold to one: {edges:?}"
+        );
+        assert_eq!(edges[0].src_id, "mig9-new");
+        assert_eq!(edges[0].dst_id, "mig9-old");
+        assert_eq!(edges[0].kind, engram_types::LinkKind::Supersedes);
+        // Answered from the target's end too.
+        assert_eq!(store.edges_touching("mig9-old").await.unwrap().len(), 1);
+    }
+
+    /// A real merge conflict in a hidden block must not cost the memory its
+    /// row, its vectors or its edges on ANY reindex — full, incremental, or the
+    /// schema migration's forced rebuild — and every one must report it.
+    #[tokio::test]
+    async fn reindex_keeps_row_vectors_and_edges_of_a_conflicted_file() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let other = Memory::new(MemoryType::Decision, "other", "c", Provenance::human());
+        store.create(&other).await.unwrap();
+        let mut m = Memory::new(MemoryType::Decision, "conflicted", "c", Provenance::human());
+        m.supersedes = vec!["old-1".into()];
+        m.links = vec![engram_types::Link::new(
+            other.id.clone(),
+            engram_types::LinkKind::Supports,
+            engram_types::LinkOrigin::Human,
+        )];
+        store.create(&m).await.unwrap();
+        store
+            .upsert_chunks(&m.id, vec![vec![0.25f32; 384]])
+            .await
+            .unwrap();
+
+        let path = paths::memories_dir(tmp.path()).join(memory_file::memory_filename(&m));
+        let clean = async_fs::read_to_string(&path).await.unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted, "fixture did not inject the conflict");
+        async_fs::write(&path, &conflicted).await.unwrap();
+
+        let check = |label: &'static str| {
+            let store = &store;
+            let id = m.id.clone();
+            async move {
+                assert!(
+                    store.list_ids().await.unwrap().contains(&id),
+                    "{label}: the row was dropped"
+                );
+                assert!(
+                    store.has_chunks_for(&id).await.unwrap(),
+                    "{label}: the vectors were pruned"
+                );
+                assert!(
+                    store
+                        .list_edges()
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|e| e.src_id == id && e.kind == engram_types::LinkKind::Supports),
+                    "{label}: its edges were dropped"
+                );
+            }
+        };
+
+        let counts = store.reindex_counted().await.unwrap();
+        assert_eq!(counts.unparseable.len(), 1, "{counts:?}");
+        assert_eq!(counts.unparseable[0].id.as_deref(), Some(m.id.as_str()));
+        assert!(counts.unparseable[0].preserved);
+        assert!(counts.unparseable[0].error.contains("merge conflict"));
+        check("full").await;
+
+        let counts = store.reindex_incremental().await.unwrap();
+        assert_eq!(counts.unparseable.len(), 1);
+        check("incremental").await;
+
+        drop(store);
+        downgrade_to_0_8_0(tmp.path()).await;
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let ids = store.list_ids().await.unwrap();
+        assert!(ids.contains(&m.id), "migration dropped the row");
+        assert!(
+            store.has_chunks_for(&m.id).await.unwrap(),
+            "migration pruned vectors"
+        );
+        // The file itself is untouched throughout.
+        assert_eq!(async_fs::read_to_string(&path).await.unwrap(), conflicted);
+    }
+
+    /// When the edges of an unparseable file cannot be read, a full reindex
+    /// refuses before clearing anything: its whole-table edge rebuild would
+    /// otherwise delete the rows that file owns.
+    #[tokio::test]
+    async fn reindex_refuses_when_an_unparseable_files_edges_cannot_be_read() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let other = Memory::new(MemoryType::Decision, "other", "c", Provenance::human());
+        store.create(&other).await.unwrap();
+        let mut m = Memory::new(MemoryType::Decision, "conflicted", "c", Provenance::human());
+        m.supersedes = vec!["old-1".into()];
+        m.links = vec![engram_types::Link::new(
+            other.id.clone(),
+            engram_types::LinkKind::Supports,
+            engram_types::LinkOrigin::Human,
+        )];
+        store.create(&m).await.unwrap();
+        let path = paths::memories_dir(tmp.path()).join(memory_file::memory_filename(&m));
+        let clean = async_fs::read_to_string(&path).await.unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted, "fixture did not inject the conflict");
+        async_fs::write(&path, &conflicted).await.unwrap();
+
+        // Break the edges table so it lists but will not open.
+        let versions = paths::lancedb_dir(&store.project_id)
+            .unwrap()
+            .join(format!("{}.lance", crate::edge_index::EDGES_TABLE))
+            .join("_versions");
+        assert!(versions.is_dir(), "fixture: no edges table at {versions:?}");
+        std::fs::remove_dir_all(&versions).unwrap();
+
+        let err = store.reindex_counted().await.unwrap_err();
+        assert!(
+            err.to_string().contains("unparseable"),
+            "the refusal names its cause: {err}"
+        );
+        assert!(
+            store.list_ids().await.unwrap().contains(&m.id),
+            "nothing was cleared"
+        );
+    }
+
+    #[test]
+    fn recover_id_reads_frontmatter_then_stem() {
+        let id = "018f2a1b-3c4d-7e5f-8a9b-000000000010";
+        let fm = format!("---\nversion: 2\nid: {id}\n---\nbody");
+        assert_eq!(
+            memory_file::recover_id(&fm, Path::new("whatever.md")).as_deref(),
+            Some(id)
+        );
+        let stem = format!("some-title_{id}.md");
+        assert_eq!(
+            memory_file::recover_id("<<<<<<< garbage", Path::new(&stem)).as_deref(),
+            Some(id)
+        );
+        assert_eq!(memory_file::recover_id("x", Path::new("notes.md")), None);
+    }
+
+    /// The write path keeps the table in step with the files, and a delete
+    /// takes the deleted memory's own rows but leaves edges INTO it dangling.
+    #[tokio::test]
+    async fn edges_follow_writes_and_deletes() {
+        use engram_types::{Link, LinkKind, LinkOrigin};
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        store
+            .create(&create_test_memory("e-a", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("e-b", Visibility::Shared))
+            .await
+            .unwrap();
+        assert!(store.list_edges().await.unwrap().is_empty());
+
+        store
+            .update_with("e-a", |m| {
+                m.links
+                    .push(Link::new("e-b", LinkKind::Supports, LinkOrigin::Human));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store
+            .update_with("e-b", |m| {
+                m.links
+                    .push(Link::new("e-a", LinkKind::RelatedTo, LinkOrigin::Agent));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.list_edges().await.unwrap().len(), 2);
+        assert_eq!(store.edges_touching("e-a").await.unwrap().len(), 2);
+
+        // A reindex reproduces exactly the same table from the files.
+        let before = store.list_edges().await.unwrap();
+        store.reindex().await.unwrap();
+        let mut after = store.list_edges().await.unwrap();
+        let mut before = before;
+        before.sort_by_key(|r| r.edge_key());
+        after.sort_by_key(|r| r.edge_key());
+        assert_eq!(before, after);
+
+        store.delete("e-b").await.unwrap();
+        let left = store.list_edges().await.unwrap();
+        assert_eq!(left.len(), 1, "e-a's edge into the deleted e-b stays");
+        assert_eq!(left[0].src_id, "e-a");
+        assert_eq!(left[0].dst_id, "e-b");
     }
 
     /// The 0.7.0 schema migration (harvest provenance), against a store whose
@@ -5097,6 +5796,47 @@ mod tests {
         let got = store.get(id).await.unwrap();
         assert_eq!(got.summary, "Current summary");
         assert_eq!(store.list_ids().await.unwrap(), vec![id.to_string()]);
+    }
+
+    /// The first-embed stamp decides "unstamped" before its embed and stamps
+    /// after it; a fingerprint written in between (a reindex for a new
+    /// model) must survive. `set_embedding_fingerprint` overwrote it, which
+    /// flaked `server::tests::reindex_re_embeds_in_error_mode_despite_mismatch`.
+    #[tokio::test]
+    async fn test_stamp_embedding_fingerprint_if_unset_keeps_existing_stamp() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let fp = |model: &str| manifest::EmbeddingFingerprint {
+            model: model.to_string(),
+            dimensions: 384,
+            composition: None,
+        };
+
+        assert_eq!(store.embedding_fingerprint().await.unwrap(), None);
+        assert!(store
+            .stamp_embedding_fingerprint_if_unset(fp("onnx/first"))
+            .await
+            .unwrap());
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(fp("onnx/first"))
+        );
+
+        store
+            .set_embedding_fingerprint(fp("onnx/reindexed"))
+            .await
+            .unwrap();
+        assert!(!store
+            .stamp_embedding_fingerprint_if_unset(fp("onnx/late-ingest"))
+            .await
+            .unwrap());
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            Some(fp("onnx/reindexed")),
+            "a late first-embed stamp must not overwrite a newer fingerprint"
+        );
     }
 
     /// Issue-3 regression: `set_embedding_fingerprint` racing concurrent
@@ -6994,5 +7734,156 @@ mod tests {
             vec![good],
             "valid memory returned, corrupt one skipped"
         );
+    }
+
+    /// Every file under `root` with its length and mtime, so two snapshots
+    /// differ when anything was created, removed, resized or rewritten.
+    fn tree_snapshot(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)> {
+        fn walk(
+            dir: &Path,
+            out: &mut std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)>,
+        ) {
+            let Ok(rd) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                // Directories are entries too: creating an empty one is a
+                // side effect the file list alone would miss.
+                out.insert(path.clone(), (meta.len(), meta.modified().unwrap()));
+                if meta.is_dir() {
+                    walk(&path, out);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        walk(root, &mut out);
+        out
+    }
+
+    /// Everything a read-only open could touch: the project tree, the global
+    /// data dir (LanceDB, personal memories, locks) and the config dir
+    /// (registry).
+    fn machine_snapshot(
+        project: &Path,
+    ) -> Vec<std::collections::BTreeMap<PathBuf, (u64, std::time::SystemTime)>> {
+        vec![
+            tree_snapshot(project),
+            tree_snapshot(&paths::global_data_dir().unwrap()),
+            tree_snapshot(&paths::global_config_dir().unwrap()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn open_read_only_and_reads_write_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &registry).await.unwrap();
+            store
+                .create(&create_test_memory("ro-shared-1", Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .create(&create_test_memory("ro-personal-1", Visibility::Personal))
+                .await
+                .unwrap();
+        }
+        // `open` would backfill this; a read-only open must not.
+        std::fs::remove_file(tmp.path().join(".engramdb").join(".gitignore")).unwrap();
+        let before = machine_snapshot(tmp.path());
+
+        let store = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        assert_eq!(store.list_filterable().await.unwrap().len(), 2);
+        assert_eq!(store.list_summary().await.unwrap().len(), 2);
+        assert_eq!(store.get("ro-shared-1").await.unwrap().id, "ro-shared-1");
+        assert_eq!(store.get("ro-personal").await.unwrap().id, "ro-personal-1");
+        assert_eq!(
+            store
+                .get_batch(&["ro-shared-1", "ro-personal-1"])
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!store.schema_state().await.needs_migration);
+        let _ = store
+            .check_staleness(&IndexConfig::default())
+            .await
+            .unwrap();
+        let _ = store.index_digests().await.unwrap();
+        let _ = store.file_digests().await.unwrap();
+        drop(store);
+
+        assert_eq!(
+            before,
+            machine_snapshot(tmp.path()),
+            "a read-only open plus reads changed files on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_read_only_reports_a_stale_schema_instead_of_migrating() {
+        let tmp = TempDir::new().unwrap();
+        MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap()
+            .create(&create_test_memory("ro-stale-1", Visibility::Shared))
+            .await
+            .unwrap();
+        let manifest_path = tmp.path().join(".engramdb").join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.1.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+        let before = machine_snapshot(tmp.path());
+
+        let store = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        let state = store.schema_state().await;
+        assert!(state.needs_migration);
+        assert_eq!(state.stored.as_deref(), Some("0.1.0"));
+        assert_eq!(state.current, manifest::CURRENT_SCHEMA_VERSION);
+        drop(store);
+
+        assert_eq!(before, machine_snapshot(tmp.path()), "no migration ran");
+        let m = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(m.schema_version, "0.1.0");
+    }
+
+    #[tokio::test]
+    async fn open_read_only_creates_nothing_for_missing_stores() {
+        let tmp = TempDir::new().unwrap();
+        let before = machine_snapshot(tmp.path());
+        assert!(matches!(
+            MemoryStore::open_read_only(tmp.path()).await,
+            Err(StorageError::NotInitialized)
+        ));
+        assert!(matches!(
+            MemoryStore::open_global_read_only().await,
+            Err(StorageError::NotInitialized)
+        ));
+        assert!(matches!(
+            MemoryStore::open_group_read_only("__g_nope").await,
+            Err(StorageError::NotInitialized)
+        ));
+        assert_eq!(before, machine_snapshot(tmp.path()));
+
+        // A store whose index was never built here (a fresh clone): the
+        // `.engramdb/` exists, `lancedb/` does not, and must not appear.
+        std::fs::create_dir_all(tmp.path().join(".engramdb").join("memories")).unwrap();
+        let before = machine_snapshot(tmp.path());
+        let err = MemoryStore::open_read_only(tmp.path()).await.err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("has not been indexed on this machine"),
+            "{err}"
+        );
+        assert_eq!(before, machine_snapshot(tmp.path()));
+        let id = project_id::compute_project_id(tmp.path());
+        assert!(!paths::lancedb_dir(&id).unwrap().exists());
     }
 }

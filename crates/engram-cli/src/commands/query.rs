@@ -28,6 +28,8 @@ pub struct QueryParams {
     pub situation: Option<String>,
     pub include_invalidated: bool,
     pub show_scores: bool,
+    /// `--expand-links [N]`: `None` defers to `[retrieval].expand_links`.
+    pub expand_links: Option<usize>,
     /// Also merge global-store memories into the project results.
     pub include_global: bool,
 }
@@ -150,6 +152,14 @@ async fn compute_query_result(
     if let Some(mc) = params.min_criticality {
         validate_score(mc, "min_criticality")?;
     }
+    if let Some(n) = params.expand_links {
+        if n > engramdb::types::MAX_EXPAND_LINKS {
+            anyhow::bail!(
+                "--expand-links must be at most {}, got {n}",
+                engramdb::types::MAX_EXPAND_LINKS
+            );
+        }
+    }
 
     let query = RetrievalQuery {
         mode: params.mode,
@@ -170,12 +180,15 @@ async fn compute_query_result(
             .transpose()?,
         include_invalidated: Some(params.include_invalidated),
         rank_fallback: None,
+        expand_links: params.expand_links,
     };
 
     // When querying a shared store directly (`--global`/`--group`), there is no
     // cross-store fan-in to do — we ARE the shared store. Short-circuit.
     if direct_shared {
-        return engramdb::ops::query_memories(&engine, &query).await;
+        let result = engramdb::ops::query_memories(&engine, &query).await?;
+        record_returned(&engine, &result, &Default::default(), query.mode);
+        return Ok(result);
     }
 
     // N-way fan-in (ops::query_memories_with_extra_stores): fold in every group
@@ -249,7 +262,28 @@ async fn compute_query_result(
         );
     }
 
+    record_returned(&engine, &outcome.result, &outcome.owners, query.mode);
     Ok(outcome.result)
+}
+
+/// Record `returned` for what this query answered (each memory in its
+/// owning store's log), under the session id the CLI runs in when it knows
+/// one ([`engramdb::ops::usage::cli_session_id`]); sessionless events never
+/// count toward promotion.
+fn record_returned(
+    engine: &engramdb::retrieval::engine::RetrievalEngine,
+    result: &RetrievalResult,
+    owners: &std::collections::HashMap<String, engramdb::ops::StoreRef>,
+    mode: RetrievalMode,
+) {
+    engramdb::ops::record_returned(
+        engine,
+        result,
+        owners,
+        mode,
+        engramdb::ops::Surface::Cli,
+        engramdb::ops::usage::cli_session_id().as_deref(),
+    );
 }
 
 #[cfg(test)]
@@ -286,6 +320,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -326,6 +361,7 @@ mod tests {
             detail_level: None,
             include_expired: false,
             show_scores: false,
+            expand_links: None,
             include_global: false,
         }
     }
@@ -528,5 +564,42 @@ mod tests {
             "expected validation message, got: {}",
             msg
         );
+    }
+
+    /// The CLI front end records `returned` for every memory it answered,
+    /// ranked, under the session id it runs in (here `CLAUDE_SESSION_ID`).
+    #[tokio::test]
+    async fn query_records_returned_with_rank_and_the_cli_session() {
+        use engramdb::ops::{Surface, UsageKind};
+        let (temp_dir, store) = setup_test_store().await;
+        std::env::set_var("CLAUDE_SESSION_ID", "cli-sess");
+        let formatter = OutputFormatter::new(None, false, true);
+        let params = QueryParams {
+            path: Some("src/main.rs".to_string()),
+            ..base_params()
+        };
+        run_query(
+            temp_dir.path(),
+            false,
+            None,
+            params,
+            None,
+            &formatter,
+            &Arc::new(DaemonCell::new()),
+            DaemonPolicy::InProcess,
+        )
+        .await
+        .unwrap();
+        let events = engramdb::telemetry::usage::load_memory_events(temp_dir.path())
+            .unwrap()
+            .events;
+        assert!(!events.is_empty(), "the answer was recorded");
+        for (i, e) in events.iter().enumerate() {
+            assert_eq!((e.kind, e.surface), (UsageKind::Returned, Surface::Cli));
+            assert_eq!(e.session_id.as_deref(), Some("cli-sess"));
+            assert_eq!(e.store_id, store.project_id);
+            assert_eq!(e.rank, Some(i as u32 + 1));
+            assert_eq!(e.query_mode.as_deref(), Some("rank"));
+        }
     }
 }

@@ -1,0 +1,13 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+✓ Linked 550e8400-e29b duplicates 018f2a1b-3c4d (confirmed)
+  ℹ stored on 018f2a1b-3c4d (personal): a committed file must not name a personal memory
+✓ Updated edge 550e8400-e29b supports 018f2a1b-3c4d @__global_store__ (rejected)
+  ℹ the target's store could not be opened here; the edge is recorded unchecked
+✓ Unlinked 550e8400-e29b supersedes 018f2a1b-3c4d (target's validity window reopened)
+✓ Resolved contradiction: 018f2a1b-3c4d supersedes 550e8400-e29b (550e8400-e29b is now invalidated)
+✓ Contradiction between 550e8400-e29b and 018f2a1b-3c4d: confirmed
+--- stderr ---

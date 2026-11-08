@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+memory=[ID] store=[PID] returned=1 returned_sessions=1 injected=1 injected_sessions=1 fetched=2 updated=0 challenged=0
+day=[DAY] returned=1 injected=1 fetched=2 writes=0
+--- stderr ---

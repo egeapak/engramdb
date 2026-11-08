@@ -78,7 +78,13 @@ async fn main() {
     let mut a_create = Vec::new();
     for i in 0..runs {
         let (build_ms, engine) = ms(ops::build_engine(store.clone(), &config_path, None)).await;
-        let (create_ms, res) = ms(ops::create_memory(&store, params(i, true), Some(&engine))).await;
+        let (create_ms, res) = ms(ops::create_memory(
+            &store,
+            params(i, true),
+            Some(&engine),
+            engramdb::ops::Surface::Cli,
+        ))
+        .await;
         res.unwrap();
         let total = build_ms + create_ms;
         println!("{i:>5}  {build_ms:>14.1}  {create_ms:>14.1}  {total:>14.1}");
@@ -106,6 +112,7 @@ async fn main() {
             &store,
             params(100 + i, true),
             Some(&engine),
+            engramdb::ops::Surface::Cli,
         ))
         .await;
         res.unwrap();
@@ -151,6 +158,7 @@ async fn main() {
             &store,
             params(300 + i, true),
             Some(&engine),
+            engramdb::ops::Surface::Cli,
         ))
         .await;
         res.unwrap();
@@ -169,6 +177,7 @@ async fn main() {
         &store,
         params(200, false),
         Some(&engine2),
+        engramdb::ops::Surface::Cli,
     ))
     .await;
     r.unwrap();
@@ -176,6 +185,7 @@ async fn main() {
         &store,
         params(201, true),
         Some(&engine2),
+        engramdb::ops::Surface::Cli,
     ))
     .await;
     r.unwrap();

@@ -1,0 +1,10 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+Total: 3
+Decision: 3
+Top 1 018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b: fetched=4 injected=12 injected_sessions=1 returned=3 returned_sessions=2
+Top 2 018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c: fetched=0 injected=1 injected_sessions=1 returned=0 returned_sessions=0
+--- stderr ---

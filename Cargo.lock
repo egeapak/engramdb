@@ -2215,6 +2215,7 @@ dependencies = [
  "clap_complete",
  "ctor",
  "dirs 7.0.0",
+ "engram-dashboard",
  "engram-mcp",
  "engram-test-support",
  "engramdb",
@@ -2234,6 +2235,29 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "engram-dashboard"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "criterion",
+ "ctor",
+ "engram-test-support",
+ "engramdb",
+ "form_urlencoded",
+ "getrandom 0.4.3",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

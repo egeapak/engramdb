@@ -14,24 +14,13 @@
 //! A long-running process later moves those lines into `hook_events` with
 //! [`drain_to_table`].
 //!
-//! **Bounded by rotation, and the loss paths are declared:**
-//! - When the live file passes [`ROTATE_BYTES`], the writer that noticed
-//!   renames it to `hook_stats.1.jsonl`, replacing the previous generation.
-//!   Without a drainer, history is therefore at most two generations (~2 MiB,
-//!   roughly 10,000 calls); anything older is dropped by design.
-//! - Two writers that both see the live file over the limit both rename. If
-//!   a third process appended a fresh live file between the two renames, the
-//!   second rename replaces the full generation with that near-empty file and
-//!   one generation is lost. The window is the gap between two `rename(2)`
-//!   calls; for a latency histogram that is an acceptable, declared loss.
-//! - A writer that opened the live file just before a drain renamed it writes
-//!   into the renamed file. The drain waits [`DRAIN_GRACE`] after renaming
-//!   before it reads, which covers an `open` + `write`; a writer stalled for
-//!   longer than that between the two calls loses its line.
-//! - `stats` never reads a file a drain has claimed, so nothing is counted
-//!   twice. The other side of that: lines in a claimed file are missing from
-//!   `stats` until a drain inserts them — for the length of a drain, or,
-//!   after a drain that crashed before its delete, until the next drain.
+//! **Bounded by rotation, and the loss paths are declared.** The life cycle
+//! (rotation at [`ROTATE_BYTES`], the rotation race, the [`DRAIN_GRACE`]
+//! window, claimed files being invisible to reads) is the shared JSONL log's,
+//! documented once in [`super::jsonl_log`]. For this log: without a drainer,
+//! history is at most two generations (~2 MiB, roughly 10,000 calls), and a
+//! lost generation in the rotation race is an acceptable loss for a latency
+//! histogram.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -40,11 +29,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::state_file::{append_state_file, read_state_file};
 use crate::telemetry::hook_events::{
     append_hook_events, build_view, retention_cutoff, Groups, HookEvent, HookPath,
     PERCENTILE_SAMPLES,
 };
+use crate::telemetry::jsonl_log::{is_initialized, state_dir, JsonlLog};
 
 pub use crate::telemetry::hook_events::{HookStatsView, HookTimingStats, PathTimingStats};
 
@@ -56,6 +45,13 @@ pub const HOOK_STATS_ROTATED_FILE: &str = "hook_stats.1.jsonl";
 
 /// Prefix of a file a drain has claimed (renamed aside) and not yet deleted.
 pub const HOOK_STATS_DRAINING_PREFIX: &str = "hook_stats.draining.";
+
+const LOG: JsonlLog = JsonlLog {
+    live: HOOK_STATS_FILE,
+    rotated: HOOK_STATS_ROTATED_FILE,
+    draining_prefix: HOOK_STATS_DRAINING_PREFIX,
+    lock_file: "hook_drain.lock",
+};
 
 /// Size at which the live file rotates.
 pub const ROTATE_BYTES: u64 = 1024 * 1024;
@@ -109,20 +105,9 @@ pub struct LoadedHookCalls {
     pub skipped_lines: u64,
 }
 
-fn state_dir(project_root: &Path) -> PathBuf {
-    crate::paths::project_dir(project_root).join("state")
-}
-
 /// Path of the live hook log for a project root.
 pub fn hook_stats_path(project_root: &Path) -> PathBuf {
-    state_dir(project_root).join(HOOK_STATS_FILE)
-}
-
-/// Whether `project_root` holds an initialized store — the same test the
-/// SessionEnd hook uses (`manifest.toml` or `memories/`).
-fn is_initialized(project_root: &Path) -> bool {
-    let engramdb = crate::paths::project_dir(project_root);
-    engramdb.join("manifest.toml").is_file() || engramdb.join("memories").is_dir()
+    LOG.live_path(project_root)
 }
 
 /// Append one hook call to the project's log, rotating when it is full.
@@ -174,19 +159,7 @@ fn record_hook_call_at(
     };
     let mut line = serde_json::to_string(&record)?;
     line.push('\n');
-    let live = hook_stats_path(project_root);
-    append_state_file(&live, &line)?;
-
-    // `symlink_metadata` reads no content; the append above already refused a
-    // symlink at this path. `rename` never dereferences its source.
-    if let Ok(meta) = std::fs::symlink_metadata(&live) {
-        if meta.len() > rotate_bytes {
-            let rotated = state_dir(project_root).join(HOOK_STATS_ROTATED_FILE);
-            // ENOENT here means another writer rotated first (see module docs).
-            let _ = std::fs::rename(&live, &rotated);
-        }
-    }
-    Ok(())
+    LOG.append(project_root, &line, rotate_bytes)
 }
 
 fn parse_lines(text: &str, out: &mut LoadedHookCalls) {
@@ -210,12 +183,9 @@ fn parse_lines(text: &str, out: &mut LoadedHookCalls) {
 /// Read both generations, oldest first. Missing files read as empty. Files
 /// a drain has claimed are not included (see the module docs).
 pub fn load_hook_calls(project_root: &Path) -> Result<LoadedHookCalls> {
-    let dir = state_dir(project_root);
     let mut out = LoadedHookCalls::default();
-    for name in [HOOK_STATS_ROTATED_FILE, HOOK_STATS_FILE] {
-        if let Some(text) = read_state_file(&dir.join(name))? {
-            parse_lines(&text, &mut out);
-        }
+    for text in LOG.read_unclaimed(project_root)? {
+        parse_lines(&text, &mut out);
     }
     Ok(out)
 }
@@ -334,87 +304,35 @@ async fn drain_to_table_with_grace(
     project_id: &str,
     grace: Duration,
 ) -> anyhow::Result<DrainReport> {
-    let mut report = DrainReport::default();
-    if !is_initialized(project_root) {
-        return Ok(report);
-    }
-    // The lock file must not be what creates `projects/<id>/`: `hook_events`
-    // refuses to create scaffolding for a project whose global dir is
-    // missing, and a lock created first would defeat that check.
-    let project_data = crate::paths::global_data_dir()?
-        .join("projects")
-        .join(project_id);
-    if !project_data.is_dir() {
-        return Ok(report);
-    }
-    let lock_path = project_data.join("hook_drain.lock");
-    let _guard = crate::write_lock::acquire_lock_file(lock_path).await?;
-
-    let dir = state_dir(project_root);
-    let stamp = format!(
-        "{}.{}",
-        std::process::id(),
-        Utc::now().timestamp_nanos_opt().unwrap_or_default()
-    );
-    let mut claimed_new = false;
-    for (i, name) in [HOOK_STATS_ROTATED_FILE, HOOK_STATS_FILE]
-        .iter()
-        .enumerate()
-    {
-        let target = dir.join(format!("{HOOK_STATS_DRAINING_PREFIX}{stamp}.{i}.jsonl"));
-        match std::fs::rename(dir.join(name), &target) {
-            Ok(()) => claimed_new = true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    let mut claimed: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with(HOOK_STATS_DRAINING_PREFIX))
-            })
-            .collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e.into()),
+    let drained = LOG
+        .drain(project_root, project_id, grace, |texts| async move {
+            let mut loaded = LoadedHookCalls::default();
+            for text in &texts {
+                parse_lines(text, &mut loaded);
+            }
+            let report = DrainReport {
+                records: loaded.records.len() as u64,
+                skipped_lines: loaded.skipped_lines,
+                files: 0,
+            };
+            let events: Vec<HookEvent> = loaded
+                .records
+                .into_iter()
+                .map(HookCallRecord::into_event)
+                .collect();
+            append_hook_events(project_id, &events, true).await?;
+            Ok(report)
+        })
+        .await?;
+    let Some((mut report, files)) = drained else {
+        return Ok(DrainReport::default());
     };
-    if claimed.is_empty() {
-        return Ok(report);
-    }
-    claimed.sort();
-    if claimed_new {
-        tokio::time::sleep(grace).await;
-    }
-
-    let mut loaded = LoadedHookCalls::default();
-    for path in &claimed {
-        if let Some(text) = read_state_file(path)? {
-            parse_lines(&text, &mut loaded);
-        }
-    }
-    report.records = loaded.records.len() as u64;
-    report.skipped_lines = loaded.skipped_lines;
-    let events: Vec<HookEvent> = loaded
-        .records
-        .into_iter()
-        .map(HookCallRecord::into_event)
-        .collect();
-    append_hook_events(project_id, &events, true).await?;
-    for path in &claimed {
-        match std::fs::remove_file(path) {
-            Ok(()) => report.files += 1,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::warn!("hook stats: could not delete {}: {e}", path.display()),
-        }
-    }
+    report.files = files;
     if report.skipped_lines > 0 {
         tracing::warn!(
             "hook stats: dropped {} unreadable line(s) while draining {}",
             report.skipped_lines,
-            dir.display()
+            state_dir(project_root).display()
         );
     }
     Ok(report)

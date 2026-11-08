@@ -133,10 +133,13 @@ fn consolidated_audience(
     (!union.is_empty()).then_some(union)
 }
 
+/// Records `created` for the new memory and `merged` (with `related_id` =
+/// the new id) for each source still present, all from `surface`.
 pub async fn compress_apply(
     store: &MemoryStore,
     params: CompressApplyParams,
     engine: Option<&crate::retrieval::engine::RetrievalEngine>,
+    surface: super::usage::Surface,
 ) -> Result<CompressApplyResult> {
     let CompressApplyParams {
         source_ids,
@@ -238,6 +241,7 @@ pub async fn compress_apply(
             embed_async,
         },
         engine,
+        surface,
     )
     .await?;
 
@@ -284,6 +288,34 @@ pub async fn compress_apply(
             Some(_) => failed_sources.push(format!("{} (still active)", id)),
         }
     }
+
+    if super::usage::usage_enabled(store).await {
+        // Only sources this compress actually closed: one whose
+        // invalidation failed is still active and was not merged.
+        for id in source_ids
+            .iter()
+            .filter(|id| verified.get(*id).is_some_and(|m| m.is_invalidated()))
+        {
+            super::usage::record_resolved(
+                store,
+                id,
+                super::usage::UsageKind::Merged,
+                surface,
+                Some(&result.id),
+            );
+        }
+    }
+
+    // Edges (schema 0.9.0): the closed sources' outbound edges move onto the
+    // summary, edges between sources are absorbed, and inbound edges resolve
+    // through each source's `superseded_by` (see `links::carry_links_onto`).
+    // Only sources this compress actually closed — a still-active one keeps
+    // its edges, like it keeps everything else.
+    let closed: Vec<crate::types::Memory> = source_ids
+        .iter()
+        .filter_map(|id| verified.get(id).filter(|m| m.is_invalidated()).cloned())
+        .collect();
+    super::links::carry_links_onto(store, &result.id, &closed).await;
 
     if !failed_sources.is_empty() {
         bail!(
@@ -447,6 +479,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap_err();
@@ -606,6 +639,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -706,6 +740,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -766,6 +801,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -829,6 +865,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap_err();
@@ -878,6 +915,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -970,6 +1008,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -997,6 +1036,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -1024,6 +1064,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await
         .unwrap();
@@ -1057,6 +1098,7 @@ mod tests {
                 embed_async: false,
             },
             None,
+            crate::ops::Surface::Cli,
         )
         .await;
 
@@ -1669,6 +1711,26 @@ pub async fn consolidate_cluster_apply(
         .await?;
     for (id, e) in demote_failures {
         tracing::warn!(memory_id = %id, "consolidation source demotion failed: {e}");
+    }
+    // Consolidation only ever runs from the lifecycle pass.
+    if super::usage::usage_enabled(store).await {
+        use super::usage::{record_resolved, Surface, UsageKind};
+        record_resolved(
+            store,
+            &new_id,
+            UsageKind::Created,
+            Surface::Maintenance,
+            None,
+        );
+        for id in source_ids {
+            record_resolved(
+                store,
+                id,
+                UsageKind::Merged,
+                Surface::Maintenance,
+                Some(&new_id),
+            );
+        }
     }
     Ok(new_id)
 }

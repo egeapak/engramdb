@@ -32,7 +32,11 @@ use std::path::Path;
 /// budget eviction. `0.8.0` added `content_sha256` + `content_len`, the identity
 /// of the `.md` bytes each row was derived from, so an in-place edit — a hand
 /// edit, a `git checkout`, a restore — becomes visible to `doctor` instead of
-/// hiding behind a count that did not change. A store whose manifest records an
+/// hiding behind a count that did not change. `0.9.0` added the `edges` table
+/// (`storage::edge_index`) — additive like `0.6.0`, but its migration does
+/// real work: the rebuild derives the table from every file's `links` and
+/// mirrors the `supersedes` / `superseded_by` fields stores already carry, so
+/// inbound edges are queryable the moment the store opens. A store whose manifest records an
 /// older version is transparently re-indexed once on open (seconds, no
 /// re-embed) and stamped up to this.
 ///
@@ -41,7 +45,7 @@ use std::path::Path;
 /// held only in LanceDB is destroyed by the very mechanism that adds the
 /// column. Unlike `keyword_stems` — a cache the rebuild recomputes — a citation
 /// cannot be recomputed from anything.
-pub const CURRENT_SCHEMA_VERSION: &str = "0.8.0";
+pub const CURRENT_SCHEMA_VERSION: &str = "0.9.0";
 
 /// The pre-migration baseline, used as the serde default so a manifest written
 /// before the field existed parses as "needs migration" rather than failing.
@@ -313,8 +317,10 @@ logical_scopes = []
         assert!(!schema_version_is_current("0.3.0")); // pre-audience, behind 0.4.0
         assert!(!schema_version_is_current("0.5.0")); // pre-conversations, behind 0.6.0
         assert!(!schema_version_is_current("0.6.0")); // pre-source_sessions, behind 0.7.0
-                                                      // Ahead of current → must NOT migrate (no silent downgrade).
-        assert!(schema_version_is_current("0.8.0"));
+        assert!(!schema_version_is_current("0.8.0")); // pre-edges, behind 0.9.0
+
+        // Ahead of current → must NOT migrate (no silent downgrade).
+        assert!(schema_version_is_current("0.10.0"));
         assert!(schema_version_is_current("1.0.0"));
         // Short / unparseable forms.
         assert!(!schema_version_is_current("0.3")); // 0.3.0, behind 0.4.0

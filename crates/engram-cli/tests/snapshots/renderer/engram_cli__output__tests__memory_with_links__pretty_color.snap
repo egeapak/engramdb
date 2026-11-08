@@ -1,0 +1,26 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+ID: <cyan>550e8400-e29b-41d4-a716-446655440000</cyan>
+Type: <yellow>Decision</yellow>
+Summary: Test summary
+Content: Test content
+Criticality: 0.80
+Confidence: 0.90
+Status: Active
+Visibility: Shared
+Created: 2026-01-02 03:04:05
+Updated: 2026-01-02 03:04:05
+Links:
+  Outbound (2):
+    related_to <-> 018f2a1b-1111 @__g_0123456789ab  (confirmed, human, 1.00) [store not reachable]
+    supports -> 018f2a1b-3c4d  Custom CA breaks webpki downloads  (confirmed, human, 1.00)
+      note: measured on the sandbox second line
+  Inbound (2):
+    contradicts <-> 018f2a1b-0000  Custom CA breaks webpki downloads  (proposed, agent, 0.60)
+      note: webpki rejects the gateway CA
+    derived_from <- 018f2a1b-2222  Custom CA breaks webpki downloads  (confirmed, human, 1.00) [invalidated, superseded by 018f2a1b-3333]
+  (2 more hidden: dangling, invalidated or rejected; `engramdb links <id> --all` shows them)
+--- stderr ---

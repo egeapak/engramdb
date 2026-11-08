@@ -23,11 +23,19 @@ static TEST_DATA_DIR: LazyLock<tempfile::TempDir> =
     LazyLock::new(|| tempfile::TempDir::new().expect("failed to create test data dir"));
 static TEST_CONFIG_DIR: LazyLock<tempfile::TempDir> =
     LazyLock::new(|| tempfile::TempDir::new().expect("failed to create test config dir"));
+/// The dashboard's layout cache (`ENGRAMDB_DASHBOARD_CACHE_DIR`), which
+/// otherwise lives under the user's real cache dir.
+static TEST_DASHBOARD_CACHE_DIR: LazyLock<tempfile::TempDir> =
+    LazyLock::new(|| tempfile::TempDir::new().expect("failed to create test dashboard cache dir"));
 
 #[ctor::ctor(unsafe)]
 fn init() {
     std::env::set_var("ENGRAMDB_DATA_DIR", TEST_DATA_DIR.path());
     std::env::set_var("ENGRAMDB_CONFIG_DIR", TEST_CONFIG_DIR.path());
+    std::env::set_var(
+        "ENGRAMDB_DASHBOARD_CACHE_DIR",
+        TEST_DASHBOARD_CACHE_DIR.path().join("layouts"),
+    );
 }
 
 /// Force the test-isolation constructor to be linked into the calling test
@@ -44,4 +52,5 @@ pub fn arm() {
     // retained and the env vars are initialized even before `init` fires.
     let _ = TEST_DATA_DIR.path();
     let _ = TEST_CONFIG_DIR.path();
+    let _ = TEST_DASHBOARD_CACHE_DIR.path();
 }

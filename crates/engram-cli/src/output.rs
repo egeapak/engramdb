@@ -9,6 +9,7 @@
 //! accordingly.
 
 use crate::project_tree::{build_render_model, RenderLine};
+use engramdb::ops::links::{Direction, EdgeState, EdgeView, LinksView};
 use engramdb::retrieval::engine::{RetrievalResult, ScoredMemory};
 use engramdb::storage::transcripts::sanitize_one_line;
 use engramdb::storage::IndexFilterable;
@@ -109,6 +110,126 @@ macro_rules! errraw {
 }
 
 pub(crate) use {errln, errraw, outln, outraw};
+
+/// Whether a links view has anything to show (edges, or hidden ones).
+fn links_view_nonempty(view: &LinksView) -> bool {
+    !view.outbound.is_empty() || !view.inbound.is_empty() || view.hidden > 0
+}
+
+/// The arrow for an edge as seen from the viewed memory.
+fn edge_arrow(e: &EdgeView) -> &'static str {
+    match (e.symmetric, e.direction) {
+        (true, _) => "<->",
+        (false, Direction::Out) => "->",
+        (false, Direction::In) => "<-",
+    }
+}
+
+/// What a far end's state adds to its row, if anything.
+fn edge_state_suffix(e: &EdgeView) -> String {
+    match e.state {
+        EdgeState::Live => String::new(),
+        EdgeState::Invalidated => match &e.successor {
+            Some(s) => format!(" [invalidated, superseded by {}]", clean(short_id(s))),
+            None => " [invalidated]".to_string(),
+        },
+        EdgeState::Dangling => " [dangling]".to_string(),
+        EdgeState::Unknown => " [store not reachable]".to_string(),
+    }
+}
+
+/// Every string in an edge row comes from a memory file, which is committed
+/// and hand-editable: an `Other` kind/status/origin, a store id or a target
+/// id can carry terminal escapes or a newline that forges a row.
+fn clean(s: &str) -> std::borrow::Cow<'_, str> {
+    sanitize_one_line(s)
+}
+
+fn edge_pretty_line(e: &EdgeView) -> String {
+    let store = e
+        .other_store
+        .as_deref()
+        .map(|s| format!(" @{}", clean(s)))
+        .unwrap_or_default();
+    let summary = e
+        .other_summary
+        .as_deref()
+        .map(|s| format!("  {}", clean(s)))
+        .unwrap_or_default();
+    format!(
+        "{} {} {}{}{}  ({}, {}, {:.2}){}",
+        clean(e.kind.as_str()),
+        edge_arrow(e),
+        clean(short_id(&e.other_id)),
+        store,
+        summary,
+        clean(e.status.as_str()),
+        clean(e.origin.as_str()),
+        e.confidence,
+        edge_state_suffix(e)
+    )
+}
+
+fn edge_plain_line(e: &EdgeView) -> String {
+    let dir = match e.direction {
+        Direction::Out => "out",
+        Direction::In => "in",
+    };
+    let state = match e.state {
+        EdgeState::Live => "live",
+        EdgeState::Invalidated => "invalidated",
+        EdgeState::Dangling => "dangling",
+        EdgeState::Unknown => "unknown",
+    };
+    let mut line = format!(
+        "edge direction={dir} kind={} other={} store={} status={} origin={} confidence={:.2} state={state} at={}",
+        clean(e.kind.as_str()),
+        clean(&e.other_id),
+        clean(e.other_store.as_deref().unwrap_or("-")),
+        clean(e.status.as_str()),
+        clean(e.origin.as_str()),
+        e.confidence,
+        e.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    if let Some(s) = &e.successor {
+        line.push_str(&format!(" successor={}", clean(s)));
+    }
+    if let Some(n) = &e.note {
+        line.push_str(&format!(" note={n:?}"));
+    }
+    line
+}
+
+/// The indented lines under a retrieval result: how a link-expanded result
+/// was reached (always), and the graph/usage score components that changed
+/// its score (with `--show-scores`). Empty for every result of a default
+/// config, so the output is unchanged unless a phase-5 knob is on.
+fn retrieval_annotations(b: &engramdb::scoring::ScoreBreakdown, show_scores: bool) -> Vec<String> {
+    let ids = |v: &[String]| v.iter().map(|i| short_id(i)).collect::<Vec<_>>().join(", ");
+    let mut lines = Vec::new();
+    if let Some(via) = &b.via {
+        lines.push(format!(
+            "via {} ({})",
+            short_id(&via.from),
+            via.kind.as_str()
+        ));
+    }
+    if show_scores {
+        if let Some(p) = b.contradicts_penalty {
+            lines.push(format!(
+                "contradicts -{p:.2} from {}",
+                ids(&b.contradicted_by)
+            ));
+        }
+        if let Some(m) = b.supports_multiplier {
+            lines.push(format!("supports x{m:.2} from {}", ids(&b.supported_by)));
+        }
+        if let Some(m) = b.usage_multiplier {
+            lines.push(format!("usage x{m:.2}"));
+        }
+    }
+    lines
+}
 
 /// Helper function to truncate IDs to 13 characters.
 ///
@@ -941,6 +1062,11 @@ impl OutputFormatter {
                         if sm.score_breakdown.below_threshold {
                             obj["below_threshold"] = serde_json::Value::Bool(true);
                         }
+                        // Link expansion: shown with or without scores, since
+                        // it says why the result is there at all.
+                        if let Some(via) = &sm.score_breakdown.via {
+                            obj["via"] = serde_json::json!(via);
+                        }
                         obj
                     }).collect::<Vec<_>>(),
                     "total": result.total,
@@ -1031,6 +1157,9 @@ impl OutputFormatter {
                     sm.memory.summary
                 );
             }
+            for line in retrieval_annotations(&sm.score_breakdown, show_scores) {
+                outln!(self, "      {}", line);
+            }
         }
     }
 
@@ -1078,6 +1207,9 @@ impl OutputFormatter {
                     tags,
                     sm.memory.summary
                 );
+            }
+            for line in retrieval_annotations(&sm.score_breakdown, show_scores) {
+                outln!(self, "      {}", line);
             }
         }
     }
@@ -1239,6 +1371,9 @@ impl OutputFormatter {
         if let Some(hooks) = &stats.hooks {
             print_hooks_pretty(self, hooks);
         }
+        if let Some(top) = &stats.top_used {
+            print_top_used_pretty(self, top);
+        }
     }
 
     fn print_stats_plain(&self, stats: &Stats) {
@@ -1277,6 +1412,316 @@ impl OutputFormatter {
                 }
             }
         }
+        if let Some(top) = &stats.top_used {
+            for (i, m) in top.memories.iter().enumerate() {
+                let c = &m.counts;
+                outln!(
+                    self,
+                    "Top {} {}: fetched={} injected={} injected_sessions={} returned={} returned_sessions={}",
+                    i + 1,
+                    m.memory_id,
+                    c.fetched,
+                    c.injected,
+                    c.injected_sessions,
+                    c.returned,
+                    c.returned_sessions
+                );
+            }
+        }
+    }
+
+    /// Print one memory's usage (`stats --memory`) in the configured format.
+    pub fn print_memory_usage(&self, report: &engramdb::ops::MemoryUsageReport) {
+        if self.silent {
+            return;
+        }
+        let c = &report.counts;
+        let active: Vec<&engramdb::ops::usage::DailyUsage> = report
+            .daily
+            .iter()
+            .filter(|d| d.returned + d.injected + d.fetched + d.writes > 0)
+            .collect();
+        match self.format {
+            OutputFormat::Json => {
+                outln!(self, "{}", serde_json::to_string_pretty(report).unwrap());
+            }
+            OutputFormat::Plain => {
+                outln!(
+                    self,
+                    "memory={} store={} returned={} returned_sessions={} injected={} injected_sessions={} fetched={} updated={} challenged={}",
+                    report.memory_id,
+                    report.store_id,
+                    c.returned,
+                    c.returned_sessions,
+                    c.injected,
+                    c.injected_sessions,
+                    c.fetched,
+                    c.updated,
+                    c.challenged
+                );
+                for d in active {
+                    outln!(
+                        self,
+                        "day={} returned={} injected={} fetched={} writes={}",
+                        d.day,
+                        d.returned,
+                        d.injected,
+                        d.fetched,
+                        d.writes
+                    );
+                }
+            }
+            OutputFormat::Pretty => {
+                outln!(self, "Usage of {}", report.memory_id);
+                outln!(self, "  {}", report.summary);
+                outln!(self, "  Store: {}", report.store_id);
+                outln!(
+                    self,
+                    "\nRead signals (each counted on its own, never summed):"
+                );
+                outln!(
+                    self,
+                    "  returned by a query:  {}{}",
+                    with_sessions(c.returned, c.returned_sessions),
+                    last_at(c.last_returned_at)
+                );
+                outln!(
+                    self,
+                    "  injected by a hook:   {}{}",
+                    with_sessions(c.injected, c.injected_sessions),
+                    last_at(c.last_injected_at)
+                );
+                outln!(
+                    self,
+                    "  fetched by id:        {}{}",
+                    c.fetched,
+                    last_at(c.last_fetched_at)
+                );
+                outln!(
+                    self,
+                    "\nWrites: {} {}, {} {}{}",
+                    c.updated,
+                    if c.updated == 1 { "update" } else { "updates" },
+                    c.challenged,
+                    if c.challenged == 1 {
+                        "challenge"
+                    } else {
+                        "challenges"
+                    },
+                    last_at(c.last_written_at)
+                );
+                outln!(self, "\nLast {} days:", report.daily.len());
+                if active.is_empty() {
+                    outln!(self, "  (no activity)");
+                }
+                for d in active {
+                    outln!(
+                        self,
+                        "  {}  returned {}, injected {}, fetched {}, writes {}",
+                        d.day,
+                        d.returned,
+                        d.injected,
+                        d.fetched,
+                        d.writes
+                    );
+                }
+            }
+        }
+    }
+
+    /// Print a memory and, when it has any, its edges (`get`).
+    ///
+    /// In the text formats, with no edges (shown or hidden) this is
+    /// byte-identical to [`print_memory`](Self::print_memory). Json always
+    /// adds an `edges` key beside the memory's own `links` (the outbound list
+    /// as stored), carrying both directions with their far ends checked.
+    pub fn print_memory_with_links(&self, memory: &Memory, view: Option<&LinksView>) {
+        if self.silent {
+            return;
+        }
+        // Json always carries `edges` when the edges were read (empty lists
+        // when there are none), like the MCP `get`; the text formats add a
+        // section only when there is something to show.
+        if let (OutputFormat::Json, Some(view)) = (self.format, view) {
+            let mut value = serde_json::to_value(memory).unwrap();
+            value["edges"] = serde_json::to_value(view).unwrap();
+            outln!(self, "{}", serde_json::to_string_pretty(&value).unwrap());
+            return;
+        }
+        let Some(view) = view.filter(|v| links_view_nonempty(v)) else {
+            return self.print_memory(memory);
+        };
+        match self.format {
+            OutputFormat::Json => unreachable!("handled above"),
+            OutputFormat::Pretty => {
+                self.print_memory_pretty(memory);
+                outln!(self, "Links:");
+                self.print_edge_lines(view);
+            }
+            OutputFormat::Plain => {
+                self.print_memory_plain(memory);
+                self.print_edge_lines(view);
+            }
+        }
+    }
+
+    /// Print one memory's edges, both directions (`links <id>`).
+    ///
+    /// Colourless in every format, like the usage view: the edges are a
+    /// table to read, and the kind is already spelled out.
+    pub fn print_links(&self, view: &LinksView) {
+        if self.silent {
+            return;
+        }
+        match self.format {
+            OutputFormat::Json => {
+                outln!(self, "{}", serde_json::to_string_pretty(view).unwrap());
+            }
+            OutputFormat::Plain => {
+                outln!(
+                    self,
+                    "memory={} outbound={} inbound={} hidden={}",
+                    view.id,
+                    view.outbound.len(),
+                    view.inbound.len(),
+                    view.hidden
+                );
+                self.print_edge_lines(view);
+            }
+            OutputFormat::Pretty => {
+                outln!(self, "Links of {}", view.id);
+                if view.outbound.is_empty() && view.inbound.is_empty() {
+                    outln!(self, "  (no edges)");
+                }
+                self.print_edge_lines(view);
+            }
+        }
+    }
+
+    /// The edge rows shared by [`print_links`](Self::print_links) and
+    /// [`print_memory_with_links`](Self::print_memory_with_links).
+    fn print_edge_lines(&self, view: &LinksView) {
+        let plain = matches!(self.format, OutputFormat::Plain);
+        for (label, edges) in [("Outbound", &view.outbound), ("Inbound", &view.inbound)] {
+            if edges.is_empty() {
+                continue;
+            }
+            if !plain {
+                outln!(self, "  {} ({}):", label, edges.len());
+            }
+            for e in edges.iter() {
+                if plain {
+                    outln!(self, "{}", edge_plain_line(e));
+                } else {
+                    outln!(self, "    {}", edge_pretty_line(e));
+                    if let Some(note) = &e.note {
+                        outln!(self, "      note: {}", sanitize_one_line(note));
+                    }
+                }
+            }
+        }
+        if view.hidden > 0 {
+            if plain {
+                outln!(self, "hidden={}", view.hidden);
+            } else {
+                outln!(
+                    self,
+                    "  ({} more hidden: dangling, invalidated or rejected; `engramdb links <id> --all` shows them)",
+                    view.hidden
+                );
+            }
+        }
+    }
+
+    /// Report a `link` (or a status change made through it).
+    pub fn print_link_result(&self, result: &engramdb::ops::links::LinkResult) {
+        if self.silent {
+            return;
+        }
+        if self.is_json() {
+            outln!(self, "{}", serde_json::to_string_pretty(result).unwrap());
+            return;
+        }
+        let verb = if result.created {
+            "Linked"
+        } else {
+            "Updated edge"
+        };
+        let store = result
+            .dst_store
+            .as_deref()
+            .map(|s| format!(" @{}", clean(s)))
+            .unwrap_or_default();
+        self.print_success(&format!(
+            "{verb} {} {} {}{store} ({})",
+            short_id(&result.src_id),
+            clean(result.kind.as_str()),
+            clean(short_id(&result.dst_id)),
+            clean(result.status.as_str())
+        ));
+        if let Some(note) = &result.stored_note {
+            self.print_hint(note);
+        }
+        match result.target_state {
+            EdgeState::Live => {}
+            EdgeState::Invalidated => {
+                self.print_hint("the target is invalidated; the edge is hidden by default")
+            }
+            EdgeState::Dangling => self.print_hint("the target does not exist (dangling edge)"),
+            EdgeState::Unknown => self.print_hint(
+                "the target's store could not be opened here; the edge is recorded unchecked",
+            ),
+        }
+    }
+
+    /// Report a reviewer's verdict on a `contradicts` edge.
+    pub fn print_contradiction_outcome(
+        &self,
+        outcome: &engramdb::ops::links::ContradictionOutcome,
+    ) {
+        if self.silent {
+            return;
+        }
+        if self.is_json() {
+            outln!(self, "{}", serde_json::to_string_pretty(outcome).unwrap());
+            return;
+        }
+        match (&outcome.winner, &outcome.loser) {
+            (Some(w), Some(l)) => self.print_success(&format!(
+                "Resolved contradiction: {} supersedes {} ({} is now invalidated)",
+                short_id(w),
+                short_id(l),
+                short_id(l)
+            )),
+            _ => self.print_success(&format!(
+                "Contradiction between {} and {}: {}",
+                short_id(&outcome.a),
+                short_id(&outcome.b),
+                outcome.outcome
+            )),
+        }
+    }
+
+    /// Report an `unlink`.
+    pub fn print_unlink_result(&self, result: &engramdb::ops::links::UnlinkResult) {
+        if self.silent {
+            return;
+        }
+        if self.is_json() {
+            outln!(self, "{}", serde_json::to_string_pretty(result).unwrap());
+            return;
+        }
+        self.print_success(&format!(
+            "Unlinked {} {} {}{}",
+            short_id(&result.src_id),
+            result.kind,
+            short_id(&result.dst_id),
+            if result.reopened {
+                " (target's validity window reopened)"
+            } else {
+                ""
+            }
+        ));
     }
 
     /// Print project info in the configured format.
@@ -1616,6 +2061,53 @@ fn print_runtime_pretty(f: &OutputFormatter, rt: &engramdb::telemetry::RuntimeSn
     }
 }
 
+/// `N` or `N in M session(s)`.
+fn with_sessions(n: u64, sessions: u64) -> String {
+    if sessions == 0 {
+        return n.to_string();
+    }
+    format!(
+        "{n} in {sessions} {}",
+        if sessions == 1 { "session" } else { "sessions" }
+    )
+}
+
+/// ` (last <instant>)`, or nothing.
+fn last_at(ts: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    ts.map(|t| format!(" (last {})", t.format("%Y-%m-%d %H:%M:%S UTC")))
+        .unwrap_or_default()
+}
+
+/// Pretty-print the most-used memories.
+fn print_top_used_pretty(f: &OutputFormatter, top: &TopUsedView) {
+    outln!(
+        f,
+        "\nMost used memories (by {}; read signals are never summed):",
+        top.by.as_str()
+    );
+    if top.memories.is_empty() {
+        outln!(f, "  (no usage recorded yet)");
+    }
+    for (i, m) in top.memories.iter().enumerate() {
+        let c = &m.counts;
+        let id: String = m.memory_id.chars().take(8).collect();
+        outln!(
+            f,
+            "  {}. {} {}",
+            i + 1,
+            id,
+            m.summary.as_deref().unwrap_or("(deleted)")
+        );
+        outln!(
+            f,
+            "     fetched {}, injected {}, returned {}",
+            c.fetched,
+            with_sessions(c.injected, c.injected_sessions),
+            with_sessions(c.returned, c.returned_sessions)
+        );
+    }
+}
+
 fn calls_word(n: u64) -> &'static str {
     if n == 1 {
         "call"
@@ -1817,6 +2309,17 @@ pub struct Stats {
     /// recorded a call (or `[stats].enabled` is false).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hooks: Option<engramdb::telemetry::hooks::HookStatsView>,
+    /// The most-used memories (`stats --top N`), from the usage events.
+    /// `None` unless asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_used: Option<TopUsedView>,
+}
+
+/// A top-N most-used listing: which signal ordered it, and the rows.
+#[derive(Debug, serde::Serialize)]
+pub struct TopUsedView {
+    pub by: engramdb::ops::UsageSort,
+    pub memories: Vec<engramdb::ops::TopMemory>,
 }
 
 /// The JSON body for a running daemon, shared by `daemon status` and
@@ -2086,6 +2589,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: fixed(2026, 1, 2, 3, 4, 5),
             updated_at: fixed(2026, 1, 2, 3, 4, 5),
@@ -2110,6 +2614,7 @@ mod tests {
             situation_multiplier: 1.0,
             decay: 1.0,
             criticality: 0.8,
+            ..Default::default()
         }
     }
 
@@ -2582,6 +3087,7 @@ mod tests {
             avg_criticality: 0.62,
             runtime: None,
             hooks: None,
+            top_used: None,
         };
         let v = serde_json::to_value(&stats).unwrap();
         assert_eq!(v["total"], 10);
@@ -2903,6 +3409,7 @@ mod tests {
             avg_criticality: 0.75,
             runtime: Some(rt),
             hooks: None,
+            top_used: None,
         }
     }
 
@@ -3118,6 +3625,7 @@ mod tests {
             visibility: Visibility::Personal,
             audience: Some(vec!["__g_abcdef012345".to_string()]),
             challenges: vec![],
+            links: vec![],
             verified_at: Some(fixed(2026, 2, 3, 4, 5, 6)),
             created_at: fixed(2026, 1, 2, 3, 4, 5),
             updated_at: fixed(2026, 1, 3, 4, 5, 6),
@@ -3243,6 +3751,54 @@ mod tests {
         });
     }
 
+    /// Phase-5 graph/usage components and a link-expanded result: the `via`
+    /// line shows with or without scores, the components only with them.
+    fn graph_retrieval_result() -> RetrievalResult {
+        let mut hit = test_score_breakdown();
+        hit.contradicts_penalty = Some(0.1);
+        hit.contradicted_by = vec!["018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string()];
+        hit.supports_multiplier = Some(1.05);
+        hit.supported_by = vec!["0190aaaa-bbbb-7ccc-8ddd-eeeeffff0000".to_string()];
+        hit.usage_multiplier = Some(1.18);
+        let mut nb = test_score_breakdown();
+        nb.final_score = 0.375;
+        nb.via = Some(engramdb::scoring::LinkVia {
+            from: test_memory().id,
+            kind: engramdb::types::LinkKind::Supports,
+        });
+        RetrievalResult {
+            memories: vec![
+                ScoredMemory {
+                    memory: test_memory(),
+                    score: 0.75,
+                    score_breakdown: hit,
+                },
+                ScoredMemory {
+                    memory: rich_memory(),
+                    score: 0.375,
+                    score_breakdown: nb,
+                },
+            ],
+            total: 2,
+            retrieval_quality: "keyword_only".to_string(),
+            dropped_below_threshold: 0,
+        }
+    }
+
+    #[test]
+    fn snap_retrieval_result_graph_with_scores() {
+        snap_formats("retrieval_graph_with_scores", |f| {
+            f.print_retrieval_result(&graph_retrieval_result(), true)
+        });
+    }
+
+    #[test]
+    fn snap_retrieval_result_graph_without_scores() {
+        snap_formats("retrieval_graph_without_scores", |f| {
+            f.print_retrieval_result(&graph_retrieval_result(), false)
+        });
+    }
+
     #[test]
     fn snap_retrieval_result_empty() {
         let empty = RetrievalResult {
@@ -3363,6 +3919,312 @@ mod tests {
         }
     }
 
+    fn usage_counts(
+        fetched: u64,
+        injected: u64,
+        returned: u64,
+    ) -> engramdb::ops::usage::UsageCounts {
+        engramdb::ops::usage::UsageCounts {
+            returned,
+            injected,
+            fetched,
+            returned_sessions: returned.min(2),
+            injected_sessions: injected.min(1),
+            last_returned_at: (returned > 0).then(|| fixed(2026, 10, 30, 9, 15, 0)),
+            last_injected_at: (injected > 0).then(|| fixed(2026, 11, 1, 14, 0, 0)),
+            last_fetched_at: (fetched > 0).then(|| fixed(2026, 11, 2, 8, 30, 0)),
+            updated: 2,
+            challenged: 1,
+            last_written_at: Some(fixed(2026, 10, 20, 12, 0, 0)),
+        }
+    }
+
+    #[test]
+    fn snap_stats_with_top_used() {
+        let stats = Stats {
+            total: 3,
+            by_type: vec![(MemoryType::Decision, 3)],
+            by_status: vec![(Status::Active, 3)],
+            by_scope: vec![],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.5,
+            runtime: None,
+            hooks: None,
+            top_used: Some(TopUsedView {
+                by: engramdb::ops::UsageSort::Fetched,
+                memories: vec![
+                    engramdb::ops::TopMemory {
+                        memory_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+                        summary: Some("Blocking calls deadlock the daemon".to_string()),
+                        counts: usage_counts(4, 12, 3),
+                    },
+                    engramdb::ops::TopMemory {
+                        memory_id: "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c".to_string(),
+                        summary: None,
+                        counts: usage_counts(0, 1, 0),
+                    },
+                ],
+            }),
+        };
+        snap_formats("stats_with_top_used", |f| f.print_stats(&stats));
+    }
+
+    #[test]
+    fn snap_stats_with_top_used_empty() {
+        let stats = Stats {
+            total: 0,
+            by_type: vec![],
+            by_status: vec![],
+            by_scope: vec![],
+            expired: 0,
+            oldest: None,
+            newest: None,
+            avg_criticality: 0.0,
+            runtime: None,
+            hooks: None,
+            top_used: Some(TopUsedView {
+                by: engramdb::ops::UsageSort::Injected,
+                memories: vec![],
+            }),
+        };
+        snap_formats("stats_with_top_used_empty", |f| f.print_stats(&stats));
+    }
+
+    fn memory_usage_report(active: bool) -> engramdb::ops::MemoryUsageReport {
+        let today = fixed(2026, 11, 3, 0, 0, 0).date_naive();
+        let mut daily: Vec<engramdb::ops::usage::DailyUsage> = (0..30)
+            .rev()
+            .map(|back| engramdb::ops::usage::DailyUsage {
+                day: today - chrono::Duration::days(back),
+                ..Default::default()
+            })
+            .collect();
+        let counts = if active {
+            daily[27].returned = 3;
+            daily[28].injected = 12;
+            daily[29].fetched = 4;
+            daily[29].writes = 1;
+            usage_counts(4, 12, 3)
+        } else {
+            engramdb::ops::usage::UsageCounts::default()
+        };
+        engramdb::ops::MemoryUsageReport {
+            memory_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            summary: "Blocking calls deadlock the daemon".to_string(),
+            store_id: "a1b2c3d4e5f60718".to_string(),
+            counts,
+            daily,
+        }
+    }
+
+    #[test]
+    fn snap_memory_usage() {
+        let report = memory_usage_report(true);
+        snap_formats("memory_usage", |f| f.print_memory_usage(&report));
+    }
+
+    // ---- edges -----------------------------------------------------------
+
+    fn edge_view(
+        direction: Direction,
+        other: &str,
+        kind: engramdb::ops::links::LinkKind,
+        state: EdgeState,
+    ) -> EdgeView {
+        use engramdb::ops::links::{LinkOrigin, LinkStatus};
+        EdgeView {
+            direction,
+            other_id: other.to_string(),
+            other_store: None,
+            other_summary: Some("Custom CA breaks webpki downloads".to_string()),
+            symmetric: kind.is_symmetric(),
+            kind,
+            confidence: 1.0,
+            origin: LinkOrigin::Human,
+            status: LinkStatus::Confirmed,
+            created_at: fixed(2026, 10, 30, 9, 15, 0),
+            note: None,
+            state,
+            successor: None,
+        }
+    }
+
+    /// One edge of every shape the renderer distinguishes: directed out and
+    /// in, symmetric, cross-store unchecked, an invalidated end with its
+    /// successor, a proposed agent edge with a note, and a hidden count.
+    fn links_view() -> LinksView {
+        use engramdb::ops::links::{LinkKind, LinkOrigin, LinkStatus};
+        let other = "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b";
+        let mut supports = edge_view(Direction::Out, other, LinkKind::Supports, EdgeState::Live);
+        supports.note = Some("measured on the sandbox\nsecond line".to_string());
+        let mut contradicts = edge_view(
+            Direction::In,
+            "018f2a1b-0000-7e5f-8a9b-0c1d2e3f4a5c",
+            LinkKind::Contradicts,
+            EdgeState::Live,
+        );
+        contradicts.origin = LinkOrigin::Agent;
+        contradicts.status = LinkStatus::Proposed;
+        contradicts.confidence = 0.6;
+        contradicts.note = Some("webpki rejects the gateway CA".to_string());
+        let mut foreign = edge_view(
+            Direction::Out,
+            "018f2a1b-1111-7e5f-8a9b-0c1d2e3f4a5d",
+            LinkKind::RelatedTo,
+            EdgeState::Unknown,
+        );
+        foreign.other_store = Some("__g_0123456789ab".to_string());
+        foreign.other_summary = None;
+        let mut derived = edge_view(
+            Direction::In,
+            "018f2a1b-2222-7e5f-8a9b-0c1d2e3f4a5e",
+            LinkKind::DerivedFrom,
+            EdgeState::Invalidated,
+        );
+        derived.successor = Some("018f2a1b-3333-7e5f-8a9b-0c1d2e3f4a5f".to_string());
+        LinksView {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            outbound: vec![foreign, supports],
+            inbound: vec![contradicts, derived],
+            hidden: 2,
+        }
+    }
+
+    fn empty_links_view() -> LinksView {
+        LinksView {
+            id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            outbound: vec![],
+            inbound: vec![],
+            hidden: 0,
+        }
+    }
+
+    #[test]
+    fn snap_links() {
+        let view = links_view();
+        snap_formats("links", |f| f.print_links(&view));
+    }
+
+    #[test]
+    fn snap_links_empty() {
+        let view = empty_links_view();
+        snap_formats("links_empty", |f| f.print_links(&view));
+    }
+
+    #[test]
+    fn snap_memory_with_links() {
+        let view = links_view();
+        snap_formats("memory_with_links", |f| {
+            f.print_memory_with_links(&test_memory(), Some(&view))
+        });
+    }
+
+    /// No edges at all: `get`'s text formats render exactly what they did
+    /// before edges existed (Json always carries `edges`; see
+    /// `snap_memory_with_no_links_json`).
+    #[test]
+    fn memory_without_links_renders_as_before() {
+        let view = empty_links_view();
+        for format in [OutputFormat::Pretty, OutputFormat::Plain] {
+            let (with, cap_with) = OutputFormatter::capturing(format);
+            with.print_memory_with_links(&rich_memory(), Some(&view));
+            let (without, cap_without) = OutputFormatter::capturing(format);
+            without.print_memory(&rich_memory());
+            assert_eq!(
+                cap_with.transcript(),
+                cap_without.transcript(),
+                "{format:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snap_memory_with_no_links_json() {
+        let view = empty_links_view();
+        let (f, cap) = OutputFormatter::capturing(OutputFormat::Json);
+        f.print_memory_with_links(&test_memory(), Some(&view));
+        snap("memory_with_no_links__json", cap.transcript());
+    }
+
+    #[test]
+    fn snap_link_results() {
+        use engramdb::ops::links::{LinkKind, LinkResult, LinkStatus, UnlinkResult};
+        let linked = LinkResult {
+            owner_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            src_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            dst_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            dst_store: None,
+            kind: LinkKind::Duplicates,
+            status: LinkStatus::Confirmed,
+            created: true,
+            target_state: EdgeState::Live,
+            stored_note: Some(
+                "stored on 018f2a1b-3c4d (personal): a committed file must not name a personal memory"
+                    .to_string(),
+            ),
+        };
+        let updated = LinkResult {
+            created: false,
+            status: LinkStatus::Rejected,
+            kind: LinkKind::Supports,
+            dst_store: Some("__global_store__".to_string()),
+            target_state: EdgeState::Unknown,
+            stored_note: None,
+            ..linked.clone()
+        };
+        let unlinked = UnlinkResult {
+            owner_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            src_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            dst_id: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            kind: LinkKind::Supersedes,
+            reopened: true,
+        };
+        let resolved = engramdb::ops::links::ContradictionOutcome {
+            a: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            b: "018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string(),
+            outcome: "superseded",
+            winner: Some("018f2a1b-3c4d-7e5f-8a9b-0c1d2e3f4a5b".to_string()),
+            loser: Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+        };
+        let both = engramdb::ops::links::ContradictionOutcome {
+            outcome: "confirmed",
+            winner: None,
+            loser: None,
+            ..resolved.clone()
+        };
+        snap_formats("link_results", |f| {
+            f.print_link_result(&linked);
+            f.print_link_result(&updated);
+            f.print_unlink_result(&unlinked);
+            f.print_contradiction_outcome(&resolved);
+            f.print_contradiction_outcome(&both);
+        });
+    }
+
+    /// The edge views are colourless, like the usage view.
+    #[test]
+    fn snap_color_links_stay_plain() {
+        let view = links_view();
+        assert_never_styled("links", OutputFormat::Pretty, |f| f.print_links(&view));
+    }
+
+    /// `get` keeps the memory's own styling; the edge rows below it add none.
+    #[test]
+    fn snap_color_memory_with_links() {
+        let view = links_view();
+        snap_colored("memory_with_links", |f| {
+            f.print_memory_with_links(&test_memory(), Some(&view))
+        });
+    }
+
+    #[test]
+    fn snap_memory_usage_unused() {
+        let report = memory_usage_report(false);
+        snap_formats("memory_usage_unused", |f| f.print_memory_usage(&report));
+    }
+
     #[test]
     fn snap_stats_with_hooks() {
         let stats = Stats {
@@ -3376,6 +4238,7 @@ mod tests {
             avg_criticality: 0.5,
             runtime: None,
             hooks: Some(hook_stats_fixture(0)),
+            top_used: None,
         };
         snap_formats("stats_with_hooks", |f| f.print_stats(&stats));
     }
@@ -3393,6 +4256,7 @@ mod tests {
             avg_criticality: 0.0,
             runtime: None,
             hooks: Some(hook_stats_fixture(3)),
+            top_used: None,
         };
         snap_formats("stats_with_hooks_skipped", |f| f.print_stats(&stats));
     }
@@ -3410,6 +4274,7 @@ mod tests {
             avg_criticality: 0.75,
             runtime: None,
             hooks: None,
+            top_used: None,
         };
         snap_formats("stats_plain_counts", |f| f.print_stats(&stats));
     }
@@ -3753,6 +4618,15 @@ mod tests {
     fn snap_color_stats_stays_plain() {
         assert_never_styled("stats_with_runtime", OutputFormat::Pretty, |f| {
             f.print_stats(&stats_with_runtime(fully_populated_runtime_snapshot()))
+        });
+    }
+
+    /// The usage views are colourless like the rest of stats.
+    #[test]
+    fn snap_color_memory_usage_stays_plain() {
+        let report = memory_usage_report(true);
+        assert_never_styled("memory_usage", OutputFormat::Pretty, |f| {
+            f.print_memory_usage(&report)
         });
     }
 

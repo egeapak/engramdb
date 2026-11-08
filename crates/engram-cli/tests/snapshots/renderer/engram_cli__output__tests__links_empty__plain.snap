@@ -1,0 +1,7 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+memory=550e8400-e29b-41d4-a716-446655440000 outbound=0 inbound=0 hidden=0
+--- stderr ---

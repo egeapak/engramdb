@@ -1,0 +1,12 @@
+---
+source: crates/engram-cli/src/output.rs
+expression: rendered
+---
+--- stdout ---
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "outbound": [],
+  "inbound": [],
+  "hidden": 0
+}
+--- stderr ---

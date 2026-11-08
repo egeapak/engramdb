@@ -457,6 +457,45 @@ impl LanceIndex {
         Ok(store)
     }
 
+    /// Open an index that already exists, creating nothing.
+    ///
+    /// [`Self::new`] creates the `memories` and `chunks` tables when they are
+    /// missing, which is right for every writer and wrong for a read-only
+    /// consumer (the dashboard): looking at a store must leave it exactly as
+    /// it was. Returns `Ok(None)` when `db_path` is not a directory or has no
+    /// `memories` table — "not indexed on this machine", which the caller
+    /// reports instead of repairing. A missing `chunks` table is tolerated:
+    /// only vector reads need it, and they fail on their own.
+    pub async fn open_existing(db_path: &Path, dimensions: usize) -> Result<Option<Self>> {
+        if !db_path.is_dir() {
+            return Ok(None);
+        }
+        let db_path_str = db_path
+            .to_str()
+            .context("Invalid database path (not valid UTF-8)")?;
+        let connection = connect(db_path_str)
+            .execute()
+            .await
+            .context("Failed to connect to LanceDB")?;
+        let store = Self {
+            connection: Arc::new(connection),
+            table_name: "memories".to_string(),
+            chunks_table_name: "chunks".to_string(),
+            dimensions,
+        };
+        if store.open_table().await.is_err() {
+            return Ok(None);
+        }
+        Ok(Some(store))
+    }
+
+    /// The underlying connection, for the tables this struct does not own
+    /// (`edge_index`'s `edges`), so they share one connection and one
+    /// `lancedb/` directory with `memories` and `chunks`.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     /// Arrow schema for the memories table (metadata only, no vector).
     fn memories_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -1867,6 +1906,78 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// The memories-table rows of `ids`, verbatim, for [`Self::restore_rows`].
+    ///
+    /// `reindex` uses this to carry the row of a memory whose file does not
+    /// parse across the table clear: the file cannot be re-derived, and
+    /// dropping its row would make a merge conflict delete the memory from
+    /// every query.
+    pub async fn snapshot_rows(&self, ids: &[String]) -> Result<Vec<RecordBatch>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let table = self.open_table().await?;
+        let mut out = Vec::new();
+        for group in ids.chunks(500) {
+            let list = group.iter().map(lit).collect::<Vec<_>>();
+            let mut stream = table
+                .query()
+                .only_if_expr(is_in(col("id"), list))
+                .execute()
+                .await
+                .context("Failed to snapshot memories rows")?;
+            while let Some(batch) = stream.next().await {
+                let batch = batch.context("Failed to read snapshot batch")?;
+                if batch.num_rows() > 0 {
+                    out.push(batch);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Re-insert rows taken by [`Self::snapshot_rows`], conformed to the
+    /// current schema: a column the snapshot lacks is filled with nulls, an
+    /// extra one is dropped. Returns how many rows were restored and how many
+    /// could not be — a batch missing a **non-nullable** column has no value
+    /// to fill it with, so it is not restored (a declared loss, only possible
+    /// across a schema migration that adds such a column; the caller warns).
+    pub async fn restore_rows(&self, batches: Vec<RecordBatch>) -> Result<(usize, usize)> {
+        let schema = self.memories_schema();
+        let mut conformed = Vec::new();
+        let mut lost = 0;
+        'batch: for batch in batches {
+            let mut columns = Vec::with_capacity(schema.fields().len());
+            for field in schema.fields() {
+                match batch.column_by_name(field.name()) {
+                    Some(c) if c.data_type() == field.data_type() => columns.push(c.clone()),
+                    _ if field.is_nullable() => columns.push(arrow_array::new_null_array(
+                        field.data_type(),
+                        batch.num_rows(),
+                    )),
+                    _ => {
+                        lost += batch.num_rows();
+                        continue 'batch;
+                    }
+                }
+            }
+            conformed.push(RecordBatch::try_new(Arc::clone(&schema), columns)?);
+        }
+        let restored: usize = conformed.iter().map(RecordBatch::num_rows).sum();
+        if restored > 0 {
+            let table = self.open_table().await?;
+            let reader =
+                RecordBatchIterator::new(conformed.into_iter().map(Ok), Arc::clone(&schema));
+            let mut op = table.merge_insert(&["id"]);
+            op.when_matched_update_all(None);
+            op.when_not_matched_insert_all();
+            op.execute(Box::new(reader))
+                .await
+                .context("Failed to restore memories rows")?;
+        }
+        Ok((restored, lost))
+    }
+
     /// The vector width of the on-disk chunks table, or `None` when the
     /// table doesn't exist (or has no vector column).
     ///
@@ -1968,10 +2079,16 @@ impl LanceIndex {
     /// optimization is maintenance, not correctness.
     pub async fn optimize(&self) -> Result<IndexOptimizeStats> {
         let mut total = IndexOptimizeStats::default();
-        for (table, label) in [
+        let mut tables = vec![
             (self.open_table().await?, "memories"),
             (self.open_chunks_table().await?, "chunks"),
-        ] {
+        ];
+        // The derived edges table (schema 0.9.0) takes a version per edge
+        // write too. Only when it exists — optimize must not create it.
+        if let Some(edges) = crate::edge_index::open(&self.connection).await? {
+            tables.push((edges, "edges"));
+        }
+        for (table, label) in tables {
             let stats = table
                 .optimize(OptimizeAction::All)
                 .await
@@ -3044,6 +3161,7 @@ mod tests {
             audience: None,
             source_sessions: vec![],
             challenges: vec![],
+            links: vec![],
             verified_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),

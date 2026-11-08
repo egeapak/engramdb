@@ -168,8 +168,8 @@ pub fn route_contradiction(
     };
     let standard_evidence = |what: &str| {
         format!(
-            "NLI contradiction (score: {score:.2}): new memory '{}' contradicts this {what}",
-            new.summary
+            "NLI contradiction (score: {score:.2}): new memory '{}' ({}) contradicts this {what}",
+            new.summary, new.id
         )
     };
 
@@ -215,6 +215,20 @@ pub fn route_contradiction(
             evidence: standard_evidence("observation"),
         },
     }
+}
+
+/// Whether `challenge` is one [`challenge_for_contradictions`] wrote about
+/// the memory `other_id`: every NLI evidence string carries `NLI` and the
+/// other memory's id (the `ChallengeNew` and standard forms name it in
+/// parentheses). Used to resolve that challenge when a reviewer settles the
+/// matching `contradicts` edge, so a dismissed contradiction stops costing
+/// the memory its score. A hand-written challenge that happens to mention
+/// both is matched too; that is accepted, since the reviewer just settled
+/// the same pair.
+pub fn names_nli_contradiction_with(challenge: &Challenge, other_id: &str) -> bool {
+    !other_id.is_empty()
+        && challenge.evidence.contains("NLI")
+        && challenge.evidence.contains(other_id)
 }
 
 /// Apply the routing table (§9.1) to each contradiction, writing challenges
