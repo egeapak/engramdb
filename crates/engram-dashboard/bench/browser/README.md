@@ -29,8 +29,7 @@ measured without rebuilding the binary), `--chrome /usr/bin/google-chrome`
 port; one per store).
 
 `--paths-only` times only the tab click, the opened scope and show all
-(no interactive figures, no relations tab); `--no-layout` skips the worker
-layout figure; `--no-layout-cache` starts the dashboard with
+(no interactive figures, no relations tab); `--no-layout-cache` starts the dashboard with
 `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`, so every server layout is cold (the
 layout cache otherwise lives under `<stores>/cache`, never the user's).
 `--cpu-throttle 4` slows the page's CPU by that factor (Chrome's
@@ -50,10 +49,10 @@ then `requestAnimationFrame`, then one task.
 | `tab_click_ms` | click on the Graph tab → painted (`graph:built`, or `graph:overview-built` past 150 memories) |
 | `graph_response_ms` | the same click → `graph:data` (the `/graph` fetch and JSON parse) |
 | `overview_paint_ms` | `tab_click_ms` when the first view is the overview |
-| `open_scope_ms` | click on the `--scope` disc → painted, split into `open_scope_response_ms` (→ `graph:data`), `open_scope_layout_ms` (the worker layout, → `graph:layout`) and `open_scope_build_ms` (the DOM, → `graph:built`); the rest is style, layout and paint |
+| `open_scope_ms` | click on the `--scope` disc → painted, split into `open_scope_response_ms` (→ `graph:data`), `open_scope_layout_ms` (decoding the server's layout, → `graph:layout`) and `open_scope_build_ms` (the DOM, → `graph:built`); the rest is style, layout and paint |
 | `show_all_ms` | `#…/graph?all=1` → painted (the full graph, up to the server's 800-memory limit); `show_all_layout_ms` its layout |
-| `tab_segments`, `open_scope_segments`, `show_all_segments` | where the time went, medians, between consecutive marks: `response` (→ `graph:data`), `layout` (→ `graph:layout`: the worker, or decoding the server's layout), `backdrop`, `nodes`, `mount`, `view`, `legend`, `edges`, `panels` (→ `graph:built`: notes, table, card), `paint` (→ the frame after); the overview's are `response`, `layout`, `build`, `paint` |
-| `*_layout_source` | where the layout came from: `server`, `worker`, `main` (no worker), `cache` (the page's own) |
+| `tab_segments`, `open_scope_segments`, `show_all_segments` | where the time went, medians, between consecutive marks: `response` (→ `graph:data`), `layout` (→ `graph:layout`: decoding the server's layout), `backdrop`, `nodes`, `mount`, `view`, `legend`, `edges`, `panels` (→ `graph:built`: notes, table, card), `paint` (→ the frame after); the overview's are `response`, `layout`, `build`, `paint` |
+| `*_layout_source` | where the layout came from: always `server` (the page has no layout code) |
 | `relations_first_page_ms` | click on the Relations tab → painted (`relations:painted`) |
 | `filter_toggle_ms` | the Proposed chip → painted, median of 10 (once, on the opened scope or the whole graph) |
 | `hover_ms_p50/p95` | `mouseover` (bubbling, as a pointer fires it) on a memory → painted, over 60 memories: latency, so it includes the wait for the next vsync (up to one 16.7 ms frame) |

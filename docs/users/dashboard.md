@@ -197,8 +197,11 @@ expands it to every one, for keyboard and screen-reader use.
 
 A large store shows its most connected memories first (800 by default); the
 page says when it is partial, and picking a top-level scope shows the rest of it. The
-layout is computed by the dashboard (or, as a fallback, in the page) and is
-deterministic: the same store draws the same graph.
+layout is computed by the dashboard server and is deterministic: the same
+store draws the same graph. While a large graph is being laid out the page
+says so; if the dashboard is busy laying out other graphs it tries again
+by itself, and if a layout fails the page says so with a *Try again*
+button.
 
 ### Scope overview and opened scopes
 

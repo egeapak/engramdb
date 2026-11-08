@@ -1,27 +1,16 @@
 // An opened scope (`top_scope=<name>` on the graph view): its memories laid
-// out by the core scope-force layout with each sub-scope as a region, its own
+// out by the server's scope-force with each sub-scope as a region, its own
 // relations drawn whole, and every relation leaving it collapsed into a
 // faint stub from the memory to one tag per far scope ("storage · 12 ⚠ 2").
 // A core render path: neutral words, neutral CSS (`.xs-*` / `.sub-*`).
 //
 // The tags sit around the laid-out memories, each in the direction its
-// scope lies on the scope overview (the same layout, so opening a scope
+// scope lies on the scope overview (the server sends those directions with
+// the layout, `dirs`, from the overview of the same box, so opening a scope
 // keeps the map's orientation), pushed apart along the ring when two would
 // overlap. Pure geometry here; views/graph.js draws and wires them.
 
 import { s } from '../dom.js';
-
-/**
- * The region a memory of an opened scope belongs to: its sub-scope (the
- * first two segments of its scope, `storage.lock`), else the opened scope's
- * own name (`''` for "no scope").
- */
-export function subKey(n) {
-  const full = n.scope || '';
-  const parts = full.split('.');
-  if (parts.length >= 2 && parts[0] && parts[1]) return `${parts[0]}.${parts[1]}`;
-  return n.top_scope || '';
-}
 
 /**
  * Neutral sub-scope regions for a style that does not lay out with

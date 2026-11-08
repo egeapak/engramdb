@@ -1,19 +1,15 @@
-//! The scope-aware force layout: the port of `web/js/graph/scope-force.js`
-//! (`LAYOUTS['scope-force']`, Plain's layout and every opened scope's).
-//!
-//! The steps, the constants and the reasons for them are documented in the
-//! JS module, which stays the reference (and the page's fallback when the
-//! server sends no layout). This file follows it statement for statement,
-//! with the same floating-point operations in the same order, so that a
-//! given input gives the same bits in both: JS numbers are IEEE doubles,
-//! `+ − × ÷` and `sqrt` are correctly rounded in both languages, Rust never
-//! fuses a multiply-add on its own, and every loop walks memories in the
-//! same (id) order and maps in the same (insertion) order as the JS. Where
-//! JS keys a `Map` by a computed number (`cx * 65536 + cy`) this keys by
-//! the same double, so even its collisions match.
+//! The scope-aware force layout (`LAYOUTS['scope-force']`, Plain's layout
+//! and every opened scope's). It began as the port of the page's former
+//! `scope-force.js`, statement for statement, and the server is now its
+//! only source. It keeps that port's rules, which are what make it
+//! deterministic: IEEE doubles with `+ − × ÷` and `sqrt` only (correctly
+//! rounded everywhere; Rust never fuses a multiply-add on its own), every
+//! loop over memories in id order and every map in insertion order. Where
+//! a map is keyed by a computed number (`cx * 65536 + cy`) it is keyed by
+//! the same double, collisions included.
 
-// Index loops on purpose: each mirrors a JS `for (let i = 0; …)` loop
-// statement for statement, which is what keeps the two bit-identical.
+// Index loops on purpose: each was a JS `for (let i = 0; …)` loop, kept
+// statement for statement.
 #![allow(clippy::needless_range_loop)]
 
 use std::collections::HashMap;
@@ -45,7 +41,7 @@ const DIRS: [(f64, f64); 12] = [
     (0.5, -R3),
     (R3, -0.5),
 ];
-const PACK_MAX: usize = 100;
+pub(crate) const PACK_MAX: usize = 100;
 const TURN_MAX: usize = 96;
 const SPREAD_TO: f64 = 860.0;
 const NUDGE_MAX: usize = 300;
@@ -977,13 +973,13 @@ fn utf16_len(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-/// `layout(input)` of scope-force.js: [`layout_core`], then [`finish`] for
+/// The whole layout (the former JS `layout(input)`): [`layout_core`], then [`finish`] for
 /// the input's width.
 pub fn layout(input: &ForceInput) -> ForceOutput {
     finish(&layout_core(input), input.width)
 }
 
-/// Everything of scope-force.js's `layout` but its step 5b and the bounds:
+/// Everything of the layout but its step 5b and the bounds:
 /// the part that does not depend on the box's width (the module docs of
 /// [`super`], "Width"), so one cached core serves every width.
 pub fn layout_core(input: &ForceInput) -> ForceCore {
@@ -1715,7 +1711,7 @@ pub fn layout_core(input: &ForceInput) -> ForceCore {
     }
 }
 
-/// scope-force.js's step 5b and bounds over a [`ForceCore`]: the drawn scope
+/// The layout's step 5b and bounds over a [`ForceCore`]: the drawn scope
 /// names, at least 12 px on screen at Fit in a box `width` wide, placed
 /// again at that size clear of the placed labels (each keeping its step-4
 /// spot when no new one is free), and the bounds they grow.

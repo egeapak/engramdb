@@ -494,6 +494,7 @@ code.nowrap { white-space: nowrap; }
 .loading { color: var(--ink-3); padding: 40px 0; }
 .error-box { border-left: 6px solid var(--red); background: var(--red-bg); padding: 12px 16px; overflow-wrap: anywhere; }
 .error-box b { color: var(--red-ink); }
+.g-failed .btn { margin-top: 10px; }
 
 footer { margin-top: 56px; border-top: 1px solid var(--rule); padding-top: 12px; font-size: 12px; color: var(--ink-3); display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 

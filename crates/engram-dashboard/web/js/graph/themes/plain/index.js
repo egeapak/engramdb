@@ -1,5 +1,5 @@
 // Plain: the neutral graph style, and the default. Memories are placed by
-// the core's scope-aware force layout (graph/scope-force.js): no grid, no
+// the core's scope-aware force layout (scope-force, computed by the server): no grid, no
 // scope chains, no badges; relations are straight.
 //
 // Memories are one neutral fill (shape follows type): colour belongs to the
@@ -34,7 +34,7 @@ export const strings = {
   noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (fading out)`,
 };
 
-/** The core's scope-aware force layout (graph/scope-force.js), default options. */
+/** The core's scope-aware force layout (scope-force, computed by the server: src/layout/scope_force.rs); no options. */
 export const layout = { name: 'scope-force', options: {} };
 
 /**

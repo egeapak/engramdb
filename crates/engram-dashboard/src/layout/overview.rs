@@ -1,12 +1,12 @@
-//! The scope overview's layout: the port of
-//! `web/js/graph/scope-overview.js` (`LAYOUTS['scope-overview']`). One disc
-//! per top scope, area by its memories, placed by scope affinity with
-//! scope-force's [`pack`](super::scope_force::pack), in pixels of a
-//! `width` × `width · aspect` box. Same operations in the same order as the
-//! JS (see `scope_force`), so the output is the same bits.
+//! The scope overview's layout (it began as the port of the page's former
+//! `scope-overview.js`). One disc per top scope, area by its memories,
+//! placed by scope affinity with scope-force's
+//! [`pack`](super::scope_force::pack), in pixels of a `width` ×
+//! `width · aspect` box, under scope-force's arithmetic rules (see
+//! `scope_force`), so the same input gives the same bits.
 
-// Index loops on purpose: each mirrors a JS `for (let i = 0; …)` loop
-// statement for statement, which is what keeps the two bit-identical.
+// Index loops on purpose: each was a JS `for (let i = 0; …)` loop, kept
+// statement for statement.
 #![allow(clippy::needless_range_loop)]
 
 use serde::Serialize;

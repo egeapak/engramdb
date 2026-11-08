@@ -16,7 +16,6 @@ import { createRequire } from 'node:module';
 import { writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fromApi, toInput } from '../layout.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('playwright');
@@ -460,50 +459,6 @@ async function benchCombo(browser, url, size, style, theme, width) {
   return row;
 }
 
-/**
- * Layout cold in a Chromium worker: the store's whole graph (up to the
- * server's 2000 cap, past the page's 800 default) through the harness's
- * `toInput`, posted to a fresh `layout-worker.js` per run after a
- * one-memory warm-up, so module loading is not counted.
- */
-async function workerLayout(browser, url, size) {
-  const { ctx, p } = await newPage(browser, url, 'plain', 'light', 1280);
-  const pid = await p.evaluate(() => location.hash.split('/')[2]);
-  const token = url.split('#token=')[1];
-  const origin = new URL(url).origin;
-  const res = await fetch(`${origin}/api/projects/${pid}/graph?limit=2000&include_proposed=true&include_rejected=true`, { headers: { Authorization: `Bearer ${token}` } });
-  const g = fromApi(await res.json());
-  const out = { size, nodes: g.nodes.length, relations: g.edges.length };
-  for (const name of ['scope-force', 'grid']) {
-    const input = toInput(g, name);
-    const tiny = toInput({ nodes: g.nodes.slice(0, 1), edges: [] }, name);
-    const ms = [];
-    for (let r = 0; r < runs; r++) {
-      ms.push(
-        await p.evaluate(
-          async ({ input, tiny }) => {
-            const w = new Worker(new URL('/js/graph/layout-worker.js', location.origin), { type: 'module' });
-            const run = (inp, seq) => new Promise((res, rej) => {
-              w.onmessage = (ev) => (ev.data.error ? rej(new Error(ev.data.error)) : res());
-              w.postMessage({ seq, input: inp });
-            });
-            await run(tiny, 1);
-            const t0 = performance.now();
-            await run(input, 2);
-            const t = performance.now() - t0;
-            w.terminate();
-            return t;
-          },
-          { input, tiny },
-        ),
-      );
-    }
-    out[`layout_cold_${name}_ms`] = med(ms);
-  }
-  await ctx.close();
-  return out;
-}
-
 const browser = await chromium.launch(args.chrome ? { executablePath: args.chrome } : {});
 const rows = [];
 let port = Number(args.port || 7400);
@@ -511,11 +466,6 @@ try {
   for (const size of sizes) {
     const { url, child } = await startDashboard(size, port++);
     try {
-      if (!args['no-layout']) {
-        const lay = await workerLayout(browser, url, size);
-        rows.push(lay);
-        console.log(JSON.stringify(lay, (k, v) => (typeof v === 'number' ? Math.round(v * 10) / 10 : v)));
-      }
       for (const style of styles)
         for (const theme of themes)
           for (const width of widths) {

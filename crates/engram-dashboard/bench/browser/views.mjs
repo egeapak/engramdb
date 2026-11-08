@@ -11,7 +11,7 @@
 //     [--runs 5] [--cpu-throttle 4] [--gpu] [--dpr 2] [--viewport 1280x860] [--paint-only] [--label after] [--json out.json]
 //
 // `cold`: the server's layout cache off and a fresh browser context, so the
-// layout is computed (server or worker) on every load; `cached`: one untimed
+// layout is computed by the server on every load; `cached`: one untimed
 // load first, so every timed load takes the server's cached layout. Every
 // figure is the median over `--runs` loads, each in a fresh context.
 //

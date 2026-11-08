@@ -1,55 +1,28 @@
-// Every layout a graph style can name, by name. A style says which one it
-// uses (`layout: { name, options }` in its module) and the input carries
-// both, so the worker can run it: a function cannot be posted to a worker,
-// and a fixed table (rather than an `import()` of a computed URL) keeps
-// every layout module visible to the embedded-import check. A Rust test
-// checks every style's `layout.name` is a key here.
+// The graph layouts a style can name. A style says which one it uses
+// (`layout: { name, options }` in its module); every layout is computed by
+// the dashboard server (src/layout/ in the dashboard crate) and sent with
+// /graph as `layout`, which graph/server-layout.js decodes. The page asks
+// for its style's with `layout=<name>` and has no layout code of its own:
+// the server is the only source, and a layout takes no style options. A
+// Rust test checks every style's `layout.name` is a key here and the
+// server's `LayoutName` accepts it.
 //
-// The scope overview (one disc per scope, bands between them;
-// ./scope-overview.js) is not a style: it is a separate core render path
-// (views/graph-overview.js) with its own entry in this table, chosen by the
-// core view when a store has more than OVERVIEW_MIN memories. An opened
-// scope is laid out by 'scope-force' whatever style is picked.
+// The scope overview and an opened scope are not styles' layouts: the core
+// view (views/graph.js, views/graph-overview.js) asks the server for them
+// (`scope-overview`, `opened`: scope-force by sub-scope) whatever the style.
 //
-// **Input** (built by views/graph.js):
-//   { layout: name, options: the style's layout options (or {}),
-//     nodes: [{ id, top_scope, slot, scope, degree, r, label, weight }],
-//     edges: [{ s, t, kind, far_scope }], aspect: box height / width,
-//     width: the box's width in CSS pixels, rounded to 40 — sent only to
-//     a layout listed in WIDTH_LAYOUTS, so any other's input (and cache
-//     key) does not change when the box is resized }
-//   `t` < 0 is a stub (dangling or cross-store) drawn off `s`; `far_scope`
-//   is the far end's top scope ('' for none, null when unknown, as for every
-//   stub today).
-//
-// **Output** — every layout must return all of these:
+// **Output** — every layout gives the view all of these, in the order of
+// the response's `nodes` and `edges`:
 //   pos:    [x0, y0, x1, y1, …], one point per node.
 //   routes: one polyline [[x, y], …] per edge, stubs included, at least two
-//           points (a straight layout returns [source, target]); the core
-//           places tooltips, pins and the click target along it.
-//   labels: one { x, y, w, anchor, placed } per node, never null (use
-//           graph/labels.js). `placed: false` is a fallback position with no
-//           free spot: drawn hidden, shown while its memory is highlighted.
+//           points; the core places tooltips, pins and the click target
+//           along it.
+//   labels: one { x, y, anchor, placed } per node. `placed: false` is a
+//           fallback position with no free spot: drawn hidden, shown while
+//           its memory is highlighted.
 //   bounds: { x, y, w, h } covering everything drawn (Fit uses it).
-// Any other field (Grid: `lines`) passes through untouched to the style's
-// `drawBackdrop(g, lay)`.
+// Any other field (Grid: `chains`; scope-force: `scopes`, `region_r`,
+// `groups`) passes through untouched to the style's `drawBackdrop(g, lay)`.
 
-import { layout as grid } from './themes/grid/layout.js';
-import { layout as scopeForce } from './scope-force.js';
-import { layout as scopeOverview } from './scope-overview.js';
-
-export const LAYOUTS = Object.freeze({ grid, 'scope-force': scopeForce, 'scope-overview': scopeOverview });
-
-/** The layouts that read `input.width` (Grid does not). */
-const WIDTH_LAYOUTS = Object.freeze({ 'scope-force': true, 'scope-overview': true });
-
-/** Whether layout `name` reads `input.width`. */
-export const usesWidth = (name) => Object.hasOwn(WIDTH_LAYOUTS, name);
-
-/** Run the layout `input.layout` names; an unknown name is an error, never a silent fallback. */
-export function runNamedLayout(input) {
-  if (typeof input.layout !== 'string' || !Object.hasOwn(LAYOUTS, input.layout)) {
-    throw new Error(`unknown graph layout ${JSON.stringify(input.layout)}`);
-  }
-  return LAYOUTS[input.layout](input);
-}
+/** Every layout a style can name, each decoded from the server's answer. */
+export const LAYOUTS = Object.freeze({ 'scope-force': true, grid: true });

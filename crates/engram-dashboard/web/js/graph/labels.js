@@ -9,8 +9,9 @@
 // it hidden and shows it only while its memory is highlighted, so hovering a
 // memory (or a neighbour of a pinned one) always names it.
 //
-// Deterministic and pure: plain data in, plain data out (it runs in the
-// layout worker).
+// Deterministic and pure: plain data in, plain data out. Every layout's
+// labels are placed by the server's port (src/layout/labels.rs); the page
+// runs this only to re-place the lit labels when a memory is focused.
 
 /** Label metrics in layout units (CSS: .graph .lbl, 11.5px, weight 600). */
 export const LABEL_H = 14;

@@ -1,8 +1,9 @@
-//! Unit tests of the layout ports: bit-parity with the JS on the committed
-//! golden fixtures (`fixtures/`, written by `node bench/golden.mjs`), the
-//! JS hash pinned to the version, the helpers' JS semantics, the output
-//! contract, determinism and the cache. `bench/server-layout.mjs` checks
-//! parity on real stores against a running dashboard.
+//! Unit tests of the server's layouts: the output contract and
+//! determinism (on a generated graph and on `/graph`-shaped fixtures in
+//! `fixtures/`: long and non-ASCII scope names and summaries, stubs, an
+//! opened scope's sub-scopes, a 14-scope overview), the label and disc
+//! geometry, the helpers' JS semantics (the page draws the label text and
+//! radius these measure), the encoding and the cache.
 
 use super::*;
 
@@ -187,38 +188,6 @@ fn same_input_same_digest_and_any_change_moves_it() {
     assert_eq!(a.digest(), LayoutInput::Force(narrow).digest());
 }
 
-/// Editing a layout JS file (or the input builder or decoder) changes
-/// `LAYOUT_JS_HASH`, which fails this test until the Rust port is checked
-/// against it (`node bench/golden.mjs`, then the golden test), the version
-/// bumped and the pair below re-pinned.
-#[test]
-fn the_layout_js_is_pinned_to_the_layout_version() {
-    assert_eq!(
-        (LAYOUT_VERSION, LAYOUT_JS_HASH),
-        (3, "c1f1f35a8599a26f"),
-        "a layout JS file changed: port the change to src/layout/, regenerate \
-         the golden fixtures (node bench/golden.mjs), bump LAYOUT_VERSION and \
-         re-pin this pair"
-    );
-    // The runtime hash (`--assets-dir`) is build.rs's over the same bytes.
-    let embedded = js_hash(|p| crate::assets::find(p).map(|a| a.bytes.to_vec()));
-    assert_eq!(embedded.as_deref(), Some(LAYOUT_JS_HASH));
-    // Every file it hashes is embedded, and every layout module is hashed.
-    for f in LAYOUT_JS_FILES {
-        assert!(crate::assets::find(f).is_some(), "{f}");
-    }
-    for f in [
-        "js/graph/scope-force.js",
-        "js/graph/scope-overview.js",
-        "js/graph/labels.js",
-        "js/graph/radius.js",
-        "js/graph/opened.js",
-        "js/graph/input.js",
-    ] {
-        assert!(LAYOUT_JS_FILES.contains(&f), "{f} is not hashed");
-    }
-}
-
 #[test]
 fn the_page_never_asks_for_a_width_the_server_refuses() {
     let js = std::str::from_utf8(crate::assets::find("js/graph/input.js").unwrap().bytes).unwrap();
@@ -293,44 +262,125 @@ fn unb64_f64(s: &str) -> Vec<f64> {
         .collect()
 }
 
+/// A scope-force input as `/graph` sends it, as text (exact: serde_json,
+/// built without `float_roundtrip`, may round a parsed double's last bit).
+fn rendered_text(input: &ForceInput, groups: Groups) -> String {
+    let li = LayoutInput::Force(input.clone());
+    let key = li.digest();
+    let cached = li.run(&key).unwrap();
+    li.render(&cached, &key, groups, None).unwrap()
+}
+
+fn rendered(input: &ForceInput, groups: Groups) -> Value {
+    serde_json::from_str(&rendered_text(input, groups)).unwrap()
+}
+
 #[test]
-fn the_encoding_round_trips() {
+fn the_encoding_is_parallel_to_the_response() {
     let input = sample(40);
     let out = scope_force::layout(&input);
-    let v = encode_force(&out, &input, "k", Groups::Sub);
+    let v = rendered(&input, Groups::Sub);
     assert_eq!(v["v"], LAYOUT_VERSION);
-    assert_eq!(v["n"], 40);
+    assert_eq!(v["name"], "scope-force");
     assert_eq!(v["groups"], "sub");
-    assert_eq!(v["check"], input_check(&input));
-    let pos = unb64_f64(v["pos"].as_str().unwrap());
-    assert_eq!(pos, out.pos);
-    let spots = unb64(v["labels"].as_str().unwrap());
-    assert_eq!(spots.len(), 40);
-    for (s, l) in spots.iter().zip(&out.labels) {
-        assert_eq!(*s == 255, !l.placed);
+    assert_eq!(unb64_f64(v["pos"].as_str().unwrap()), out.pos);
+    let routes = unb64_f64(v["routes"].as_str().unwrap());
+    assert_eq!(routes.len(), 4 * input.edges.len());
+    assert_eq!(
+        routes,
+        out.routes.iter().flatten().copied().collect::<Vec<_>>()
+    );
+    let xy = unb64_f64(v["label_xy"].as_str().unwrap());
+    let flags = unb64(v["label_flags"].as_str().unwrap());
+    assert_eq!(flags.len(), 40);
+    for (i, l) in out.labels.iter().enumerate() {
+        assert_eq!((xy[2 * i], xy[2 * i + 1]), (l.x, l.y));
+        assert_eq!(flags[i] & 0x80 != 0, l.placed);
+        assert_eq!(labels::Anchor::ALL[usize::from(flags[i] & 0x7f)], l.anchor);
     }
-    // Two stubs, one end (two doubles) each.
-    assert_eq!(unb64(v["stubs"].as_str().unwrap()).len(), 2 * 2 * 8);
+    // Each memory's region by index into `group_keys`.
+    let keys: Vec<&str> = v["group_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    for (n, g) in input.nodes.iter().zip(v["group"].as_array().unwrap()) {
+        assert_eq!(keys[g.as_u64().unwrap() as usize], n.top_scope);
+    }
+    assert!(v.get("dirs").is_none());
 }
 
-// ---------------------------------------------------------------------------
-// Golden fixtures: the JS layouts' output, bit for bit
-// ---------------------------------------------------------------------------
-
-/// The fixtures `node bench/golden.mjs` writes: a response's fields, the
-/// request, the input's check and the JS layout's output (doubles as
-/// base64 little-endian, so no JSON parse can round them).
-const GOLDEN: &[(&str, &str)] = &[
-    ("force-top", include_str!("fixtures/force-top.json")),
-    ("force-sub", include_str!("fixtures/force-sub.json")),
-    ("overview", include_str!("fixtures/overview.json")),
-];
-
-fn bits(v: &[f64]) -> Vec<u64> {
-    v.iter().map(|x| x.to_bits()).collect()
+/// Two labels' boxes overlap (a hairline touch is not an overlap).
+fn overlaps(a: &Rect, b: &Rect) -> bool {
+    a.x0 < b.x1 - 1e-9 && b.x0 < a.x1 - 1e-9 && a.y0 < b.y1 - 1e-9 && b.y0 < a.y1 - 1e-9
 }
 
-fn check_force(name: &str, fx: &Value) {
+/// The contract every scope-force output keeps: one finite position per
+/// memory, one finite route of two points per relation starting at its
+/// source, one label per memory, placed labels never overlapping each other
+/// or a memory, finite bounds holding every memory.
+fn check_force_contract(name: &str, input: &ForceInput, out: &ForceOutput) {
+    let n = input.nodes.len();
+    assert_eq!(out.pos.len(), 2 * n, "{name}");
+    assert!(out.pos.iter().all(|v| v.is_finite()), "{name}: positions");
+    assert_eq!(out.routes.len(), input.edges.len(), "{name}");
+    for (k, (r, e)) in out.routes.iter().zip(&input.edges).enumerate() {
+        assert!(r.iter().all(|v| v.is_finite()), "{name}: route {k}");
+        if e.s >= 0 {
+            let s = e.s as usize;
+            assert_eq!(
+                [r[0], r[1]],
+                [out.pos[2 * s], out.pos[2 * s + 1]],
+                "{name}: route {k} source"
+            );
+        }
+        if e.t >= 0 {
+            let t = e.t as usize;
+            assert_eq!(
+                [r[2], r[3]],
+                [out.pos[2 * t], out.pos[2 * t + 1]],
+                "{name}: route {k} target"
+            );
+        }
+    }
+    assert_eq!(out.labels.len(), n, "{name}");
+    let placed: Vec<&labels::Label> = out.labels.iter().filter(|l| l.placed).collect();
+    assert!(!placed.is_empty() || n == 0, "{name}: no label placed");
+    for (a, la) in placed.iter().enumerate() {
+        assert!(la.x.is_finite() && la.y.is_finite(), "{name}: label");
+        for lb in &placed[a + 1..] {
+            assert!(
+                !overlaps(&la.rect, &lb.rect),
+                "{name}: labels overlap: {la:?} {lb:?}"
+            );
+        }
+    }
+    let [bx, by, bw, bh] = out.bounds;
+    assert!(
+        [bx, by, bw, bh].iter().all(|v| v.is_finite()) && bw > 0.0 && bh > 0.0,
+        "{name}"
+    );
+    for i in 0..n {
+        let (x, y) = (out.pos[2 * i], out.pos[2 * i + 1]);
+        assert!(
+            x >= bx && x <= bx + bw && y >= by && y <= by + bh,
+            "{name}: memory {i} outside the bounds"
+        );
+    }
+    assert!(out.region_r.is_finite() && out.region_r > 0.0, "{name}");
+}
+
+#[test]
+fn scope_force_keeps_its_contract_on_a_generated_graph() {
+    for n in [1usize, 2, 7, 60, 400] {
+        let input = sample(n);
+        check_force_contract(&format!("sample {n}"), &input, &scope_force::layout(&input));
+    }
+}
+
+/// A fixture's response fields, as `graph.rs` builds the input from them.
+fn fixture_force(fx: &Value) -> ForceInput {
     let nodes: Vec<NodeFacts<'_>> = fx["nodes"]
         .as_array()
         .unwrap()
@@ -360,66 +410,16 @@ fn check_force(name: &str, fx: &Value) {
     } else {
         Groups::Top
     };
-    // Exact: k / 20 is the double the page's Math.round(a * 20) / 20 gives.
-    let aspect = fx["aspect20"].as_f64().unwrap() / 20.0;
-    let width = fx["width"].as_f64().unwrap();
-    let input = build_force_input(&nodes, &edges, groups, aspect, width);
-    assert_eq!(
-        u64::from(input_check(&input)),
-        fx["check"].as_u64().unwrap(),
-        "{name}: input check (the input builders differ)"
-    );
-    let out = scope_force::layout(&input);
-    let want = &fx["out"];
-    let f = |k: &str| unb64_f64(want[k].as_str().unwrap());
-    assert_eq!(bits(&out.pos), bits(&f("pos")), "{name}: pos");
-    let routes: Vec<f64> = out.routes.iter().flatten().copied().collect();
-    assert_eq!(bits(&routes), bits(&f("routes")), "{name}: routes");
-    let lab: Vec<f64> = out.labels.iter().flat_map(|l| [l.x, l.y, l.w]).collect();
-    assert_eq!(bits(&lab), bits(&f("labels")), "{name}: labels");
-    let anchors: String = out
-        .labels
-        .iter()
-        .map(|l| {
-            format!(
-                "{}{}",
-                &l.anchor.as_str()[..1],
-                if l.placed { "+" } else { "-" }
-            )
-        })
-        .collect();
-    assert_eq!(
-        anchors,
-        want["anchors"].as_str().unwrap(),
-        "{name}: anchors"
-    );
-    assert_eq!(bits(&out.bounds), bits(&f("bounds")), "{name}: bounds");
-    assert_eq!(
-        out.region_r.to_bits(),
-        f("region_r")[0].to_bits(),
-        "{name}: region_r"
-    );
-    let names: Vec<f64> = out
-        .scopes
-        .iter()
-        .flat_map(|s| [s.x, s.y, s.w, s.size])
-        .collect();
-    assert_eq!(bits(&names), bits(&f("scopes")), "{name}: scope names");
-    let flags: Vec<String> = out
-        .scopes
-        .iter()
-        .map(|s| format!("{}:{}{}", s.key, u8::from(s.placed), u8::from(s.backed)))
-        .collect();
-    let want_flags: Vec<String> = want["scope_flags"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(flags, want_flags, "{name}: scope name flags");
+    build_force_input(
+        &nodes,
+        &edges,
+        groups,
+        fx["aspect"].as_f64().unwrap(),
+        fx["width"].as_f64().unwrap(),
+    )
 }
 
-fn check_overview(name: &str, fx: &Value) {
+fn fixture_overview(fx: &Value) -> overview::OverviewInput {
     let scopes: Vec<(&str, usize)> = fx["scopes"]
         .as_array()
         .unwrap()
@@ -443,62 +443,191 @@ fn check_overview(name: &str, fx: &Value) {
             )
         })
         .collect();
-    let aspect = fx["aspect20"].as_f64().unwrap() / 20.0;
-    let input = build_overview_input(&scopes, &rows, aspect, fx["width"].as_f64().unwrap());
-    assert_eq!(
-        u64::from(overview_check(&input)),
-        fx["check"].as_u64().unwrap(),
-        "{name}: overview input check (the input builders or scopePairs differ)"
+    build_overview_input(
+        &scopes,
+        &rows,
+        fx["aspect"].as_f64().unwrap(),
+        fx["width"].as_f64().unwrap(),
+    )
+}
+
+/// `/graph`-shaped inputs: a store's nodes and edges (by top scope and an
+/// opened scope by sub-scope) and a summary's scopes and scope pairs.
+const FIXTURES: &[(&str, &str)] = &[
+    ("force-top", include_str!("fixtures/force-top.json")),
+    ("force-sub", include_str!("fixtures/force-sub.json")),
+    ("overview", include_str!("fixtures/overview.json")),
+];
+
+fn check_overview_contract(
+    name: &str,
+    input: &overview::OverviewInput,
+    out: &overview::OverviewOutput,
+) {
+    let m = input.nodes.len();
+    assert_eq!(out.pos.len(), 2 * m, "{name}");
+    assert_eq!(out.r.len(), m, "{name}");
+    assert!(
+        out.pos.iter().chain(&out.r).all(|v| v.is_finite()),
+        "{name}"
     );
-    let out = overview::layout(&input);
-    let want = &fx["out"];
-    let f = |k: &str| unb64_f64(want[k].as_str().unwrap());
-    assert_eq!(bits(&out.pos), bits(&f("pos")), "{name}: pos");
-    assert_eq!(bits(&out.r), bits(&f("r")), "{name}: r");
-    let routes: Vec<f64> = out.routes.iter().flatten().flatten().copied().collect();
-    assert_eq!(bits(&routes), bits(&f("routes")), "{name}: routes");
-    let lab: Vec<f64> = out.labels.iter().flat_map(|l| [l.x, l.y, l.w]).collect();
-    assert_eq!(bits(&lab), bits(&f("labels")), "{name}: labels");
-    let flags: String = out
-        .labels
-        .iter()
-        .map(|l| {
-            format!(
-                "{}{}{}{}",
-                &l.anchor[..1],
-                u8::from(l.placed),
-                u8::from(l.short),
-                u8::from(l.forced)
-            )
-        })
-        .collect();
-    assert_eq!(
-        flags,
-        want["label_flags"].as_str().unwrap(),
-        "{name}: label flags"
+    assert_eq!(out.routes.len(), input.edges.len(), "{name}");
+    assert!(
+        out.routes.iter().flatten().flatten().all(|v| v.is_finite()),
+        "{name}"
     );
-    let b = &out.bounds;
-    assert_eq!(
-        bits(&[b.x, b.y, b.w, b.h]),
-        bits(&f("bounds")),
-        "{name}: bounds"
+    assert_eq!(out.labels.len(), m, "{name}");
+    // Discs never overlap one another, and stay in the box.
+    for i in 0..m {
+        assert!(out.r[i] > 0.0, "{name}: disc {i}");
+        let (x, y, r) = (out.pos[2 * i], out.pos[2 * i + 1], out.r[i]);
+        let b = &out.bounds;
+        assert!(
+            x - r >= b.x - 1e-6 && x + r <= b.x + b.w + 1e-6,
+            "{name}: disc {i} outside"
+        );
+        assert!(
+            y - r >= b.y - 1e-6 && y + r <= b.y + b.h + 1e-6,
+            "{name}: disc {i} outside"
+        );
+        for j in i + 1..m {
+            let d = ((out.pos[2 * i] - out.pos[2 * j]).powi(2)
+                + (out.pos[2 * i + 1] - out.pos[2 * j + 1]).powi(2))
+            .sqrt();
+            // A disc drawn at the minimum radius (6 px) is larger than its
+            // count's area: with very many scopes two such may touch.
+            if out.r[i] > 6.0 && out.r[j] > 6.0 {
+                assert!(
+                    d >= out.r[i] + out.r[j] - 1e-6,
+                    "{name}: discs {i} and {j} overlap: d {d}, radii {} + {}",
+                    out.r[i],
+                    out.r[j]
+                );
+            }
+        }
+    }
+    assert!(
+        out.labels
+            .iter()
+            .all(|l| l.x.is_finite() && l.y.is_finite()),
+        "{name}"
     );
 }
 
 #[test]
-fn the_ports_match_the_js_on_the_golden_fixtures() {
-    for (name, text) in GOLDEN {
+fn the_layouts_keep_their_contract_and_are_deterministic_on_the_fixtures() {
+    for (name, text) in FIXTURES {
         let fx: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(
-            fx["v"], LAYOUT_VERSION,
-            "{name}: regenerate with node bench/golden.mjs"
-        );
         match fx["layout"].as_str().unwrap() {
-            "scope-force" => check_force(name, &fx),
-            "scope-overview" => check_overview(name, &fx),
+            "scope-force" => {
+                let input = fixture_force(&fx);
+                assert!(input.nodes.len() > 100, "{name}");
+                assert!(input.edges.iter().any(|e| e.t < 0), "{name}: has stubs");
+                let out = scope_force::layout(&input);
+                check_force_contract(name, &input, &out);
+                // Same input, same bytes: computed twice, and through the
+                // cache's binary form.
+                let groups = if fx["groups"] == "sub" {
+                    Groups::Sub
+                } else {
+                    Groups::Top
+                };
+                let a = rendered_text(&input, groups);
+                let b = rendered_text(&input, groups);
+                assert_eq!(a, b, "{name}: deterministic");
+                let li = LayoutInput::Force(input.clone());
+                let key = li.digest();
+                let cached = li.run(&key).unwrap();
+                let back = Cached::from_bytes(&cached.to_bytes()).unwrap();
+                assert_eq!(
+                    li.render(&back, &key, groups, None).unwrap(),
+                    a,
+                    "{name}: the cached form renders the same bytes"
+                );
+            }
+            "scope-overview" => {
+                let input = fixture_overview(&fx);
+                assert!(input.nodes.len() > 10, "{name}");
+                let out = overview::layout(&input);
+                check_overview_contract(name, &input, &out);
+                let li = LayoutInput::Overview(input.clone());
+                let key = li.digest();
+                assert_eq!(
+                    li.run(&key).unwrap(),
+                    li.run(&key).unwrap(),
+                    "{name}: deterministic"
+                );
+                // Every disc and band is named.
+                let Cached::Overview(text) = li.run(&key).unwrap() else {
+                    panic!("an overview");
+                };
+                let v: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(v["ids"].as_array().unwrap().len(), input.nodes.len());
+                let pairs = v["pairs"].as_array().unwrap();
+                assert_eq!(pairs.len(), input.edges.len());
+                for (p, e) in pairs.iter().zip(&input.edges) {
+                    assert_eq!(p[0], input.nodes[e.s].id.as_str());
+                    assert_eq!(p[1], input.nodes[e.t].id.as_str());
+                }
+                // An opened scope's directions come from these discs.
+                let me = input.nodes[0].id.as_str();
+                let far: Vec<&str> = input.nodes[1..].iter().map(|n| n.id.as_str()).collect();
+                let dirs = overview_dirs(&text, me, &far).unwrap();
+                assert_eq!(dirs.as_object().unwrap().len(), far.len());
+                assert!(overview_dirs(&text, "no such scope", &far).is_none());
+            }
             other => panic!("{name}: unknown layout {other}"),
         }
     }
+}
+
+#[test]
+fn overview_discs_never_overlap_however_many_scopes() {
+    // Up to `PACK_MAX` scopes the discs are packed; past it they sit on a
+    // sunflower spiral of their average size, where large ones can touch.
+    for m in [1usize, 2, 5, 30, scope_force::PACK_MAX] {
+        let input = overview::OverviewInput {
+            nodes: (0..m)
+                .map(|i| overview::OverviewNode {
+                    id: format!("scope-{i}"),
+                    count: (1 + (i * 37) % 500) as f64,
+                    full_len: 14,
+                    short_len: 7,
+                })
+                .collect(),
+            edges: (1..m)
+                .map(|i| overview::OverviewEdge {
+                    s: i - 1,
+                    t: i,
+                    n: (i % 9 + 1) as f64,
+                })
+                .collect(),
+            aspect: 0.6,
+            width: 1240.0,
+        };
+        check_overview_contract(&format!("{m} scopes"), &input, &overview::layout(&input));
+    }
+}
+
+#[test]
+fn a_layout_that_is_not_finite_is_an_error_never_sent() {
+    let mut input = sample(10);
+    input.nodes[3].r = f64::NAN;
+    input.nodes[4].weight = f64::INFINITY;
+    let li = LayoutInput::Force(input);
+    let key = li.digest();
+    // Whatever the layout makes of it, a non-finite number never reaches
+    // the page: either it is still finite or `run` refuses.
+    if let Ok(c) = li.run(&key) {
+        let text = li.render(&c, &key, Groups::Top, None).unwrap();
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(unb64_f64(v["pos"].as_str().unwrap())
+            .iter()
+            .all(|x| x.is_finite()));
+    }
+    // The other kind in the cache is an error, not a response.
+    let ov = Cached::Overview("{}".into());
+    assert!(li.render(&ov, &key, Groups::Top, None).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -525,10 +654,12 @@ fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     assert_eq!(c.dir(), Some(dir.as_path()));
     let mut runs = 0;
-    let first = c.fill(&key, || {
-        runs += 1;
-        input.run(&key)
-    });
+    let first = c
+        .fill(&key, || {
+            runs += 1;
+            input.run(&key)
+        })
+        .unwrap();
     let file = dir.join(format!("{key}.bin"));
     assert!(file.is_file());
     #[cfg(unix)]
@@ -540,15 +671,17 @@ fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
     }
     // A fresh cache (a new process) reads it back without computing.
     let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
-    let again = c2.fill(&key, || unreachable!("served from disk"));
+    let again = c2.fill(&key, || unreachable!("served from disk")).unwrap();
     assert_eq!(*first, *again);
     // A corrupt file is ignored, recomputed and replaced.
     std::fs::write(&file, b"EDLC garbage").unwrap();
     let c3 = cache::LayoutCache::new(Some(dir.clone()), true);
-    let fixed = c3.fill(&key, || {
-        runs += 1;
-        input.run(&key)
-    });
+    let fixed = c3
+        .fill(&key, || {
+            runs += 1;
+            input.run(&key)
+        })
+        .unwrap();
     assert_eq!(*fixed, *first);
     assert_eq!(runs, 2);
     // A file naming another digest is not served for this one either.
@@ -558,8 +691,9 @@ fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
     let mut ran = false;
     c4.fill(&other, || {
         ran = true;
-        Cached::Overview("null".into())
-    });
+        Ok(Cached::Overview("null".into()))
+    })
+    .unwrap();
     assert!(ran);
     // A symlink at a cache file's path is never followed.
     #[cfg(unix)]
@@ -573,7 +707,8 @@ fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
         c5.fill(&key, || {
             ran = true;
             input.run(&key)
-        });
+        })
+        .unwrap();
         assert!(ran, "a symlinked cache file is a miss");
     }
     // A file of the older format is deleted by the next prune.
@@ -589,7 +724,8 @@ fn the_disk_cache_evicts_the_oldest_past_its_cap() {
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     for k in 0..6 {
         let key = format!("{k:064x}");
-        c.fill(&key, || Cached::Overview("x".repeat(1000)));
+        c.fill(&key, || Ok(Cached::Overview("x".repeat(1000))))
+            .unwrap();
         let past = std::time::SystemTime::now() - std::time::Duration::from_secs(600 - k * 60);
         std::fs::File::options()
             .append(true)
@@ -661,50 +797,97 @@ fn a_corrupt_overview_on_disk_is_a_miss() {
     let dir = temp_cache_dir();
     let key = "b".repeat(64);
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
-    c.fill(&key, || Cached::Overview("{\"v\":3,".into()));
+    c.fill(&key, || Ok(Cached::Overview("{\"v\":3,".into())))
+        .unwrap();
     // A fresh process (an empty memory tier) reads the file: invalid JSON
     // is never spliced into a response, so it is computed again.
     let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
     let mut ran = false;
-    let v = c2.fill(&key, || {
-        ran = true;
-        Cached::Overview("{\"v\":3}".into())
-    });
+    let v = c2
+        .fill(&key, || {
+            ran = true;
+            Ok(Cached::Overview("{\"v\":3}".into()))
+        })
+        .unwrap();
     assert!(ran, "a corrupt overview file is a miss");
     assert_eq!(*v, Cached::Overview("{\"v\":3}".into()));
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
 
 #[test]
-fn one_computation_per_key_and_a_bounded_number_at_once() {
+fn one_computation_per_key_and_a_bounded_queue() {
     let c = cache::LayoutCache::new(None, true);
-    let key = |k: u32| format!("{k:064x}");
-    let cache::Flight::Lead(a) = c.begin(&key(1)) else {
+    let key = |k: usize| format!("{k:064x}");
+    let cache::Flight::Lead(a) = c.begin(&key(0)) else {
         panic!("the first request leads");
     };
     let mut rx = a.subscribe();
     assert!(
-        matches!(c.begin(&key(1)), cache::Flight::Wait(_)),
+        matches!(c.begin(&key(0)), cache::Flight::Wait(_)),
         "the same key waits"
     );
-    let cache::Flight::Lead(b) = c.begin(&key(2)) else {
-        panic!("a second key leads");
-    };
+    // Every other key leads too, computing or queued, up to the bound.
+    let mut leads = Vec::new();
+    for k in 1..cache::MAX_COMPUTING + cache::MAX_QUEUED {
+        match c.begin(&key(k)) {
+            cache::Flight::Lead(l) => leads.push(l),
+            _ => panic!("key {k} is within the queue"),
+        }
+    }
     assert!(
-        matches!(c.begin(&key(3)), cache::Flight::Busy),
-        "past MAX_COMPUTING: none"
+        matches!(c.begin(&key(1000)), cache::Flight::Full),
+        "past MAX_COMPUTING + MAX_QUEUED: refused"
     );
-    let v = c.fill(&key(1), || Cached::Overview("one".into()));
-    c.land(a, v);
+    // A request for a key in flight still joins it when the queue is full.
+    assert!(matches!(c.begin(&key(1)), cache::Flight::Wait(_)));
+    let v = c
+        .fill(&key(0), || Ok(Cached::Overview("one".into())))
+        .unwrap();
+    c.land(a, Ok(v));
     assert_eq!(
-        rx.borrow_and_update().as_deref(),
-        Some(&Cached::Overview("one".into()))
+        rx.borrow_and_update()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|v| (**v).clone()),
+        Some(Cached::Overview("one".into()))
     );
-    // A lead dropped without landing (its computation panicked) frees the
-    // key and its permit.
-    drop(b);
-    assert!(matches!(c.begin(&key(2)), cache::Flight::Lead(_)));
-    assert!(matches!(c.begin(&key(3)), cache::Flight::Lead(_)));
+    // A landed lead frees its place; so does one dropped without landing
+    // (its computation panicked), whose waiters see the channel close.
+    assert!(matches!(c.begin(&key(1000)), cache::Flight::Lead(_)));
+    let dropped = leads.pop().unwrap();
+    let gone = dropped.subscribe();
+    drop(dropped);
+    assert!(gone.has_changed().is_err());
+    // A failure reaches the waiters as an error.
+    let l = leads.pop().unwrap();
+    let mut failed = l.subscribe();
+    c.land(l, Err("bad input".into()));
+    assert!(matches!(&*failed.borrow_and_update(), Some(Err(why)) if &**why == "bad input"));
+}
+
+#[tokio::test]
+async fn a_lead_waits_its_turn_for_a_computing_slot() {
+    let c = cache::LayoutCache::new(None, true);
+    let key = |k: usize| format!("{k:064x}");
+    let leads: Vec<cache::Lead> = (0..=cache::MAX_COMPUTING)
+        .map(|k| match c.begin(&key(k)) {
+            cache::Flight::Lead(l) => l,
+            _ => panic!("lead {k}"),
+        })
+        .collect();
+    let mut held = Vec::new();
+    for l in &leads[..cache::MAX_COMPUTING] {
+        held.push(l.permit().await);
+    }
+    let last = &leads[cache::MAX_COMPUTING];
+    let wait = tokio::time::timeout(std::time::Duration::from_millis(50), last.permit()).await;
+    assert!(
+        wait.is_err(),
+        "every computing slot is taken: the next one queues"
+    );
+    held.pop();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(5), last.permit()).await;
+    assert!(got.is_ok(), "a freed slot goes to the queued lead");
 }
 
 #[test]
@@ -723,4 +906,121 @@ fn a_shared_cache_dir_is_refused() {
     assert!(off.dir().is_none());
     assert!(!dir.join("off").exists());
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+/// The contract Grid's output keeps: one finite position per memory, no two
+/// memories on one grid point, every relation a finite route of two or more
+/// points from its source (to its target when it has one), one label per
+/// memory with placed labels never overlapping, one line per scope starting
+/// at a memory, and finite bounds holding every memory and route.
+fn check_grid_contract(name: &str, input: &ForceInput, out: &grid::GridOutput) {
+    let n = input.nodes.len();
+    assert_eq!(out.pos.len(), 2 * n, "{name}");
+    assert!(out.pos.iter().all(|v| v.is_finite()), "{name}: positions");
+    let mut seen = std::collections::HashSet::new();
+    for i in 0..n {
+        let p = (out.pos[2 * i].to_bits(), out.pos[2 * i + 1].to_bits());
+        assert!(seen.insert(p), "{name}: two memories at one point");
+    }
+    let at = |i: i64| [out.pos[2 * i as usize], out.pos[2 * i as usize + 1]];
+    assert_eq!(out.routes.len(), input.edges.len(), "{name}");
+    for (k, (r, e)) in out.routes.iter().zip(&input.edges).enumerate() {
+        assert!(r.len() >= 2 && r.len() < 256, "{name}: route {k}");
+        assert!(
+            r.iter().flatten().all(|v| v.is_finite()),
+            "{name}: route {k}"
+        );
+        assert_eq!(r[0], at(e.s), "{name}: route {k} source");
+        if e.t >= 0 {
+            assert_eq!(*r.last().unwrap(), at(e.t), "{name}: route {k} target");
+        }
+    }
+    assert_eq!(out.labels.len(), n, "{name}");
+    let placed: Vec<&labels::Label> = out.labels.iter().filter(|l| l.placed).collect();
+    assert!(!placed.is_empty() || n == 0, "{name}: no label placed");
+    for (a, la) in placed.iter().enumerate() {
+        assert!(la.x.is_finite() && la.y.is_finite(), "{name}: label");
+        for lb in &placed[a + 1..] {
+            assert!(!overlaps(&la.rect, &lb.rect), "{name}: labels overlap");
+        }
+    }
+    let keys: std::collections::HashSet<&str> =
+        input.nodes.iter().map(|n| n.top_scope.as_str()).collect();
+    assert_eq!(out.lines.len(), keys.len(), "{name}: one line per scope");
+    for l in &out.lines {
+        let first = l.pts.first().expect("a line has a point");
+        assert!(
+            (0..n).any(|i| [out.pos[2 * i], out.pos[2 * i + 1]] == *first),
+            "{name}: line {:?} starts off its memories",
+            l.key
+        );
+    }
+    let [bx, by, bw, bh] = out.bounds;
+    assert!([bx, by, bw, bh].iter().all(|v| v.is_finite()) && bw > 0.0 && bh > 0.0);
+    let inside = |[x, y]: [f64; 2]| x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+    for i in 0..n {
+        assert!(
+            inside(at(i as i64)),
+            "{name}: memory {i} outside the bounds"
+        );
+    }
+    for r in &out.routes {
+        assert!(
+            r.iter().all(|p| inside(*p)),
+            "{name}: a route leaves the bounds"
+        );
+    }
+}
+
+#[test]
+fn grid_keeps_its_contract_and_is_deterministic() {
+    let mut cases: Vec<(String, ForceInput)> = [1usize, 2, 7, 60, 400]
+        .iter()
+        .map(|&n| (format!("sample {n}"), sample(n)))
+        .collect();
+    for (name, text) in FIXTURES {
+        let fx: Value = serde_json::from_str(text).unwrap();
+        if fx["layout"] == "scope-force" {
+            cases.push((name.to_string(), fixture_force(&fx)));
+        }
+    }
+    for (name, input) in &cases {
+        let out = grid::layout(input);
+        check_grid_contract(name, input, &out);
+        let li = LayoutInput::Grid(input.clone());
+        let key = li.digest();
+        let a = li.run(&key).unwrap();
+        assert_eq!(a, li.run(&key).unwrap(), "{name}: deterministic");
+        // Through the cache's binary form, the same text.
+        let back = Cached::from_bytes(&a.to_bytes()).unwrap();
+        let text = li.render(&a, &key, Groups::Top, None).unwrap();
+        assert_eq!(li.render(&back, &key, Groups::Top, None).unwrap(), text);
+        // The encoding is parallel to the response: route k's points follow
+        // route_points, and pos/labels are per node.
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["name"], "grid");
+        let pos = unb64_f64(v["pos"].as_str().unwrap());
+        let bits = |a: &[f64]| a.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&pos), bits(&out.pos), "{name}");
+        let counts = unb64(v["route_points"].as_str().unwrap());
+        let flat = unb64_f64(v["routes"].as_str().unwrap());
+        assert_eq!(counts.len(), input.edges.len());
+        let mut at = 0;
+        for (k, &m) in counts.iter().enumerate() {
+            let m = m as usize;
+            let want: Vec<f64> = out.routes[k].iter().flatten().copied().collect();
+            assert_eq!(
+                bits(&flat[at..at + 2 * m]),
+                bits(&want),
+                "{name}: route {k}"
+            );
+            at += 2 * m;
+        }
+        assert_eq!(at, flat.len());
+        assert_eq!(
+            unb64(v["label_flags"].as_str().unwrap()).len(),
+            input.nodes.len()
+        );
+        assert_eq!(v["chains"].as_array().unwrap().len(), out.lines.len());
+    }
 }

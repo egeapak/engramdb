@@ -66,6 +66,14 @@ impl IntoResponse for ApiError {
         let body = serde_json::json!({
             "error": { "code": self.code, "message": self.message }
         });
-        crate::api::json_response(self.status, &body)
+        let mut r = crate::api::json_response(self.status, &body);
+        // A refusal for load (the layout queue is full): the page retries.
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            r.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("1"),
+            );
+        }
+        r
     }
 }

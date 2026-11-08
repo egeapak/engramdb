@@ -1,6 +1,7 @@
 //! Collision-free memory labels: the port of `web/js/graph/labels.js`
-//! (`placeLabels`), operation for operation, so a label lands on the same
-//! spot (and a nudged memory on the same point) as in the page's worker.
+//! (`placeLabels`), operation for operation. The page keeps `placeLabels`
+//! only to re-place the few lit labels when a memory is focused; every
+//! layout's labels are placed here.
 //!
 //! Most important memory first (degree, then reads, then id); each label
 //! takes the first free spot of below / above / right / left (then, with

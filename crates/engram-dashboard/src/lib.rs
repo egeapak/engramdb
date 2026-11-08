@@ -124,10 +124,6 @@ pub struct AppState {
     pub(crate) stores: stores::StoreCache,
     /// Server-side graph layouts (`layout::cache`).
     pub(crate) layouts: layout::cache::LayoutCache,
-    /// How long a `/graph` response waits for its layout
-    /// (`graph::LAYOUT_TIMEOUT`; longer in this crate's own tests, which run
-    /// unoptimized and in parallel).
-    pub(crate) layout_timeout: std::time::Duration,
 }
 
 impl AppState {
@@ -147,28 +143,7 @@ impl AppState {
             current,
             stores: stores::StoreCache::new(stores::DEFAULT_CAPACITY),
             layouts: layout::cache::LayoutCache::from_env(),
-            layout_timeout: if cfg!(test) {
-                std::time::Duration::from_secs(20)
-            } else {
-                graph::LAYOUT_TIMEOUT
-            },
         })
-    }
-
-    /// Whether the server's layouts are the page's: always with the
-    /// embedded assets; with `--assets-dir`, only while the layout JS on
-    /// disk hashes as the binary's does ([`layout::LAYOUT_JS_HASH`]), so an
-    /// edit to a layout there is drawn by the page's own JS, never masked
-    /// by the binary's Rust port of the old one. Reads a few files: call
-    /// it on the blocking pool.
-    pub(crate) fn server_layouts_match(&self) -> bool {
-        match &self.assets {
-            assets::AssetSource::Embedded => true,
-            assets::AssetSource::Disk(dir) => {
-                layout::js_hash(|p| std::fs::read(dir.join(p)).ok()).as_deref()
-                    == Some(layout::LAYOUT_JS_HASH)
-            }
-        }
     }
 }
 

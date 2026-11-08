@@ -11,10 +11,12 @@
 // builds each memory's `<g class="node">` and each relation's `<g>` (with
 // its handlers, aria and hit path) and asks the style for what goes inside.
 //
-// The server bounds the graph (`/graph?limit=`, "showing N of M"); the
-// style's layout (graph/layouts.js) runs in a Web Worker so a large store
-// never freezes the page, and is deterministic, so the same store draws the
-// same graph.
+// The server bounds the graph (`/graph?limit=`, "showing N of M") and lays
+// it out: the scope overview, an opened scope and the style's own layout
+// (graph/layouts.js `LAYOUTS`: Plain's scope-force, Grid's grid) come with
+// the response, which waits for them (a "busy" answer is retried, a failure
+// shown with a retry). No layout runs in the browser. Every layout is
+// deterministic, so the same store draws the same graph.
 //
 // **Steady graph.** The page asks the server for every edge kind and status
 // (only `invalidated` and `top_scope`, which change the memory set, go to the
@@ -53,7 +55,7 @@
 // the status filters) opens on the scope overview (./graph-overview.js: one
 // disc per top scope, bands between them), unless the hash says `all=1`
 // ("Show all memories", still bounded by the server's limit). A scope opened
-// from it (`top_scope=<name>`) is laid out by the core scope-force layout
+// from it (`top_scope=<name>`) is laid out by the server's scope-force
 // whatever the style, sub-scopes as regions, and its relations to other
 // scopes are faint stubs ending in one tag per far scope (../graph/opened.js).
 // Everything else — every store of OVERVIEW_MIN memories or fewer, and the
@@ -67,9 +69,9 @@ import { api } from '../api.js';
 import { fmt, ago, plural, shortId, label } from '../format.js';
 import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
-import { runNamedLayout, usesWidth } from '../graph/layouts.js';
-import { isFor, decode, serverKey, SERVER_LAYOUTS } from '../graph/server-layout.js';
-import { shortLabel, forceInput, roundAspect, roundWidth } from '../graph/input.js';
+import { LAYOUTS } from '../graph/layouts.js';
+import { decodeForce, decodeGrid, serverKey } from '../graph/server-layout.js';
+import { shortLabel, roundAspect, roundWidth } from '../graph/input.js';
 import { along } from '../graph/geometry.js';
 import { reads, radius } from '../graph/radius.js';
 import { makeT } from '../graph/strings.js';
@@ -82,18 +84,12 @@ import { memoryPanel } from '../graph/details.js';
 import { placeLabels } from '../graph/labels.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
-import { OVERVIEW_MIN, renderOverview, overviewLayout } from './graph-overview.js';
+import { OVERVIEW_MIN, renderOverview } from './graph-overview.js';
 
 // ---------------------------------------------------------------------------
-// Layout worker and caches
+// Page state
 // ---------------------------------------------------------------------------
 
-let worker = null;
-let workerBroken = false;
-let layoutSeq = 0;
-const waiting = new Map();
-/** Layout results by input (a few: one per recently viewed graph). */
-const layoutCache = new Map();
 /** The last viewport per project + layout, so a re-render keeps it. */
 const viewports = new Map();
 /** Per project: what to pin, and say, when the graph comes back after a review
@@ -106,15 +102,6 @@ let resizeObs = null;
 /** The drawn graph's surface `dispose` (canvas), run when the graph leaves the page or the next one renders. */
 let liveSurface = null;
 
-function failWorker() {
-  workerBroken = true;
-  if (worker) worker.terminate();
-  worker = null;
-  for (const [, w] of waiting) w.fallback();
-  waiting.clear();
-}
-
-/** Lay out off the main thread; on the main thread (deferred) if no worker starts. */
 /** FNV-1a over a layout's cache key: the zoom kept per laid-out graph. */
 function hashKey(str) {
   let a = 0x811c9dc5;
@@ -125,39 +112,6 @@ function hashKey(str) {
     b = Math.imul(b ^ c, 0x5bd1e995);
   }
   return (a >>> 0).toString(16) + (b >>> 0).toString(16) + '.' + str.length;
-}
-
-/** The layout worker, started on first use (null when none can start). */
-function ensureWorker() {
-  if (workerBroken) return null;
-  if (worker) return worker;
-  try {
-    worker = new Worker(new URL('../graph/layout-worker.js', import.meta.url), { type: 'module' });
-  } catch (_) {
-    workerBroken = true;
-    return null;
-  }
-  worker.onmessage = (ev) => {
-    const w = waiting.get(ev.data.seq);
-    if (!w) return;
-    waiting.delete(ev.data.seq);
-    if (ev.data.error) w.reject(new Error(ev.data.error));
-    else w.resolve(ev.data.result);
-  };
-  worker.onerror = (ev) => {
-    ev.preventDefault();
-    failWorker();
-  };
-  return worker;
-}
-
-/**
- * Start the layout worker ahead of need (the overview does not use it, the
- * scope it opens will): it loads its modules now, and nothing is laid out
- * or cached.
- */
-function warmWorker() {
-  ensureWorker();
 }
 
 /**
@@ -174,8 +128,9 @@ const PAGE_EXTRA = 300;
  * The page's scrollbar is set, for the measurement only, to what the drawn
  * page will have (it scrolls when the box plus PAGE_EXTRA is taller than
  * the window), since a classic scrollbar narrows the box. A wrong guess
- * only costs speed: the drawn box then misses the server's layout and the
- * worker lays out. Returns { aspect, width } rounded as the input rounds them.
+ * only costs a little: the server's layout, made for this shape, is fitted
+ * into the drawn box. Returns { aspect, width } rounded as the server takes
+ * them.
  */
 export function measureBox(main, loadingEl) {
   const box = h('div', { class: 'graph-box' });
@@ -191,51 +146,38 @@ export function measureBox(main, loadingEl) {
   return { aspect: roundAspect(ht / w), width: roundWidth(w) };
 }
 
+/** Retries of a "busy" /graph (the server's layout queue full), and the wait before each. */
+const BUSY_RETRIES = [1000, 2000, 3000, 5000];
+
 /**
- * The layout of `input`: from the page's cache, the server's layout of this
- * very input (`server`: { L, groups }, graph/server-layout.js), else the
- * worker. A server layout is cached under its digest (`serverKey`), so the
- * page never stringifies a large input it did not have to lay out.
+ * `/graph` with `params`, waiting for the server's layout: a 503
+ * `layout_busy` is retried after a pause (a few times), any other failure
+ * thrown. While the answer takes longer than a moment, `note` says it is
+ * being laid out.
  */
-function runLayout(input, server) {
-  const remember = (key, lay, source) => {
-    layoutCache.set(key, lay);
-    while (layoutCache.size > 4) layoutCache.delete(layoutCache.keys().next().value);
-    return { key, lay, source };
-  };
-  const sKey = server && serverKey(server.L);
-  if (sKey && isFor(server.L, input, server.groups)) {
-    if (layoutCache.has(sKey)) return Promise.resolve({ key: sKey, lay: layoutCache.get(sKey), source: 'cache' });
-    const lay = decode(server.L, input);
-    if (lay) return Promise.resolve(remember(sKey, lay, 'server'));
-  }
-  const key = JSON.stringify(input);
-  if (layoutCache.has(key)) return Promise.resolve({ key, lay: layoutCache.get(key), source: 'cache' });
-  let source = 'worker';
-  return new Promise((resolve, reject) => {
-    const seq = ++layoutSeq;
-    const fallback = () =>
-      setTimeout(() => {
-        source = 'main';
-        try {
-          resolve(runNamedLayout(input));
-        } catch (e) {
-          reject(e);
-        }
-      }, 0);
-    const wk = ensureWorker();
-    if (wk) {
+async function fetchGraph(ctx, params, note, t) {
+  const slow = setTimeout(() => {
+    if (note.isConnected) note.textContent = t('layingOutServer');
+  }, 400);
+  try {
+    for (let attempt = 0; ; attempt++) {
       try {
-        waiting.set(seq, { resolve, reject, fallback });
-        wk.postMessage({ seq, input });
-        return;
-      } catch (_) {
-        waiting.delete(seq);
-        workerBroken = true;
+        return await api.graph(ctx.project.id, params);
+      } catch (e) {
+        if (!(e && e.status === 503 && e.code === 'layout_busy') || attempt >= BUSY_RETRIES.length || ctx.isStale()) throw e;
+        if (note.isConnected) note.textContent = t('layoutBusy');
+        await new Promise((r) => setTimeout(r, BUSY_RETRIES[attempt]));
+        if (ctx.isStale()) throw e;
       }
     }
-    fallback();
-  }).then((lay) => remember(key, lay, source));
+  } finally {
+    clearTimeout(slow);
+  }
+}
+
+/** An error and a button that renders the view again. */
+function failed(ctx, e, t) {
+  return h('div', { class: 'g-failed' }, errorBox(e), h('button', { type: 'button', class: 'btn sm', onclick: () => ctx.refresh() }, t('retry')));
 }
 
 // ---------------------------------------------------------------------------
@@ -388,21 +330,21 @@ export async function renderGraph(main, ctx) {
     mount(main, projHead('Graph', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
     return;
   }
-  // Ask the server to lay out what it can (graph/server-layout.js): the
-  // scope overview, scope-force when the style uses it with no options of
-  // its own, and an opened scope (scope-force by sub-scope) when one scope
-  // is picked: the server knows the store's size, so it lays that out only
-  // when the store has an overview (more than OVERVIEW_MIN memories, as
-  // `opened` below decides), else the style's own when it asked. It answers
-  // with the one that fits its response.
-  const box = measureBox(main, h('p', { class: 'loading' }, t('loading')));
+  // Ask the server for the layouts it computes (graph/server-layout.js):
+  // the scope overview, the style's own when it is a server layout, and an
+  // opened scope (scope-force by sub-scope) when one scope is picked: the
+  // server knows the store's size, so it lays that out only when the store
+  // has an overview (more than OVERVIEW_MIN memories, as `opened` below
+  // decides), else the style's own when it asked. It answers with the one
+  // that fits its response, and waits for it.
+  const note = h('p', { class: 'loading', role: 'status' }, t('loading'));
+  const box = measureBox(main, note);
   const singleScope = f.top_scope && !f.top_scope.includes(',');
-  const ownForce = theme.layout.name === 'scope-force' && !Object.keys(theme.layout.options || {}).length;
-  const asked = [wantOverview && 'scope-overview', ownForce && 'scope-force', singleScope && 'opened'].filter((n) => n && (n === 'opened' || SERVER_LAYOUTS[n]));
+  const asked = [wantOverview && 'scope-overview', Object.hasOwn(LAYOUTS, theme.layout.name) && theme.layout.name, singleScope && 'opened'].filter(Boolean);
   let g;
   try {
     // Every kind and status: the display filters apply here (module docs).
-    g = await api.graph(p.id, {
+    g = await fetchGraph(ctx, {
       include_proposed: 'true',
       include_rejected: 'true',
       include_invalidated: f.invalidated ? 'true' : 'false',
@@ -412,10 +354,10 @@ export async function renderGraph(main, ctx) {
       layout_aspect: asked.length ? String(box.aspect) : undefined,
       layout_width: asked.length ? String(box.width) : undefined,
       layout_open_over: singleScope ? String(OVERVIEW_MIN) : undefined,
-    });
+    }, note, t);
   } catch (e) {
     if (ctx.isStale()) return;
-    mount(main, projHead('Graph', t('title', p.name), []), errorBox(e));
+    mount(main, projHead('Graph', t('title', p.name), []), failed(ctx, e, t));
     return;
   }
   if (ctx.isStale()) return;
@@ -431,6 +373,7 @@ export async function renderGraph(main, ctx) {
       f,
       hashOf,
       styleControl,
+      failed: (e) => failed(ctx, e, t),
       filters: (box, onChange) => {
         const apply = (next) => {
           Object.assign(f, next);
@@ -446,7 +389,6 @@ export async function renderGraph(main, ctx) {
       const sel = main.querySelector('.g-style select');
       if (sel) sel.focus();
     }
-    warmWorker();
     performance.mark('graph:overview-built');
     return;
   }
@@ -611,16 +553,11 @@ export async function renderGraph(main, ctx) {
     mount(card, h('div', { class: 'eyebrow' }, 'Details'), h('p', { class: 'hint' }, 'Nothing to show.'));
     return;
   }
-  mount(graphBox, h('p', { class: 'graph-empty muted' }, t('layingOut', g.nodes.length)));
-
-  // Layout input (graph/input.js, which the server mirrors): edge ends as
-  // node indices (-1: a stub off the source), and the name of the style's
-  // layout (part of the cache key). An opened scope: scope-force whatever
-  // the style, each sub-scope a region (its key stands in for the top scope
-  // the layout groups by). The box's width goes in only for a layout that
-  // sizes what must stay readable at Fit by it (coarsely, so a resize
-  // rarely misses the cache): any other would lay out again on every resize
-  // for nothing.
+  // The layout: the server's, sent with this response and keyed by its node
+  // and edge order (an opened scope is scope-force by sub-scope whatever the
+  // style; otherwise the style's own, graph/layouts.js). scope-force's
+  // carries each memory's region (`lay.groups`: its sub-scope in an opened
+  // scope) and, for an opened scope, the far scopes' directions.
   const labels = g.nodes.map((n) => shortLabel(n.summary));
   const layoutName = opened ? 'scope-force' : theme.layout.name;
   // The box's size, read once here, while the page is cheap to lay out (no
@@ -628,23 +565,17 @@ export async function renderGraph(main, ctx) {
   // read of it while the graph is built would force a style and layout pass
   // over thousands of new SVG elements, and the paint does that pass anyway.
   const boxSize = { w: graphBox.clientWidth, h: graphBox.clientHeight };
-  const { input, groupKeys } = forceInput(g, {
-    layout: layoutName,
-    options: opened ? {} : theme.layout.options,
-    opened: !!opened,
-    aspect: (boxSize.h || 500) / (boxSize.w || 800),
-    width: usesWidth(layoutName) ? boxSize.w || 800 : null,
-    labels,
-  });
-  // The server's layout says which grouping it is for (`groups`).
-  const serverLay = g.layout ? { L: g.layout, groups: opened ? 'sub' : 'top' } : null;
-  const res = await runLayout(input, serverLay).catch((e) => {
-    if (!ctx.isStale()) mount(graphBox, errorBox(e));
-    return null;
-  });
-  if (!res || ctx.isStale()) return;
-  // `source`: where the layout came from (worker, main thread, the page's
-  // cache, or the server), for the browser bench.
+  let res;
+  try {
+    const lay = layoutName === 'grid' ? decodeGrid(g.layout, g) : decodeForce(g.layout, g, opened ? 'sub' : 'top');
+    res = { key: serverKey(g.layout), lay, source: 'server' };
+  } catch (e) {
+    mount(graphBox, failed(ctx, e, t));
+    return;
+  }
+  const groupKeys = res.lay.groups || g.nodes.map((n) => n.top_scope || '');
+  // `source`: where the layout came from (always the server now), for the
+  // browser bench.
   performance.mark('graph:layout', { detail: { source: res.source } });
   const lay = res.lay;
   const viewKey = p.id + '|' + hashKey(res.key);
@@ -708,13 +639,8 @@ export async function renderGraph(main, ctx) {
   if (opened && g.stub_scopes && g.stub_scopes.length) {
     const bw = boxSize.w || 800;
     const bh = boxSize.h || 500;
-    const dirs = new Map();
-    const ov = overviewLayout(g, bw, Math.min(3, Math.max(0.3, bh / bw)));
-    const me = ov.index.get(opened === '-' ? '' : opened);
-    for (const sc of g.stub_scopes) {
-      const j = ov.index.get(sc.name);
-      if (me !== undefined && j !== undefined) dirs.set(sc.name, [ov.lay.pos[2 * j] - ov.lay.pos[2 * me], ov.lay.pos[2 * j + 1] - ov.lay.pos[2 * me + 1]]);
-    }
+    // Each far scope's direction on the scope overview (the server's).
+    const dirs = lay.dirs || new Map();
     const tags = g.stub_scopes
       .slice()
       .sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))

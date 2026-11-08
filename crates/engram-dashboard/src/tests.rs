@@ -1230,19 +1230,6 @@ fn every_import_resolves_to_an_embedded_file() {
         checked >= 10,
         "the import scan found only {checked} imports"
     );
-    // The layout worker is reached only through `new URL(…)`, so the scan
-    // must see it or a renamed worker would 404 at run time.
-    let graph = crate::assets::find("js/views/graph.js").expect("graph view embedded");
-    let graph_imports = imports(
-        "js/views/graph.js",
-        std::str::from_utf8(graph.bytes).unwrap(),
-    );
-    assert!(
-        graph_imports
-            .iter()
-            .any(|t| t == "js/graph/layout-worker.js"),
-        "{graph_imports:?}"
-    );
     // And the page's own references.
     let index = std::str::from_utf8(crate::assets::find("index.html").unwrap().bytes).unwrap();
     for needle in ["src=\"", "href=\""] {
@@ -1275,7 +1262,8 @@ const GRAPH_STYLE_INTERFACE: &[&str] = &[
 /// Every graph style is a folder `js/graph/themes/<id>/` whose `index.js`
 /// exports the whole interface as named exports (`export const` /
 /// `export function`, never `= undefined` / `= null`), declares
-/// `id = '<id>'`, names a layout that `graph/layouts.js` has, and is listed in
+/// `id = '<id>'`, names a layout the server computes (`graph/layouts.js`
+/// `LAYOUTS`; a layout takes no options), and is listed in
 /// the registry's `STYLES` (imported is not enough: only a listed style can
 /// be picked). A missing export would only fail at run time, on the one page
 /// that picks the style.
@@ -1289,14 +1277,8 @@ fn every_graph_style_exports_the_interface() {
     let registry_path = format!("{STYLE_ROOT}index.js");
     let registry = asset_text(&registry_path);
     let listed = registered_styles(&registry_path, registry);
-    let layouts = object_keys(
-        asset_text("js/graph/layouts.js"),
-        "export const LAYOUTS = Object.freeze({",
-    );
-    assert!(
-        layouts.contains(&"grid".to_string()),
-        "layouts: {layouts:?}"
-    );
+    let layouts_js = asset_text("js/graph/layouts.js");
+    let server = object_keys(layouts_js, "export const LAYOUTS = Object.freeze({");
     for dir in &dirs {
         let path = format!("{STYLE_ROOT}{dir}/index.js");
         let src = asset_text(&path);
@@ -1310,8 +1292,23 @@ fn every_graph_style_exports_the_interface() {
         let layout = quoted_after(src, "export const layout = { name: ")
             .unwrap_or_else(|| panic!("{path}: `layout` must start `{{ name: '<layout>'`"));
         assert!(
-            layouts.contains(&layout),
-            "{path} names layout {layout:?}, which graph/layouts.js does not have ({layouts:?})"
+            server.contains(&layout),
+            "{path} names layout {layout:?}, which graph/layouts.js does not have ({server:?})"
+        );
+        assert!(
+            [
+                crate::layout::LayoutName::ScopeForce,
+                crate::layout::LayoutName::Grid
+            ]
+            .iter()
+            .any(|n| n.as_str() == layout),
+            "{path} names layout {layout:?}, which the server does not compute"
+        );
+        assert!(
+            src.contains(&format!(
+                "export const layout = {{ name: '{layout}', options: {{}} }};"
+            )),
+            "{path}: a layout takes no options"
         );
         assert!(
             listed.contains(&path),
@@ -1624,85 +1621,29 @@ fn registered_styles(path: &str, src: &str) -> Vec<String> {
         .collect()
 }
 
-/// The scope-force layout promises the same positions in every browser, which
-/// holds only while its arithmetic is exactly rounded everywhere: `+ − × ÷`
-/// and `Math.sqrt`, never the implementation-approximated `Math.cos` / `sin`
-/// / `hypot` / `pow` / `exp` / `log` / `atan*` / `**`, and no `Math.random`.
-/// Checked on the layout, the scope overview's layout and the label
-/// placement they call (comments skipped).
+/// The server is the only source of every layout (`src/layout/`): the page
+/// has no JS copy of scope-force, the scope overview or Grid's layout to
+/// fall back on or to drift from, and no layout worker. `graph/layouts.js`
+/// only names the layouts a style may pick.
 #[test]
-fn the_scope_force_layout_uses_only_exactly_rounded_arithmetic() {
-    let banned = [
-        "Math.cos",
-        "Math.sin",
-        "Math.tan",
-        "Math.atan",
-        "Math.hypot",
-        "Math.pow",
-        "Math.exp",
-        "Math.log",
-        "Math.random",
-        "Math.asin",
-        "Math.acos",
-        "Math.cbrt",
-        "**",
-    ];
-    // Code only: `//` comments and tracked `/* … */` blocks (which may span
-    // lines and need not start a line) are blanked, nothing else is skipped.
-    for path in [
+fn the_server_layouts_have_no_browser_copy() {
+    let src = asset_text("js/graph/layouts.js");
+    let names = object_keys(src, "export const LAYOUTS = Object.freeze({");
+    assert_eq!(names, ["scope-force", "grid"], "layouts: {names:?}");
+    for gone in [
         "js/graph/scope-force.js",
         "js/graph/scope-overview.js",
-        "js/graph/labels.js",
-        "js/graph/radius.js",
+        "js/graph/themes/grid/layout.js",
+        "js/graph/layout-worker.js",
     ] {
-        let mut in_block = false;
-        for (n, line) in asset_text(path).lines().enumerate() {
-            let mut code = String::new();
-            let mut rest = line;
-            loop {
-                if in_block {
-                    match rest.find("*/") {
-                        Some(end) => {
-                            rest = &rest[end + 2..];
-                            in_block = false;
-                        }
-                        None => break,
-                    }
-                } else {
-                    let block = rest.find("/*");
-                    let comment = rest.find("//");
-                    match (block, comment) {
-                        (Some(b), c) if c.is_none_or(|c| b < c) => {
-                            code.push_str(&rest[..b]);
-                            rest = &rest[b + 2..];
-                            in_block = true;
-                        }
-                        (_, Some(c)) => {
-                            code.push_str(&rest[..c]);
-                            break;
-                        }
-                        _ => {
-                            code.push_str(rest);
-                            break;
-                        }
-                    }
-                }
-            }
-            for b in banned {
-                assert!(!code.contains(b), "{path}:{}: {b} in {line:?}", n + 1);
-            }
-        }
-        assert!(!in_block, "{path}: unclosed /* comment");
+        assert!(crate::assets::find(gone).is_none(), "{gone} is embedded");
     }
-    let layouts = object_keys(
-        asset_text("js/graph/layouts.js"),
-        "export const LAYOUTS = Object.freeze({",
-    );
-    assert!(layouts.contains(&"scope-force".to_string()), "{layouts:?}");
-    assert!(
-        layouts.contains(&"scope-overview".to_string()),
-        "{layouts:?}"
-    );
+    for a in crate::assets::embedded() {
+        if a.path.ends_with(".js") {
+            let text = std::str::from_utf8(a.bytes).unwrap();
+            assert!(!text.contains("new Worker("), "{} starts a worker", a.path);
+        }
+    }
     assert!(
         asset_text("js/graph/themes/index.js").contains("export const DEFAULT_STYLE = 'plain';"),
         "Plain is the default style"
@@ -3069,14 +3010,22 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     let uri = format!("/api/projects/{}/graph?{lay}", fx.id);
     let (s, v) = get_json(&app, &uri).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    // A graph response carries scope-force, for exactly its nodes and edges.
+    // A graph response carries scope-force, parallel to its nodes and edges.
     let l = &v["layout"];
     assert_eq!(l["v"], crate::layout::LAYOUT_VERSION);
     assert_eq!(l["name"], "scope-force");
     assert_eq!(l["groups"], "top");
-    assert!(l["check"].is_u64(), "{l}");
-    assert_eq!(l["n"], v["nodes"].as_array().unwrap().len());
-    assert_eq!(l["e"], v["edges"].as_array().unwrap().len());
+    let n = v["nodes"].as_array().unwrap().len();
+    let e = v["edges"].as_array().unwrap().len();
+    let b64_len = |k: &str| {
+        let t = l[k].as_str().unwrap();
+        t.len() / 4 * 3 - t.matches('=').count()
+    };
+    assert_eq!(b64_len("pos"), 16 * n, "{l}");
+    assert_eq!(b64_len("label_xy"), 16 * n);
+    assert_eq!(b64_len("label_flags"), n);
+    assert_eq!(b64_len("routes"), 32 * e);
+    assert_eq!(l["group"].as_array().unwrap().len(), n);
     assert_eq!(l["aspect"], 0.6);
     assert_eq!(l["width"], 1280.0);
     let key = l["key"].as_str().unwrap().to_string();
@@ -3103,6 +3052,21 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     .await;
     assert_eq!(sum["summary"], true);
     assert_eq!(sum["layout"]["name"], "scope-overview");
+    // Named discs and bands: the page matches them by name.
+    let ids = sum["layout"]["ids"].as_array().unwrap();
+    assert_eq!(
+        sum["layout"]["pos"].as_array().unwrap().len(),
+        2 * ids.len()
+    );
+    for l in sum["scopes"].as_array().unwrap() {
+        if l["count"].as_u64().unwrap() > 0 {
+            assert!(ids.contains(&l["name"]), "{l} has no disc");
+        }
+    }
+    assert_eq!(
+        sum["layout"]["pairs"].as_array().unwrap().len(),
+        sum["layout"]["routes"].as_array().unwrap().len()
+    );
     // The overview alone on a graph response: nothing fits, nothing sent.
     let (_, none) = get_json(
         &app,
@@ -3124,6 +3088,10 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     };
     let (_, sub) = get_json(&app, &one("layout=scope-force,opened&layout_open_over=1")).await;
     assert_eq!(sub["layout"]["groups"], "sub", "{sub}");
+    // Its tags' directions: one per far scope the overview has a disc for.
+    if sub["stub_scopes"].as_array().is_some_and(|f| !f.is_empty()) {
+        assert!(sub["layout"]["dirs"].is_object(), "{}", sub["layout"]);
+    }
     let (_, top) = get_json(
         &app,
         &one("layout=scope-force,opened&layout_open_over=1000"),
@@ -3132,6 +3100,26 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     assert_eq!(top["layout"]["groups"], "top", "{top}");
     let (_, neither) = get_json(&app, &one("layout=opened&layout_open_over=1000")).await;
     assert!(neither.get("layout").is_none());
+    // Grid's layout: parallel to the nodes, every edge's points counted.
+    let (_, grid) = get_json(
+        &app,
+        &format!(
+            "/api/projects/{}/graph?layout=scope-overview,grid&layout_aspect=0.6&layout_width=1280",
+            fx.id
+        ),
+    )
+    .await;
+    let gl = &grid["layout"];
+    assert_eq!(gl["name"], "grid", "{gl}");
+    let b64 = |k: &str| {
+        let t = gl[k].as_str().unwrap();
+        t.len() / 4 * 3 - t.matches('=').count()
+    };
+    assert_eq!(b64("pos"), 16 * n);
+    assert_eq!(b64("label_flags"), n);
+    assert_eq!(b64("route_points"), e);
+    assert!(b64("routes") >= 32 * e);
+    assert!(gl["chains"].is_array());
     // The cache file is in the cache dir (the harness's temp dir), 0600, and
     // nothing changed anywhere a store lives.
     let dir = paths::dashboard_layout_cache_dir().unwrap();
@@ -3155,7 +3143,7 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     // Bad parameters are the caller's fault, including an aspect or width
     // the page would have rounded (each would be a new cache key).
     for bad in [
-        "layout=grid&layout_aspect=0.6&layout_width=1280",
+        "layout=nope&layout_aspect=0.6&layout_width=1280",
         "layout=scope-force&layout_aspect=9&layout_width=1280",
         "layout=scope-force&layout_width=1280",
         "layout=scope-force&layout_aspect=0.6&layout_width=wide",
@@ -3172,44 +3160,32 @@ async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     }
 }
 
-/// With `--assets-dir`, the server lays out only while the layout JS on
-/// disk is the binary's: an edited layout is drawn by the page's own JS.
+/// With `--assets-dir` the server lays out as with the embedded assets:
+/// there is no page copy of its layouts for the files on disk to differ from.
 #[tokio::test]
-async fn disk_assets_get_a_server_layout_only_while_the_layout_js_is_the_binarys() {
+async fn disk_assets_get_the_server_layout_too() {
     let ef = edge_fixture().await;
     let fx = &ef.fx;
-    let web = tempfile::tempdir().unwrap();
-    for f in crate::layout::LAYOUT_JS_FILES {
-        let to = web.path().join(f);
-        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-        std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("web")
-                .join(f),
-            &to,
-        )
-        .unwrap();
-    }
+    let web = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web");
+    let disk = app_with(Some(fx.current.clone()), Some(web), false);
     let uri = format!(
         "/api/projects/{}/graph?layout=scope-force&layout_aspect=0.6&layout_width=1280",
         fx.id
     );
-    let same = app_with(
-        Some(fx.current.clone()),
-        Some(web.path().to_path_buf()),
-        false,
-    );
-    let (_, v) = get_json(&same, &uri).await;
-    assert_eq!(v["layout"]["name"], "scope-force", "the same JS on disk");
-    let edited = web.path().join("js/graph/scope-force.js");
-    let mut text = std::fs::read_to_string(&edited).unwrap();
-    text.push_str("\n// edited\n");
-    std::fs::write(&edited, text).unwrap();
-    let (_, v) = get_json(&same, &uri).await;
-    assert!(
-        v.get("layout").is_none(),
-        "edited JS on disk: no server layout"
-    );
+    let (_, v) = get_json(&disk, &uri).await;
+    assert_eq!(v["layout"]["name"], "scope-force", "{v}");
+}
+
+/// A full layout queue is a 503 the page retries: it says when.
+#[test]
+fn a_busy_answer_says_when_to_retry() {
+    use axum::response::IntoResponse;
+    let r = crate::ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "layout_busy", "busy")
+        .into_response();
+    assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(r.headers()[header::RETRY_AFTER], "1");
+    let other = crate::ApiError::internal("x").into_response();
+    assert!(other.headers().get(header::RETRY_AFTER).is_none());
 }
 
 #[tokio::test]

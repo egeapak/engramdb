@@ -29,18 +29,18 @@ export const strings = {
   noteUnknown: (n) => `${plural(n, 'relation')} into a store that cannot be checked here (drawn to “?”)`,
 };
 
-/** Laid out by ./layout.js (named in graph/layouts.js, so the worker can run it); no options. */
+/** Laid out by the server (src/layout/grid.rs, named in graph/layouts.js); no options. */
 export const layout = { name: 'grid', options: {} };
 
 /** Each scope's line through its memories (under the relations), and its badge (over them). */
 export function drawBackdrop(g, lay) {
   const below = s('g', { class: 'scope-paths', 'aria-hidden': 'true' });
-  for (const l of lay.lines) {
+  for (const l of lay.chains) {
     if (!l.key || l.pts.length < 2) continue;
     below.appendChild(s('path', { class: ['ln', 'stroke-' + slot(l.slot), 'lv-' + variant(l.slot)], d: pathD(l.pts) }));
   }
   const above = s('g', { class: 'lbadges', 'aria-hidden': 'true' });
-  for (const l of lay.lines) {
+  for (const l of lay.chains) {
     if (!l.key) continue;
     const [x, y] = l.pts[0];
     above.appendChild(

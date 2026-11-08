@@ -34,58 +34,6 @@ fn main() {
     out.push_str("];\n");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     std::fs::write(out_dir.join("assets.rs"), out).unwrap();
-
-    // The layout-relevant JS (the server's layouts are Rust ports of it):
-    // its hash is pinned with `layout::LAYOUT_VERSION` by a test, and salts
-    // every layout cache digest. `layout::js_hash` computes the same over
-    // the embedded (or `--assets-dir`) files.
-    let mut hash = String::from("pub const LAYOUT_JS_FILES: &[&str] = &[\n");
-    for f in LAYOUT_JS_FILES {
-        writeln!(hash, "    {f:?},").unwrap();
-    }
-    hash.push_str("];\n");
-    let parts: Vec<(&str, Vec<u8>)> = LAYOUT_JS_FILES
-        .iter()
-        .map(|f| (*f, std::fs::read(root.join(f)).unwrap()))
-        .collect();
-    writeln!(
-        hash,
-        "pub const LAYOUT_JS_HASH: &str = {:?};",
-        layout_hash(&parts)
-    )
-    .unwrap();
-    std::fs::write(out_dir.join("layout_js.rs"), hash).unwrap();
-}
-
-/// Must list what `src/layout/` ports, and agree with `layout::js_hash`.
-const LAYOUT_JS_FILES: &[&str] = &[
-    "js/graph/input.js",
-    "js/graph/labels.js",
-    "js/graph/opened.js",
-    "js/graph/radius.js",
-    "js/graph/scope-force.js",
-    "js/graph/scope-overview.js",
-    "js/graph/server-layout.js",
-];
-
-/// FNV-1a 64 over each file's path, a NUL, its bytes and a NUL, carriage
-/// returns left out (a Windows checkout may add them): a change detector,
-/// not a security boundary. A copy of `layout::js_hash`.
-fn layout_hash(parts: &[(&str, Vec<u8>)]) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |bytes: &[u8]| {
-        for b in bytes.iter().filter(|&&b| b != b'\r') {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    };
-    for (path, bytes) in parts {
-        eat(path.as_bytes());
-        eat(&[0]);
-        eat(bytes);
-        eat(&[0]);
-    }
-    format!("{h:016x}")
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {

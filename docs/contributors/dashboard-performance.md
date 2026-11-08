@@ -11,7 +11,7 @@ p50, 4 cores, Chromium, release build.
 | what | budget |
 |---|---|
 | `/graph` response | 1k ≤ 150 ms, 2k ≤ 300, 10k overview (`summary_over`) ≤ 400 |
-| layout, cold, in the worker | 1k ≤ 400 ms, 2k ≤ 1000 |
+| layout, cold, on the server (the `/graph` handler with `layout=`) | 1k ≤ 400 ms, 2k ≤ 1000 |
 | tab click → first full paint | 1k ≤ 800 ms, 2k ≤ 1500, 10k (overview) ≤ 800 |
 | hover / focus frame | ≤ 16 ms |
 | pan / zoom | 60 fps (2k ≥ 45) |
@@ -51,10 +51,10 @@ Three tools, from the server inward to the pixels:
    frame times, for both styles, light and dark, 1280 and 390 px wide.
    "Painted" is the first frame after the mark. Every timed load is a fresh
    browser context (no layout cache); `--assets web` serves the frontend
-   from disk, so a JS change is measured without a rebuild. It also posts
-   each store's whole graph (up to the server's 2000 cap) to a fresh
-   `layout-worker.js` for the cold layout figure. `node bench/layout.mjs`
-   (the layout harness) covers layout quality; see `bench/README.md`.
+   from disk, so a JS change is measured without a rebuild. The layouts'
+   own cost is the Criterion bench's `*_layout` cases (2. above), since
+   every layout is computed by the server. `node bench/layout.mjs` (the
+   layout harness) covers layout quality; see `bench/README.md`.
 
 What the page lays out is bounded by the server: past 150 memories the tab
 opens on the scope overview, and an opened scope or "show all" asks for at
@@ -78,8 +78,8 @@ binary, same stores.
 |---|---|---|---|---|---|
 | `/graph`, as the page sees it (fetch + parse) | 15 (16) | 16 (19) | 20 (23) | 48 (54) | 150 / 300 / 400 |
 | tab click → painted | 94 (113) | 49 (50) | 55 (71) | 105 (123) | 800 / 1500 / 800 |
-| layout cold in the worker, scope-force (Plain) | 17 | 111 | 179 | 188 (2000 of 10k) | 400 / 1000 |
-| layout cold in the worker, grid | 21 | 197 | 322 | 393 (2000 of 10k) | 400 / 1000 |
+| layout cold in the worker, scope-force (Plain; historical: the page no longer lays out) | 17 | 111 | 179 | 188 (2000 of 10k) | 400 / 1000 |
+| layout cold in the worker, grid (historical) | 21 | 197 | 322 | 393 (2000 of 10k) | 400 / 1000 |
 | open the largest scope | – | 146 (177) | 176 (210) | 307 (355) | 300 / 500 / 500 |
 | show all (≤ 800 memories) | – | 314 (362) | 341 (386) | 346 (394) | (tab click) |
 | filter toggle, before → after | 18 (19) → 18 (19) | 22 (24) → 22 (23) | 26 (28) → 24 (24) | **47 (54) → 38 (40)** | 50 / 100 |
@@ -173,46 +173,73 @@ budget. (Plain has since moved to a canvas: see "Canvas surface" below.)
 
 ## Server-side layout
 
-`/graph?layout=scope-overview,scope-force[,opened]&layout_aspect=…&layout_width=…`
-answers with a `layout` object computed in Rust (`src/layout/`, a port of
-`scope-force.js`, `scope-overview.js`, `labels.js`, `radius.js` and the input
-builder `graph/input.js`). The page decodes it and skips its own layout; it
-lays out as before (scope-force in the worker, the overview on the main
-thread) when the response has none, or the header (`v`, name, node/edge
-counts, aspect, width, `check`, a checksum of the input the page
-recomputes — `inputCheck` for scope-force, `overviewCheck` for the overview,
-whose band `k` is drawn along route `k`, so pair order is checked too — and
-for scope-force `groups`) does not match its own input, or a decoded number
-is not finite. Parity (`node bench/server-layout.mjs`, every key compared with
-`Object.is`, so bit for bit, not within a tolerance): **0 differences** for
-positions, routes, labels and scope names on every bench store and path
-(tab, opened scope, show all) at 1280 and 390 px, the same labels placed
-and the same crossings. The same comparison runs in CI on three committed
-fixtures: `node bench/golden.mjs --check` (the CI *Check & Lint* job) fails
-when the JS output no longer matches them, and
-`the_ports_match_the_js_on_the_golden_fixtures` when the Rust output does
-not. A hash of the layout JS (everything an input is built from: the
-layouts, `input.js` with its overview pairing `scopePairs`, and the decoder)
-pinned to `LAYOUT_VERSION` fails CI when the JS changes without the port.
+Every layout is computed by the server (`src/layout/`): scope-force (Plain,
+the small-store scope filter and every opened scope), Grid's seeded grid
+layout and the scope overview. The page asks
+`/graph?layout=scope-overview,<style's layout>[,opened]&layout_aspect=…&layout_width=…`
+and draws the `layout` object it gets; it has no layout code of its own
+(only `graph/labels.js`, to re-place the few lit labels when a memory is
+focused). A layout missing from a response that should carry one, or a
+malformed one, is an error the page shows with a *Try again* button.
 
-Encoding (`layout.v = 3`): positions as little-endian f64 in base64,
-one byte per label (the `spotsAt` index, 255 = unplaced), stub ends only
-(straight routes come from positions), scope names and region radii as
-JSON. For 800 memories: ~20 KB (14 KB gzipped) inside a ~450–530 KB
-response; the worker's full output as JSON would be ~150 KB. f64 was kept
-over integer-scaled positions (8.5 KB) because it is exact.
+History: the layouts began as JS in the page (a module worker, with a
+main-thread fallback). The server's were Rust ports held bit for bit to
+that JS by golden fixtures, a hash of the layout JS pinned to
+`LAYOUT_VERSION` and a parity script; Grid's stayed JS-only. All of that
+was retired once the server became the only source: Grid's layout was
+ported too (bit-identical on every comparison case; Grid's screenshots
+diffed at 0 % against the JS-laid-out page before the JS was deleted), and
+the parity machinery was replaced by Rust property tests (output contract,
+determinism, placed labels never overlapping, overview discs never
+overlapping; `src/layout/tests.rs`).
 
-Computation: single-flight per input, at most 2 layouts at once (a request
-that finds both busy goes without), waited for at most 250 ms; a late layout
-still lands in the cache for the next request. scope-force caches its
-width-free core and places the scope names per request, so one entry serves
-every box width.
+Encoding (`layout.v = 4`), keyed by the order of the response's own `nodes`
+and `edges` (no input checksum: the layout rides in the same document):
+positions, label positions and routes as little-endian f64 in base64, one
+byte per label (anchor + placed bit), per-node group indices, the rest as
+JSON; Grid's routes as their points in edge order with one count byte per
+edge. The contract is in `server-layout.js`'s and `layout/mod.rs`'s module
+docs. For 800 memories (s1k, show all): scope-force ~65 KB (36 KB
+gzipped), Grid ~91 KB (19 KB gzipped), inside a ~450–530 KB response. v4
+sends what v3 made the page rebuild (label positions instead of spot
+indices, both route ends instead of stub ends only), for a simpler
+contract at ~40 KB more per graph.
+
+Browser, first paint (`views.mjs --paint-only`, light, 1280 px, DPR 1,
+median of 5, ms; *cold* = the server's layout cache off), before = v3 (the
+worker for Grid, the optional server layout for Plain), after = v4 (every
+layout on the server):
+
+| view | Plain before → after | Grid before → after |
+|---|---|---|
+| s1k show all, cold | 98 → 107 | 254 (worker) → 130 |
+| s1k show all, cached | 80 → 76 | 270 (worker) → 85 |
+| s10k opened scope, cold | 160 → 149 | 197 → 178 |
+| s10k opened scope, cached | 118 → 113 | 135 → 138 |
+
+Plain is unchanged within run-to-run noise (it already had the server's
+layout). Grid's full graph no longer waits for the worker: 254 → 130 ms
+cold, 270 → 85 cached. The opened scope was already the server's for both.
+
+Computation: single-flight per input (a second request for the same layout
+waits for the first), at most 2 computing at once and 16 more queued; a
+request beyond that is a 503 `layout_busy` with `Retry-After: 1`, which the
+page retries (after 1, 2, 3 and 5 s, saying it is laying out the graph)
+before showing an error with a retry. There is no timeout: a request waits
+for its layout. A layout that fails (a non-finite number, a panic in a debug
+build) is a 500 `layout_failed` and is never cached. scope-force caches its
+width-free core and places the scope names per request, so one entry
+serves every box width.
 
 Cache: 32 layouts in memory per process, plus a disk cache (64 MiB, LRU by
 mtime) under `<cache>/engramdb/dashboard/layouts` (0700 dir, 0600 files,
 `ENGRAMDB_DASHBOARD_CACHE_DIR` overrides, `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
-disables both), keyed by SHA-256 of the layout version, the layout JS hash,
-the crate version, the name and the input. Never written into a store.
+disables both), keyed by SHA-256 of the layout version, the crate version,
+the name and the input. Never written into a store.
+
+The figures below were measured when the server's layout was still optional
+(encoding v3, the worker as fallback, a 250 ms wait); they are kept as the
+record of what moving the layout to the server bought.
 
 Browser, Plain, light, 1280 px, release, median of 5 runs, ms; *cold* =
 no layout cached on the server, *cached* = a repeat. Segments: response,
@@ -402,9 +429,9 @@ in all. What cut it, each measured (21-run medians unless noted):
 | base raster in an OffscreenCanvas worker, page fallback | dropped | built and measured: first paint 53 → 96 ms (s1k, DPR 1); the worker's module graph arrives ~20 ms after the layout, its JIT and fonts start cold, and the raster stays on the critical path |
 | Path2D batches cached across draws | kept (already) | a settle that only moves the view reuses the merged paths |
 
-Not cut: the 10k opened scope spends 3.4 ms laying out the scope overview
-on the main thread for its tags' directions (shared with the SVG surface,
-cached when the page comes from the overview).
+(Since cut: the 10k opened scope spent 3.4 ms laying out the scope
+overview on the main thread for its tags' directions; the server now sends
+those directions with the opened scope's layout, `dirs`.)
 
 **DPR 2.** First paint is now below the SVG at every store (above). The
 hover frame was 20–23 ms; it is 9.1–10.4, below the SVG's 10.1–11.7:

@@ -1,7 +1,7 @@
 //! The layout cache: in memory (a small LRU in [`crate::AppState`]) and on
 //! disk, keyed by the layout input's digest ([`super::LayoutInput::digest`]),
-//! with at most one computation per key in flight and at most
-//! [`MAX_COMPUTING`] at once.
+//! with at most one computation per key in flight, at most
+//! [`MAX_COMPUTING`] at once and at most [`MAX_QUEUED`] more waiting.
 //!
 //! **The dashboard's one declared write outside a store.** Every GET is
 //! side-effect free *for stores* (they open read-only, nothing is created
@@ -33,10 +33,15 @@
 //!
 //! **Bounded work.** A key being computed is computed once: later requests
 //! for it wait on the same result ([`Flight::Wait`]). At most
-//! [`MAX_COMPUTING`] keys are computed at once; a request past that gets no
-//! layout ([`Flight::Busy`]) and the page lays out itself, so slow inputs (a
-//! long scope name costs time in the name placement) cannot fill the
-//! blocking pool, whose other users are the store probes.
+//! [`MAX_COMPUTING`] keys are computed at once, so slow inputs cannot fill
+//! the blocking pool, whose other users are the store probes; up to
+//! [`MAX_QUEUED`] more keys wait their turn ([`Lead::permit`], first come
+//! first served), and a request for a new key past that is refused
+//! ([`Flight::Full`]: `graph.rs` answers 503 with `Retry-After`, which the
+//! page retries). Every request waits for its layout however long it takes:
+//! the page has no other way to lay one out. A computation that fails (a
+//! number that is not finite, or a panic) reaches every waiter as an error
+//! and is not cached, so the next request computes it again.
 //!
 //! **Loss paths, all harmless for a cache and all declared here:** a file
 //! that does not parse, carries another digest or another version is
@@ -69,6 +74,8 @@ pub const MEM_ENTRIES: usize = 32;
 pub const DISK_BYTES: u64 = 64 * 1024 * 1024;
 /// Layouts computed at once (module docs, "Bounded work").
 pub const MAX_COMPUTING: usize = 2;
+/// Layouts waiting for a computing slot (module docs, "Bounded work").
+pub const MAX_QUEUED: usize = 16;
 /// A cache file larger than this is not read (none is written that large).
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 /// A temp file older than this is a crash's leftover.
@@ -78,7 +85,9 @@ const MAGIC: &[u8; 4] = b"EDLC";
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-type Slot = watch::Receiver<Option<Arc<Cached>>>;
+/// A computation's result as its waiters see it: `None` until it lands.
+pub type Outcome = Result<Arc<Cached>, Arc<str>>;
+type Slot = watch::Receiver<Option<Outcome>>;
 
 pub struct LayoutCache {
     enabled: bool,
@@ -86,32 +95,49 @@ pub struct LayoutCache {
     /// `None`: memory only (no cache dir, or one refused).
     disk: Option<PathBuf>,
     flights: Arc<Mutex<HashMap<String, Slot>>>,
+    /// [`MAX_COMPUTING`] permits: one per computation running.
     permits: Arc<Semaphore>,
+    /// [`MAX_COMPUTING`] + [`MAX_QUEUED`] permits: one per key led, running
+    /// or waiting for a computing permit.
+    admits: Arc<Semaphore>,
 }
 
 /// What a request for an uncached layout does ([`LayoutCache::begin`]).
 pub enum Flight {
     /// Another request is computing it: wait for that one.
     Wait(Slot),
-    /// Compute it (on the blocking pool), then [`LayoutCache::land`] it.
+    /// Compute it: take a [`Lead::permit`], run it on the blocking pool,
+    /// then [`LayoutCache::land`] it.
     Lead(Lead),
-    /// [`MAX_COMPUTING`] layouts are being computed: go without.
-    Busy,
+    /// [`MAX_COMPUTING`] layouts are being computed and [`MAX_QUEUED`] more
+    /// are waiting: refuse (the caller answers 503).
+    Full,
 }
 
 /// The right to compute one key. Dropped without landing (the computation
-/// panicked), it clears the key so the next request computes it again.
+/// panicked), it clears the key so the next request computes it again, and
+/// its waiters see the channel close.
 pub struct Lead {
     key: String,
-    tx: watch::Sender<Option<Arc<Cached>>>,
+    tx: watch::Sender<Option<Outcome>>,
     flights: Arc<Mutex<HashMap<String, Slot>>>,
-    _permit: OwnedSemaphorePermit,
+    permits: Arc<Semaphore>,
+    _admit: OwnedSemaphorePermit,
 }
 
 impl Lead {
     /// A receiver of this computation's result.
     pub fn subscribe(&self) -> Slot {
         self.tx.subscribe()
+    }
+
+    /// Wait for one of the [`MAX_COMPUTING`] computing slots; hold it while
+    /// computing.
+    pub async fn permit(&self) -> OwnedSemaphorePermit {
+        Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("the layout semaphore is never closed")
     }
 }
 
@@ -163,6 +189,7 @@ impl LayoutCache {
             disk,
             flights: Arc::new(Mutex::new(HashMap::new())),
             permits: Arc::new(Semaphore::new(MAX_COMPUTING)),
+            admits: Arc::new(Semaphore::new(MAX_COMPUTING + MAX_QUEUED)),
         }
     }
 
@@ -196,15 +223,15 @@ impl LayoutCache {
         }
     }
 
-    /// Join the computation of `key` in flight, or lead a new one if a
-    /// permit is free (module docs, "Bounded work").
+    /// Join the computation of `key` in flight, or lead a new one if the
+    /// queue has room (module docs, "Bounded work").
     pub fn begin(&self, key: &str) -> Flight {
         let mut f = self.flights.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(rx) = f.get(key) {
             return Flight::Wait(rx.clone());
         }
-        let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-            return Flight::Busy;
+        let Ok(admit) = Arc::clone(&self.admits).try_acquire_owned() else {
+            return Flight::Full;
         };
         let (tx, rx) = watch::channel(None);
         f.insert(key.to_string(), rx);
@@ -212,12 +239,14 @@ impl LayoutCache {
             key: key.to_string(),
             tx,
             flights: Arc::clone(&self.flights),
-            _permit: permit,
+            permits: Arc::clone(&self.permits),
+            _admit: admit,
         })
     }
 
-    /// Hand a led computation's result to everyone waiting on it.
-    pub fn land(&self, lead: Lead, v: Arc<Cached>) {
+    /// Hand a led computation's result (or its error) to everyone waiting
+    /// on it.
+    pub fn land(&self, lead: Lead, v: Outcome) {
         // Out of the map first, so a request arriving now reads the memory
         // cache (filled before this) rather than a finished flight.
         self.flights
@@ -228,25 +257,30 @@ impl LayoutCache {
     }
 
     /// The layout for `key`: from memory, else from disk, else computed
-    /// (and stored in both). Blocking: call it on the blocking pool.
-    pub fn fill(&self, key: &str, compute: impl FnOnce() -> Cached) -> Arc<Cached> {
+    /// (and stored in both; a failed computation is stored nowhere).
+    /// Blocking: call it on the blocking pool.
+    pub fn fill(
+        &self,
+        key: &str,
+        compute: impl FnOnce() -> Result<Cached, String>,
+    ) -> Result<Arc<Cached>, String> {
         if !self.enabled {
-            return Arc::new(compute());
+            return compute().map(Arc::new);
         }
         if let Some(v) = self.get_mem(key) {
-            return v;
+            return Ok(v);
         }
         if let Some(v) = self.read_disk(key) {
             let v = Arc::new(v);
             self.put_mem(key, Arc::clone(&v));
-            return v;
+            return Ok(v);
         }
-        let v = Arc::new(compute());
+        let v = Arc::new(compute()?);
         self.put_mem(key, Arc::clone(&v));
         if let Err(e) = self.write_disk(key, &v) {
             tracing::debug!("dashboard layout cache: write failed: {e}");
         }
-        v
+        Ok(v)
     }
 
     fn file_of(&self, key: &str) -> Option<PathBuf> {
@@ -276,7 +310,7 @@ impl LayoutCache {
         let v = Cached::from_bytes(body)?;
         // The overview is spliced into the response as text: a corrupt one
         // would make every `/graph` of this key invalid JSON until evicted.
-        if let Cached::Overview(text) = &v {
+        if let Cached::Overview(text) | Cached::Grid(text) = &v {
             serde_json::from_str::<serde::de::IgnoredAny>(text).ok()?;
         }
         // Refresh the LRU stamp on the same handle; a failure only makes it

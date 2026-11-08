@@ -7,8 +7,8 @@
 //! nothing is created.
 //!
 //! **Bounded.** A store can hold thousands of memories; the page lays them
-//! out in a Web Worker and draws them in SVG, which stays responsive to a
-//! couple of thousand memories. Past `limit` (default [`DEFAULT_LIMIT`], at
+//! out on the server (`layout`) and draws them on a canvas or in SVG,
+//! which stays responsive to a couple of thousand memories. Past `limit` (default [`DEFAULT_LIMIT`], at
 //! most [`MAX_LIMIT`]) the memories most worth drawing are kept — the most
 //! connected first, then the most read, then the most critical — and the
 //! response says how many it left out (`total_nodes` vs `shown_nodes`), so a
@@ -37,21 +37,21 @@
 //!
 //! **Layout.** `layout=` (with `layout_aspect=` and `layout_width=`, as the
 //! page rounds them; see [`crate::layout::LayoutRequest`]) adds `layout`:
-//! the page's layout of exactly this response, computed here
-//! ([`crate::layout`]) so the page skips its own. A `summary` response
-//! carries the scope overview when `layout=` names `scope-overview`; a graph
-//! carries scope-force grouped by sub-scope when `layout=` names `opened`,
-//! `top_scope=` names one scope and more than `layout_open_over=N` memories
-//! pass the status filters (the page's opened scope), else scope-force by
-//! top scope when `layout=` names `scope-force`; anything else carries none.
-//! Computed on the blocking pool, once per input at a time and at most
-//! `layout::cache::MAX_COMPUTING` at once (a request past that gets none),
-//! under `AppState::layout_timeout` ([`LAYOUT_TIMEOUT`]: about what the
-//! page's worker takes), and cached by the input's digest (in memory and
-//! under the OS cache dir, never in a store: `layout::cache`); a layout not
-//! ready in time is left out (the page lays out as before) and still cached
-//! when it finishes. With `--assets-dir` the layout is sent only while the
-//! layout JS on disk is the binary's (`AppState::server_layouts_match`).
+//! the layout of exactly this response, computed here ([`crate::layout`]),
+//! which the page draws as sent (it has no layout code of its own). A
+//! `summary` response carries the scope overview when `layout=` names
+//! `scope-overview`; a graph carries scope-force grouped by sub-scope when
+//! `layout=` names `opened`, `top_scope=` names one scope and more than
+//! `layout_open_over=N` memories pass the status filters (the page's opened
+//! scope, with `dirs` for its tags, from the overview of the same box),
+//! else the style's own by top scope when `layout=` names `scope-force` or
+//! `grid`; anything else carries none. The response always waits for its layout:
+//! computed on the blocking pool, once per input at a time, at most
+//! `layout::cache::MAX_COMPUTING` at once with `MAX_QUEUED` more waiting
+//! (a request for a new layout past that is a 503 `layout_busy` with
+//! `Retry-After`), and cached by the input's digest (in memory and under
+//! the OS cache dir, never in a store: `layout::cache`). A layout that
+//! fails is a 500 `layout_failed`, never a response without one.
 //!
 //! **Far ends.** A same-store edge whose target is gone is returned with
 //! `state: "dangling"` (drawn as a stub to a deleted-memory mark); one into
@@ -72,7 +72,7 @@ use serde::Serialize;
 
 use crate::api::{color_slots, ok, open, query, status_str, top_scope_of, wire, ApiResult};
 use crate::layout::{
-    cache::Flight, overview::OverviewInput, EdgeFacts, ForceInput, Groups, LayoutInput,
+    cache::Flight, overview::OverviewInput, Cached, EdgeFacts, ForceInput, Groups, LayoutInput,
     LayoutRequest, NodeFacts,
 };
 use crate::{ApiError, AppState};
@@ -83,10 +83,6 @@ pub const DEFAULT_LIMIT: usize = 800;
 pub const MAX_LIMIT: usize = 2000;
 /// Foreign stores probed per request; edges into any beyond are `unknown`.
 const MAX_FOREIGN_STORES: usize = 8;
-/// How long a response waits for its layout (module docs): about what the
-/// page's worker takes for a large graph, so a slow layout never makes the
-/// page slower than laying out itself would.
-pub const LAYOUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Serialize, Default)]
 struct Reads {
@@ -346,53 +342,85 @@ fn overview_input(
     crate::layout::build_overview_input(&scopes, &rows, req.aspect, req.width)
 }
 
-/// The encoded layout for `input`: from the cache, else computed on the
-/// blocking pool within the state's layout timeout, once per key at a time
-/// (module docs), then finished for the request's width on the blocking
-/// pool within the same timeout. `None` when not ready, busy, or not the page's layout.
+/// A layout that could not be computed (module docs): the page shows it.
+fn layout_failed(why: impl std::fmt::Display) -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "layout_failed",
+        format!("the graph layout failed: {why}"),
+    )
+}
+
+/// What the cache holds for `input` (digest `key`): from memory, else
+/// computed (or read from disk) on the blocking pool once per key at a time,
+/// waiting for a computing slot behind at most `MAX_QUEUED` others (module
+/// docs). The computation runs in its own task, so a request that gives up
+/// still leaves its layout cached.
+async fn cached_layout(
+    state: &Arc<AppState>,
+    input: &Arc<LayoutInput>,
+    key: &str,
+) -> Result<Arc<Cached>, ApiError> {
+    if let Some(v) = state.layouts.get_mem(key) {
+        return Ok(v);
+    }
+    let mut rx = match state.layouts.begin(key) {
+        Flight::Full => {
+            return Err(ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "layout_busy",
+                "the dashboard is laying out other graphs; try again in a moment",
+            ))
+        }
+        Flight::Wait(rx) => rx,
+        Flight::Lead(lead) => {
+            let rx = lead.subscribe();
+            let (st, inp, k) = (Arc::clone(state), Arc::clone(input), key.to_string());
+            tokio::spawn(async move {
+                let permit = lead.permit().await;
+                let st2 = Arc::clone(&st);
+                let done = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    st2.layouts.fill(&k, || inp.run(&k))
+                })
+                .await;
+                // A panic drops the lead unlanded: its waiters see the
+                // channel close.
+                if let Ok(r) = done {
+                    st.layouts.land(lead, r.map_err(Arc::from));
+                }
+            });
+            rx
+        }
+    };
+    let outcome = match rx.wait_for(Option::is_some).await {
+        Ok(v) => v.clone(),
+        Err(_) => None,
+    };
+    match outcome {
+        Some(Ok(v)) => Ok(v),
+        Some(Err(why)) => Err(layout_failed(why)),
+        None => Err(layout_failed("the layout computation stopped")),
+    }
+}
+
+/// The encoded layout for `input` ([`cached_layout`]), finished for the
+/// request's width on the blocking pool (the scope names' placement grows
+/// with their length, and they come from memory files), with an opened
+/// scope's `dirs`.
 async fn layout_of(
     state: &Arc<AppState>,
     input: LayoutInput,
     groups: Groups,
-) -> Option<crate::layout::cache::Encoded> {
-    let deadline = tokio::time::Instant::now() + state.layout_timeout;
-    if matches!(state.assets, crate::assets::AssetSource::Disk(_)) {
-        let st = Arc::clone(state);
-        let current = tokio::task::spawn_blocking(move || st.server_layouts_match());
-        if !current.await.unwrap_or(false) {
-            return None;
-        }
-    }
+    dirs: Option<serde_json::Value>,
+) -> Result<crate::layout::cache::Encoded, ApiError> {
     let input = Arc::new(input);
     let key = input.digest();
-    let cached = match state.layouts.get_mem(&key) {
-        Some(v) => v,
-        None => {
-            let mut rx = match state.layouts.begin(&key) {
-                Flight::Busy => return None,
-                Flight::Wait(rx) => rx,
-                Flight::Lead(lead) => {
-                    let rx = lead.subscribe();
-                    let (st, inp, k) = (Arc::clone(state), Arc::clone(&input), key.clone());
-                    tokio::task::spawn_blocking(move || {
-                        let v = st.layouts.fill(&k, || inp.run(&k));
-                        st.layouts.land(lead, v);
-                    });
-                    rx
-                }
-            };
-            let ready = tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await;
-            match ready {
-                Ok(Ok(v)) => Arc::clone(v.as_ref()?),
-                _ => return None,
-            }
-        }
-    };
-    // Finishing scope-force places the scope names for this width: CPU work
-    // whose cost grows with the names' length (they come from memory
-    // files), so it runs on the blocking pool too, within the same deadline.
-    let render = tokio::task::spawn_blocking(move || input.render(&cached, &key, groups));
-    tokio::time::timeout_at(deadline, render).await.ok()?.ok()?
+    let cached = cached_layout(state, &input, &key).await?;
+    tokio::task::spawn_blocking(move || input.render(&cached, &key, groups, dirs.as_ref()))
+        .await
+        .map_err(layout_failed)?
+        .map_err(layout_failed)
 }
 
 /// A memory's sub-scope: the first two segments of its first logical scope,
@@ -638,7 +666,7 @@ pub(crate) async fn project_graph(
         let layout = match layout_req {
             Some(req) if req.overview => {
                 let input = overview_input(&scopes, &scope_edges, &req);
-                layout_of(&state, LayoutInput::Overview(input), Groups::Top).await
+                Some(layout_of(&state, LayoutInput::Overview(input), Groups::Top, None).await?)
             }
             _ => None,
         };
@@ -884,8 +912,34 @@ pub(crate) async fn project_graph(
     };
     let layout = match (layout_req, groups) {
         (Some(req), Some(groups)) if !nodes.is_empty() => {
+            // An opened scope's tags point where each far scope lies on the
+            // overview of the same box (the same cached overview).
+            let dirs = match (&stub_scopes, &scopes_wanted) {
+                (Some(far), Some(ls)) if groups == Groups::Sub && !far.is_empty() => {
+                    let input = Arc::new(LayoutInput::Overview(overview_input(
+                        &scopes,
+                        &scope_edges,
+                        &req,
+                    )));
+                    let key = input.digest();
+                    match &*cached_layout(&state, &input, &key).await? {
+                        Cached::Overview(text) => {
+                            let me = if ls[0] == "-" { "" } else { ls[0] };
+                            let names: Vec<&str> = far.iter().map(|f| f.name.as_str()).collect();
+                            crate::layout::overview_dirs(text, me, &names)
+                        }
+                        Cached::Force(_) | Cached::Grid(_) => None,
+                    }
+                }
+                _ => None,
+            };
             let input = force_input(&nodes, &edges, &req, groups);
-            layout_of(&state, LayoutInput::Force(input), groups).await
+            Some(layout_of(&state, LayoutInput::Force(input), groups, dirs).await?)
+        }
+        // Grid's own layout, by top scope (never an opened scope's).
+        (Some(req), None) if req.grid && !nodes.is_empty() => {
+            let input = force_input(&nodes, &edges, &req, Groups::Top);
+            Some(layout_of(&state, LayoutInput::Grid(input), Groups::Top, None).await?)
         }
         _ => None,
     };

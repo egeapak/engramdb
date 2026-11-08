@@ -10,6 +10,8 @@
 // so the overview of a 10 000-memory store is the whole store. The kind /
 // proposed / rejected chips re-count the bands in place (graph/tally.js);
 // the discs never move, because the layout's input is the unfiltered pairs.
+// The layout is the server's (graph/server-layout.js), sent with the
+// summary and matched to the response's scopes and pairs by name.
 //
 // A band under max(2, 12% of the largest) relations is left out (the note
 // under the graph says how many); a left-out pair with a contradiction keeps
@@ -21,9 +23,7 @@ import { h, s, mount } from '../dom.js';
 import { fmt, plural } from '../format.js';
 import { scopeName, slot } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
-import { runNamedLayout } from '../graph/layouts.js';
-import { fromServer } from '../graph/server-layout.js';
-import { overviewInput, scopePairs as pairRows } from '../graph/input.js';
+import { decodeOverview } from '../graph/server-layout.js';
 import { filtered, merge, dominant } from '../graph/tally.js';
 import { projHead, secHead, alertBanner } from './common.js';
 
@@ -40,55 +40,43 @@ const SPOTS = [0.5, 0.42, 0.58, 0.34, 0.66, 0.26, 0.74, 0.18, 0.82];
 /** Pairs the table lists before "Show all". */
 const PAIRS_PAGE = 50;
 
-const overviewCache = new Map();
-
 /** The scope last opened from the overview, per project, so Back refocuses its disc. */
 const lastOpened = new Map();
 
 /**
- * The overview layout for this input, cached by input (a few): the
- * server's (`server`, graph/server-layout.js) when it is for exactly this
- * input, else computed here. `source` says which, for the browser bench.
- */
-function layoutOf(input, server) {
-  const key = JSON.stringify(input);
-  let source = 'cache';
-  if (!overviewCache.has(key)) {
-    const fromSrv = server ? fromServer(server, input) : null;
-    source = fromSrv ? 'server' : 'main';
-    overviewCache.set(key, fromSrv || runNamedLayout(input));
-    while (overviewCache.size > 4) overviewCache.delete(overviewCache.keys().next().value);
-  }
-  return { lay: overviewCache.get(key), source };
-}
-
-/**
- * Pairs of different top scopes, unordered, each the sum of its server rows
- * (a directed kind has one row per direction): `[{ a, b, n, tally }]`. The
- * pairing and order are graph/input.js's (hashed with the layouts, since the
- * overview's band k is pair k); `n` is the pair's relation count.
+ * Pairs of different top scopes, unordered (`a` < `b`), each the sum of its
+ * server rows (a directed kind has one row per direction): `[{ a, b, n,
+ * tally }]`, `n` the pair's relation count.
  */
 export function scopePairs(g) {
-  return pairRows(g.scope_edges).map((p) => ({ a: p.a, b: p.b, n: p.n, tally: p.rows.reduce(merge, { count: 0, kinds: {} }) }));
+  const pairs = new Map();
+  for (const row of g.scope_edges || []) {
+    if (row.a === row.b) continue;
+    const [a, b] = row.a < row.b ? [row.a, row.b] : [row.b, row.a];
+    const key = JSON.stringify([a, b]);
+    if (!pairs.has(key)) pairs.set(key, { a, b, n: 0, tally: { count: 0, kinds: {} } });
+    const p = pairs.get(key);
+    p.n += row.count || 0;
+    p.tally = merge(p.tally, row);
+  }
+  return pairs;
 }
 
 /**
- * The overview layout of `g`'s scopes for a `width` × `width · aspect` box
- * (also read by an opened scope, for the direction of each far scope).
- * Returns { lay, scopes, pairs, index: name → disc }.
+ * The server's overview layout of `g` (a summary with `layout`), with the
+ * response's scopes and pairs in the layout's disc and band order, matched
+ * by name. Returns { lay, scopes, pairs, index: name → disc }; throws when
+ * the layout is missing or does not name the response's scopes.
  */
-export function overviewLayout(g, width, aspect) {
-  const scopes = g.scopes.filter((l) => l.count > 0);
-  const index = new Map(scopes.map((l, i) => [l.name, i]));
-  const pairs = scopePairs(g).filter((p) => index.has(p.a) && index.has(p.b));
-  const input = overviewInput(
-    scopes,
-    pairs.map((p) => ({ a: p.a, b: p.b, n: p.n })),
-    width,
-    aspect,
-  );
-  const { lay, source } = layoutOf(input, g.layout && g.layout.name === 'scope-overview' ? g.layout : null);
-  return { lay, source, scopes, pairs, index };
+export function overviewLayout(g) {
+  const lay = decodeOverview(g.layout);
+  const byName = new Map(g.scopes.map((l) => [l.name, l]));
+  const scopes = lay.ids.map((id) => byName.get(id));
+  if (scopes.some((l) => !l)) throw new Error("The server's overview layout names a scope this response does not have. Reload the page.");
+  const index = new Map(lay.ids.map((id, i) => [id, i]));
+  const tallies = scopePairs(g);
+  const pairs = lay.pairs.map(([a, b]) => tallies.get(JSON.stringify([a, b])) || { a, b, n: 0, tally: { count: 0, kinds: {} } });
+  return { lay, scopes, pairs, index };
 }
 
 /** The point at `t` on a band's quadratic curve. */
@@ -107,7 +95,7 @@ function kindWords(ft) {
 
 /**
  * Render the overview page into `main`. `env` carries what the graph view
- * owns: { t, f, hashOf, filters(box, onChange), styleControl }.
+ * owns: { t, f, hashOf, filters(box, onChange), styleControl, failed(e) }.
  */
 export function renderOverview(main, ctx, g, env) {
   const { t, f, hashOf } = env;
@@ -158,10 +146,15 @@ export function renderOverview(main, ctx, g, env) {
     tableBox,
   );
 
-  const width = graphBox.clientWidth || 800;
-  const aspect = Math.min(3, Math.max(0.3, (graphBox.clientHeight || 500) / width));
-  const { lay, source, scopes, pairs, index } = overviewLayout(g, width, aspect);
-  performance.mark('graph:overview-layout', { detail: { source } });
+  let laid;
+  try {
+    laid = overviewLayout(g);
+  } catch (e) {
+    mount(graphBox, env.failed(e));
+    return;
+  }
+  const { lay, scopes, pairs, index } = laid;
+  performance.mark('graph:overview-layout', { detail: { source: 'server' } });
   const W = lay.bounds.w;
   const H = lay.bounds.h;
   const P = (i) => [lay.pos[2 * i], lay.pos[2 * i + 1]];

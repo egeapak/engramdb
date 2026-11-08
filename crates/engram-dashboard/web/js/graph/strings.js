@@ -15,7 +15,9 @@ export const CORE = {
   title: (project) => `${project} graph`,
   intro: () => ['Each memory is shaped by its type and grouped by its top-level scope.', 'Size follows reads.'],
   loading: 'Loading graph…',
-  layingOut: (n) => `Laying out ${plural(n, 'memory', 'memories')}…`,
+  layingOutServer: 'Laying out the graph…',
+  layoutBusy: 'The dashboard is laying out other graphs; trying again…',
+  retry: 'Try again',
   empty: 'No memories to draw yet.',
   emptyScope: 'No memories in this top-level scope with these filters.',
   graphAria: (project, n) =>

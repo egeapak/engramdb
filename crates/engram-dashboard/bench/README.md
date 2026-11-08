@@ -1,91 +1,71 @@
 # Graph layout bench
 
-A developer tool for the dashboard's graph layouts (`web/js/graph/layouts.js`).
-It lives outside `web/`, so `build.rs` never embeds it in the binary and the
-frontend tests (wording, imports, CSP) never scan it. Needs Node 22 or newer
-(the web modules are plain ES modules; Node detects that on its own).
+A developer tool for the dashboard's graph layouts. Every layout is computed
+by the server (`src/layout/`: scope-force, Grid's, the scope overview); the
+page draws what `/graph` sends and has no layout code of its own. This
+folder lives outside `web/`, so `build.rs` never embeds it in the binary and
+the frontend tests (wording, imports, CSP) never scan it. Needs Node 22 or
+newer (the web modules are plain ES modules; Node detects that on its own).
 
 ```bash
 cd crates/engram-dashboard
-node bench/layout.mjs                                  # n = 60, 1000, 2000, 300x8000, 2000x10000; every layout
-node bench/layout.mjs --n 300x8000                     # N memories with E relations (the dense small graph)
-node bench/layout.mjs --n 1000 --layouts scope-force --runs 9 --cold 5
-node bench/layout.mjs --graph saved-graph.json         # a real store (see below)
-node bench/layout.mjs --json                           # one JSON row per (layout, n)
-node bench/details.mjs                                 # the details panel's direction words from both ends (exits 1 on a wrong one)
-LAYOUT_OPTIONS='{"topPull":0.03}' node bench/layout.mjs --layouts scope-force
+node bench/layout.mjs --url '<token URL of a running dashboard>'   # every project: scope-force and grid
+node bench/layout.mjs --url '…' --projects ID --box 1.6x360        # one project, a phone's box
+node bench/layout.mjs --graph saved-graph.json                     # a saved /graph response that carries a layout
+node bench/layout.mjs                                              # the prototype baseline on n = 60, 1000, 2000, 300x8000, 2000x10000
+node bench/layout.mjs --json                                       # one JSON row per (layout, graph)
+node bench/details.mjs                                             # the details panel's direction words from both ends (exits 1 on a wrong one)
 ```
 
 Each row reports:
 
 | column | meaning |
 |---|---|
-| cold ms | the first call in a fresh Node process (median of `--cold` processes): roughly what the page's worker pays |
-| warm ms | median of `--runs` calls after a warm-up |
 | crossings | proper crossings between straight relations |
 | edge/NN | mean relation length / median nearest-neighbour gap, after fitting to 1240 × 780 |
 | overlap % | memories under 6 px from another at that fit |
 | same scope % | share of each memory's 5 nearest neighbours in its top scope |
 | labels placed | labels that found a free spot (the rest show only on hover) |
-| deterministic | a second run gave identical positions and routes |
-| contract | the output contract in `layouts.js` (`pos`, `routes`, `labels`, `bounds`) |
+| contract | the output contract in `web/js/graph/layouts.js` (`pos`, `routes`, `labels`, `bounds`), decoded as the page decodes it |
+| same again | (`--url`) a second request gave the same layout |
+| ms | (`--url`) the `/graph` response time with the layout, and without `layout=` |
+
+Exits 1 when a layout breaks the contract or differs on the second request.
+The server's own compute time is the Criterion bench's
+(`benches/dashboard_graph.rs`, the `*_layout` cases); start the dashboard
+with `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` for the cold `ms` here.
 
 Files:
 
-- `layout.mjs`: the harness. `toInput(graph, layout)` builds the same input
-  `views/graph.js` does; `fromApi(json)` turns a saved
-  `GET /api/projects/{id}/graph?limit=2000` response into a graph.
+- `layout.mjs`: the harness. `fromApi(json)` turns a `/graph` response into
+  the metrics' graph.
 - `data.mjs`: the deterministic synthetic generator (about ten top scopes,
   nested sub-scopes, skewed sizes, 0.7 relations per memory, mostly inside a
-  scope).
+  scope), for the prototype baseline.
 - `metrics.mjs`: the quality metrics.
-- `browser/`: the Playwright bench of the real page (`browser/README.md`);
-  its cold-layout figure posts `toInput(fromApi(…))` to a fresh worker, as
-  described below.
+- `browser/`: the Playwright bench of the real page (`browser/README.md`).
 - `prototype.mjs`, `prototype-common.mjs`: the reviewer's `force-scoped`
   prototype, kept as a baseline only.
 
-To bench a real store, save its graph with the dashboard's token (shown with
-`engramdb dashboard --no-open`):
+To save a real store's graph with its layout, use the dashboard's token
+(shown with `engramdb dashboard --no-open`):
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://127.0.0.1:$PORT/api/projects/$ID/graph?limit=2000" > saved-graph.json
+  "http://127.0.0.1:$PORT/api/projects/$ID/graph?limit=2000&layout=scope-force&layout_aspect=0.6&layout_width=1280" > saved-graph.json
 ```
 
-## Server-side layout parity
+## Layout tests
 
-`node bench/server-layout.mjs --url '<token URL of a running dashboard>'
-[--scope NAME] [--boxes 0.6x1280,1.6x360]` asks every available project's
-`/graph` for what the page asks (the overview's summary, one scope opened —
-`--scope`, default the store's largest — and show all), once per box
-(aspect × width), with a server layout (`src/layout/`). It builds the
-worker's input from the same response with the page's own
-`web/js/graph/input.js`, runs the JS layout here and compares every key of
-the two outputs with `Object.is`: the largest difference is 0 only when the
-bits are the same (there is no tolerance). It also reports labels placed,
-crossings, JS cold / warm ms, the response time with and without `layout=`,
-and the encoded layout's size against integer encodings, raw and gzipped.
-Exits 1 on any difference. Start the dashboard with
-`ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` for the server's cold figure. With
-`--assets-dir`, the server lays out only while the files on disk are the
-layout JS the binary was built with.
-
-Node is a proxy for the browser. To time the real thing, post the same input
-to `js/graph/layout-worker.js` in a fresh Chromium worker (Playwright), once
-with a one-memory input first so the timing excludes module loading.
-
-## Golden fixtures
-
-`node bench/golden.mjs` writes `src/layout/fixtures/*.json`: three
-deterministic `/graph`-shaped responses (top scopes with stubs and labels
-nudged; one scope by sub-scope at phone width; the overview), with what the
-page's JS lays out from them, doubles as base64 little-endian. The Rust test
-`the_ports_match_the_js_on_the_golden_fixtures` builds the same inputs with
-its ports and compares every double bit for bit. `--check` exits 1 when the
-committed fixtures differ from what the JS writes now. Regenerate after
-changing a layout JS file and its port; the pin test
-(`the_layout_js_is_pinned_to_the_layout_version`) says when.
+The layouts' properties are Rust tests (`src/layout/tests.rs`): the output
+contract (finite numbers, routes from their memories, placed labels never
+overlapping, everything inside the bounds), determinism (the same input
+gives the same bytes, also through the cache's binary form), overview discs
+never overlapping, and a layout that is not finite being an error, never
+sent. They run on generated graphs and on three `/graph`-shaped inputs in
+`src/layout/fixtures/` (long and non-ASCII scope names and summaries,
+stubs, one scope by sub-scope at phone width, a 14-scope overview). There
+is no JS copy to compare against any more.
 
 ## Relation geometry check
 
