@@ -222,6 +222,24 @@ pub fn is_hook_invocation(args: &[std::ffi::OsString]) -> bool {
     false
 }
 
+/// The global registry, or — for a hook only — `None` with a warning when it
+/// cannot be resolved (no config directory). A hook then runs unresolved
+/// rather than exiting non-zero, which Claude Code would report on every
+/// tool call.
+fn registry_or_hook_fallback(
+    registry: engramdb::storage::Result<FileRegistry>,
+    is_hook: bool,
+) -> Result<Option<FileRegistry>> {
+    match registry {
+        Ok(registry) => Ok(Some(registry)),
+        Err(e) if is_hook => {
+            tracing::warn!("engramdb hook: registry unavailable (continuing unresolved): {e}");
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Run a hook in this process: the `Hook` arm of [`run`], also reached early
 /// when the registry cannot be opened. Fails open: every error is logged and
 /// `Ok(())` returned.
@@ -349,8 +367,32 @@ pub async fn run(cli: Cli) -> Result<()> {
     // Create output formatter
     let formatter = OutputFormatter::new(cli.format, cli.json, cli.no_color);
 
-    // Create global file-backed registry for all commands
-    let registry = FileRegistry::global()?;
+    // Create global file-backed registry for all commands. A hook must not
+    // fail on it (no resolvable config dir, an unwritable one): it runs
+    // unresolved with no registry, the same degraded mode as a failed
+    // worktree resolution below.
+    let registry = match registry_or_hook_fallback(
+        FileRegistry::global(),
+        matches!(cli.command, Command::Hook { .. }),
+    )? {
+        Some(registry) => registry,
+        None => {
+            if let Command::Hook { command } = cli.command {
+                let config_path = dir.join(".engramdb").join("config.toml");
+                let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+                return dispatch_hook(
+                    command,
+                    &dir,
+                    hook_input,
+                    in_process_flag,
+                    config.stats.enabled,
+                    started,
+                )
+                .await;
+            }
+            unreachable!("registry_or_hook_fallback returns None only for a hook");
+        }
+    };
 
     // If we're inside a linked git worktree, transparently route memory
     // operations to the main worktree's project: ensure it is initialized,
@@ -960,39 +1002,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Hook { command } => {
-            // Hooks fire on every Read/Write/Edit and never create memories —
-            // they deliberately skip provider resolution (no `backend`), see
-            // `build_engine_without_providers`. The one model use is
-            // UserPromptSubmit's situation classifier: a running daemon's
-            // embedding model, else the embedding model alone in-process
-            // (`--in-process` skips the daemon).
-            let Some(call) = command.as_ref().and_then(commands::hook::hook_call) else {
-                // Version skew: the Claude Code hook config names an event
-                // this binary predates (or is a bare `engramdb hook`). Report
-                // on stderr and exit 0 — see `warn_unknown_hook`.
-                let name = match &command {
-                    Some(HookCommand::Unknown(args)) => args.first().map(String::as_str),
-                    _ => None,
-                };
-                commands::hook::warn_unknown_hook(name);
-                return Ok(());
-            };
-            let input = hook_input.take().unwrap_or_else(commands::hook::read_stdin);
-            let result = commands::hook::run_in_process(&call, &dir, &input, in_process_flag).await;
-            if config.stats.enabled {
-                let session_id = commands::hook::event_session_id(&input);
-                commands::hook::record_hook_stats(
-                    &dir,
-                    call.name(),
-                    started.elapsed(),
-                    result.is_ok(),
-                    session_id.as_deref(),
-                );
-            }
-            if let Err(e) = result {
-                tracing::warn!("engramdb hook failed (continuing without context): {e}");
-            }
-            Ok(())
+            dispatch_hook(
+                command,
+                &dir,
+                hook_input,
+                in_process_flag,
+                config.stats.enabled,
+                started,
+            )
+            .await
         }
         // `discover` is the one `projects` subcommand that rebuilds an index
         // and therefore needs model providers, so it is dispatched here
@@ -1085,6 +1103,20 @@ mod tests {
     use super::*;
     use engramdb::daemon::DaemonPolicy;
     use engramdb::types::DaemonConfig;
+
+    /// A hook must not exit non-zero because the registry path cannot be
+    /// resolved (on Linux `dirs` falls back to the passwd entry, so the real
+    /// failure cannot be forced from a tier-2 test; the branch is tested here).
+    #[test]
+    fn a_hook_without_a_registry_falls_back() {
+        let err = || {
+            Err(engramdb::storage::StorageError::Validation(
+                "Could not determine config directory".to_string(),
+            ))
+        };
+        assert!(matches!(registry_or_hook_fallback(err(), true), Ok(None)));
+        assert!(registry_or_hook_fallback(err(), false).is_err());
+    }
 
     #[test]
     fn is_hook_invocation_table() {

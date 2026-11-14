@@ -1985,17 +1985,25 @@ pub fn warn_unparseable_hook_args(error_line: &str) {
 /// context on exit 0, so writing there would quietly poison every prompt with
 /// a diagnostic.
 pub fn warn_unknown_hook(name: Option<&str>) {
+    use std::io::Write as _;
     let supported = crate::supported_hook_subcommands().join(", ");
-    match name {
-        Some(name) => eprintln!(
+    // `writeln!` on a locked handle, not `eprintln!`: a closed stderr must not
+    // panic a hook (the release profile aborts on panic).
+    let mut err = std::io::stderr().lock();
+    let _ = match name {
+        Some(name) => writeln!(
+            err,
             "engramdb {} does not support `hook {name}`. Your Claude Code hook \
              configuration is newer than this binary — reinstall with \
              `cargo install --git https://github.com/egeapak/engramdb --force`. \
              Supported here: {supported}. (Continuing without context; this hook is a no-op.)",
             env!("CARGO_PKG_VERSION"),
         ),
-        None => eprintln!("engramdb hook: no hook event given. Expected one of: {supported}."),
-    }
+        None => writeln!(
+            err,
+            "engramdb hook: no hook event given. Expected one of: {supported}."
+        ),
+    };
 }
 
 /// The wire form of a hook subcommand, or `None` for
@@ -2232,19 +2240,50 @@ async fn run_session_end_isolated(input: &str, dir: &Path) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("session-end thread ended without a result"))?
 }
 
+/// The most stdin a hook reads: half the daemon's 64 MiB frame cap, because
+/// the `Hook` frame carries stdin JSON-escaped and escaping can double it.
+pub const MAX_HOOK_STDIN: u64 = 32 * 1024 * 1024;
+
 /// Read the hook event from stdin. Hooks must never fail on their input, so
 /// a closed stdin reads as empty and invalid UTF-8 is replaced.
+///
+/// Bounded by [`MAX_HOOK_STDIN`]. Declared loss path: an event larger than
+/// the cap is cut, fails to parse, and the hook returns no context (a warning
+/// says so). No read timeout: Claude Code owns the hook timeout.
 pub fn read_stdin() -> String {
+    let (text, capped) = read_capped(std::io::stdin().lock(), MAX_HOOK_STDIN);
+    if capped {
+        tracing::warn!(
+            "engramdb hook: event on stdin exceeds {MAX_HOOK_STDIN} bytes; ignoring it (no context)"
+        );
+    }
+    text
+}
+
+/// Read at most `cap` bytes from `r`; `true` when more was available.
+pub(crate) fn read_capped(r: impl Read, cap: u64) -> (String, bool) {
     let mut bytes = Vec::new();
-    let _ = std::io::stdin().read_to_end(&mut bytes);
-    String::from_utf8_lossy(&bytes).into_owned()
+    // One byte over the cap tells "exactly cap" from "more than cap".
+    let _ = r.take(cap.saturating_add(1)).read_to_end(&mut bytes);
+    let capped = bytes.len() as u64 > cap;
+    if capped {
+        bytes.truncate(cap as usize);
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), capped)
 }
 
 /// Print a hook's output: the hook protocol document Claude Code parses off
 /// stdout.
+///
+/// Never `println!`: it panics when stdout is closed (Claude Code gave up on
+/// the hook), and the release profile aborts on panic. A failed write is
+/// ignored; nobody is reading.
 pub fn print_hook_output(output: Option<&str>) {
+    use std::io::Write as _;
     if let Some(json) = output {
-        println!("{}", json);
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{json}");
+        let _ = out.flush();
     }
 }
 
@@ -5229,5 +5268,17 @@ mod daemon_executor_tests {
         assert_eq!(project.project_id, store.project_id);
         assert_eq!(project.session_id.as_deref(), Some("sess-9"));
         assert!(project.stats_enabled);
+    }
+
+    /// stdin is read through a cap: an over-cap event is cut (and flagged),
+    /// never read without bound into memory.
+    #[test]
+    fn read_capped_truncates_at_the_cap() {
+        let (text, capped) = read_capped(std::io::Cursor::new(b"abcdef".to_vec()), 4);
+        assert_eq!(text, "abcd");
+        assert!(capped);
+        let (text, capped) = read_capped(std::io::Cursor::new(b"abcd".to_vec()), 4);
+        assert_eq!(text, "abcd");
+        assert!(!capped, "exactly the cap is not over it");
     }
 }

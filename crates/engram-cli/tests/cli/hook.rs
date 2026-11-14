@@ -449,3 +449,51 @@ fn supported_hook_subcommands_matches_cli() {
     // leak into the list.
     assert_eq!(names.len(), 6, "unexpected hook subcommands: {names:?}");
 }
+
+/// Claude Code can give up on a hook and close its end of stdout before the
+/// hook prints. `println!` panics on that write (exit 101 in debug, an abort
+/// under the release profile's `panic = "abort"`); the hook must exit 0.
+#[cfg(unix)]
+#[test]
+fn hook_with_closed_stdout_exits_zero() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    #[allow(deprecated)]
+    let bin = assert_cmd::cargo::cargo_bin("engramdb");
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "--dir",
+            project.path().to_str().unwrap(),
+            "hook",
+            "session-start",
+        ])
+        .env("ENGRAMDB_REGISTRY_PATH", state.path().join("registry.json"))
+        .env("ENGRAMDB_DATA_DIR", state.path().join("data"))
+        .env("ENGRAMDB_CONFIG_DIR", state.path().join("config"))
+        .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
+        .env("ENGRAMDB_OFFLINE", "1")
+        .env("ENGRAMDB_IN_PROCESS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Close the read end before the hook can write: it is still blocked on
+    // stdin, which only reaches EOF below.
+    drop(child.stdout.take());
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        let _ = stdin.write_all(b"{\"session_id\":\"s1\"}");
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hook must exit 0 with stdout closed: {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
