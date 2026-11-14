@@ -82,8 +82,13 @@ updates:
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
 
+  # Every `uses:` is pinned to a commit SHA with the version in a trailing
+  # comment; Dependabot updates both. "/" covers .github/workflows; a composite
+  # action's own `uses:` lines are only seen when its directory is listed.
   - package-ecosystem: github-actions
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/install-onnxruntime"
     schedule:
       interval: monthly
     commit-message:

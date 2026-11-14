@@ -5,8 +5,18 @@ on:
     tags:
       - "v*"
 
+# Read-only by default. Only the `release` job, which publishes, gets a write
+# token (see its `permissions`). The test and build jobs run a build script
+# and proc-macro of every dependency; a workflow-wide `contents: write` handed
+# each of them a token that can rewrite tags and releases.
 permissions:
-  contents: write
+  contents: read
+
+# Every action in this repository's workflows is pinned to a full commit SHA,
+# with the released version in a trailing comment. A tag such as `@v2` can be
+# moved to different code by whoever controls the action's repository; a SHA
+# cannot. Dependabot (`github-actions` in .github/dependabot.yml) bumps the
+# SHA and the comment together.
 
 # No archive contains an ONNX Runtime — not statically linked, not shipped
 # alongside. Every binary resolves one at startup from the user's system, and
@@ -37,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert tag matches manifest and workspace versions
         run: |
           tag_ver="${GITHUB_REF_NAME#v}"
@@ -74,7 +84,7 @@ jobs:
       # report (see .config/nextest.toml).
       NEXTEST_PROFILE: ci
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
@@ -82,12 +92,12 @@ jobs:
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Install nextest
         # Prebuilt binary, same rationale as ci.yml: `cargo install` compiles
         # nextest from source (~7 min on a cache miss).
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -113,22 +123,27 @@ jobs:
         # `if: always()`: the report matters most when a test failed or was
         # killed by the slow-test limit.
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-release-test
           path: target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: warn
 
+  # None of the four build jobs restores a Rust build cache
+  # (`Swatinem/rust-cache` is used by `test` only). A cache entry is restored
+  # without verification, so a poisoned one would end up inside a published
+  # binary. The price is a cold build per target; the LTO release build redoes
+  # the expensive part anyway.
   build-arm:
     needs: [version-check, test]
     runs-on: macos-15
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Cache Homebrew packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -140,8 +155,6 @@ jobs:
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
         # `--bin engramdb` resolves to the `engram-cli` crate via the workspace's
@@ -159,7 +172,7 @@ jobs:
           cd ../..
           shasum -a 256 engramdb-aarch64-apple-darwin.tar.gz > engramdb-aarch64-apple-darwin.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engramdb-aarch64-apple-darwin
           path: |
@@ -181,10 +194,10 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Cache Homebrew packages
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/Library/Caches/Homebrew
@@ -200,8 +213,6 @@ jobs:
       - name: Add Intel macOS target
         run: rustup target add x86_64-apple-darwin
 
-      - uses: Swatinem/rust-cache@v2
-
       - name: Build release binary
         # Default features. `load-dynamic` needs no ONNX Runtime at build time,
         # which is exactly what makes this target buildable without the special
@@ -215,7 +226,7 @@ jobs:
           cd ../../..
           shasum -a 256 engramdb-x86_64-apple-darwin.tar.gz > engramdb-x86_64-apple-darwin.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engramdb-x86_64-apple-darwin
           path: |
@@ -227,15 +238,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
         # `--bin engramdb` resolves via workspace `default-members` (see build-arm).
@@ -250,7 +259,7 @@ jobs:
           cd ../..
           sha256sum engramdb-x86_64-unknown-linux-gnu.tar.gz > engramdb-x86_64-unknown-linux-gnu.tar.gz.sha256
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engramdb-x86_64-unknown-linux-gnu
           path: |
@@ -262,15 +271,13 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install protobuf compiler
         run: choco install protoc -y
 
       - name: Install Rust toolchain
         run: rustup toolchain install stable --profile minimal
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
         # The shared embedding daemon (Unix-domain-socket only) compiles out on
@@ -288,7 +295,7 @@ jobs:
           $hash = (Get-FileHash engramdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  engramdb-x86_64-pc-windows-msvc.zip" | Out-File -Encoding ascii engramdb-x86_64-pc-windows-msvc.zip.sha256
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engramdb-x86_64-pc-windows-msvc
           path: |
@@ -299,13 +306,17 @@ jobs:
     needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The only job with a write token: it creates the release and uploads the
+    # archives. It checks out nothing and builds nothing.
+    permissions:
+      contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           merge-multiple: true
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           generate_release_notes: true
           # These archives contain the binary only. Since ONNX Runtime is no

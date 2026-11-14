@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install nightly toolchain
         run: rustup toolchain install nightly --profile minimal
@@ -42,7 +42,7 @@ jobs:
       # (ASan-instrumented nightly deps, multiple GB) would land in the 10 GB
       # repo quota CI's caches live in and evict them, and a weekly run on a
       # new nightly would barely reuse it anyway. Saved from master only.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: "fuzz -> target"
           cache-targets: false
@@ -101,7 +101,7 @@ jobs:
           tar -C "$bin" -czf fuzz-bins.tar.gz $targets
           ls -l fuzz-bins.tar.gz
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-bins
           path: fuzz-bins.tar.gz
@@ -127,9 +127,9 @@ jobs:
           - registry
           - slug
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: fuzz-bins
 
@@ -142,7 +142,7 @@ jobs:
         # instead of restarting from the curated seeds in git. Caches are
         # immutable, so key on run_id to save a fresh snapshot every run and
         # let restore-keys pick up the most recent previous one.
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -163,7 +163,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
@@ -187,7 +187,7 @@ jobs:
       issues: write
     steps:
       - name: File or update fuzz-failure issues
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;
