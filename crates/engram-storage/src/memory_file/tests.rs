@@ -2356,3 +2356,167 @@ fn test_fuzz_seeds_for_links_behave() {
         include_str!("../../../../fuzz/corpus/memory_file/v2_conflicted_hidden_block.md");
     assert!(parse_memory_file(conflicted).is_err());
 }
+
+// ---- filenames and ids ----
+
+#[test]
+fn a_non_uuid_id_never_gets_a_slug() {
+    let mut memory = sample_memory();
+    memory.id = "auth-decision".to_string();
+    memory.title = Some("Use short lived tokens".to_string());
+    assert_eq!(memory_filename(&memory), "auth-decision.md");
+
+    // A UUID-shaped id keeps the slug, as before.
+    memory.id = "01912345-6789-7abc-8def-0123456789ab".to_string();
+    assert_eq!(
+        memory_filename(&memory),
+        "use-short-lived-tokens_01912345-6789-7abc-8def-0123456789ab.md"
+    );
+}
+
+/// For every id the format can carry, the filename's stem reads back as the
+/// id — with any title. The domain is `validate_id_shape`'s, minus the one
+/// shape `memory_filename` documents as ambiguous (a non-UUID id ending in
+/// `_<uuid-shaped tail>`).
+#[test]
+fn filename_round_trips_to_the_id_for_any_valid_id() {
+    // A small deterministic generator: no new dev-dependency for one test.
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let alphabet: Vec<char> = "abcXYZ019-_. ~é".chars().collect();
+    let titles = [
+        None,
+        Some("A title"),
+        Some("under_score and-hyphen"),
+        Some("!!!"),
+        Some("ünïcödé title 42"),
+    ];
+    let mut ids: Vec<String> = vec![
+        "auth-decision".into(),
+        "a".into(),
+        "with_underscore".into(),
+        "dots.in.id".into(),
+        "01912345-6789-7abc-8def-0123456789ab".into(),
+        "ends-with_".into(),
+        "x_y_z".into(),
+    ];
+    for _ in 0..2_000 {
+        let len = 1 + (next() % 40) as usize;
+        ids.push(
+            (0..len)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect(),
+        );
+    }
+    let mut checked = 0;
+    for id in ids {
+        if validate_id_shape(&id).is_err() {
+            continue;
+        }
+        let ambiguous_tail = !is_uuid_shaped(&id)
+            && id
+                .rfind('_')
+                .is_some_and(|pos| is_uuid_shaped(&id[pos + 1..]));
+        if ambiguous_tail {
+            continue;
+        }
+        for title in titles {
+            let mut memory = sample_memory();
+            memory.id = id.clone();
+            memory.title = title.map(str::to_string);
+            let filename = memory_filename(&memory);
+            let stem = filename.strip_suffix(".md").unwrap();
+            assert_eq!(
+                extract_id_from_stem(stem),
+                id,
+                "filename {filename:?} hides id {id:?}"
+            );
+            assert!(stem_matches_id_prefix(stem, &id));
+            checked += 1;
+        }
+    }
+    assert!(checked > 5_000, "the generator produced too few valid ids");
+}
+
+// ---- parsing ----
+
+#[test]
+fn a_missing_created_takes_the_callers_fallback() {
+    let memory = sample_memory();
+    let content: String = write_memory_file(&memory)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.contains("**Created:**") && !l.contains("**Updated:**"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let fallback = chrono::DateTime::parse_from_rfc3339("2020-01-02T03:04:05Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    let at = parse_memory_file_at(&content, fallback).unwrap();
+    assert_eq!(at.created_at, fallback);
+    assert_eq!(at.updated_at, fallback);
+    // A file that records its timestamps ignores the fallback.
+    let full = write_memory_file(&memory).unwrap();
+    assert_eq!(
+        parse_memory_file_at(&full, fallback).unwrap().created_at,
+        parse_memory_file(&full).unwrap().created_at
+    );
+}
+
+#[test]
+fn an_indented_first_line_survives_a_round_trip() {
+    let mut memory = sample_memory();
+    memory.content = "    let x = 1;\n    let y = 2;\n\nplain text".to_string();
+    memory.details = Some("  - a continuation line\n  - another".to_string());
+    let text = write_memory_file(&memory).unwrap();
+    let parsed = parse_memory_file(&text).unwrap();
+    assert_eq!(parsed.content, memory.content);
+    assert_eq!(parsed.details, memory.details);
+    // A write fixed point: nothing drifts on the next rewrite.
+    assert_eq!(write_memory_file(&parsed).unwrap(), text);
+
+    // Leading blank lines and trailing whitespace are still dropped.
+    memory.content = "\n\n  indented after blanks  \n\n".to_string();
+    let parsed = parse_memory_file(&write_memory_file(&memory).unwrap()).unwrap();
+    assert_eq!(parsed.content, "  indented after blanks");
+}
+
+/// `NaN` and `inf` parse as `f64`; stored, they poison every score the
+/// memory takes part in. They read as absent, so the defaults apply.
+#[test]
+fn a_non_finite_score_reads_as_absent() {
+    for bad in ["NaN", "nan", "inf", "-inf", "infinity", "+Infinity"] {
+        let text = format!("- **Criticality:** {bad}\n- **Confidence:** {bad}");
+        assert_eq!(parse_score_field(&text, "Criticality"), None, "{bad}");
+        assert_eq!(parse_score_field(&text, "Confidence"), None, "{bad}");
+        let legacy = format!("**Criticality:** {bad} | **Confidence:** 0.9");
+        assert_eq!(parse_score_field(&legacy, "Criticality"), None, "{bad}");
+        assert_eq!(parse_score_field(&legacy, "Confidence"), Some(0.9));
+    }
+    assert_eq!(
+        parse_score_field("- **Criticality:** 0.95", "Criticality"),
+        Some(0.95)
+    );
+
+    let memory = sample_memory();
+    let text = write_memory_file(&memory)
+        .unwrap()
+        .replace(
+            &format!("**Criticality:** {}", memory.criticality),
+            "**Criticality:** NaN",
+        )
+        .replace(
+            &format!("**Confidence:** {}", memory.confidence),
+            "**Confidence:** inf",
+        );
+    assert!(text.contains("**Criticality:** NaN") && text.contains("**Confidence:** inf"));
+    let parsed = parse_memory_file(&text).unwrap();
+    assert_eq!(parsed.criticality, 0.5);
+    assert_eq!(parsed.confidence, 0.8);
+}

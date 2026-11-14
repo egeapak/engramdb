@@ -102,7 +102,7 @@ source_file = "..."
 - **`summary`** — the most-searched field. **Make it read like a search query**, not a sentence. Subject + verb + object, ~10 words. Bad: "I think we decided to use PostgreSQL because of concurrent writes." Good: "Use PostgreSQL over SQLite for concurrent writes".
 - **`content`** — the body. ~500 tokens. What you'd tell a teammate in one paragraph.
 - **`details`** — optional extended details. **Lazy-loaded** — not returned by default in `query` unless you set `detail_level: "full"`. Use for things like full code snippets, links, or extended rationale that's only occasionally needed.
-- **`title`** — optional short label that engramdb uses for the on-disk filename (`<slug>_<uuid>.md` if set; just `<uuid>.md` otherwise). Doesn't affect retrieval.
+- **`title`** — optional short label that engramdb uses for the on-disk filename (`<slug>_<uuid>.md` if set; just `<uuid>.md` otherwise; a hand-authored non-UUID id is always `<id>.md`, since the slug can only be told from a UUID-shaped id). Doesn't affect retrieval.
 
 ### Scope: `physical` and `logical`
 

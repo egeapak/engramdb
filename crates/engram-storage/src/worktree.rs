@@ -74,7 +74,7 @@ async fn migrate_dir(
             left_behind += 1;
             continue;
         };
-        let Ok(memory) = memory_file::parse_memory_file(&content) else {
+        let Ok(memory) = memory_file::parse_memory_file_from(&content, &path) else {
             left_behind += 1;
             continue;
         };

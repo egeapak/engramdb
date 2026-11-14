@@ -68,7 +68,7 @@ fn parse_batch(read: Vec<(String, PathBuf, String)>) -> Vec<(String, Memory)> {
     use rayon::prelude::*;
 
     fn parse_one(id: String, path: &Path, content: &str) -> Option<(String, Memory)> {
-        match memory_file::parse_memory_file(content) {
+        match memory_file::parse_memory_file_from(content, path) {
             Ok(memory) => Some((id, memory)),
             Err(e) => {
                 tracing::warn!(
@@ -997,7 +997,7 @@ impl MemoryStore {
     /// not an opaque I/O failure.
     async fn read_found_file(path: &Path, id: &str) -> Result<Memory> {
         match async_fs::read_to_string(path).await {
-            Ok(content) => memory_file::parse_memory_file(&content),
+            Ok(content) => memory_file::parse_memory_file_from(&content, path),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 Err(StorageError::NotFound(id.to_string()))
             }
@@ -2051,6 +2051,7 @@ impl MemoryStore {
                 owned: Vec::new(),
                 paths: HashMap::new(),
                 unparseable: Vec::new(),
+                renamed: Vec::new(),
             }
         };
         let mut personal = if personal_dir.exists() {
@@ -2060,12 +2061,19 @@ impl MemoryStore {
                 owned: Vec::new(),
                 paths: HashMap::new(),
                 unparseable: Vec::new(),
+                renamed: Vec::new(),
             }
         };
         // An id with a file in BOTH directories is one memory: index the
         // winner, keep and report the loser (see `ReindexCounts::shadowed`).
         // Writing both rows let whichever directory was written last win the
         // row, whatever `get` said, and counted the memory twice.
+        let mut renamed: Vec<(String, PathBuf)> = shared
+            .renamed
+            .drain(..)
+            .chain(personal.renamed.drain(..))
+            .collect();
+        renamed.sort();
         let mut shadowed: Vec<(String, PathBuf)> = Vec::new();
         {
             let personal_updated: HashMap<&str, chrono::DateTime<chrono::Utc>> = personal
@@ -2345,6 +2353,7 @@ impl MemoryStore {
             skipped,
             unparseable,
             shadowed,
+            renamed,
         })
     }
 
@@ -2834,8 +2843,8 @@ impl MemoryStore {
         // index — and its vectors with it — on the next reindex.
         let results: Vec<std::result::Result<_, UnparseableMemoryFile>> = read
             .into_par_iter()
-            .map(
-                |(path, mtime, content)| match memory_file::parse_memory_file(&content) {
+            .map(|(path, mtime, content)| {
+                match memory_file::parse_memory_file_at(&content, mtime.into()) {
                     Ok(memory) => {
                         let digest = FileDigest::of(content.as_bytes());
                         Ok((path, mtime, memory, digest))
@@ -2846,8 +2855,8 @@ impl MemoryStore {
                         error: e.to_string(),
                         preserved: false,
                     }),
-                },
-            )
+                }
+            })
             .collect();
         let mut parsed: Vec<(PathBuf, std::time::SystemTime, Memory, FileDigest)> = Vec::new();
         let mut unparseable = Vec::new();
@@ -2902,6 +2911,51 @@ impl MemoryStore {
             }
         }
 
+        // Heal a file whose name hides its id. Every lookup by id goes
+        // through the filename (`extract_id_from_stem`), so a file whose stem
+        // does not yield the id inside it is indexed and then unreachable:
+        // `get`, `update` and `delete` all answer NotFound. That is what a
+        // titled non-UUID id was renamed to before `memory_filename` stopped
+        // adding a slug to one, and what a hand-named file is. Renamed here,
+        // under the write lock; the bytes (and so the digest) do not change.
+        let mut renamed: Vec<(String, PathBuf)> = Vec::new();
+        for (id, (path, _mtime, memory, _digest)) in by_id.iter_mut() {
+            if stem_id(path) == Some(id.as_str()) {
+                continue;
+            }
+            let target = dir.join(memory_file::memory_filename(memory));
+            if target == *path {
+                // An id no filename can carry (see `memory_filename`).
+                continue;
+            }
+            if target.exists() {
+                tracing::warn!(
+                    "{} holds memory {id} but its name does not carry that id, and {} \
+                     already exists; leaving it (the memory is not reachable by id)",
+                    path.display(),
+                    target.display()
+                );
+                continue;
+            }
+            match async_fs::rename(&*path, &target).await {
+                Ok(()) => {
+                    tracing::warn!(
+                        "renamed {} to {}: the old name did not carry the id of the memory \
+                         in it, so the memory could not be found by id",
+                        path.display(),
+                        target.display()
+                    );
+                    *path = target.clone();
+                    renamed.push((id.clone(), target));
+                }
+                Err(e) => tracing::warn!(
+                    "could not rename {} to {} ({e}); memory {id} stays unreachable by id",
+                    path.display(),
+                    target.display()
+                ),
+            }
+        }
+
         let mut paths = HashMap::with_capacity(by_id.len());
         let owned: Vec<(String, Memory, FileDigest)> = by_id
             .into_iter()
@@ -2914,6 +2968,7 @@ impl MemoryStore {
             owned,
             paths,
             unparseable,
+            renamed,
         })
     }
 
@@ -3536,7 +3591,11 @@ fn cross_dir_rule(
 async fn cross_dir_winner(shared: &Path, personal: &Path) -> CrossDirWinner {
     async fn updated_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
         let content = async_fs::read_to_string(path).await.ok()?;
-        Some(memory_file::parse_memory_file(&content).ok()?.updated_at)
+        Some(
+            memory_file::parse_memory_file_from(&content, path)
+                .ok()?
+                .updated_at,
+        )
     }
     cross_dir_rule(updated_at(shared).await, updated_at(personal).await)
 }
@@ -3675,6 +3734,8 @@ struct ScannedDir {
     /// The file each owned id was read from.
     paths: HashMap<String, PathBuf>,
     unparseable: Vec<UnparseableMemoryFile>,
+    /// Files renamed because their name hid their id: `(id, new path)`.
+    renamed: Vec<(String, PathBuf)>,
 }
 
 /// A memory file `reindex` could not parse.
@@ -3713,6 +3774,9 @@ pub struct ReindexCounts {
     /// unattended reindex (it also runs as the forced migration) must not
     /// decide that. An `update` or `delete` of the id removes it.
     pub shadowed: Vec<(String, PathBuf)>,
+    /// Files renamed because their name did not carry the id of the memory
+    /// inside (so it could not be found by id): `(id, new path)`.
+    pub renamed: Vec<(String, PathBuf)>,
 }
 
 /// Scan a directory for `.md` files, recording each one's path and length.
@@ -8613,5 +8677,114 @@ mod tests {
             ..IndexConfig::default()
         };
         assert_eq!(store.check_staleness(&cfg).await.unwrap(), None);
+    }
+
+    // ---- ids and filenames ----
+
+    /// A hand-authored (non-UUID) id used to become unreachable the moment
+    /// the memory got a title: the file was renamed `<slug>_<id>.md`, and
+    /// that stem reads back as a different id.
+    #[tokio::test]
+    async fn a_titled_non_uuid_memory_stays_reachable() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        store
+            .create(&create_test_memory("auth-decision", Visibility::Shared))
+            .await
+            .unwrap();
+
+        store
+            .update_with("auth-decision", |m| {
+                m.title = Some("Use short lived tokens".to_string());
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let got = store.get("auth-decision").await.unwrap();
+        assert_eq!(got.title.as_deref(), Some("Use short lived tokens"));
+        assert!(paths::memories_dir(tmp.path())
+            .join("auth-decision.md")
+            .exists());
+        // And it can still be changed and removed by its id.
+        store
+            .update_with("auth-decision", |m| {
+                m.summary = "Edited".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.delete("auth-decision").await.unwrap();
+    }
+
+    /// A file an older binary already renamed (or a hand-named one) is put
+    /// back under a name that carries its id.
+    #[tokio::test]
+    async fn reindex_renames_a_file_whose_stem_hides_its_id() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let mut memory = create_test_memory("auth-decision", Visibility::Shared);
+        memory.title = Some("Use short lived tokens".to_string());
+        let dir = paths::memories_dir(tmp.path());
+        let hidden = dir.join("use-short-lived-tokens_auth-decision.md");
+        std::fs::write(&hidden, memory_file::write_memory_file(&memory).unwrap()).unwrap();
+        assert!(matches!(
+            store.get("auth-decision").await,
+            Err(StorageError::NotFound(_))
+        ));
+
+        let counts = store.reindex_counted().await.unwrap();
+
+        let healed = dir.join("auth-decision.md");
+        assert_eq!(
+            counts.renamed,
+            vec![("auth-decision".to_string(), healed.clone())]
+        );
+        assert!(healed.exists() && !hidden.exists());
+        assert_eq!(counts.indexed, 1);
+        assert_eq!(
+            store.get("auth-decision").await.unwrap().title.as_deref(),
+            Some("Use short lived tokens")
+        );
+        // Nothing left to do the second time.
+        assert!(store.reindex_counted().await.unwrap().renamed.is_empty());
+    }
+
+    /// A file with no `Created` field used to get `now` on every parse.
+    #[tokio::test]
+    async fn a_file_without_created_parses_to_the_same_timestamps_twice() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let memory = create_test_memory("no-created", Visibility::Shared);
+        let content: String = memory_file::write_memory_file(&memory)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.contains("**Created:**") && !l.contains("**Updated:**"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let path = paths::memories_dir(tmp.path()).join("no-created.md");
+        std::fs::write(&path, &content).unwrap();
+        let when =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+
+        let first = store.get("no-created").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let second = store.get("no-created").await.unwrap();
+        let batch = store.get_batch(&["no-created"]).await.unwrap();
+
+        let expected: chrono::DateTime<chrono::Utc> = when.into();
+        assert_eq!(first.created_at, expected);
+        assert_eq!(first.updated_at, expected);
+        assert_eq!(second.created_at, first.created_at);
+        assert_eq!(batch[0].1.created_at, first.created_at);
     }
 }

@@ -132,7 +132,16 @@ pub struct V2Parser;
 impl MemoryParser for V2Parser {
     fn parse(&self, content: &str) -> Result<Memory> {
         let (frontmatter, body) = split_frontmatter(content)?;
-        parse_v2(frontmatter, body)
+        parse_v2(frontmatter, body, &|| None)
+    }
+
+    fn parse_with_fallback(
+        &self,
+        content: &str,
+        fallback_created: &dyn Fn() -> Option<chrono::DateTime<Utc>>,
+    ) -> Result<Memory> {
+        let (frontmatter, body) = split_frontmatter(content)?;
+        parse_v2(frontmatter, body, fallback_created)
     }
 
     fn version(&self) -> Option<u32> {
@@ -161,7 +170,11 @@ impl MemoryWriter for V2Writer {
 // Implementation
 // ---------------------------------------------------------------------------
 
-fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
+fn parse_v2(
+    frontmatter: &str,
+    body: &str,
+    fallback_created: &dyn Fn() -> Option<chrono::DateTime<Utc>>,
+) -> Result<Memory> {
     let fm: MinimalFrontmatter = yaml::from_str(frontmatter)?;
     super::validate_id_shape(&fm.id)?;
 
@@ -192,7 +205,14 @@ fn parse_v2(frontmatter: &str, body: &str) -> Result<Memory> {
     // Parse provenance
     let prov_text = sections.get("Provenance").map(String::as_str).unwrap_or("");
     let provenance = parse_provenance_section(prov_text);
-    let created_at = parse_datetime_field(prov_text, "Created").unwrap_or_else(Utc::now);
+    // A file with no `Created` (hand-written, or cut by a merge) takes the
+    // caller's fallback — the file's mtime on every store path — and only
+    // then "now": a fresh `now` per parse gave the same file a different
+    // `created_at`/`updated_at` on every read, which no newest-wins
+    // comparison survives.
+    let created_at = parse_datetime_field(prov_text, "Created")
+        .or_else(fallback_created)
+        .unwrap_or_else(Utc::now);
     let updated_at = parse_datetime_field(prov_text, "Updated").unwrap_or(created_at);
 
     // Parse hidden metadata
