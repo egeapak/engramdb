@@ -647,6 +647,38 @@ impl MemoryStore {
 
     /// Create a new memory.
     pub async fn create(&self, memory: &Memory) -> Result<String> {
+        self.create_inner(memory, None).await
+    }
+
+    /// [`Self::create`] for a memory whose vectors are already computed: the
+    /// file, then the chunks, then the index row with `has_embedding` already
+    /// true — one memories-table commit instead of the two that `create`
+    /// followed by a chunk upsert costs (the row, then its flag).
+    ///
+    /// `embed_sha256` describes the text `chunks` were embedded from, as for
+    /// [`Self::upsert_chunks_if_current`]. Empty `chunks` is plain `create`.
+    ///
+    /// A crash between the chunks and the row leaves a file with vectors and
+    /// no row: `doctor` reports the missing row and `reindex` rebuilds it,
+    /// deriving `has_embedding` from chunk presence, so the vectors are kept.
+    pub async fn create_with_chunks(
+        &self,
+        memory: &Memory,
+        chunks: Vec<Vec<f32>>,
+        embed_sha256: Option<String>,
+    ) -> Result<String> {
+        if chunks.is_empty() {
+            return self.create_inner(memory, None).await;
+        }
+        self.create_inner(memory, Some((chunks, embed_sha256)))
+            .await
+    }
+
+    async fn create_inner(
+        &self,
+        memory: &Memory,
+        chunks: Option<(Vec<Vec<f32>>, Option<String>)>,
+    ) -> Result<String> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
 
         let memories_dir = self.get_memories_dir(&memory.visibility)?;
@@ -679,12 +711,14 @@ impl MemoryStore {
         // crash-orphaned file with no index row is doctor's territory either
         // way — the sweep never saw files the index didn't know about
         // re-created under colliding fresh UUIDs in practice.
-        let id_preexisting = !self
+        //
+        // An equality probe, not the prefix `LIKE`: the question is about
+        // this one whole id.
+        let id_preexisting = self
             .lance_index
-            .find_ids_by_prefix(&memory.id)
+            .id_exists(&memory.id)
             .await
-            .map_err(StorageError::index("id probe"))?
-            .is_empty();
+            .map_err(StorageError::index("id probe"))?;
         if id_preexisting {
             for dir in [
                 self.get_memories_dir(&Visibility::Shared)?,
@@ -708,21 +742,42 @@ impl MemoryStore {
         // `has_embedding`: the chunks table is untouched here, so carry the
         // current chunk-presence state forward. A fresh `IndexEntry`'s default
         // `false` would otherwise drop an already-embedded memory from semantic
-        // ranking (R3). For a brand-new memory this is `false` as expected.
+        // ranking (R3). A brand-new id has no row and therefore no chunks
+        // (chunks are only ever written for an existing memory), so the
+        // chunk probe is skipped for it: one index read per fresh create.
         let mut entry = IndexEntry::for_file(memory, &digest);
-        entry.has_embedding = self
-            .lance_index
-            .has_chunks(&memory.id)
-            .await
-            .map_err(StorageError::index("has_chunks"))?;
+        entry.has_embedding = match chunks {
+            Some((chunks, embed_sha256)) => {
+                // Chunks before the row: the row is then born with the flag
+                // set, and a crash in between is the recoverable direction
+                // (see `create_with_chunks`).
+                self.lance_index
+                    .write_chunks(&memory.id, chunks, embed_sha256.as_deref())
+                    .await
+                    .map_err(StorageError::index("upsert_chunks"))?;
+                true
+            }
+            None if id_preexisting => self
+                .lance_index
+                .has_chunks(&memory.id)
+                .await
+                .map_err(StorageError::index("has_chunks"))?,
+            None => false,
+        };
         self.lance_index
             .upsert(&entry)
             .await
             .map_err(StorageError::index("upsert"))?;
         self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
-        // Update manifest stats
-        self.update_manifest_stats().await?;
+        // Update manifest stats. A fresh id adds exactly one row, which the
+        // cheap path can verify; a re-create may have changed scopes on an
+        // existing row, which only the scan can see.
+        if id_preexisting {
+            self.update_manifest_stats().await?;
+        } else {
+            self.update_manifest_stats_after(1, &memory.logical).await?;
+        }
 
         Ok(memory.id.clone())
     }
@@ -733,12 +788,14 @@ impl MemoryStore {
     /// performs a single ID probe, a single chunk-presence probe, a single
     /// index upsert and a single manifest refresh for the whole set.
     ///
-    /// The per-memory version costs *four* separate O(store size) operations
-    /// each — the `find_ids_by_prefix` LIKE scan, the `has_chunks` query, the
+    /// The per-memory version cost *four* separate O(store size) operations
+    /// each — a prefix `LIKE` scan, the `has_chunks` query, the
     /// `merge_insert` commit, and the full-column scan behind
-    /// `update_manifest_stats` — so creating W memories into a store of M is
-    /// quadratic. Measured: one `create` costs 24 ms into an empty store and
-    /// 582 ms into a 1000-memory one.
+    /// `update_manifest_stats` — so creating W memories into a store of M was
+    /// quadratic. Measured then: one `create` cost 24 ms into an empty store
+    /// and 582 ms into a 1000-memory one. A single `create` of a fresh id is
+    /// now one equality probe, one commit and a metadata row count, but it is
+    /// still one commit (and one lock) per memory, which this avoids.
     ///
     /// Semantics are identical to calling [`Self::create`] in a loop, with two
     /// deliberate differences that both follow from batching:
@@ -3265,6 +3322,44 @@ impl MemoryStore {
     /// rewrite is skipped entirely when the stats did not change (the common
     /// case for updates).
     async fn update_manifest_stats(&self) -> Result<()> {
+        let (manifest_path, manifest) = self.load_manifest_for_stats().await;
+        self.rescan_manifest_stats(&manifest_path, manifest).await
+    }
+
+    /// [`Self::update_manifest_stats`] for a write that added `added` rows
+    /// carrying `new_scopes`, without the full `logical` column scan when the
+    /// manifest can be shown to have been current.
+    ///
+    /// The check is `count_rows()` (table metadata, no scan) against
+    /// `manifest.memory_count + added`: when they agree the manifest was in
+    /// step before this write, so the new count and the union of the scopes
+    /// are exactly what the scan would produce. Any disagreement — the
+    /// manifest is a committed file, and a branch switch or a merge can change
+    /// it under the index — falls back to the scan, so a drifted manifest
+    /// still self-heals on the next write. (A manifest whose count happens to
+    /// match while its scope list is stale is corrected by the next update,
+    /// delete or reindex, all of which always scan.)
+    async fn update_manifest_stats_after(&self, added: usize, new_scopes: &[String]) -> Result<()> {
+        let (manifest_path, mut manifest) = self.load_manifest_for_stats().await;
+        let rows = self
+            .lance_index
+            .count()
+            .await
+            .map_err(StorageError::index("count"))?;
+        if rows != manifest.stats.memory_count + added {
+            return self.rescan_manifest_stats(&manifest_path, manifest).await;
+        }
+        let mut logical_scopes = manifest.stats.logical_scopes.clone();
+        logical_scopes.extend(new_scopes.iter().cloned());
+        logical_scopes.sort();
+        logical_scopes.dedup();
+        manifest::update_stats(&mut manifest, rows, logical_scopes);
+        manifest::save_manifest(&manifest_path, &manifest).await?;
+        Ok(())
+    }
+
+    /// The manifest to refresh, or a rebuilt default one.
+    async fn load_manifest_for_stats(&self) -> (PathBuf, manifest::Manifest) {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         // Stats refresh runs AFTER the mutation (file + index row) is durable,
         // so a missing/corrupt manifest must not fail the operation — the
@@ -3272,7 +3367,7 @@ impl MemoryStore {
         // succeeded, and nothing would ever self-heal the manifest. Rebuild a
         // default one instead (the project id is known) and let the stats
         // write below recreate the file.
-        let mut manifest = match manifest::load_manifest(&manifest_path).await {
+        let manifest = match manifest::load_manifest(&manifest_path).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(
@@ -3290,7 +3385,16 @@ impl MemoryStore {
                 }
             }
         };
+        (manifest_path, manifest)
+    }
 
+    /// Recompute the stats from the index (one `logical` column scan) and
+    /// write the manifest when they changed.
+    async fn rescan_manifest_stats(
+        &self,
+        manifest_path: &Path,
+        mut manifest: manifest::Manifest,
+    ) -> Result<()> {
         let (memory_count, scope_set) = self
             .lance_index
             .count_and_logical_scopes()
@@ -3308,7 +3412,7 @@ impl MemoryStore {
         }
 
         manifest::update_stats(&mut manifest, memory_count, logical_scopes);
-        manifest::save_manifest(&manifest_path, &manifest).await?;
+        manifest::save_manifest(manifest_path, &manifest).await?;
 
         Ok(())
     }
@@ -3938,6 +4042,180 @@ mod tests {
         memory.id = id.to_string();
         memory.visibility = visibility;
         memory
+    }
+
+    fn index_reads() -> (usize, usize, usize) {
+        use crate::lance_index::test_counters::{CHUNK_PROBES, ID_PROBES, STATS_SCANS};
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            ID_PROBES.load(Relaxed),
+            CHUNK_PROBES.load(Relaxed),
+            STATS_SCANS.load(Relaxed),
+        )
+    }
+
+    async fn manifest_stats(dir: &Path) -> (usize, Vec<String>) {
+        let m = manifest::load_manifest(&paths::project_dir(dir).join("manifest.toml"))
+            .await
+            .unwrap();
+        (m.stats.memory_count, m.stats.logical_scopes)
+    }
+
+    /// A single create used to cost a prefix `LIKE` probe, a chunk probe and
+    /// a full `logical` column scan for the manifest: three O(N) reads for an
+    /// id that cannot have a row, chunks or anything else yet.
+    #[tokio::test]
+    async fn create_of_a_fresh_id_makes_one_probe() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let mut first = create_test_memory("probe-1", Visibility::Shared);
+        first.logical = vec!["api.auth".into()];
+        store.create(&first).await.unwrap();
+
+        let before = index_reads();
+        let mut second = create_test_memory("probe-2", Visibility::Shared);
+        second.logical = vec!["api.auth".into(), "db.schema".into()];
+        store.create(&second).await.unwrap();
+        let after = index_reads();
+
+        assert_eq!(after.0 - before.0, 1, "one id probe");
+        assert_eq!(after.1 - before.1, 0, "no chunk probe for a fresh id");
+        assert_eq!(
+            after.2 - before.2,
+            0,
+            "no stats scan when the manifest was current"
+        );
+        assert_eq!(
+            manifest_stats(tmp.path()).await,
+            (2, vec!["api.auth".to_string(), "db.schema".to_string()])
+        );
+    }
+
+    /// The manifest is a committed file: a branch switch can change it under
+    /// the index. The shortcut must notice and fall back to the scan.
+    #[tokio::test]
+    async fn manifest_stats_fall_back_to_a_scan_when_the_count_disagrees() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let mut first = create_test_memory("drift-1", Visibility::Shared);
+        first.logical = vec!["real.scope".into()];
+        store.create(&first).await.unwrap();
+
+        // As after checking out a branch whose manifest says something else.
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        manifest::update_stats(&mut m, 7, vec!["stale.scope".into()]);
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        let before = index_reads();
+        let mut second = create_test_memory("drift-2", Visibility::Shared);
+        second.logical = vec!["other.scope".into()];
+        store.create(&second).await.unwrap();
+        assert_eq!(index_reads().2 - before.2, 1, "the scan ran");
+        assert_eq!(
+            manifest_stats(tmp.path()).await,
+            (2, vec!["other.scope".to_string(), "real.scope".to_string()])
+        );
+    }
+
+    /// `create` then a chunk upsert commits the memories table twice (the
+    /// row, then its `has_embedding` flag).
+    #[tokio::test]
+    async fn create_with_chunks_commits_the_row_once() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        store
+            .create(&create_test_memory("cwc-0", Visibility::Shared))
+            .await
+            .unwrap();
+
+        let v0 = store.lance_index.memories_version().await.unwrap();
+        let m = create_test_memory("cwc-1", Visibility::Shared);
+        store
+            .create_with_chunks(
+                &m,
+                vec![vec![0.5; 384], vec![0.25; 384]],
+                Some("digest-1".into()),
+            )
+            .await
+            .unwrap();
+        let v1 = store.lance_index.memories_version().await.unwrap();
+        assert_eq!(v1 - v0, 1, "one memories-table commit");
+
+        assert!(has_embedding_flag(&store, "cwc-1").await);
+        let chunks = store.export_chunks("cwc-1").await.unwrap();
+        assert_eq!(chunks, vec![vec![0.5; 384], vec![0.25; 384]]);
+        assert_eq!(store.get("cwc-1").await.unwrap().id, "cwc-1");
+        assert_eq!(manifest_stats(tmp.path()).await.0, 2);
+
+        // The two-step path it replaces, for the comparison this test is about.
+        let m2 = create_test_memory("cwc-2", Visibility::Shared);
+        store.create(&m2).await.unwrap();
+        store
+            .upsert_chunks("cwc-2", vec![vec![0.5; 384]])
+            .await
+            .unwrap();
+        let v2 = store.lance_index.memories_version().await.unwrap();
+        assert_eq!(v2 - v1, 2);
+
+        // No chunks: plain create.
+        let m3 = create_test_memory("cwc-3", Visibility::Shared);
+        store.create_with_chunks(&m3, vec![], None).await.unwrap();
+        assert!(!has_embedding_flag(&store, "cwc-3").await);
+    }
+
+    /// Existing behavior the probe change must keep: re-creating an id under
+    /// the other visibility removes the old file and keeps its vectors' flag.
+    #[tokio::test]
+    async fn a_recreate_of_an_existing_id_still_sweeps_both_dirs() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let shared = create_test_memory("sweep-1", Visibility::Shared);
+        store.create(&shared).await.unwrap();
+        store
+            .upsert_chunks("sweep-1", vec![vec![0.5; 384]])
+            .await
+            .unwrap();
+        let shared_dir = store.get_memories_dir(&Visibility::Shared).unwrap();
+        let personal_dir = store.get_memories_dir(&Visibility::Personal).unwrap();
+        assert_eq!(
+            find_memory_files(&shared_dir, "sweep-1")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let before = index_reads();
+        let personal = create_test_memory("sweep-1", Visibility::Personal);
+        store.create(&personal).await.unwrap();
+        let after = index_reads();
+        assert_eq!(
+            after.1 - before.1,
+            1,
+            "an existing id is still chunk-probed"
+        );
+
+        assert!(find_memory_files(&shared_dir, "sweep-1")
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            find_memory_files(&personal_dir, "sweep-1")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            has_embedding_flag(&store, "sweep-1").await,
+            "the re-create reset has_embedding"
+        );
+        assert_eq!(manifest_stats(tmp.path()).await.0, 1);
     }
 
     /// The batched chunk write must be observably identical to N single

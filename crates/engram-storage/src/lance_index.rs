@@ -806,6 +806,8 @@ impl LanceIndex {
     pub async fn count_and_logical_scopes(
         &self,
     ) -> Result<(usize, std::collections::HashSet<String>)> {
+        #[cfg(test)]
+        test_counters::STATS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let table = self.open_table().await?;
 
         let mut stream = table
@@ -898,10 +900,48 @@ impl LanceIndex {
         Ok(ids)
     }
 
+    /// Whether a row with exactly this id exists.
+    ///
+    /// An equality probe with `limit(1)`, for `create`: the prefix `LIKE`
+    /// of [`Self::find_ids_by_prefix`] answers a wider question (and cannot
+    /// use the id's scalar index the same way), and `create` only ever asks
+    /// about one whole id.
+    pub async fn id_exists(&self, id: &str) -> Result<bool> {
+        #[cfg(test)]
+        test_counters::ID_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let table = self.open_table().await?;
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .only_if_expr(col("id").eq(lit(id)))
+            .limit(1)
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for an id")?;
+        while let Some(batch_result) = stream.next().await {
+            if batch_result.context("Failed to read batch")?.num_rows() > 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The memories table's current version (one per commit).
+    #[cfg(test)]
+    pub(crate) async fn memories_version(&self) -> Result<u64> {
+        let table = self.open_table().await?;
+        table
+            .version()
+            .await
+            .context("Failed to read table version")
+    }
+
     /// Find IDs matching a given prefix via a LanceDB WHERE clause.
     ///
     /// Returns all matching IDs; callers handle 0/1/many disambiguation.
     pub async fn find_ids_by_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        #[cfg(test)]
+        test_counters::ID_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let table = self.open_table().await?;
         // The pattern still escapes the LIKE metacharacters `%` and `_` —
         // that is pattern semantics (a literal `_` in a stem must not act as
@@ -1314,6 +1354,25 @@ impl LanceIndex {
             self.delete_chunks(memory_id).await?;
             return Ok(());
         }
+        self.write_chunks(memory_id, chunks, embed_sha256).await?;
+        // Keep the memories-table R3 flag in sync: this memory now has chunks.
+        self.set_has_embedding(memory_id, true).await
+    }
+
+    /// The chunks-table half of [`Self::upsert_chunks`]: the vectors, without
+    /// the memories-table flag update. For the one caller that writes the row
+    /// itself right after, with `has_embedding` already true
+    /// (`MemoryStore::create_with_chunks`) — one memories-table commit
+    /// instead of two. `chunks` must not be empty.
+    pub async fn write_chunks(
+        &self,
+        memory_id: &str,
+        chunks: Vec<Vec<f32>>,
+        embed_sha256: Option<&str>,
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            anyhow::bail!("write_chunks called with no chunks for memory '{memory_id}'");
+        }
 
         // Validate every vector against the index's fixed width BEFORE any
         // Arrow construction: `FixedSizeListArray::new` PANICS on a length
@@ -1357,10 +1416,6 @@ impl LanceIndex {
         op.execute(Box::new(batches))
             .await
             .context("Failed to upsert chunks")?;
-
-        // Keep the memories-table R3 flag in sync: this memory now has chunks.
-        self.set_has_embedding(memory_id, true).await?;
-
         Ok(())
     }
 
@@ -1705,6 +1760,8 @@ impl LanceIndex {
     }
 
     pub async fn has_chunks(&self, memory_id: &str) -> Result<bool> {
+        #[cfg(test)]
+        test_counters::CHUNK_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let table = self.open_chunks_table().await?;
         let mut stream = table
             .query()
@@ -3137,6 +3194,19 @@ fn parse_provenance_source(s: &str) -> Result<ProvenanceSource> {
         "imported" => Ok(ProvenanceSource::Imported),
         _ => anyhow::bail!("Unknown provenance source: {}", s),
     }
+}
+
+/// Read counters for the tests that pin how many index reads a write makes.
+/// Process-wide, which nextest's process-per-test model makes per-test.
+#[cfg(test)]
+pub(crate) mod test_counters {
+    use std::sync::atomic::AtomicUsize;
+    /// `id_exists` + `find_ids_by_prefix`.
+    pub(crate) static ID_PROBES: AtomicUsize = AtomicUsize::new(0);
+    /// `has_chunks`.
+    pub(crate) static CHUNK_PROBES: AtomicUsize = AtomicUsize::new(0);
+    /// `count_and_logical_scopes` (the full `logical` column scan).
+    pub(crate) static STATS_SCANS: AtomicUsize = AtomicUsize::new(0);
 }
 
 #[cfg(test)]
