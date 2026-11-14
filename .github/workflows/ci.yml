@@ -586,13 +586,15 @@ jobs:
   # `--all-features` necessarily turns `bundled-onnxruntime` back on, so the job
   # above links ONNX Runtime statically and never exercises what users actually
   # ship: default features, where the runtime is `dlopen`ed at run time. This job
-  # covers that path — including the case that used to abort the process, a
-  # *missing* runtime, which must degrade to "embeddings unavailable" instead.
+  # covers that path. The case that used to abort the process, a *missing*
+  # runtime that must degrade to "embeddings unavailable" instead, is guarded by
+  # the `missing-runtime` job below, against a binary built with
+  # `panic = "abort"`; this job only runs the probe's own unit tests.
   #
   # Split the same way as `test` (build once, three shards), and for the same
   # reason: this was the slowest Linux job (median 14.3 min: ~6 min build,
   # ~1.2 min test-target build, ~6.5 min of tests). The build-only assertions
-  # (ldd, start-up, the missing-runtime probe) stay in the build job, which
+  # (ldd, start-up, the runtime probe's unit tests) stay in the build job, which
   # deliberately never installs a runtime — so "must start with no runtime
   # installed" now really runs with none, rather than with the one the old
   # single job had already put in /usr/local/lib for its test step.
@@ -647,10 +649,12 @@ jobs:
           cargo nextest archive --workspace --locked
           --archive-file nextest-default-features.tar.zst
 
-      - name: Missing runtime must degrade, not abort
-        # The regression guard for the whole change. `ort`'s own loader panics
-        # when the dylib is absent and the release profile is `panic = "abort"`,
-        # so without the pre-flight probe in `engram_onnx::runtime` this aborts.
+      - name: The runtime probe's unit tests, with no runtime installed
+        # Unit tests of `engram_onnx::runtime` only. Whether a missing runtime
+        # really degrades instead of aborting is the `missing-runtime` job's
+        # question: this profile unwinds, so a loader that skipped the probe
+        # would not abort here. (This step used to end with
+        # `cargo run ... doctor || true`, which could not fail on anything.)
         # No runtime was ever installed on this runner, so nothing to remove.
         run: |
           if ldconfig -p | grep -qi onnxruntime; then
@@ -658,8 +662,6 @@ jobs:
             exit 1
           fi
           cargo nextest run --workspace --locked -E 'test(runtime::tests::)'
-          echo "Probe reports:"
-          cargo run --quiet --locked --bin engramdb -- doctor || true
 
       - name: Upload the test archive
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -669,6 +671,81 @@ jobs:
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
+
+  # The regression guard for "a missing ONNX Runtime degrades, it does not kill
+  # the process". Under `load-dynamic`, `ort`'s own loader panics when the
+  # library is absent, and the shipped profile is `panic = "abort"`, so every
+  # model loader has to call `ensure_onnx_runtime()` before it touches `ort`.
+  # A loader that forgets passes every other job here: the dev profile
+  # unwinds, and a panic inside `spawn_blocking` comes back as a `JoinError`
+  # the caller turns into the fallback. Users then get SIGABRT.
+  #
+  # So this job builds the binary with the dev profile plus `panic = "abort"`
+  # (the property under test is the panic strategy; a real release build would
+  # add many minutes of LTO for nothing) and runs
+  # .github/scripts/smoke-no-runtime.sh, which drives every command that loads
+  # a model, with NLI, the reranker and T5 all enabled, and fails on any exit
+  # code a command is not allowed. release.yml runs the same script against
+  # each real release binary.
+  #
+  # The model cache is restored so the models are present and the runtime is
+  # the only missing thing: the loaders check "is the model cached" right
+  # after the runtime probe, so with an empty cache a loader that skipped the
+  # probe would fail at the download instead of reaching `ort`. (On a cold
+  # cache the script still passes; it is then a weaker test.)
+  #
+  # Its own job, not a step of `test-load-dynamic-build`: the abort build
+  # recompiles every crate (the panic strategy is part of each crate's
+  # codegen), so it gets its own runner disk and its own rust-cache entry
+  # (`key: abort`). If the 10 GB cache quota becomes a problem again, set
+  # `save-if: false` here first and accept a cold build.
+  missing-runtime:
+    name: Missing ONNX Runtime degrades, never aborts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: abort
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Restore the ONNX model cache
+        # Saved by the `coverage` job (see there); restore-only here.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
+      - name: No ONNX Runtime may be installed on this runner
+        run: |
+          if ldconfig -p | grep -qi onnxruntime; then
+            echo "::error::an ONNX Runtime is installed on this runner; the missing-runtime checks would not test anything."
+            exit 1
+          fi
+          if [ -n "${ORT_DYLIB_PATH:-}" ]; then
+            echo "::error::ORT_DYLIB_PATH is set; the missing-runtime checks would not test anything."
+            exit 1
+          fi
+          echo "OK: no ONNX Runtime on this runner."
+
+      - name: Build the binary with panic = "abort"
+        env:
+          # The dev profile with the release profile's panic strategy. Same as
+          # `--config 'profile.dev.panic="abort"'`.
+          CARGO_PROFILE_DEV_PANIC: abort
+        run: cargo build --locked --bin engramdb
+
+      - name: Every model-loading command must survive a missing runtime
+        run: bash .github/scripts/smoke-no-runtime.sh target/debug/engramdb --require-missing-runtime
 
   test-load-dynamic:
     name: Test (default features, runtime-loaded ONNX) (shard ${{ matrix.shard }}/3)
@@ -875,6 +952,7 @@ jobs:
       - test
       - simd-levels
       - test-load-dynamic-build
+      - missing-runtime
       - test-load-dynamic
       - coverage
     runs-on: ubuntu-latest
