@@ -61,6 +61,60 @@ pub struct MaintenanceReport {
     /// Conversation-index pass result, if an engine was supplied and
     /// `[harvest] index` is on.
     pub conversation_index: Option<crate::ops::harvest_index::IndexReport>,
+    /// Rows the pass restored by reindexing a store whose index had lost every
+    /// row while its memory files were still there.
+    pub rebuilt_rows: Option<usize>,
+}
+
+/// How many memory files a store holds when its index has no rows at all, or
+/// `None` when the index has rows, there are no files, or the check failed.
+///
+/// Read-only: the SessionStart hook uses it to tell the agent to run
+/// `engramdb reindex` (a hook has no budget for the rebuild itself).
+pub async fn empty_index_file_count(store: &MemoryStore) -> Option<usize> {
+    match store.count().await {
+        Ok(0) => {}
+        Ok(_) => return None,
+        Err(e) => {
+            tracing::warn!("engramdb: could not count index rows: {e}");
+            return None;
+        }
+    }
+    let files = store.list_file_ids().await.ok()?.len();
+    (files > 0).then_some(files)
+}
+
+/// Rebuild the index of a store that has memory files but no index rows.
+///
+/// The shape the orphan sweep leaves behind for a project that is initialized
+/// but missing from the registry: the sweep removes `<data>/projects/<id>/`
+/// (keeping it only while it holds data nothing else can recreate, see
+/// `paths::holds_irreplaceable_data`), and the next open creates an empty
+/// table. Every query then finds nothing, though the `.md` files are all
+/// there. `reindex` is the documented repair and only reads those files, so
+/// it is safe to run unasked; it rebuilds metadata only, and the "Memory
+/// vectors" doctor check then names the memories still without vectors.
+///
+/// Returns the rows restored, or `None` when there was nothing to do or the
+/// check or the rebuild failed (logged).
+pub async fn rebuild_empty_index(store: &MemoryStore) -> Option<usize> {
+    let files = empty_index_file_count(store).await?;
+    match store.reindex().await {
+        Ok(n) => {
+            tracing::warn!(
+                "engramdb: the index of {} had no rows for {files} memory file(s); rebuilt {n} row(s) from the files",
+                store.project_dir.display()
+            );
+            Some(n)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "engramdb: the index of {} has no rows for {files} memory file(s) and the rebuild failed ({e}) — run `engramdb reindex`",
+                store.project_dir.display()
+            );
+            None
+        }
+    }
 }
 
 /// Effective auto-maintenance status, for diagnostics (`engramdb doctor`).
@@ -364,6 +418,8 @@ pub async fn auto_maintain_with_engine(
     if paths::project_dir(dir).exists() {
         match MemoryStore::open(dir).await {
             Ok(store) => {
+                // Before the health check, so it reports the repaired store.
+                report.rebuilt_rows = rebuild_empty_index(&store).await;
                 match doctor(&store).await {
                     Ok(result) => {
                         if !result.healthy {
@@ -613,6 +669,42 @@ mod tests {
         assert!(report.prune.is_some(), "cleanup must have run");
         let doctor = report.doctor.expect("doctor must have run");
         assert!(doctor.healthy, "freshly-created store must be healthy");
+    }
+
+    /// The shape the orphan sweep leaves for an initialized project that
+    /// dropped out of the registry: memory files intact, data directory gone,
+    /// so the next open creates an empty index and every query finds nothing.
+    #[tokio::test]
+    async fn an_emptied_index_is_rebuilt() {
+        let dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(dir.path(), &registry).await.unwrap();
+        for n in 0..3 {
+            let mem = Memory::new(
+                MemoryType::Decision,
+                format!("T{n}"),
+                format!("C{n}"),
+                Provenance::human(),
+            );
+            store.create(&mem).await.unwrap();
+        }
+        let lancedb = crate::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(&lancedb).unwrap();
+        assert_eq!(
+            MemoryStore::open(dir.path()).await.unwrap().count().await.unwrap(),
+            0,
+            "precondition: the reopened index is empty"
+        );
+
+        let report = auto_maintain(dir.path(), &registry, &cfg(0), false).await;
+        assert_eq!(report.rebuilt_rows, Some(3));
+        let store = MemoryStore::open(dir.path()).await.unwrap();
+        assert_eq!(store.count().await.unwrap(), 3);
+        assert!(report.doctor.expect("doctor must have run").healthy);
+
+        // A store with rows is left alone.
+        assert_eq!(rebuild_empty_index(&store).await, None);
     }
 
     /// The widest reach the prune sweep has, and the reason its retention rule

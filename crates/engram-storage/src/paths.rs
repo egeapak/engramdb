@@ -545,6 +545,16 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 /// can never clear. **Anything added under `<data>/projects/<id>/` that is not
 /// rebuildable from the project tree has to be added here too**, or the next
 /// sweep silently eats it.
+///
+/// **Declared loss.** The telemetry tables under `lancedb/` (`memory_events`,
+/// the `memory_usage` rollup, `hook_events`) are *not* protected, by decision:
+/// retaining them would keep the data directory of every abandoned project
+/// that ever recorded a hook. So an initialized project that drops out of the
+/// registry loses its usage counts and hook stats to the sweep, for good. The
+/// memories index itself is rebuilt from the `.md` files: the maintenance
+/// pass and the MCP startup reindex a store whose index came back empty
+/// (`ops::maintenance::rebuild_empty_index`), and its vectors are named by
+/// doctor's "Memory vectors" check until `reindex --embeddings-only` runs.
 pub async fn holds_irreplaceable_data(dir: &Path) -> bool {
     holds_files_with_extension(&dir.join("personal").join("memories"), "md").await
         || holds_files_with_extension(&dir.join("transcripts"), transcript_archive::ARCHIVE_EXT)

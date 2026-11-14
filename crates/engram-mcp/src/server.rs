@@ -2236,7 +2236,20 @@ impl EngramDbServer {
     async fn check_registration(&self) {
         match ops::projects::ensure_registered(&self.effective_dir, self.registry.as_ref()).await {
             Ok(check) => {
-                if let Some(notice) = check.agent_notice() {
+                if let Some(mut notice) = check.agent_notice() {
+                    // A project that fell out of the registry may have had its
+                    // data directory swept, leaving an empty index beside
+                    // intact memory files. Startup is deferred past the
+                    // handshake, so the rebuild can run here.
+                    if let Ok(store) = MemoryStore::open(&self.effective_dir).await {
+                        if let Some(rows) = ops::maintenance::rebuild_empty_index(&store).await {
+                            notice.push_str(&format!(
+                                " Its search index had been emptied, so EngramDB rebuilt it from \
+                                 the {rows} memory file(s); run `engramdb doctor` to see whether \
+                                 their vectors need `engramdb reindex --embeddings-only`."
+                            ));
+                        }
+                    }
                     tracing::warn!("{notice}");
                     self.registration_notice.set(Some(notice));
                 }

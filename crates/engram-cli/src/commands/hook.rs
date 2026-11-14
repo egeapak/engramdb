@@ -786,7 +786,23 @@ async fn process_session_start(
 async fn registration_notice(dir: &Path, registry: Option<&dyn RegistryBackend>) -> Option<String> {
     let registry = registry?;
     match engramdb::ops::projects::ensure_registered(dir, registry).await {
-        Ok(check) => check.agent_notice(),
+        Ok(check) => {
+            let notice = check.agent_notice()?;
+            // A project that fell out of the registry may have had its data
+            // directory swept, which leaves an empty index beside intact
+            // memory files. The rebuild is too slow for a hook; say what to run.
+            let empty = match MemoryStore::open(dir).await {
+                Ok(store) => engramdb::ops::maintenance::empty_index_file_count(&store).await,
+                Err(_) => None,
+            };
+            Some(match empty {
+                Some(files) => format!(
+                    "{notice} Its search index is empty although it has {files} memory \
+                     file(s), so queries find nothing until the user runs `engramdb reindex`."
+                ),
+                None => notice,
+            })
+        }
         Err(e) => {
             tracing::warn!("engramdb hook: registry check failed (continuing): {e}");
             None
@@ -5195,6 +5211,34 @@ mod daemon_executor_tests {
             .await
             .unwrap();
         assert!(reg.projects.iter().any(|e| e.project_id == id));
+    }
+
+    /// A project that fell out of the registry may have lost its data
+    /// directory to the orphan sweep: the notice then says to reindex.
+    #[tokio::test]
+    async fn registration_notice_names_reindex_when_the_index_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = engramdb::types::Memory::new(
+            MemoryType::Decision,
+            "T",
+            "C",
+            engramdb::types::Provenance::human(),
+        );
+        store.create(&mem).await.unwrap();
+        let lancedb = engramdb::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(lancedb).unwrap();
+
+        let registry = InMemoryRegistry::new();
+        let notice = registration_notice(tmp.path(), Some(&registry))
+            .await
+            .expect("an unregistered store gets a notice");
+        assert!(notice.contains("registered it now"), "{notice}");
+        assert!(notice.contains("`engramdb reindex`"), "{notice}");
+        assert!(notice.contains("1 memory"), "{notice}");
     }
 
     /// A store the daemon has cached still sees a memory written afterwards by
