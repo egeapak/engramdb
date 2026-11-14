@@ -5,10 +5,8 @@
 //! - [`RetrievalConfig`] - retrieval settings (thresholds, max results)
 //! - [`ScoringConfig`] - scoring mode weights (with_query, scope_only, degraded)
 //! - [`ScoringWeights`] - component weights for semantic, relevance, scope
-//! - [`ScopeProximityConfig`] - physical scope bonuses (exact file, same dir, etc.)
-//! - [`LogicalBonusConfig`] - logical scope bonuses (exact, parent, sibling)
 //! - [`TrustWeights`] - trust scores by provenance source
-//! - [`ThresholdsConfig`] - thresholds for needs_review, gc, compress
+//! - [`ThresholdsConfig`] - thresholds for gc and compress
 //!
 //! All structs provide sensible defaults and can be loaded from TOML files.
 
@@ -550,56 +548,6 @@ impl ScoringConfig {
     }
 }
 
-/// Physical scope proximity bonuses
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScopeProximityConfig {
-    /// Exact file match bonus
-    pub exact_file: f64,
-
-    /// Same directory bonus
-    pub same_directory: f64,
-
-    /// Same module/subtree bonus
-    pub same_module: f64,
-
-    /// Project root (default) bonus
-    pub project_root: f64,
-}
-
-impl Default for ScopeProximityConfig {
-    fn default() -> Self {
-        Self {
-            exact_file: 1.0,
-            same_directory: 0.85,
-            same_module: 0.6,
-            project_root: 0.4,
-        }
-    }
-}
-
-/// Logical scope bonuses
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogicalBonusConfig {
-    /// Exact logical scope match bonus
-    pub exact: f64,
-
-    /// Parent scope match bonus
-    pub parent: f64,
-
-    /// Sibling scope match bonus
-    pub sibling: f64,
-}
-
-impl Default for LogicalBonusConfig {
-    fn default() -> Self {
-        Self {
-            exact: 0.3,
-            parent: 0.2,
-            sibling: 0.15,
-        }
-    }
-}
-
 /// Trust weights by provenance source
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustWeights {
@@ -647,9 +595,11 @@ impl Default for TrustWeights {
 /// Search-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    /// Weight applied to semantic (cosine) similarity in search scoring.
-    /// Higher values make semantic matches dominate over keyword matches.
-    pub semantic_weight: f64,
+    /// Retired: read by nothing (no blend formula ever took a weight). Still
+    /// parsed so a config that sets it loads; the loader warns and `doctor`
+    /// reports it ([`EngramConfig::retired_keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_weight: Option<f64>,
 
     /// Minimum score threshold for search results (results below this are filtered out).
     pub threshold: f64,
@@ -658,7 +608,7 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            semantic_weight: 3.0,
+            semantic_weight: None,
             threshold: 0.2,
         }
     }
@@ -667,8 +617,11 @@ impl Default for SearchConfig {
 /// Thresholds for various operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThresholdsConfig {
-    /// Score threshold for needs_review status
-    pub needs_review: f64,
+    /// Retired: read by nothing (no code marks a memory needs-review from a
+    /// score). Still parsed so a config that sets it loads; the loader warns
+    /// and `doctor` reports it ([`EngramConfig::retired_keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_review: Option<f64>,
 
     /// Score threshold for garbage collection
     pub gc: f64,
@@ -680,7 +633,7 @@ pub struct ThresholdsConfig {
 impl Default for ThresholdsConfig {
     fn default() -> Self {
         Self {
-            needs_review: 0.3,
+            needs_review: None,
             gc: 0.05,
             compress: 0.4,
         }
@@ -1240,13 +1193,27 @@ pub struct EngramConfig {
     #[serde(default)]
     pub embeddings: EmbeddingsConfig,
 
-    /// Physical scope proximity bonuses
-    #[serde(default)]
-    pub scope_proximity: ScopeProximityConfig,
+    /// A retired `[scope_proximity]` table. Its four-bucket model never
+    /// existed in the scorer (physical scope is depth decay,
+    /// `[retrieval.scoring] depth_decay_base/floor`), so nothing read it. Kept
+    /// as raw TOML so a config that has it (even partly) still loads; see
+    /// [`EngramConfig::retired_keys`].
+    #[serde(
+        rename = "scope_proximity",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_scope_proximity: Option<toml::Table>,
 
-    /// Logical scope bonuses
-    #[serde(default)]
-    pub logical_bonus: LogicalBonusConfig,
+    /// A retired `[logical_bonus]` table, read by nothing (the logical scope
+    /// tiers are fixed in `scope::logical`). Raw TOML, like
+    /// [`Self::legacy_scope_proximity`].
+    #[serde(
+        rename = "logical_bonus",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_logical_bonus: Option<toml::Table>,
 
     /// Trust weights by source
     #[serde(default)]
@@ -2124,6 +2091,33 @@ impl EngramConfig {
 }
 
 impl EngramConfig {
+    /// Retired keys this config still sets, as dotted names
+    /// (`scope_proximity.exact_file`, `thresholds.needs_review`, …). They
+    /// parse and have no effect; the loader warns once per file and `doctor`
+    /// reports them. Empty for a config that sets none.
+    pub fn retired_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        for (section, table) in [
+            ("scope_proximity", &self.legacy_scope_proximity),
+            ("logical_bonus", &self.legacy_logical_bonus),
+        ] {
+            match table {
+                Some(t) if t.is_empty() => keys.push(section.to_string()),
+                Some(t) => keys.extend(t.keys().map(|k| format!("{section}.{k}"))),
+                None => {}
+            }
+        }
+        if self.thresholds.needs_review.is_some() {
+            keys.push("thresholds.needs_review".to_string());
+        }
+        if self.search.semantic_weight.is_some() {
+            keys.push("search.semantic_weight".to_string());
+        }
+        keys
+    }
+}
+
+impl EngramConfig {
     /// The `[security]` keys a project config still sets. They are ignored:
     /// security settings come only from the global config file. Empty when
     /// the project config has no `[security]` table (or an empty one).
@@ -2885,19 +2879,10 @@ mod tests {
         assert_eq!(config.trust_weights.inferred, 0.6);
         assert_eq!(config.trust_weights.imported, 0.7);
 
-        // Scope proximity
-        assert_eq!(config.scope_proximity.exact_file, 1.0);
-        assert_eq!(config.scope_proximity.same_directory, 0.85);
-        assert_eq!(config.scope_proximity.same_module, 0.6);
-        assert_eq!(config.scope_proximity.project_root, 0.4);
-
-        // Logical bonus
-        assert_eq!(config.logical_bonus.exact, 0.3);
-        assert_eq!(config.logical_bonus.parent, 0.2);
-        assert_eq!(config.logical_bonus.sibling, 0.15);
+        // Retired keys are absent by default
+        assert!(config.retired_keys().is_empty());
 
         // Thresholds
-        assert_eq!(config.thresholds.needs_review, 0.3);
         assert_eq!(config.thresholds.gc, 0.05);
         assert_eq!(config.thresholds.compress, 0.4);
 
@@ -2933,7 +2918,6 @@ mod tests {
         assert_eq!(config.retrieval.scoring.depth_decay_floor, 0.3);
 
         // Search config
-        assert_eq!(config.search.semantic_weight, 3.0);
         assert_eq!(config.search.threshold, 0.2);
 
         // Scoring weights - with_keyword
@@ -2974,15 +2958,8 @@ mod tests {
         // Verify all values match
         assert_eq!(loaded.retrieval.max_results, original.retrieval.max_results);
         assert_eq!(loaded.trust_weights.human, original.trust_weights.human);
-        assert_eq!(
-            loaded.scope_proximity.exact_file,
-            original.scope_proximity.exact_file
-        );
-        assert_eq!(loaded.logical_bonus.exact, original.logical_bonus.exact);
-        assert_eq!(
-            loaded.thresholds.needs_review,
-            original.thresholds.needs_review
-        );
+        assert_eq!(loaded.thresholds.gc, original.thresholds.gc);
+        assert_eq!(loaded.thresholds.compress, original.thresholds.compress);
         assert_eq!(
             loaded.retrieval.scoring.scope_multiplier_floor,
             original.retrieval.scoring.scope_multiplier_floor
@@ -3060,9 +3037,8 @@ relevance = 1.0
 
         // Verify other sections use defaults (thanks to #[serde(default)])
         assert_eq!(config.trust_weights.human, 1.0);
-        assert_eq!(config.scope_proximity.exact_file, 1.0);
-        assert_eq!(config.logical_bonus.exact, 0.3);
-        assert_eq!(config.thresholds.needs_review, 0.3);
+        assert_eq!(config.thresholds.compress, 0.4);
+        assert!(config.retired_keys().is_empty());
     }
 
     #[test]
@@ -3337,22 +3313,22 @@ semantic_weight = 5.0
 threshold = 0.25
 "#;
         let config: EngramConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.search.semantic_weight, 5.0);
+        assert_eq!(config.search.semantic_weight, Some(5.0));
         assert_eq!(config.search.threshold, 0.25);
+        assert_eq!(config.retired_keys(), ["search.semantic_weight"]);
     }
 
     #[test]
     fn test_search_config_defaults_when_omitted() {
         // Empty TOML: all sections use #[serde(default)] on EngramConfig
         let config: EngramConfig = toml::from_str("").unwrap();
-        assert_eq!(config.search.semantic_weight, 3.0);
+        assert_eq!(config.search.semantic_weight, None);
         assert_eq!(config.search.threshold, 0.2);
     }
 
     #[test]
     fn test_search_config_roundtrip() {
         let mut config = EngramConfig::default();
-        config.search.semantic_weight = 7.5;
         config.search.threshold = 0.1;
 
         let temp_path = std::env::temp_dir().join("test_search_config_roundtrip.toml");
@@ -3360,8 +3336,69 @@ threshold = 0.25
         let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
         std::fs::remove_file(&temp_path).ok();
 
-        assert_eq!(loaded.search.semantic_weight, 7.5);
         assert_eq!(loaded.search.threshold, 0.1);
+    }
+
+    #[test]
+    fn retired_sections_parse_partially_and_are_reported() {
+        // One key of a retired section: a parse error while the section was
+        // a struct with required fields.
+        let config: EngramConfig = toml::from_str(
+            r#"
+[scope_proximity]
+exact_file = 0.9
+
+[logical_bonus]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.retired_keys(),
+            ["scope_proximity.exact_file", "logical_bonus"]
+        );
+    }
+
+    #[test]
+    fn retired_scalar_keys_are_optional() {
+        // `[thresholds]` without `needs_review` and `[search]` without
+        // `semantic_weight` used to be parse errors.
+        let config: EngramConfig = toml::from_str(
+            r#"
+[thresholds]
+gc = 0.1
+compress = 0.5
+
+[search]
+threshold = 0.3
+"#,
+        )
+        .unwrap();
+        assert!(config.retired_keys().is_empty());
+        assert_eq!(config.thresholds.compress, 0.5);
+
+        let old: EngramConfig = toml::from_str(
+            r#"
+[thresholds]
+needs_review = 0.3
+gc = 0.05
+compress = 0.4
+"#,
+        )
+        .unwrap();
+        assert_eq!(old.retired_keys(), ["thresholds.needs_review"]);
+    }
+
+    #[test]
+    fn a_default_config_serializes_without_retired_keys() {
+        let text = toml::to_string(&EngramConfig::default()).unwrap();
+        for key in [
+            "scope_proximity",
+            "logical_bonus",
+            "needs_review",
+            "semantic_weight",
+        ] {
+            assert!(!text.contains(key), "{key} in:\n{text}");
+        }
     }
 
     #[test]

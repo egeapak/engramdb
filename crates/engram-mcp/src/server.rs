@@ -3678,7 +3678,10 @@ impl EngramDbServer {
                 .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
         }
         let store = self.open_store_for(input.project.as_deref()).await?;
-        let result = ops::compress_candidates(&store, input.scope.as_deref(), input.threshold)
+        // An explicit `threshold` wins; otherwise the target's `[thresholds] compress`.
+        let config = self.load_config_for(input.project.as_deref()).await?;
+        let threshold = input.threshold.or(Some(config.thresholds.compress));
+        let result = ops::compress_candidates(&store, input.scope.as_deref(), threshold)
             .await
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 

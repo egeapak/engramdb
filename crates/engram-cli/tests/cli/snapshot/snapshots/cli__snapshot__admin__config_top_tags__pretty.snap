@@ -14,7 +14,6 @@ Retrieval / search
   default max results:    10
   relevance threshold:    0.45
   search threshold:       0.2
-  search semantic weight: 3
   include expired:        false
 
 Features

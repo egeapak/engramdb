@@ -34,6 +34,9 @@ pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
     let config: EngramConfig = toml::from_str(&content)?;
     warn_legacy_daemon_keys(config_path, &config);
     warn_legacy_security_keys(config_path, &config);
+    if let Some(message) = retired_keys_message(config_path, &config) {
+        warn_once(config_path, WarnKind::RetiredKeys, &message);
+    }
     if let Err(e) = config.validate() {
         warn_once(
             config_path,
@@ -137,6 +140,21 @@ pub fn legacy_security_message(config_path: &Path, config: &EngramConfig) -> Opt
     ))
 }
 
+/// The message for a config that still sets retired keys (see
+/// [`EngramConfig::retired_keys`]), or `None` when it sets none. Shared by the
+/// loader's warning and `doctor`.
+pub fn retired_keys_message(config_path: &Path, config: &EngramConfig) -> Option<String> {
+    let keys = config.retired_keys();
+    if keys.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: these keys are no longer read and have no effect: {} (remove them)",
+        config_path.display(),
+        keys.join(", ")
+    ))
+}
+
 /// Warn once per path when a project config sets `[security]` keys.
 fn warn_legacy_security_keys(config_path: &Path, config: &EngramConfig) {
     if let Some(message) = legacy_security_message(config_path, config) {
@@ -229,6 +247,7 @@ enum WarnKind {
     Unreadable,
     LegacyDaemon,
     LegacySecurity,
+    RetiredKeys,
     UnknownGlobalKeys,
 }
 
@@ -415,6 +434,49 @@ imported = 0.65
             "{log:?}"
         );
         assert_eq!(about(&path_b, "daemon.enabled"), 1, "{log:?}");
+    }
+
+    /// Retired keys are named once per file, beside (not instead of) the
+    /// `[daemon]` warning for the same file.
+    #[tokio::test]
+    async fn retired_keys_warn_once_per_path() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let path_a = a.path().join("config.toml");
+        let path_b = b.path().join("config.toml");
+        tokio::fs::write(
+            &path_a,
+            "[scope_proximity]
+exact_file = 1.0
+",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &path_b,
+            "[search]
+semantic_weight = 3.0
+threshold = 0.2
+[daemon]
+enabled = false
+",
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            load_config_or_default(&path_a).await;
+            load_config_or_default(&path_b).await;
+        }
+        let log = emitted().lock().unwrap().clone();
+        let about = |p: &Path, key: &str| {
+            log.iter()
+                .filter(|m| m.contains(&p.display().to_string()) && m.contains(key))
+                .count()
+        };
+        assert_eq!(about(&path_a, "scope_proximity.exact_file"), 1, "{log:?}");
+        assert_eq!(about(&path_b, "search.semantic_weight"), 1, "{log:?}");
+        assert_eq!(about(&path_b, "daemon.enabled"), 1, "{log:?}");
+        assert!(log.iter().any(|m| m.contains("no longer read")), "{log:?}");
     }
 
     /// `[security]` in the global file is read, and is not reported as an

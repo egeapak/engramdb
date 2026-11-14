@@ -1259,6 +1259,19 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
                     details,
                     status: Some(CheckStatus::Warn),
                 },
+                None if !config.retired_keys().is_empty() => EnvironmentCheck {
+                    name: "Config file".to_string(),
+                    passed: true,
+                    message: ".engramdb/config.toml sets keys that are no longer read".to_string(),
+                    suggestion: Some(
+                        "Delete the listed keys from .engramdb/config.toml; they have no effect"
+                            .to_string(),
+                    ),
+                    details: crate::storage::config::retired_keys_message(&config_path, &config)
+                        .into_iter()
+                        .collect(),
+                    status: Some(CheckStatus::Warn),
+                },
                 None if refused_nli_model(&config).is_some() => EnvironmentCheck {
                     name: "Config file".to_string(),
                     passed: true,
@@ -4322,6 +4335,28 @@ mod tests {
         assert!(detail.contains("daemon.idle_timeout_secs"), "{detail}");
         let global = crate::storage::paths::global_config_path().unwrap();
         assert!(detail.contains(&global.display().to_string()), "{detail}");
+    }
+
+    /// Retired keys load and are reported as a warning naming each one,
+    /// without failing the check.
+    #[tokio::test]
+    async fn test_check_config_file_flags_retired_keys() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[logical_bonus]\nexact = 0.3\n[thresholds]\nneeds_review = 0.3\ngc = 0.05\ncompress = 0.4\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "a retired key must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        let detail = result.details.join("\n");
+        assert!(detail.contains("logical_bonus.exact"), "{detail}");
+        assert!(detail.contains("thresholds.needs_review"), "{detail}");
     }
 
     /// `[nli].model` outside the built-in list is not loaded; doctor says why.
