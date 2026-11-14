@@ -124,27 +124,25 @@ pub fn archive_transcript(
         restrict_to_owner(parent, 0o700);
     }
 
-    // Process-unique temp name: a SessionEnd hook can fire twice for the same
-    // session, and two writers sharing one temp path would interleave into a
-    // corrupt archive that still renames into place looking valid.
-    let tmp = dest.with_extension(format!("tmp{}", std::process::id()));
-
-    // A partial temp file is invisible to `list_archives` (it does not end in
-    // `.jsonl.zst`), so a failure that left one behind would leak bytes the
-    // size budget can never reclaim. Clean up on every error path.
-    let written = compress_into(transcript, &tmp);
-    let (hasher, original_bytes) = match written {
-        Ok(v) => v,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-
-    if let Err(e) = std::fs::rename(&tmp, &dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    // A temp name unique per *call*, not per process: the daemon runs every
+    // session's SessionEnd hook in one process, so a pid-derived name was
+    // shared by two archives of one session and they interleaved into a
+    // corrupt file that still renamed into place looking valid. `tempfile`
+    // creates it 0600 and removes it when dropped, which covers every error
+    // path below; a leftover would be invisible to `list_archives` (it does
+    // not end in `.jsonl.zst`) and so to the size budget.
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!(".{session_id}."))
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    let (hasher, original_bytes) = compress_into(transcript, tmp.as_file())?;
+    // Before the rename: a rename that reaches the disk ahead of the data it
+    // names is a truncated archive after a power cut, and the ledger would
+    // record it as collected.
+    tmp.as_file().sync_all()?;
+    tmp.persist(&dest).map_err(|e| e.error)?;
+    sync_dir(parent);
     restrict_to_owner(&dest, 0o600);
     let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
 
@@ -177,32 +175,29 @@ fn restrict_to_owner(path: &Path, mode: u32) {
     let _ = (path, mode);
 }
 
-/// Stream `src` through zstd into `tmp`, returning the plaintext hasher and
+/// Make a rename in `dir` durable, best-effort (not every filesystem lets a
+/// directory be synced, and the file is already in place).
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Ok(handle) = std::fs::File::open(dir) {
+        let _ = handle.sync_all();
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// Stream `src` through zstd into `out`, returning the plaintext hasher and
 /// the original size.
 ///
 /// Hashes as the bytes stream past, so integrity costs one pass rather than a
-/// second read of a file that can be tens of megabytes.
-fn compress_into(src: &Path, tmp: &Path) -> Result<(Sha256, u64)> {
+/// second read of a file that can be tens of megabytes. `out` is the caller's
+/// temp file, created owner-only: the archive is a verbatim conversation and
+/// must never be 0644, not even for the compression window.
+fn compress_into(src: &Path, out: &std::fs::File) -> Result<(Sha256, u64)> {
     use std::io::{Read, Write};
 
     let mut input = std::fs::File::open(src)?;
     let original_bytes = input.metadata().map(|m| m.len()).unwrap_or(0);
-    // Mode at *creation*: the archive is a verbatim conversation, and
-    // `restrict_to_owner` after the rename leaves it 0644 for the whole
-    // compression window. Contained today only because the parent directory
-    // is 0700 — which a future change could quietly undo.
-    #[cfg(unix)]
-    let out = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(tmp)?
-    };
-    #[cfg(not(unix))]
-    let out = std::fs::File::create(tmp)?;
     let mut encoder = zstd::stream::Encoder::new(out, ZSTD_LEVEL)?;
 
     let mut hasher = Sha256::new();
@@ -260,10 +255,22 @@ pub fn export_archive_bounded(
         .map(|n| n.saturating_add(64 * 1024).min(MAX_RESTORED_BYTES))
         .unwrap_or(MAX_RESTORED_BYTES);
 
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut out = std::fs::File::create(dest)?;
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(parent)?;
+    // Written beside `dest` and renamed only after the last read succeeded.
+    // Writing `dest` directly left a partial file whenever the decoder failed
+    // midway (a truncated or corrupt archive): a transcript that parses as a
+    // valid-but-short session. The temp removes itself on every early return.
+    let mut prefix = std::ffi::OsString::from(".");
+    prefix.push(dest.file_name().unwrap_or_default());
+    prefix.push(".");
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
 
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -276,18 +283,16 @@ pub fn export_archive_bounded(
         }
         total = total.saturating_add(n as u64);
         if total > limit {
-            // Remove the partial file: leaving it would hand the caller a
-            // truncated transcript that parses as a valid-but-short session.
-            drop(out);
-            let _ = std::fs::remove_file(dest);
             return Err(crate::error::StorageError::Validation(format!(
                 "archive for session {session_id} expands past {limit} bytes; \
                  refusing to continue (the stored archive may be corrupt or crafted)"
             )));
         }
         hasher.update(&buf[..n]);
-        out.write_all(&buf[..n])?;
+        tmp.as_file_mut().write_all(&buf[..n])?;
     }
+    tmp.as_file().sync_all()?;
+    tmp.persist(dest).map_err(|e| e.error)?;
     Ok(hex_digest(hasher))
 }
 
@@ -366,9 +371,15 @@ pub fn total_bytes(project_id: &str) -> Result<u64> {
 /// What an eviction pass did (or, in dry-run, would do).
 #[derive(Debug, Clone, Default)]
 pub struct PruneOutcome {
+    /// Sessions whose copy is gone (in dry-run: would be). Never includes a
+    /// copy whose removal failed — callers clear ledger references from this
+    /// list, and clearing one for a file still on disk orphans the file.
     pub removed: Vec<String>,
     pub bytes_freed: u64,
     pub bytes_remaining: u64,
+    /// Copies an eviction chose but could not delete: `(session id, error)`.
+    /// Their bytes count as remaining, not freed.
+    pub failed: Vec<(String, String)>,
     /// Bytes held by copies a memory cites as its evidence, and so exempt from
     /// both limits.
     pub pinned_bytes: u64,
@@ -470,8 +481,26 @@ pub fn prune_archives(
     outcome.bytes_remaining = keep.iter().map(|a| a.bytes).sum();
 
     if !dry_run {
-        for session_id in &outcome.removed {
-            let _ = remove_archive(project_id, session_id);
+        let sizes: std::collections::HashMap<&str, u64> = archives
+            .iter()
+            .map(|a| (a.session_id.as_str(), a.bytes))
+            .collect();
+        let chosen = std::mem::take(&mut outcome.removed);
+        for session_id in chosen {
+            // `Ok(false)` — already gone — is as removed as it gets.
+            match remove_archive(project_id, &session_id) {
+                Ok(_) => outcome.removed.push(session_id),
+                Err(e) => {
+                    let bytes = sizes.get(session_id.as_str()).copied().unwrap_or(0);
+                    outcome.bytes_freed = outcome.bytes_freed.saturating_sub(bytes);
+                    outcome.bytes_remaining += bytes;
+                    tracing::warn!(
+                        "transcript copy for session {session_id} could not be removed ({e}); \
+                         it stays on disk and in the ledger"
+                    );
+                    outcome.failed.push((session_id, e.to_string()));
+                }
+            }
         }
     }
     Ok(outcome)
@@ -563,11 +592,11 @@ mod tests {
             let transcript = write_transcript(src.path(), "s1.jsonl", 10);
             archive_transcript("proj", "s1", &transcript).unwrap();
             let dir = paths::transcript_archive_dir("proj").unwrap();
-            // Assert on the whole directory rather than on a temp *extension*:
-            // the temp name carries a pid suffix (`.tmp1234`), so matching
-            // `extension() == "tmp"` silently matched nothing and the test
-            // could never fail. Anything that is not the finished archive is
-            // a leak, whatever it is called.
+            // Assert on the whole directory rather than on a temp *name*
+            // (`.<session>.<random>.tmp` today, `.tmp<pid>` before): a match
+            // on the wrong pattern silently matches nothing and the test can
+            // never fail. Anything that is not the finished archive is a
+            // leak, whatever it is called.
             let names: Vec<String> = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
@@ -754,6 +783,113 @@ mod tests {
             assert!(list_archives("never-used").unwrap().is_empty());
             assert_eq!(total_bytes("never-used").unwrap(), 0);
             assert!(!remove_archive("never-used", "nope").unwrap());
+        });
+    }
+
+    /// The daemon runs every session's SessionEnd hook in one process, so a
+    /// pid-derived temp name was shared by two archives of the same session.
+    #[test]
+    fn two_archives_of_one_session_in_one_process_do_not_collide() {
+        with_data_dir(|_| {
+            let src = TempDir::new().unwrap();
+            let transcript = write_transcript(src.path(), "s1.jsonl", 20_000);
+            let expected = std::fs::read(&transcript).unwrap();
+
+            std::thread::scope(|scope| {
+                for _ in 0..16 {
+                    scope.spawn(|| {
+                        archive_transcript("proj", "s1", &transcript).unwrap();
+                    });
+                }
+            });
+
+            let out = src.path().join("restored.jsonl");
+            export_archive("proj", "s1", &out).unwrap();
+            assert_eq!(
+                std::fs::read(&out).unwrap(),
+                expected,
+                "concurrent archives interleaved"
+            );
+            let dir = paths::transcript_archive_dir("proj").unwrap();
+            let names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            assert_eq!(names, vec![format!("s1.{ARCHIVE_EXT}")]);
+        });
+    }
+
+    /// A decoder error midway used to leave the bytes written so far at
+    /// `dest`: a transcript that parses as a valid-but-short session.
+    #[test]
+    fn a_failed_export_leaves_no_file() {
+        with_data_dir(|_| {
+            let src = TempDir::new().unwrap();
+            // Incompressible enough to span several zstd blocks.
+            let transcript = src.path().join("big.jsonl");
+            let mut body = String::new();
+            for i in 0..40_000u64 {
+                body.push_str(&format!(
+                    "{{\"n\":{},\"h\":\"{:016x}\"}}\n",
+                    i,
+                    i.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ));
+            }
+            std::fs::write(&transcript, &body).unwrap();
+            archive_transcript("proj", "s1", &transcript).unwrap();
+
+            // Truncate the stored archive in the middle.
+            let stored = archive_path("proj", "s1").unwrap();
+            let bytes = std::fs::read(&stored).unwrap();
+            assert!(
+                bytes.len() > 128 * 1024,
+                "fixture too small: {}",
+                bytes.len()
+            );
+            std::fs::write(&stored, &bytes[..bytes.len() / 2]).unwrap();
+
+            let out_dir = TempDir::new().unwrap();
+            let out = out_dir.path().join("restored.jsonl");
+            assert!(export_archive("proj", "s1", &out).is_err());
+            let left: Vec<String> = std::fs::read_dir(out_dir.path())
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            assert!(
+                left.is_empty(),
+                "a partial export was left behind: {left:?}"
+            );
+        });
+    }
+
+    /// `let _ = remove_archive(..)` reported a copy as removed when the unlink
+    /// failed; the caller then cleared its ledger reference and the file was
+    /// orphaned on disk.
+    #[test]
+    fn a_failed_unlink_is_not_reported_as_removed() {
+        with_data_dir(|_| {
+            let src = TempDir::new().unwrap();
+            let transcript = write_transcript(src.path(), "ok.jsonl", 10);
+            archive_transcript("proj", "ok", &transcript).unwrap();
+            // Something `remove_file` cannot unlink whoever runs the test (a
+            // read-only directory would not stop root): a directory under an
+            // archive's name.
+            let stuck = archive_path("proj", "stuck").unwrap();
+            std::fs::create_dir_all(stuck.join("child")).unwrap();
+            let stuck_bytes = std::fs::metadata(&stuck).unwrap().len();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            // Retention 0 days: everything is too old.
+            let outcome = prune_archives("proj", Some(0), 0, false, &no_pins()).unwrap();
+
+            assert_eq!(outcome.removed, vec!["ok"]);
+            assert_eq!(outcome.failed.len(), 1, "{:?}", outcome.failed);
+            assert_eq!(outcome.failed[0].0, "stuck");
+            assert_eq!(outcome.bytes_remaining, stuck_bytes);
+            assert!(stuck.exists());
+            assert!(!archive_path("proj", "ok").unwrap().exists());
         });
     }
 }
