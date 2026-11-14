@@ -64,6 +64,7 @@ For restricted-egress sandboxes (no `cdn.pyke.io` / `huggingface.co`), see the p
 |----------|------|
 | `tests` modules colocated in each source file (in `src/` and every `crates/*/src/`) | Unit tests, colocated with the code |
 | `src/daemon/tests.rs` | Daemon integration tests (in-process Unix socket) |
+| `crates/engram-dashboard/src/tests.rs` and `src/layout/tests.rs` | Dashboard security, read-only and layout property tests. The browser checks in `crates/engram-dashboard/bench/browser/` are run by hand. |
 | `crates/engram-cli/tests/cli/*.rs` | Black-box CLI tests using `assert_cmd` |
 | `crates/engram-cli/tests/cli/snapshot/` | Binary-level `insta` snapshots (tier 2, below) |
 | `crates/engram-cli/src/output.rs::tests` | Renderer `insta` snapshots (tier 1, below) |
