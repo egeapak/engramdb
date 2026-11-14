@@ -2311,6 +2311,7 @@ dependencies = [
 name = "engram-onnx"
 version = "0.10.0"
 dependencies = [
+ "libc",
  "libloading",
  "ort",
  "tempfile",

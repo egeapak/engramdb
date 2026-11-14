@@ -25,7 +25,7 @@ xnnpack = ["ort/xnnpack"]
 # Default. `ort` `dlopen`s libonnxruntime at run time, so nothing is needed at
 # build time and one binary works against any installed runtime >= 1.24.
 # `libloading` is ours, for the pre-flight probe in `runtime.rs`.
-load-dynamic = ["ort/load-dynamic", "dep:libloading"]
+load-dynamic = ["ort/load-dynamic", "dep:libloading", "dep:libc"]
 # Download and statically link a prebuilt ONNX Runtime (the historical default).
 bundled-onnxruntime = ["ort/download-binaries"]
 
@@ -67,6 +67,11 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = ["ndarray"
 # touches it — `ort`'s own loader panics on a missing dylib and the release
 # profile is `panic = "abort"`, so that panic is not catchable.
 libloading = { version = "0.9", optional = true }
+
+# `runtime.rs` asks `dladdr` which file the system loader opened, so the path
+# it hands `ort` is absolute.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # `runtime.rs` tests write a bogus file and assert the probe rejects it.

@@ -24,9 +24,9 @@ brew install onnxruntime          # macOS / Linuxbrew
 sudo apt-get install -y libonnxruntime   # where packaged
 ```
 
-Windows: download the official ONNX Runtime zip from the Microsoft releases page, unpack it, and set `ORT_DYLIB_PATH` to `onnxruntime.dll` (or put its `lib` folder on `PATH`).
+Windows: download the official ONNX Runtime zip from the Microsoft releases page, unpack it, and set `ORT_DYLIB_PATH` to the absolute path of `onnxruntime.dll` (or put its `lib` folder on `PATH`).
 
-Or point at a specific library with `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`. Until one is found EngramDB still runs — search falls back to keyword matching.
+Or point at a specific library with `ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so` (a relative path is refused). Until one is found EngramDB still runs — search falls back to keyword matching.
 
 **`ONNX Runtime <version> is too old` (needs API 24).**
 The runtime that was found predates 1.24, which provides C API version 24, the version EngramDB's `ort` build requires. Homebrew ships 1.28; distro packages are often older. Upgrade it, or point `ORT_DYLIB_PATH` at a newer one. EngramDB reports the version it found instead of failing inside `ort`.

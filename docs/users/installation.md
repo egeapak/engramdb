@@ -22,14 +22,27 @@ EngramDB does not contain a copy of ONNX Runtime, and does not ship one:
 release archives hold the binary and nothing else. It resolves a runtime from
 your system at startup, in this order:
 
-1. `ORT_DYLIB_PATH`, if set — an explicit path to the library.
-2. The directory holding the `engramdb` binary — drop a `libonnxruntime`
-   there and it wins over everything below it.
-3. Standard package-manager locations: `/opt/homebrew/lib` and `/usr/local/lib`
-   on macOS, `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch
-   directories on Linux.
-4. The platform loader's own search path (`PATH` on Windows,
-   `LD_LIBRARY_PATH`/`ld.so.conf` on Linux).
+1. `ORT_DYLIB_PATH`, if set. It must be an absolute path to the library. A
+   relative path is used only if it exists under the directory that holds the
+   `engramdb` binary. Any other relative path is refused.
+2. The directory holding the `engramdb` binary, then `../lib` beside it. Put a
+   `libonnxruntime` there and it wins over everything below it.
+3. The directories in the platform's library-path variable: `PATH` on Windows,
+   `DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS,
+   `LD_LIBRARY_PATH` on Linux. Only absolute entries are used. Empty, `.` and
+   relative entries are skipped.
+4. Standard locations: `$HOMEBREW_PREFIX/lib`, `/opt/homebrew/lib`,
+   `/usr/local/lib`, `/opt/local/lib`, `$HOME/lib` and `/usr/lib` on macOS;
+   `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch directories on
+   Linux.
+5. On Linux only, the system loader's own search (the `ld.so` cache), so a
+   runtime in an `ld.so.conf.d` directory is found. This step is skipped when
+   `LD_LIBRARY_PATH` has an empty or relative entry.
+
+EngramDB never loads the library from the current directory. A project folder
+that contains a file named `onnxruntime.dll` or `libonnxruntime.dylib` has no
+effect. If your runtime is in a directory that is not listed above, set
+`ORT_DYLIB_PATH` to its absolute path.
 
 Installing it, if you need to:
 
@@ -39,7 +52,7 @@ sudo apt-get install -y libonnxruntime   # where packaged
 ```
 
 Windows: download the official ONNX Runtime zip from the Microsoft releases
-page, unpack it, and set `ORT_DYLIB_PATH` to `onnxruntime.dll` (or put its
+page, unpack it, and set `ORT_DYLIB_PATH` to the absolute path of `onnxruntime.dll` (or put its
 `lib` folder on `PATH`). EngramDB has no published Scoop package yet.
 
 This is deliberate. The prebuilt runtime that would otherwise be compiled in
