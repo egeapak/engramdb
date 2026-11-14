@@ -3,7 +3,8 @@
 // from the page's own performance marks and requestAnimationFrame. A
 // developer tool (README.md); not embedded, not in CI.
 //
-//   NODE_PATH=$(npm root -g) node bench/browser/run.mjs --stores /tmp/dash-bench \
+//   (cd bench/browser && npm ci)
+//   node bench/browser/run.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--sizes s60,s1k,s2k,s10k] [--styles plain,grid]
 //     [--themes light,dark] [--widths 1280,390] [--runs 5] [--assets web] [--chrome PATH]
 //     [--json out.json] [--cpu-throttle 4]
@@ -18,7 +19,21 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { chromium } = require('playwright');
+// The driver: `playwright-core` pinned in ./package.json (`npm ci` here; it
+// carries no browser download), else a `playwright` found some other way (a
+// global install through NODE_PATH, as these scripts were first run).
+function loadChromium() {
+  for (const name of ['playwright-core', 'playwright']) {
+    try {
+      return require(name).chromium;
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') throw e;
+    }
+  }
+  console.error('Playwright is not installed. Run `npm ci` in crates/engram-dashboard/bench/browser (see README.md).');
+  process.exit(2);
+}
+const chromium = loadChromium();
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : '1']] : acc), []),

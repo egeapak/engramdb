@@ -82,6 +82,16 @@ updates:
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
 
+  # The one npm dependency in the repository: `playwright-core`, the driver of
+  # the dashboard's browser checks (never embedded, never shipped). Pinned by
+  # a lockfile that CI installs with `npm ci --ignore-scripts`.
+  - package-ecosystem: npm
+    directory: "/crates/engram-dashboard/bench/browser"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+
   # rust-toolchain.toml pins the exact stable release CI and the release
   # workflow build with. Without this entry the pin would only ever move by
   # hand; with it a new compiler arrives as a PR that runs the whole suite.

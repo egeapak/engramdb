@@ -770,6 +770,33 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # What the `frontend-browser` job needs: the debug binary built above and
+      # the generator of the deterministic dashboard stores (an example of the
+      # core crate; model-free). Built here because this job already has every
+      # dependency compiled in this profile. The three steps are
+      # `continue-on-error`: `frontend-browser` is not a required job yet, so
+      # nothing it needs may fail this one, which is required. If they fail,
+      # `frontend-browser` fails at its download step and says why.
+      - name: Build the dashboard store generator
+        continue-on-error: true
+        run: cargo build --locked -p engramdb --example dashboard_bench_store
+
+      - name: Pack the binary and the generator for the browser checks
+        continue-on-error: true
+        # A tarball, because upload-artifact drops the executable bit.
+        run: >-
+          tar -C target/debug -cf dashboard-browser-bins.tar
+          engramdb examples/dashboard_bench_store
+
+      - name: Upload them
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-browser-bins
+          path: dashboard-browser-bins.tar
+          retention-days: 1
+          if-no-files-found: warn
+
   # The regression guard for "a missing ONNX Runtime degrades, it does not kill
   # the process". Under `load-dynamic`, `ort`'s own loader panics when the
   # library is absent, and the shipped profile is `panic = "abort"`, so every
@@ -844,6 +871,88 @@ jobs:
 
       - name: Every model-loading command must survive a missing runtime
         run: bash .github/scripts/smoke-no-runtime.sh target/debug/engramdb --require-missing-runtime
+
+  # The dashboard's interaction and accessibility checks in a real browser
+  # (crates/engram-dashboard/bench/browser/checks.mjs): the accessible list,
+  # keyboard walk, hover hit testing, click, relation pin, display filters,
+  # zoom and pan, theme switch, far-scope tags, and "no console error", for
+  # both drawing surfaces (Plain on canvas, Grid on SVG). Nothing else in CI
+  # runs the frontend; the Rust tests read it as text.
+  #
+  # NOT REQUIRED YET, on purpose: this job is not in `ci-result.needs`, so a
+  # failure here shows as a failed check but does not fail `CI result`. The
+  # pixel comparisons have only been run on developer machines (they pass
+  # there with a debug binary and Chrome); whether they hold under this
+  # runner's software rasteriser and Chrome version is what the first runs
+  # will show. After ten consecutive green master runs, add `frontend-browser`
+  # to `ci-result.needs` (one line) and delete this paragraph. If a pixel
+  # check is unstable here, fix its tolerance in checks.mjs with the
+  # measurement recorded in bench/browser/README.md; do not delete the check.
+  #
+  # No browser download: the runner image ships Google Chrome, and the driver
+  # is `playwright-core`, pinned with a lockfile in bench/browser. Stores are
+  # generated in this job (not shipped from the build job) because a store's
+  # id is derived from its absolute path.
+  frontend-browser:
+    name: Frontend (headless browser checks, not required yet)
+    needs: test-load-dynamic-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Download the binary and the store generator
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dashboard-browser-bins
+
+      - name: Generate the dashboard stores (60 and 1,000 memories)
+        # Deterministic `.md` files plus one reindex; no model, no network.
+        # 1,000 is above the overview threshold (150), so the opened-scope
+        # checks run without the 10k store.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bins"
+          tar -C "$RUNNER_TEMP/bins" -xf dashboard-browser-bins.tar
+          "$RUNNER_TEMP/bins/examples/dashboard_bench_store" "$RUNNER_TEMP/dash-bench" s60 s1k
+
+      - name: Install the pinned Playwright driver
+        working-directory: crates/engram-dashboard/bench/browser
+        # `--ignore-scripts`: playwright-core needs no install script, and a
+        # lockfile-pinned dependency should not get to run one here.
+        run: npm ci --ignore-scripts
+
+      - name: Run the browser checks
+        working-directory: crates/engram-dashboard
+        run: |
+          set -euo pipefail
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || true)
+          if [ -z "$chrome" ]; then
+            echo "::error::no Google Chrome on this runner image; install one or pass a Chromium path"
+            exit 1
+          fi
+          "$chrome" --version
+          # `--allow-missing-favicon`: see bench/browser/README.md ("In CI").
+          node bench/browser/checks.mjs \
+            --stores "$RUNNER_TEMP/dash-bench" \
+            --bin "$RUNNER_TEMP/bins/engramdb" \
+            --chrome "$chrome" \
+            --allow-missing-favicon \
+            --views s60:full,s1k:all,s1k:open \
+            --json "$RUNNER_TEMP/browser-checks.json"
+
+      - name: Upload the check results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-checks
+          path: ${{ runner.temp }}/browser-checks.json
+          retention-days: 7
+          if-no-files-found: warn
 
   test-load-dynamic:
     name: Test (default features, runtime-loaded ONNX) (shard ${{ matrix.shard }}/3)
@@ -1036,6 +1145,11 @@ jobs:
   # failed `needs` would skip this job, and GitHub counts a skipped required
   # check as passing. Anything other than success (failure, cancelled, or a
   # shard skipped because its build failed) fails it.
+  #
+  # Every job in this file is listed below, with one declared exception:
+  # `frontend-browser`, which is informational until it has proven stable on
+  # this runner (see its comment). A new job belongs in this list unless it
+  # says, like that one, why not.
   ci-result:
     name: CI result
     if: always()

@@ -1,11 +1,14 @@
 // Browser checks of the graph view's interaction and accessibility, for
 // either surface (the canvas host Plain draws through, the SVG Grid draws
-// through): what a keyboard, a screen reader and a pointer get. A developer
-// tool run by hand (README.md), like run.mjs; not embedded, not in CI.
+// through): what a keyboard, a screen reader and a pointer get. Not embedded.
+// Run by hand (README.md), and by CI's `frontend-browser` job against the
+// runner's Chrome and a debug binary.
 //
-//   NODE_PATH=$(npm root -g) node bench/browser/checks.mjs --stores /tmp/dash-bench \
+//   (cd bench/browser && npm ci)
+//   node bench/browser/checks.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--assets web] [--views s60:full,s1k:all,s10k:open]
 //     [--styles plain,grid] [--dpr 2] [--viewport 1280x860] [--json out.json]
+//     [--chrome /usr/bin/google-chrome] [--allow-missing-favicon]
 //
 // Per view and style it checks:
 //   a11y_list      one focusable element per drawn memory, with the SVG `<g>`'s
@@ -44,7 +47,11 @@
 //   dispose        (canvas) leaving the graph empties every canvas the host held
 //   console        no page error, no console error (a CSP violation is one)
 //
-// `--dpr 2` runs every check at device scale 2.
+// `--allow-missing-favicon` drops exactly one console error from that last
+// check: the 404 for `/favicon.ico`. The dashboard declares no icon, so a full
+// Chrome (`--chrome`, new headless mode) asks for the default one and logs the
+// 404. Measured with Chrome on the s60 and s1k stores: it is the only console
+// error in any view. Remove the flag from CI once the dashboard serves an icon.
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -53,7 +60,21 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { chromium } = require('playwright');
+// The driver: `playwright-core` pinned in ./package.json (`npm ci` here; it
+// carries no browser download), else a `playwright` found some other way (a
+// global install through NODE_PATH, as these scripts were first run).
+function loadChromium() {
+  for (const name of ['playwright-core', 'playwright']) {
+    try {
+      return require(name).chromium;
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') throw e;
+    }
+  }
+  console.error('Playwright is not installed. Run `npm ci` in crates/engram-dashboard/bench/browser (see README.md).');
+  process.exit(2);
+}
+const chromium = loadChromium();
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : '1']] : acc), []),
@@ -215,7 +236,12 @@ async function check(browser, url, size, view, style) {
   const p = await ctx.newPage();
   const errors = [];
   p.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
-  p.on('console', (m) => m.type() === 'error' && errors.push('console: ' + m.text()));
+  p.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    const from = m.location().url || '';
+    if (args['allow-missing-favicon'] && /^http:\/\/[^/]+\/favicon\.ico$/.test(from) && /\b404\b/.test(m.text())) return;
+    errors.push('console: ' + m.text() + (from ? ' @ ' + from.replace(/token=[0-9a-f]+/, 'token=…') : ''));
+  });
   await p.goto(url);
   await p.waitForSelector('.nav a[href*="/graph"]');
   await openView(p, view);
