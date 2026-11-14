@@ -15,6 +15,11 @@
 - Network access on first use, to download the models. The default embedding
   model is about 33 MB. The reranker (about 37 MB) and the T5 title model
   (about 77 MB) are also on by default. After that, EngramDB works offline.
+  EngramDB checks the SHA-256 of each built-in model file it downloads
+  itself (the default embedding, T5, NLI and reranker models). A file that
+  does not match is not loaded, and `engramdb doctor` names it; delete it
+  from the model cache to download it again. Models that `fastembed`
+  downloads on its own (the other embedding providers) are not checked.
 
 ### ONNX Runtime
 

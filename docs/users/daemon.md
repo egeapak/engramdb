@@ -113,6 +113,8 @@ The folder that holds the socket is the daemon's private folder. It holds three 
 
 On Unix, the daemon creates the folder with mode `0700`. If the folder already exists, it must be owned by you and have mode `0700`. Otherwise the daemon refuses to start, and models load in-process. The error names the folder and the fix (for example `chmod 700 <folder>`). An overridden socket moves the whole folder: `ENGRAMDB_DAEMON_SOCKET=/path/to/dir/d.sock` puts the lock and the log in `/path/to/dir/` too.
 
+Clients check the other end too. Before it sends anything, every client (MCP, CLI, hooks) checks that the process listening on the socket runs as you: the socket's peer uid on Unix, the pipe server's user SID on Windows. A listener owned by another user is refused, so a socket or pipe someone else created first never receives your hook input or model text. A refused daemon counts as not running: hooks and models run in-process, and `engramdb doctor` reports it as a failure.
+
 Under `$XDG_RUNTIME_DIR` the folder is cleared when you log out, so the log is too. The log only needs to explain the most recent daemon failure, so this is acceptable.
 
 ## Disabling

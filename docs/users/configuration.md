@@ -2,15 +2,15 @@
 
 EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, the three `[retrieval.scoring]` weight sub-tables (`with_query`, `scope_only`, `degraded`) and their `relevance` weights, all of `[thresholds]` (`needs_review` / `gc` / `compress`), all of `[search]`, `[scope_proximity]`, `[logical_bonus]`, `[trust_weights]`, `[nli]`, and `[rerank]`. The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override.
 
-One section is the exception: `[daemon]` is read only from the **global** config file, `<global config dir>/config.toml` (Linux: `~/.config/engramdb/config.toml`; macOS: `~/Library/Application Support/engramdb/config.toml`; `$ENGRAMDB_CONFIG_DIR/config.toml` when that variable is set). The daemon is one process shared by every project, so its settings cannot come from a project. The global file holds only `[daemon]`; a missing file means the defaults. A project config that still has a `[daemon]` section loads, but EngramDB ignores the keys, warns once naming each one, and `engramdb doctor` reports them. See [daemon.md](./daemon.md#configuration).
+Two sections are the exception: `[daemon]` and `[security]` are read only from the **global** config file, `<global config dir>/config.toml` (Linux: `~/.config/engramdb/config.toml`; macOS: `~/Library/Application Support/engramdb/config.toml`; `$ENGRAMDB_CONFIG_DIR/config.toml` when that variable is set). The daemon is one process shared by every project, so its settings cannot come from a project. `[security]` decides what a project's agent may do outside that project, and a project config is committed with the repository, so a cloned repository must not be able to grant itself anything. The global file holds only these two sections; a missing file means the defaults. A project config that still has a `[daemon]` or `[security]` section loads, but EngramDB ignores the keys, warns once naming each one, and `engramdb doctor` reports them. A `[security]` key set to `true` in a project config grants nothing. See [daemon.md](./daemon.md#configuration) and [`[security]`](#security) below.
 
 ## Override precedence
 
 | Layer | Source |
 |-------|--------|
 | Built-in defaults | `crates/engram-types/src/config.rs` |
-| `config.toml` | `<project>/.engramdb/config.toml` — every section except `[daemon]` |
-| Global `config.toml` | `<global config dir>/config.toml` — `[daemon]` only |
+| `config.toml` | `<project>/.engramdb/config.toml` — every section except `[daemon]` and `[security]` |
+| Global `config.toml` | `<global config dir>/config.toml` — `[daemon]` and `[security]` only |
 | Environment | See [Environment variables](#environment-variables) |
 | CLI flag | `--embedding-backend`, `--socket`, etc. |
 
@@ -18,7 +18,7 @@ Higher rows lose to lower rows.
 
 ## Full schema
 
-Every field with its default. All sections go in `<project>/.engramdb/config.toml`, except `[daemon]`, which goes in the global config file:
+Every field with its default. All sections go in `<project>/.engramdb/config.toml`, except `[daemon]` and `[security]`, which go in the global config file:
 
 ```toml
 [retrieval]
@@ -159,22 +159,23 @@ interval_secs = 21600               # 6h throttle on the full housekeeping pass
 compaction_fragment_threshold = 32  # uncompacted fragments that trigger early compaction (0 = time-based only)
 compaction_min_interval_secs = 120  # floor between compaction firings
 
-# [daemon] goes in the GLOBAL config file (<global config dir>/config.toml),
-# never in a project config — see daemon.md.
+# [daemon] and [security] go in the GLOBAL config file
+# (<global config dir>/config.toml), never in a project config — see daemon.md.
 [daemon]
 enabled = true
 idle_timeout_secs = 900        # 15 min idle → daemon exits
 use_for_cli = true             # route model-needing CLI commands through a running daemon
 # socket_path = "/run/user/1000/engramdb/daemon.sock"   # optional override; the folder must be yours, mode 0700
 
+[security]                          # GLOBAL config file only
+allow_cross_project_writes = false  # allow MCP tools to write to (or link) a different registered project
+allow_all_projects_harvest = false  # allow MCP harvest tools to read other projects' transcripts
+allow_custom_model_repos = false    # allow [nli].model to name a repository that is not built in
+
 [title]
 strategy = "t5"                # "t5" (default) | "keyword" | "none"
 # pool_size = 2                # T5 sessions to pool when strategy = "t5"; omit to auto-size (2, clamped to cores).
 #                               # Shared between projects like the embedding pool: largest request, rounded up to a power of two.
-
-[security]
-allow_cross_project_writes = true   # allow MCP tools to write to a different registered project
-allow_all_projects_harvest = false  # allow MCP harvest tools to set all_projects (machine-wide read)
 
 [epistemic]
 observation_review_days = 90        # observations unverified for longer than this get a
@@ -260,14 +261,24 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
   A warning from this check always names the tier that produced it, because a clean `size` result is not proof of currency. For the exact, unbudgeted answer use `engramdb doctor` (content drift) or `engramdb reindex --dry-run` (content drift **and** stale vectors). Neither of these fields affects the provider cache key — index-currency checking loads no model.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
-- **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.
+- **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`. `model` must be one of the built-in NLI models (`Xenova/nli-deberta-v3-xsmall`, the default, or `cross-encoder/nli-deberta-v3-xsmall`). Any other repository is refused and NLI stays off for that project, unless the global config sets `[security] allow_custom_model_repos = true`. A project config is committed with the repository, so without this rule a cloned repository could make EngramDB download and parse any model its author chose. `model` must look like `owner/name`. The daemon reads the opt-in once at start, so after you change it run `engramdb daemon restart`.
 - **`[links]`** — the automatic edge proposers ([links.md](./links.md#automatic-proposals)). They run when a memory is created (and when an MCP `update` re-embeds it), never in a hook, and only *propose*: a proposed edge changes no score until someone confirms it (`engramdb link … --status confirmed`, or the dashboard with `--allow-writes`). Defaults are conservative: a neighbour must reach `related_threshold` (0.80) to be proposed at all, and `max_proposals_per_memory` (3) caps the unreviewed proposals on each end of an edge, contradictions first. Similarity is the vector index's score, `1 / (1 + d²)` over the embeddings' squared L2 distance — for the default normalized MiniLM vectors, 0.80 is a cosine of about 0.88 and 0.92 about 0.96. Contradiction proposals ride `[nli]` and need it enabled; similarity proposals need only embeddings, but a neighbour is proposed as `duplicates` only when NLI also ran on the pair and found no contradiction (without NLI it is `related_to`). Proposing makes no extra model call: the search reuses the vectors `create` just computed. An existing edge of any kind or status between two memories — including a rejected one — blocks every proposal for that pair. Every field is optional; set `max_proposals_per_memory = 0`, or both `propose_*` to `false`, to switch proposals off. Validation requires both thresholds in `[0, 1]` with `duplicate_threshold >= related_threshold`.
 - **`[rerank]`** — on by default since the quantized cross-encoder (`jina-turbo-q`, ~36.5 MB, uint8) never lost to the unreranked baseline on any measured corpus, at an estimated ~150 ms/query (noisy; see the linked doc for the range). `top_n = 10` is both cheaper and more accurate than the historical default of 50 — reranking is deep-or-not-at-all, so there is no partial/gated mode. Final score blends original and reranker: `(1 - weight) * original + weight * rerank_score`. Set `enabled = false` to opt back out. This never affects the Claude Code hook handlers (`PreToolUse` / `SessionStart` / `UserPromptSubmit`): they build their retrieval engine with no model providers at all, so they cannot pay reranker latency regardless of this config. See [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) for the measured evidence.
 - **`[review]`** — the recency trigger for reviewing old memories. `recency_days` (default **90**) is the age past which an *active* memory that hasn't been updated (every edit and every `resolve`/keep/update bumps `updated_at`) is suggested for review. It never deletes or hides anything — it only surfaces a suggestion: the MCP `review` tool folds these stale memories in alongside flagged (challenged / needs-review) ones by default, and the MCP `memory-session-end` prompt reports how many are due so an agent can offer to revisit them. Stale memories are ranked by criticality so the ones most worth re-verifying come first. Omit the field to keep the 90-day default; validation accepts 1–3650. On the CLI, `engramdb review --stale-after-days [N]` opts a single run into the trigger (bare flag = 90).
 - **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event". Hook call stats (the per-project `hook_events` table and `.engramdb/state/hook_stats.jsonl`) honor the same switch and window: `enabled = false` stops hooks from recording, and rows older than `retention_days` are pruned and left out of the summary. Per-memory usage events (`memory_events` / `memory_usage`, `.engramdb/state/memory_events.jsonl`; see `stats --memory` in the [CLI reference](./cli-reference.md)) follow the same switch; raw events are pruned at `retention_days`, but each memory's lifetime counts are kept in the rollup.
 - **`[title]`** — how a memory's title is generated when the caller doesn't supply one. `t5` (default) is abstractive T5-small summarization; the shared daemon / MCP server loads (and pools) the encoder+decoder **once machine-wide**, so the per-`create` cost is amortized. `keyword` is in-process RAKE extraction (no model); `none` skips automatic titling. The one-shot CLI's `engramdb add` always uses `keyword` so a single command never pays a cold T5 load. The MCP `create` tool's per-call `title_strategy` overrides this.
 - **`[daemon]`** — **global config file only**; see [daemon.md](./daemon.md#configuration). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading. `enabled` and `use_for_cli` are per user, so the daemon is used the same way in every project; for a one-off opt-out use `--in-process` or `ENGRAMDB_IN_PROCESS=1`.
-- **`[security]`** — `allow_cross_project_writes` (default `true`, preserving historical behavior) gates the MCP server's confused-deputy surface. Nearly every MCP tool accepts an optional `project` override that resolves to *any* project in the global registry, so a steered agent operating in project A could otherwise mutate a different registered project B on the same machine. Setting it to `false` blocks the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`, `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) from writing to a **different** registered project. `doctor` is gated as well, but only when called with `fix: true` — reading the diagnosis is not a write, flipping memories to `needs_review` is. The session's own project (`project` omitted) and the shared global store (`project = "global"`) are always allowed; a linked worktree of the session's own project is not treated as cross-project. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_*`, `doctor` without `fix`, `harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search`) are never gated. `allow_all_projects_harvest` (default **false**) is separate because it gates a *read*: the harvest tools' `all_projects` option reads every Claude Code conversation on the machine rather than this project's, and naming another `project` reads that project's raw transcripts. Both need this flag — it gates the *read* tools (`harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search` — search returns conversation-derived text, and even a result *count* says something about a project you may not read), and also `harvest_mark`, which despite being a write resolves a session-id prefix against the target's transcripts and names every match in its error, so the write gate alone made it a session-id oracle for a project the read gate refuses; `harvest_mark` therefore needs **both** flags for a cross-project target — and both read it from **your own** project's config — never the target's, so a permissive setting in one repo cannot open the gate for the rest. Cross-project *memory* reads are unaffected: memories are curated, a transcript is the raw conversation.
+- **`[security]`** — **global config file only.** <a id="security"></a> A project config is committed with its repository, so it cannot open these gates; a project-level `[security]` is ignored, warned about once and reported by `doctor`.
+
+  `allow_cross_project_writes` (default **`false`**) gates the MCP server's confused-deputy surface. Nearly every MCP tool takes an optional `project` override that resolves to *any* project in the global registry, so a steered agent working in project A could otherwise change project B on the same machine. Unless it is `true`, the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`, `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) refuse to write to a **different** registered project. `doctor` is gated only with `fix: true`: reading the diagnosis is not a write, flipping memories to `needs_review` is. The session's own project (`project` omitted), its own linked worktrees, group stores and the global store are always allowed. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_list`, `projects_info`, `doctor` without `fix`) are never gated.
+
+  `projects_link` and `projects_unlink` change the registry's hierarchy, and a project's harvest scope is its root plus everything linked under it. Re-parenting inside the session's own hierarchy is always allowed. Linking anything else needs both `allow_cross_project_writes` and `allow_all_projects_harvest`; unlinking a project outside the session's hierarchy needs `allow_cross_project_writes`. `engramdb setup` no longer auto-approves these two tools, and removes an old approval. The CLI `engramdb projects link` is not gated: it is the user's own request.
+
+  `allow_all_projects_harvest` (default **`false`**) gates a *read*: the harvest tools' `all_projects` option reads every Claude Code conversation on the machine, and naming another `project` reads that project's raw transcripts. It gates `harvest_list`, `harvest_show`, `harvest_ledger` and `harvest_search` (search returns conversation-derived text, and even a result count says something about a project you may not read). `harvest_mark` needs **both** flags for another project: it is a write, but it resolves a session-id prefix against the target's transcripts and names every match in its error. Cross-project *memory* reads are not gated: memories are curated, a transcript is the raw conversation.
+
+  `allow_custom_model_repos` (default **`false`**) lets `[nli].model` name a repository that is not built in (see `[nli]` above).
+
+  **Upgrading:** cross-project MCP writes used to be allowed by default and were read from the session's own project config. They now stop until you set `allow_cross_project_writes = true` in the global file. The refusal message names that file.
 
 ## Environment variables
 
@@ -276,7 +287,7 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 | Variable | Effect |
 |----------|--------|
 | `ENGRAMDB_DATA_DIR` | Global data directory. Overrides the platform default. Tests use it for isolation. |
-| `ENGRAMDB_CONFIG_DIR` | Global config directory (the registry and the global `config.toml` with `[daemon]`). Overrides the platform default. Tests use it. |
+| `ENGRAMDB_CONFIG_DIR` | Global config directory (the registry and the global `config.toml` with `[daemon]` and `[security]`). Overrides the platform default. Tests use it. |
 | `ENGRAMDB_REGISTRY_PATH` | Path of the registry file itself. Overrides `<config dir>/registry.json`. Meant for tests. |
 | `ENGRAMDB_MODEL_CACHE_DIR` | Model cache directory (used verbatim). Separate from the data directory. |
 | `ENGRAMDB_OFFLINE` | Truthy: the embedding, NLI and T5 loaders never download a model that is not cached. They fail at once instead. |
