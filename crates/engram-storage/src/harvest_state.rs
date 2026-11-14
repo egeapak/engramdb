@@ -183,6 +183,15 @@ pub struct HarvestEntry {
     pub note: Option<String>,
     /// The archived transcript, when one is held.
     pub archive: Option<crate::transcript_archive::ArchiveRef>,
+    /// When the automatic index pass last failed to index this session, or
+    /// `None` when it never failed or has been indexed since.
+    ///
+    /// The maintenance pass reads it to retry a failing session at most once
+    /// per day and after every session that never failed, so a handful of
+    /// unindexable sessions (a transcript that will not parse, a copy that
+    /// will not decompress) cannot take the whole per-pass budget forever.
+    /// [`set_stage`] with [`HarvestStage::Indexed`] clears it.
+    pub index_failed_at: Option<DateTime<Utc>>,
 }
 
 impl HarvestEntry {
@@ -196,6 +205,7 @@ impl HarvestEntry {
             stage: HarvestStage::Collected,
             note: None,
             archive: None,
+            index_failed_at: None,
         }
     }
 
@@ -260,6 +270,17 @@ struct LedgerLine {
         skip_serializing_if = "Option::is_none"
     )]
     archive: Option<Option<crate::transcript_archive::ArchiveRef>>,
+    /// When the automatic index pass last failed on this session; `null`
+    /// clears it (written with the `indexed` stage).
+    ///
+    /// A binary from before this field ignores it on read, and its compaction
+    /// drops it: the cost is one early retry of that session, nothing more.
+    #[serde(
+        default,
+        deserialize_with = "explicit_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    index_failed_at: Option<Option<DateTime<Utc>>>,
     /// Tombstone: the entry is gone as of `at`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     removed: bool,
@@ -278,6 +299,7 @@ impl LedgerLine {
             memories_created: None,
             note: None,
             archive: None,
+            index_failed_at: None,
             removed: false,
         }
     }
@@ -464,6 +486,9 @@ fn fold_with_tombstones(
         if let Some(archive) = line.archive {
             folded.entry.archive = archive;
         }
+        if let Some(failed) = line.index_failed_at {
+            folded.entry.index_failed_at = failed;
+        }
     }
     (map, tombstones)
 }
@@ -640,6 +665,7 @@ pub fn mark_harvested(
             stage: HarvestStage::Collected,
             note,
             archive: None,
+            index_failed_at: None,
         });
     // The fold stamps `harvested_at` from the winning decision line's own
     // timestamp, so "the entry does not carry ours" is exactly "a later
@@ -689,7 +715,32 @@ pub fn set_stage(project_dir: &Path, session_id: &str, stage: HarvestStage) -> R
     }
     let mut line = LedgerLine::touching(session_id);
     line.stage = Some(stage);
+    if stage == HarvestStage::Indexed {
+        // Indexed settles any earlier failure, so the retry clock stops.
+        line.index_failed_at = Some(None);
+    }
     append(project_dir, &[line])
+}
+
+/// Record that the automatic index pass failed on these sessions at `at`.
+///
+/// One append for the whole batch. The stage and decision are untouched, so a
+/// failure never reopens or settles anything; it only defers the next
+/// automatic attempt (see `ops::harvest_index`).
+pub fn set_index_failed(project_dir: &Path, session_ids: &[String], at: DateTime<Utc>) -> Result<()> {
+    let lines: Vec<LedgerLine> = session_ids
+        .iter()
+        .filter(|id| crate::transcripts::is_valid_session_id(id))
+        .map(|id| {
+            let mut line = LedgerLine::touching(id);
+            line.index_failed_at = Some(Some(at));
+            line
+        })
+        .collect();
+    if lines.is_empty() {
+        return Ok(());
+    }
+    append(project_dir, &lines)
 }
 
 /// Forget the archive reference for one or more sessions, keeping the review
@@ -1017,6 +1068,7 @@ fn migrate_legacy_map(project_dir: &Path) {
             memories_created: Some(entry.memories_created),
             note: Some(entry.note),
             archive: Some(entry.archive),
+            index_failed_at: None,
             removed: false,
         });
     }
@@ -1169,6 +1221,10 @@ fn maybe_compact(project_dir: &Path) {
             memories_created: Some(entry.memories_created),
             note: Some(entry.note.clone()),
             archive: Some(entry.archive.clone()),
+            // Fold-preserving like every other field: a compaction that
+            // dropped it would let a failing session back to the front of
+            // the queue.
+            index_failed_at: Some(entry.index_failed_at),
             removed: false,
         };
         let Ok(encoded) = serde_json::to_string(&line) else {
@@ -1569,6 +1625,31 @@ mod tests {
         let entry = &read_harvested(dir)["s1"];
         assert_eq!(entry.decision(), HarvestDecision::Deferred);
         assert_eq!(entry.note.as_deref(), Some(filler.as_str()));
+    }
+
+    #[test]
+    fn index_failure_survives_compaction_and_is_cleared_by_indexed() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let failed_at = "2026-08-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        set_index_failed(dir, &["s1".to_string()], failed_at).unwrap();
+        assert_eq!(read_harvested(dir)["s1"].index_failed_at, Some(failed_at));
+
+        let filler = "x".repeat(2048);
+        append_until_compacted(dir, "s1", &filler);
+        assert_eq!(lines_in(dir).len(), 1, "compaction did not run");
+        assert_eq!(
+            read_harvested(dir)["s1"].index_failed_at,
+            Some(failed_at),
+            "compaction dropped the index failure marker"
+        );
+
+        set_stage(dir, "s1", HarvestStage::Indexed).unwrap();
+        let entry = &read_harvested(dir)["s1"];
+        assert_eq!(entry.stage, HarvestStage::Indexed);
+        assert_eq!(entry.index_failed_at, None, "indexing must clear the marker");
+        // A marker never touches the decision.
+        assert_eq!(entry.decision(), HarvestDecision::Deferred);
     }
 
     #[test]

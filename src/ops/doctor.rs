@@ -978,6 +978,9 @@ pub struct HarvestHealth {
     /// Until one exists, `harvest search` cannot find that conversation and a
     /// miss is indistinguishable from the topic never coming up.
     pub pending_index: usize,
+    /// Sessions the automatic index pass failed on and has not indexed
+    /// since; it retries each at most once a day.
+    pub index_failed: usize,
     /// Ledger lines, and the entries a compaction would keep: live sessions
     /// plus the removal tombstones kept within the 365-day window.
     pub ledger_lines: usize,
@@ -995,6 +998,7 @@ impl HarvestHealth {
     /// Nothing to say: no ledger, no pins, nothing waiting.
     fn is_quiet(&self) -> bool {
         self.pending_index == 0
+            && self.index_failed == 0
             && self.ledger_lines == 0
             && self.expired.is_empty()
             && self.pinned_count == 0
@@ -1038,6 +1042,23 @@ pub fn build_harvest_checks(health: &HarvestHealth) -> Vec<EnvironmentCheck> {
             status: Some(CheckStatus::Warn),
         }
     });
+
+    if health.index_failed > 0 {
+        checks.push(EnvironmentCheck {
+            name: "Conversation index failures".to_string(),
+            passed: true,
+            message: format!(
+                "{} session{} could not be indexed (retried daily)",
+                health.index_failed,
+                if health.index_failed == 1 { "" } else { "s" }
+            ),
+            suggestion: Some(
+                "Run `engramdb harvest index <session>` on one to see why it fails.".to_string(),
+            ),
+            details: vec![],
+            status: Some(CheckStatus::Warn),
+        });
+    }
 
     let pending_compaction = crate::storage::harvest_state::compaction_is_pending(
         health.ledger_lines,
@@ -1166,6 +1187,7 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
         crate::ops::harvest_index::pending_sessions(&scope, after, chrono::Utc::now())
             .map(|v| v.len())
             .unwrap_or(0);
+    let index_failed = crate::ops::harvest_index::index_failures(&scope);
 
     // Both fallible halves bail rather than default. An empty `with_bytes`
     // would report every citation in the store as expired evidence, which is
@@ -1189,6 +1211,7 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
 
     let health = HarvestHealth {
         pending_index,
+        index_failed,
         ledger_lines,
         ledger_entries,
         expired,
@@ -6265,6 +6288,25 @@ mod harvest_doctor_tests {
         assert!(!ledger.message.contains("compaction pending"));
         assert!(find(&checks, "Harvest evidence").is_none());
         assert!(find(&checks, "Pinned transcripts").is_none());
+    }
+
+    #[test]
+    fn index_failures_are_reported_apart_from_the_backlog() {
+        let health = HarvestHealth {
+            index_failed: 3,
+            ..Default::default()
+        };
+        let checks = build_harvest_checks(&health);
+        let check = find(&checks, "Conversation index failures").unwrap();
+        assert!(check.passed);
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert_eq!(
+            check.message,
+            "3 sessions could not be indexed (retried daily)"
+        );
+        assert!(build_harvest_checks(&HarvestHealth::default())
+            .iter()
+            .all(|c| c.name != "Conversation index failures"));
     }
 
     /// A backlog is a warning to act on, not a failure: the automatic pass

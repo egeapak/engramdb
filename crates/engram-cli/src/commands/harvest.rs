@@ -1438,6 +1438,7 @@ mod tests {
             stage,
             note: None,
             archive: None,
+            index_failed_at: None,
         }
     }
 
@@ -1619,6 +1620,7 @@ mod tests {
                 sha256: "dead\u{1b}[2K\rbeef".into(),
                 archived_at: chrono::Utc::now(),
             }),
+            index_failed_at: None,
         }
     }
 

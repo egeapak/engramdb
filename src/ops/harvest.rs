@@ -2231,6 +2231,7 @@ mod tests {
                         stage: harvest_state::HarvestStage::Collected,
                         note: None,
                         archive: None,
+                        index_failed_at: None,
                     },
                 )
             })
@@ -2281,6 +2282,7 @@ mod tests {
             stage: harvest_state::HarvestStage::Collected,
             note: None,
             archive: None,
+            index_failed_at: None,
         };
         let ledger: std::collections::HashMap<String, harvest_state::HarvestEntry> = [
             (
