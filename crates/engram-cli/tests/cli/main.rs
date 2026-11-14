@@ -21,3 +21,4 @@ mod reindex;
 mod snapshot;
 mod stats;
 mod update;
+mod worktree;

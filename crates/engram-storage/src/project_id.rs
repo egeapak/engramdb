@@ -38,6 +38,16 @@ pub fn compute_project_id(project_dir: &Path) -> String {
     hash_string(&path_str)
 }
 
+/// A linked git worktree: where its main worktree is, and where git keeps
+/// this worktree's private state (index, HEAD).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeLink {
+    /// The main worktree's project root (canonical).
+    pub main_root: PathBuf,
+    /// The per-worktree git directory, `<main>/.git/worktrees/<name>`.
+    pub gitdir: PathBuf,
+}
+
 /// If `dir` is a linked git worktree, return the absolute path of the main
 /// worktree's project root.
 ///
@@ -50,6 +60,11 @@ pub fn compute_project_id(project_dir: &Path) -> String {
 ///   directory (the main worktree's project root).
 /// - Malformed worktree files / unreadable commondir: returns `None`.
 pub fn detect_worktree_main(dir: &Path) -> Option<PathBuf> {
+    detect_worktree(dir).map(|link| link.main_root)
+}
+
+/// [`detect_worktree_main`], also returning the per-worktree git directory.
+pub fn detect_worktree(dir: &Path) -> Option<WorktreeLink> {
     let git_entry = dir.join(".git");
     let metadata = fs::symlink_metadata(&git_entry).ok()?;
 
@@ -101,7 +116,10 @@ pub fn detect_worktree_main(dir: &Path) -> Option<PathBuf> {
     // the final `..`, landing one directory too deep.
     let main_git_dir = main_git_dir.canonicalize().ok()?;
     let main_root = main_git_dir.parent()?.to_path_buf();
-    Some(main_root)
+    Some(WorktreeLink {
+        main_root,
+        gitdir: worktree_gitdir,
+    })
 }
 
 fn get_git_remote(project_dir: &Path) -> Option<String> {

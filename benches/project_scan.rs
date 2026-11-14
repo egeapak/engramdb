@@ -111,12 +111,31 @@ fn bench_aggregate_stats(c: &mut Criterion) {
     group.finish();
 }
 
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=bench",
+            "-c",
+            "user.email=bench@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .status()
+        .expect("git must be on PATH for the worktree bench");
+    assert!(status.success(), "git {args:?} failed");
+}
+
 /// Seed a main store with `main_count` memories and a sibling "worktree"
 /// store holding `stray_count` memories to be consolidated into it.
 ///
-/// The two directories are independent stores; consolidation is driven purely
-/// by path, so this reproduces the migration loop without needing real git
-/// worktree plumbing.
+/// The worktree is a real `git worktree` whose branch does not track
+/// `.engramdb/`: consolidation asks git whether the directory is tracked and
+/// only moves a store git does not track, so a fake layout would measure
+/// nothing.
 async fn seed_worktree(main_count: usize, stray_count: usize) -> (TempDir, std::path::PathBuf) {
     let root = TempDir::new().expect("failed to create temp dir");
     let registry = InMemoryRegistry::new();
@@ -134,7 +153,21 @@ async fn seed_worktree(main_count: usize, stray_count: usize) -> (TempDir, std::
     }
 
     let wt_dir = root.path().join("wt");
-    std::fs::create_dir_all(&wt_dir).expect("failed to create worktree dir");
+    std::fs::write(main_dir.join("README"), "bench").expect("failed to write README");
+    git(&main_dir, &["init", "-q"]);
+    git(&main_dir, &["add", "README"]);
+    git(&main_dir, &["commit", "-q", "-m", "init"]);
+    git(
+        &main_dir,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "bench",
+            wt_dir.to_str().expect("utf-8 temp path"),
+        ],
+    );
     let wt_store = MemoryStore::init(&wt_dir, &registry)
         .await
         .expect("failed to init worktree store");

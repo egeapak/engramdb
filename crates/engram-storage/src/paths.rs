@@ -451,7 +451,7 @@ pub async fn holds_irreplaceable_data(dir: &Path) -> bool {
 ///
 /// A read error other than "not found" counts as `true`: EACCES or a dead
 /// mount must not read as "nothing of value here".
-async fn holds_files_with_extension(dir: &Path, ext: &str) -> bool {
+pub(crate) async fn holds_files_with_extension(dir: &Path, ext: &str) -> bool {
     match tokio::fs::read_dir(dir).await {
         Ok(mut entries) => {
             while let Ok(Some(entry)) = entries.next_entry().await {

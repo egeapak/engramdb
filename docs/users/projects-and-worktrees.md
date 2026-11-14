@@ -139,8 +139,8 @@ a warning in human output, and in `skipped[]` in JSON:
   one path.
 - A **linked git worktree** carrying its own `.engramdb/`. Worktrees are
   sub-projects: memory operations inside one already route to the main
-  checkout, and any stray local store is consolidated into it on the next
-  command. Adopting one as a root project would give the same memory files two
+  checkout, and any stray local store (one git does not track) is
+  consolidated into it on the next command. Adopting one as a root project would give the same memory files two
   owners, double-counting them in `projects list` and `projects stats`. Run
   `discover` against the main checkout instead.
 
@@ -190,6 +190,15 @@ When you run a memory operation inside a linked git worktree, EngramDB **routes 
 4. Consolidates any memories previously written to a stray worktree-local `.engramdb/` into the main store.
 
 `add`, `query`, `update`, etc. target one consistent store regardless of which worktree you're in.
+
+**What "stray" means.** A worktree-local `.engramdb/` is stray only when git tracks nothing under it (EngramDB asks `git ls-files`). If your repository commits its memories, every worktree has `.engramdb/` as an ordinary checkout, and EngramDB treats it as one: it writes nothing under it, deletes nothing under it, and copies nothing out of it. In that setup:
+
+- All reads and writes in the worktree still go to the main worktree's store.
+- A memory committed only on the worktree's branch is **not visible** to EngramDB while it is only on that branch. It becomes visible when the branch is merged into whatever the main worktree has checked out. It is deliberately not copied into the main worktree: that would write one branch's state into another branch's working tree.
+- A memory created from the worktree is written into the main worktree's `.engramdb/memories/` and is committed from the main checkout.
+- `git status` in the worktree stays clean after any EngramDB command or hook.
+
+`git` must be on `PATH` for a stray store to be consolidated. When git cannot be asked (not installed, or it refuses the repository), the worktree-local directory is left alone and a warning is logged; routing to the main worktree does not depend on it.
 
 **Exceptions.** A few commands deliberately do **not** route to the main worktree:
 
