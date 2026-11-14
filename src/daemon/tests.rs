@@ -2620,3 +2620,32 @@ async fn an_incompatible_daemon_is_not_pinged_again_inside_the_window() {
     }
     assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+/// In-process fallback models are unloaded once the daemon serves the
+/// session again, and kept while it does not.
+#[tokio::test]
+async fn in_process_models_unload_once_the_daemon_serves() {
+    let loader =
+        std::sync::Arc::new(crate::ops::provider_cache::test_support::FakeLoader::default());
+    let cache = crate::ops::ProviderCache::with_loader(loader, 4);
+    let mut c = EngramConfig::default();
+    c.nli.enabled = false;
+    c.rerank.enabled = false;
+    c.title.strategy = crate::title::TitleStrategy::Keyword;
+    assert!(cache
+        .get(&c, Some(EmbeddingBackend::Onnx))
+        .await
+        .embedding
+        .is_some());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let idle = Duration::from_millis(10);
+
+    assert_eq!(
+        super::sweep_in_process_models(&cache, false, idle).await,
+        0,
+        "daemon down: the in-process models are the session's only ones"
+    );
+    assert_eq!(cache.loaded_count().await, 1);
+    assert_eq!(super::sweep_in_process_models(&cache, true, idle).await, 1);
+    assert_eq!(cache.loaded_count().await, 0);
+}

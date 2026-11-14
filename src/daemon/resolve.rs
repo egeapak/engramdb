@@ -213,6 +213,29 @@ impl Default for DaemonCell {
     }
 }
 
+/// Unload the in-process fallback models of a session the daemon now serves.
+///
+/// A transient daemon failure makes a long-lived MCP session load its models
+/// in-process (`InProcessFallback::Pool`), and that cache has no sweeper of
+/// its own, so those models stayed resident for the session's lifetime even
+/// after the daemon came back. The MCP heartbeat calls this on each tick:
+/// when the daemon answered (`daemon_healthy`), demands older than `idle`
+/// expire and unused models unload. In-process demands are stamped only by
+/// in-process requests, so once the daemon serves the session they age out
+/// after one idle window; a model a request still holds is kept. When the
+/// daemon is unreachable nothing is swept, so in-process-as-primary keeps
+/// its models. Returns how many models were unloaded.
+pub async fn sweep_in_process_models(
+    cache: &ProviderCache,
+    daemon_healthy: bool,
+    idle: Duration,
+) -> usize {
+    if !daemon_healthy {
+        return 0;
+    }
+    cache.evict_idle(idle).await
+}
+
 /// What to load when the daemon path is unavailable (disabled, unreachable,
 /// or forbidden by policy).
 pub enum InProcessFallback<'a> {

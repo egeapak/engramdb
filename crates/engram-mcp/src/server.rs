@@ -2416,6 +2416,7 @@ impl EngramDbServer {
         let daemon = Arc::clone(&self.daemon);
         let backend = self.embedding_backend;
         let config_path = self.effective_dir.join(".engramdb").join("config.toml");
+        let provider_cache = self.provider_cache.clone();
         tokio::spawn(async move {
             loop {
                 // Re-read every tick so an edit to the global config applies
@@ -2443,11 +2444,19 @@ impl EngramDbServer {
                 // tick, like the global one, so an edit moves the lease.
                 if let Some(handle) = handle {
                     let config = load_config_or_default(&config_path).await;
-                    handle
+                    let answered = handle
                         .renew_lease(engramdb::daemon::ModelSelection::from_config(
                             &config, backend,
                         ))
                         .await;
+                    // The daemon serves this session again: let models the
+                    // in-process fallback loaded during an outage age out.
+                    engramdb::daemon::sweep_in_process_models(
+                        &provider_cache,
+                        answered,
+                        std::time::Duration::from_secs(idle),
+                    )
+                    .await;
                 }
                 tokio::time::sleep(engramdb::daemon::heartbeat_interval(idle)).await;
             }
