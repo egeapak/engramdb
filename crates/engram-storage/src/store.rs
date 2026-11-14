@@ -845,22 +845,53 @@ impl MemoryStore {
     }
 
     /// Get a memory by ID (supports prefix matching).
+    ///
+    /// When the same id has a file in both the shared and the personal
+    /// directory, [`cross_dir_winner`] decides which one is the memory — the
+    /// same rule every other reader and the index use.
     pub async fn get(&self, id: &str) -> Result<Memory> {
-        // Try shared memories first
-        match self
-            .get_from_dir(id, &paths::memories_dir(&self.project_dir))
-            .await
-        {
-            Ok(memory) => return Ok(memory),
-            Err(StorageError::NotFound(_)) => {
-                // Fall through to personal
-            }
+        let shared_dir = paths::memories_dir(&self.project_dir);
+        let personal_dir = paths::personal_memories_dir(&self.project_id)?;
+        let shared = locate_memory_file(&shared_dir, id).await?;
+        let personal = match locate_memory_file(&personal_dir, id).await {
+            Ok(found) => found,
+            // A shared hit used to answer without looking at the personal
+            // directory at all; a problem there must not fail it now.
+            Err(_) if shared.is_some() => None,
             Err(e) => return Err(e),
-        }
+        };
 
-        // Try personal memories
-        self.get_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)
-            .await
+        let candidates: Vec<&PathBuf> = match (&shared, &personal) {
+            (Some(s), Some(p)) if stem_id(s) == stem_id(p) => match cross_dir_winner(s, p).await {
+                CrossDirWinner::Shared => vec![s, p],
+                CrossDirWinner::Personal => vec![p, s],
+            },
+            // A prefix naming different ids in the two directories: shared
+            // first, as before.
+            (Some(s), Some(p)) => vec![s, p],
+            (Some(s), None) => vec![s],
+            (None, Some(p)) => vec![p],
+            (None, None) => Vec::new(),
+        };
+        // A file removed between the scan and the read (a concurrent
+        // rename-update or delete) falls through to the next candidate.
+        for path in candidates {
+            match Self::read_found_file(path, id).await {
+                Err(StorageError::NotFound(_)) => continue,
+                other => return other,
+            }
+        }
+        Err(StorageError::NotFound(id.to_string()))
+    }
+
+    /// Every id that has a file in both the shared and the personal
+    /// directory, with the copy that wins. Read-only; for `doctor`.
+    pub async fn cross_dir_duplicates(&self) -> Result<Vec<CrossDirDuplicate>> {
+        let shared = scan_dir_to_stats(&paths::memories_dir(&self.project_dir)).await;
+        let personal = scan_dir_to_stats(&paths::personal_memories_dir(&self.project_id)?).await;
+        let mut duplicates = merge_cross_dir(shared, personal).await.duplicates;
+        duplicates.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(duplicates)
     }
 
     /// Get multiple memories by their full IDs in a single batch.
@@ -872,6 +903,10 @@ impl MemoryStore {
     /// Returns a Vec of `(id, Memory)` pairs.  IDs that cannot be loaded
     /// (missing file, parse error) are silently skipped.
     pub async fn get_batch<S: AsRef<str>>(&self, ids: &[S]) -> Result<Vec<(String, Memory)>> {
+        if ids.is_empty() {
+            // No directory scans for nothing to read.
+            return Ok(Vec::new());
+        }
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
 
@@ -886,16 +921,20 @@ impl MemoryStore {
         // which also sidesteps the higher-ranked lifetime bound the stream
         // adapters would otherwise demand of the map-lookup closure.
         use futures_util::{stream, StreamExt};
-        let to_read: Vec<(String, PathBuf)> = ids
-            .iter()
-            .filter_map(|id| {
-                let id_str = id.as_ref();
-                let path = shared_map
-                    .get(id_str)
-                    .or_else(|| personal_map.get(id_str))?;
-                Some((id_str.to_owned(), path.clone()))
-            })
-            .collect();
+        let mut to_read: Vec<(String, PathBuf)> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let id_str = id.as_ref();
+            let path = match (shared_map.get(id_str), personal_map.get(id_str)) {
+                // In both directories: the same winner `get` and the index pick.
+                (Some(s), Some(p)) => match cross_dir_winner(s, p).await {
+                    CrossDirWinner::Shared => s,
+                    CrossDirWinner::Personal => p,
+                },
+                (Some(path), None) | (None, Some(path)) => path,
+                (None, None) => continue,
+            };
+            to_read.push((id_str.to_owned(), path.clone()));
+        }
         let read: Vec<(String, PathBuf, String)> = stream::iter(to_read)
             .map(|(id_str, path)| async move {
                 // An indexed memory whose file is unreadable/unparseable is a
@@ -943,24 +982,6 @@ impl MemoryStore {
             .filter(|id| on_disk.contains(id.as_ref()))
             .map(|id| id.as_ref().to_owned())
             .collect())
-    }
-
-    async fn get_from_dir(&self, id: &str, dir: &Path) -> Result<Memory> {
-        let matches = find_memory_files(dir, id).await?;
-
-        match matches.len() {
-            0 => Err(StorageError::NotFound(id.to_string())),
-            1 => Self::read_found_file(&matches[0], id).await,
-            _ => {
-                // Multiple files for ONE full ID (`find_memory_files` already
-                // rejected distinct IDs as ambiguous): a stale duplicate left
-                // by an update that crashed between writing the renamed file
-                // and removing the old one. The newest file is the current
-                // state — the rename path always writes the new file last.
-                let newest = newest_by_mtime(&matches).await;
-                Self::read_found_file(newest, id).await
-            }
-        }
     }
 
     /// Read + parse a memory file found by a directory scan.
@@ -1235,7 +1256,7 @@ impl MemoryStore {
         // never observe a spurious NotFound. When the filename changed
         // (title/visibility update), a crash between the write and the
         // removal leaves at worst TWO files for one ID — readers resolve
-        // that to the newest mtime (see `get_from_dir`) and the next
+        // that to the newest mtime (see `locate_memory_file`) and the next
         // update/delete/reindex cleans the stale one up. The old
         // delete-then-write order could lose the memory's file entirely.
         atomic_write(&file_path, &content).await?;
@@ -1243,6 +1264,35 @@ impl MemoryStore {
             if *old != file_path {
                 match async_fs::remove_file(old).await {
                     Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        // An explicit write to this id also heals a cross-directory
+        // duplicate: a copy of the same id in the OTHER visibility directory
+        // (a `git checkout` restoring a tracked shared file after the memory
+        // went personal, a crashed visibility flip) would otherwise keep
+        // competing with the file just written. `create` sweeps both
+        // directories the same way.
+        for dir in [
+            self.get_memories_dir(&Visibility::Shared)?,
+            self.get_memories_dir(&Visibility::Personal)?,
+        ] {
+            if dir == old_dir {
+                continue;
+            }
+            for other in find_memory_files(&dir, &memory.id).await? {
+                if other == file_path {
+                    continue;
+                }
+                match async_fs::remove_file(&other).await {
+                    Ok(()) => tracing::warn!(
+                        "removed {}: a second copy of memory {} in the other visibility \
+                         directory, replaced by this update",
+                        other.display(),
+                        memory.id
+                    ),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => return Err(e.into()),
                 }
@@ -1482,17 +1532,7 @@ impl MemoryStore {
         // (a reindex rebuilds the row from the file, so an orphaned row is
         // repairable while an orphaned file would resurrect on reindex).
         for id in &to_delete {
-            match self
-                .delete_file_from_dir(id, &paths::memories_dir(&self.project_dir))
-                .await
-            {
-                Ok(()) => {}
-                Err(StorageError::NotFound(_)) => {
-                    self.delete_file_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)
-                        .await?;
-                }
-                Err(e) => return Err(e),
-            }
+            self.delete_files_in_both_dirs(id).await?;
         }
 
         self.lance_index
@@ -1519,20 +1559,7 @@ impl MemoryStore {
         // Try to delete file from shared. Only a NotFound falls through to
         // the personal dir — a real I/O error must propagate as-is, not be
         // masked by the personal lookup's NotFound.
-        match self
-            .delete_file_from_dir(full_id, &paths::memories_dir(&self.project_dir))
-            .await
-        {
-            Ok(()) => {}
-            Err(StorageError::NotFound(_)) => {
-                self.delete_file_from_dir(
-                    full_id,
-                    &paths::personal_memories_dir(&self.project_id)?,
-                )
-                .await?;
-            }
-            Err(e) => return Err(e),
-        }
+        self.delete_files_in_both_dirs(full_id).await?;
 
         // Delete from LanceDB (metadata + chunks)
         self.lance_index
@@ -2007,6 +2034,7 @@ impl MemoryStore {
         } else {
             ScannedDir {
                 owned: Vec::new(),
+                paths: HashMap::new(),
                 unparseable: Vec::new(),
             }
         };
@@ -2015,9 +2043,51 @@ impl MemoryStore {
         } else {
             ScannedDir {
                 owned: Vec::new(),
+                paths: HashMap::new(),
                 unparseable: Vec::new(),
             }
         };
+        // An id with a file in BOTH directories is one memory: index the
+        // winner, keep and report the loser (see `ReindexCounts::shadowed`).
+        // Writing both rows let whichever directory was written last win the
+        // row, whatever `get` said, and counted the memory twice.
+        let mut shadowed: Vec<(String, PathBuf)> = Vec::new();
+        {
+            let personal_updated: HashMap<&str, chrono::DateTime<chrono::Utc>> = personal
+                .owned
+                .iter()
+                .map(|(id, m, _)| (id.as_str(), m.updated_at))
+                .collect();
+            let mut drop_shared: HashSet<String> = HashSet::new();
+            let mut drop_personal: HashSet<String> = HashSet::new();
+            for (id, memory, _) in &shared.owned {
+                let Some(personal_at) = personal_updated.get(id.as_str()) else {
+                    continue;
+                };
+                match cross_dir_rule(Some(memory.updated_at), Some(*personal_at)) {
+                    CrossDirWinner::Shared => drop_personal.insert(id.clone()),
+                    CrossDirWinner::Personal => drop_shared.insert(id.clone()),
+                };
+            }
+            drop(personal_updated);
+            for (side, dropped) in [(&mut shared, drop_shared), (&mut personal, drop_personal)] {
+                if dropped.is_empty() {
+                    continue;
+                }
+                side.owned.retain(|(id, _, _)| !dropped.contains(id));
+                for id in dropped {
+                    let path = side.paths.remove(&id).unwrap_or_default();
+                    tracing::warn!(
+                        "memory {id} has a file in both the shared and the personal directory; \
+                         {} is the older copy and is not indexed (it is left on disk — update \
+                         or delete the memory to remove it)",
+                        path.display()
+                    );
+                    shadowed.push((id, path));
+                }
+            }
+            shadowed.sort();
+        }
         let parsed_ids: std::collections::HashSet<&str> = shared
             .owned
             .iter()
@@ -2259,6 +2329,7 @@ impl MemoryStore {
             indexed: indexed_ids.len(),
             skipped,
             unparseable,
+            shadowed,
         })
     }
 
@@ -2454,7 +2525,7 @@ impl MemoryStore {
 
         let mut digests = HashMap::new();
         let mut unreadable = Vec::new();
-        for (id, stat) in shared.by_id.into_iter().chain(personal.by_id) {
+        for (id, stat) in merge_cross_dir(shared, personal).await.by_id {
             match async_fs::read(&stat.path).await {
                 Ok(bytes) => {
                     digests.insert(id, FileDigest::of(&bytes));
@@ -2484,7 +2555,7 @@ impl MemoryStore {
         for visibility in [Visibility::Shared, Visibility::Personal] {
             let dir = self.get_memories_dir(&visibility)?;
             let mut paths = find_memory_files(&dir, id).await?;
-            // Newest wins, matching `get_from_dir`'s duplicate resolution: the
+            // Newest wins, matching `locate_memory_file`'s duplicate resolution: the
             // row describes whichever file a reader would resolve to.
             if paths.len() > 1 {
                 let mut with_mtime: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
@@ -2586,6 +2657,29 @@ impl MemoryStore {
     /// All files matching the ID are removed: `find_memory_files` guarantees
     /// they share one full ID, so any extra file is a stale duplicate left by
     /// a crashed rename-update — deleting the memory sweeps it up too.
+    /// Remove every file of `id` from the shared AND the personal directory.
+    ///
+    /// Both, always: stopping at the first directory that had a copy left a
+    /// cross-directory duplicate's other copy on disk, and the next reindex
+    /// brought the deleted memory back. `NotFound` only when neither
+    /// directory had one; a real I/O error propagates as-is.
+    async fn delete_files_in_both_dirs(&self, id: &str) -> Result<()> {
+        let shared = self
+            .delete_file_from_dir(id, &paths::memories_dir(&self.project_dir))
+            .await;
+        let personal = self
+            .delete_file_from_dir(id, &paths::personal_memories_dir(&self.project_id)?)
+            .await;
+        match (shared, personal) {
+            (Err(StorageError::NotFound(_)), Err(e @ StorageError::NotFound(_))) => Err(e),
+            (Err(StorageError::NotFound(_)), other) | (other, Err(StorageError::NotFound(_))) => {
+                other
+            }
+            (Err(e), _) | (_, Err(e)) => Err(e),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     async fn delete_file_from_dir(&self, id: &str, dir: &Path) -> Result<()> {
         let matches = find_memory_files(dir, id).await?;
 
@@ -2779,11 +2873,19 @@ impl MemoryStore {
             }
         }
 
+        let mut paths = HashMap::with_capacity(by_id.len());
         let owned: Vec<(String, Memory, FileDigest)> = by_id
             .into_iter()
-            .map(|(id, (_path, _mtime, memory, digest))| (id, memory, digest))
+            .map(|(id, (path, _mtime, memory, digest))| {
+                paths.insert(id.clone(), path);
+                (id, memory, digest)
+            })
             .collect();
-        Ok(ScannedDir { owned, unparseable })
+        Ok(ScannedDir {
+            owned,
+            paths,
+            unparseable,
+        })
     }
 
     /// Phase 5 of a reindex: write the rows [`Self::scan_dir`] derived.
@@ -2937,7 +3039,7 @@ impl MemoryStore {
         // Tier A always runs: it is the cheapest signal and the only one that
         // needs no per-file `statx`.
         if cfg.staleness_check == StalenessCheck::Counts {
-            let md_count = count_md_files(&shared_dir).await + count_md_files(&personal_dir).await;
+            let md_count = count_distinct_md_files(&shared_dir, &personal_dir).await;
             let lance_count = self.lance_count().await?;
             return Ok(StalenessFindings {
                 md_count,
@@ -2946,14 +3048,17 @@ impl MemoryStore {
             });
         }
 
-        let mut on_disk = scan_dir_to_stats(&shared_dir).await;
+        let shared = scan_dir_to_stats(&shared_dir).await;
         let personal = scan_dir_to_stats(&personal_dir).await;
-        // A file count, not a distinct-id count: a stale duplicate left by a
-        // crashed rename is a real inconsistency, and tier A has always
-        // reported it.
-        let md_count = on_disk.file_count + personal.file_count;
-        on_disk.by_id.extend(personal.by_id);
-        let by_id = on_disk.by_id;
+        // A file count, not a distinct-id count, WITHIN a directory: a stale
+        // duplicate left by a crashed rename is a real inconsistency, and
+        // tier A has always reported it. An id present in BOTH directories is
+        // counted once and compared through its winning copy: reindex keeps
+        // (and reports) such a pair rather than deleting a file, so counting
+        // both made this warning permanent.
+        let merged = merge_cross_dir(shared, personal).await;
+        let md_count = merged.file_count;
+        let by_id = merged.by_id;
 
         let rows = self.index_digests().await?;
         let lance_count = rows.len();
@@ -3355,11 +3460,141 @@ async fn newest_by_mtime(paths: &[PathBuf]) -> &PathBuf {
     best
 }
 
-/// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
-async fn count_md_files(dir: &Path) -> usize {
-    if !dir.exists() {
-        return 0;
+/// Which copy of an id present in both visibility directories is the memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum CrossDirWinner {
+    Shared,
+    Personal,
+}
+
+/// An id with a file in both the shared and the personal directory.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CrossDirDuplicate {
+    pub id: String,
+    pub shared: PathBuf,
+    pub personal: PathBuf,
+    pub winner: CrossDirWinner,
+}
+
+/// The one rule for an id in both directories, from each copy's parsed
+/// `updated_at` (`None` = the copy does not parse):
+///
+/// - the newest `updated_at` wins;
+/// - on a tie the **personal** copy wins — the private choice is the safe
+///   one: a `git checkout` that restores a tracked shared file must not make
+///   a memory public again;
+/// - a copy that does not parse loses to one that does.
+fn cross_dir_rule(
+    shared: Option<chrono::DateTime<chrono::Utc>>,
+    personal: Option<chrono::DateTime<chrono::Utc>>,
+) -> CrossDirWinner {
+    match (shared, personal) {
+        (Some(s), Some(p)) if s > p => CrossDirWinner::Shared,
+        (Some(_), None) => CrossDirWinner::Shared,
+        _ => CrossDirWinner::Personal,
     }
+}
+
+/// [`cross_dir_rule`] for two files. `get`, `get_batch`, the staleness check,
+/// `file_digests` and `reindex` all go through the rule, so they agree.
+async fn cross_dir_winner(shared: &Path, personal: &Path) -> CrossDirWinner {
+    async fn updated_at(path: &Path) -> Option<chrono::DateTime<chrono::Utc>> {
+        let content = async_fs::read_to_string(path).await.ok()?;
+        Some(memory_file::parse_memory_file(&content).ok()?.updated_at)
+    }
+    cross_dir_rule(updated_at(shared).await, updated_at(personal).await)
+}
+
+/// The id a memory file's name carries.
+fn stem_id(path: &Path) -> Option<&str> {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .map(memory_file::extract_id_from_stem)
+}
+
+/// The current file for `id` (or a unique prefix) in one directory: the
+/// newest when a crashed rename left several for the same id.
+async fn locate_memory_file(dir: &Path, id: &str) -> Result<Option<PathBuf>> {
+    let mut matches = find_memory_files(dir, id).await?;
+    Ok(match matches.len() {
+        0 => None,
+        1 => matches.pop(),
+        // Multiple files for ONE full ID (`find_memory_files` already
+        // rejected distinct IDs as ambiguous): a stale duplicate left by an
+        // update that crashed between writing the renamed file and removing
+        // the old one. The newest file is the current state — the rename
+        // path always writes the new file last.
+        _ => Some(newest_by_mtime(&matches).await.clone()),
+    })
+}
+
+/// The two directories' files as one id → file map.
+struct MergedDirs {
+    by_id: HashMap<String, FileStat>,
+    /// Every `.md` file, an id present in both directories counted once.
+    file_count: usize,
+    duplicates: Vec<CrossDirDuplicate>,
+}
+
+/// Merge the shared and the personal scan, resolving an id present in both
+/// with [`cross_dir_winner`] (two file reads per such id, none otherwise).
+async fn merge_cross_dir(shared: DirStats, personal: DirStats) -> MergedDirs {
+    let mut file_count = shared.file_count + personal.file_count;
+    let mut by_id = shared.by_id;
+    let mut duplicates = Vec::new();
+    for (id, personal_stat) in personal.by_id {
+        let Some(shared_stat) = by_id.get(&id) else {
+            by_id.insert(id, personal_stat);
+            continue;
+        };
+        let winner = cross_dir_winner(&shared_stat.path, &personal_stat.path).await;
+        duplicates.push(CrossDirDuplicate {
+            id: id.clone(),
+            shared: shared_stat.path.clone(),
+            personal: personal_stat.path.clone(),
+            winner,
+        });
+        file_count = file_count.saturating_sub(1);
+        if winner == CrossDirWinner::Personal {
+            by_id.insert(id, personal_stat);
+        }
+    }
+    MergedDirs {
+        by_id,
+        file_count,
+        duplicates,
+    }
+}
+
+/// `.md` files in both directories, an id present in both counted once (the
+/// `counts` tier: names only, no `statx`, no read).
+async fn count_distinct_md_files(shared_dir: &Path, personal_dir: &Path) -> usize {
+    async fn ids(dir: &Path) -> (usize, HashSet<String>) {
+        let mut ids = HashSet::new();
+        let mut count = 0;
+        let Ok(mut entries) = async_fs::read_dir(dir).await else {
+            return (0, ids);
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("md") {
+                count += 1;
+                if let Some(id) = stem_id(&path) {
+                    ids.insert(id.to_string());
+                }
+            }
+        }
+        (count, ids)
+    }
+    let (shared_count, shared_ids) = ids(shared_dir).await;
+    let (personal_count, personal_ids) = ids(personal_dir).await;
+    let in_both = shared_ids.intersection(&personal_ids).count();
+    (shared_count + personal_count).saturating_sub(in_both)
+}
+
+/// Count `.md` files in a directory. Returns 0 if the directory doesn't exist.
+#[cfg(test)]
+async fn count_md_files(dir: &Path) -> usize {
     let Ok(mut entries) = async_fs::read_dir(dir).await else {
         return 0;
     };
@@ -3401,6 +3636,8 @@ struct RowIdentity {
 /// One directory's parse result ([`MemoryStore::scan_dir`]).
 struct ScannedDir {
     owned: Vec<(String, Memory, crate::digest::FileDigest)>,
+    /// The file each owned id was read from.
+    paths: HashMap<String, PathBuf>,
     unparseable: Vec<UnparseableMemoryFile>,
 }
 
@@ -3433,6 +3670,13 @@ pub struct ReindexCounts {
     /// Files that did not parse. Their rows, vectors and edges were kept
     /// (see [`UnparseableMemoryFile`]); every surface must show these.
     pub unparseable: Vec<UnparseableMemoryFile>,
+    /// Ids with a file in both the shared and the personal directory: the
+    /// id and the path of the copy that LOST ([`cross_dir_rule`]). The
+    /// winner is indexed; the loser is left on disk — it may be a tracked
+    /// file git would restore anyway, or a private copy with edits, and an
+    /// unattended reindex (it also runs as the forced migration) must not
+    /// decide that. An `update` or `delete` of the id removes it.
+    pub shadowed: Vec<(String, PathBuf)>,
 }
 
 /// Scan a directory for `.md` files, recording each one's path and length.
@@ -8000,5 +8244,199 @@ mod tests {
         done.store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(reader.await.unwrap() > 0);
         assert_eq!(store.list_summary().await.unwrap().len(), 10);
+    }
+
+    // ---- one id in both the shared and the personal directory ----
+
+    /// A memory that went personal, plus its old shared file back on disk
+    /// (what a `git checkout` of a tracked file does). Returns
+    /// `(store, id, shared_path, personal_path)`.
+    async fn store_with_a_restored_shared_copy(
+        tmp: &TempDir,
+        id: &str,
+    ) -> (MemoryStore, String, PathBuf, PathBuf) {
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let mut original = create_test_memory(id, Visibility::Shared);
+        original.summary = "Shared original".to_string();
+        store.create(&original).await.unwrap();
+        let shared_path = paths::memories_dir(tmp.path()).join(format!("{id}.md"));
+        let shared_bytes = std::fs::read(&shared_path).unwrap();
+
+        store
+            .update_with(id, |m| {
+                m.visibility = Visibility::Personal;
+                m.summary = "Now private".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(!shared_path.exists(), "the flip removed the shared file");
+        let personal_path = paths::personal_memories_dir(&store.project_id)
+            .unwrap()
+            .join(format!("{id}.md"));
+        assert!(personal_path.exists());
+
+        // The older shared copy comes back.
+        std::fs::write(&shared_path, shared_bytes).unwrap();
+        (store, id.to_string(), shared_path, personal_path)
+    }
+
+    #[tokio::test]
+    async fn a_restored_shared_copy_does_not_shadow_the_personal_one() {
+        let tmp = TempDir::new().unwrap();
+        let (store, id, shared_path, personal_path) =
+            store_with_a_restored_shared_copy(&tmp, "cross-dir-get").await;
+
+        // `get` used to return the shared copy (shared first).
+        let got = store.get(&id).await.unwrap();
+        assert_eq!(got.summary, "Now private");
+        assert_eq!(got.visibility, Visibility::Personal);
+
+        let batch = store.get_batch(&[id.as_str()]).await.unwrap();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].1.summary, "Now private");
+
+        let duplicates = store.cross_dir_duplicates().await.unwrap();
+        assert_eq!(
+            duplicates,
+            vec![CrossDirDuplicate {
+                id: id.clone(),
+                shared: shared_path,
+                personal: personal_path.clone(),
+                winner: CrossDirWinner::Personal,
+            }]
+        );
+
+        // The index row, the content digest and the staleness check agree.
+        store.reindex().await.unwrap();
+        let rows = store.list_summary().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        let indexed = store.index_digests().await.unwrap();
+        assert_eq!(
+            indexed[0].content_sha256.as_deref(),
+            Some(
+                FileDigest::of(&std::fs::read(&personal_path).unwrap())
+                    .sha256
+                    .as_str()
+            ),
+            "the row was built from the personal copy"
+        );
+        let (digests, unreadable) = store.file_digests().await.unwrap();
+        assert!(unreadable.is_empty());
+        assert_eq!(
+            digests[&id],
+            FileDigest::of(&std::fs::read(&personal_path).unwrap())
+        );
+        for check in [
+            StalenessCheck::Counts,
+            StalenessCheck::Size,
+            StalenessCheck::Content,
+        ] {
+            let cfg = IndexConfig {
+                staleness_check: check,
+                ..IndexConfig::default()
+            };
+            assert_eq!(
+                store.check_staleness(&cfg).await.unwrap(),
+                None,
+                "{check:?}: a cross-directory duplicate is not permanent drift"
+            );
+        }
+    }
+
+    /// The shared copy is the newer one: it wins, and the tie goes personal.
+    #[test]
+    fn the_cross_dir_rule_is_newest_then_personal() {
+        let t = chrono::Utc::now();
+        let later = t + chrono::Duration::seconds(1);
+        assert_eq!(cross_dir_rule(Some(later), Some(t)), CrossDirWinner::Shared);
+        assert_eq!(
+            cross_dir_rule(Some(t), Some(later)),
+            CrossDirWinner::Personal
+        );
+        assert_eq!(cross_dir_rule(Some(t), Some(t)), CrossDirWinner::Personal);
+        // A copy that does not parse loses.
+        assert_eq!(cross_dir_rule(Some(t), None), CrossDirWinner::Shared);
+        assert_eq!(cross_dir_rule(None, Some(t)), CrossDirWinner::Personal);
+    }
+
+    #[tokio::test]
+    async fn reindex_reports_and_keeps_a_cross_dir_duplicate() {
+        let tmp = TempDir::new().unwrap();
+        let (store, id, shared_path, personal_path) =
+            store_with_a_restored_shared_copy(&tmp, "cross-dir-reindex").await;
+
+        let counts = store.reindex_counted().await.unwrap();
+
+        assert_eq!(counts.indexed, 1, "one memory, counted once");
+        assert_eq!(counts.shadowed, vec![(id.clone(), shared_path.clone())]);
+        assert!(shared_path.exists(), "reindex never deletes the loser");
+        assert!(personal_path.exists());
+        // Incremental reports it too.
+        let again = store.reindex_incremental().await.unwrap();
+        assert_eq!(again.shadowed, vec![(id, shared_path)]);
+        assert_eq!(again.indexed, 1);
+    }
+
+    #[tokio::test]
+    async fn an_update_removes_the_other_directorys_copy() {
+        let tmp = TempDir::new().unwrap();
+        let (store, id, shared_path, personal_path) =
+            store_with_a_restored_shared_copy(&tmp, "cross-dir-update").await;
+
+        store
+            .update_with(&id, |m| {
+                m.summary = "Edited".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(!shared_path.exists(), "the update healed the duplicate");
+        assert!(personal_path.exists());
+        assert_eq!(store.get(&id).await.unwrap().summary, "Edited");
+        assert!(store.cross_dir_duplicates().await.unwrap().is_empty());
+    }
+
+    /// Deleting stopped at the first directory that had a copy, so the other
+    /// copy survived and the next reindex brought the memory back.
+    #[tokio::test]
+    async fn a_delete_removes_both_copies() {
+        let tmp = TempDir::new().unwrap();
+        let (store, id, shared_path, personal_path) =
+            store_with_a_restored_shared_copy(&tmp, "cross-dir-delete").await;
+
+        store.delete(&id).await.unwrap();
+
+        assert!(!shared_path.exists());
+        assert!(!personal_path.exists());
+        assert_eq!(store.reindex().await.unwrap(), 0);
+        assert!(matches!(
+            store.get(&id).await,
+            Err(StorageError::NotFound(_))
+        ));
+
+        // The batched delete goes through the same sweep.
+        let tmp = TempDir::new().unwrap();
+        let (store, id, shared_path, personal_path) =
+            store_with_a_restored_shared_copy(&tmp, "cross-dir-delete-batch").await;
+        let (deleted, _) = store
+            .delete_batch_if(std::slice::from_ref(&id), |_| true)
+            .await
+            .unwrap();
+        assert_eq!(deleted, vec![id]);
+        assert!(!shared_path.exists());
+        assert!(!personal_path.exists());
+    }
+
+    #[tokio::test]
+    async fn get_batch_of_nothing_scans_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let none: [&str; 0] = [];
+        assert!(store.get_batch(&none).await.unwrap().is_empty());
     }
 }
