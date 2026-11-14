@@ -85,7 +85,36 @@ pub async fn check_daemon() -> EnvironmentCheck {
     let daemon_dir = super::daemon_dir_for(&socket);
     let folder_problem = super::transport::daemon_dir_problem(&daemon_dir);
 
-    match super::query_status(&socket).await {
+    let status = super::query_status(&socket).await;
+    // A listener that runs as another user is refused by every client
+    // (`transport::connect`'s peer check), so it reads as "not running" to
+    // `query_status`. It is not self-correcting: a spawn cannot bind a path
+    // someone else holds.
+    let peer_refused = match &status {
+        Ok(Some(_)) => None,
+        _ => match super::transport::connect(&socket).await {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Some(e),
+            _ => None,
+        },
+    };
+
+    match status {
+        _ if peer_refused.is_some() => EnvironmentCheck {
+            name: "Embedding daemon".to_string(),
+            passed: false,
+            message: format!(
+                "the daemon socket is served by another user — every session refuses it: {}",
+                peer_refused.map(|e| e.to_string()).unwrap_or_default()
+            ),
+            suggestion: Some(
+                "Find out who runs that process and stop it, or point the socket at a \
+                 private folder (global [daemon].socket_path); until then models load \
+                 in-process."
+                    .to_string(),
+            ),
+            details,
+            status: Some(CheckStatus::Fail),
+        },
         Ok(Some(s)) => {
             details.push(format!(
                 "pid {}, uptime {}s, {} model(s) loaded, {} requests served (cumulative)",
@@ -190,6 +219,29 @@ mod tests {
             check.suggestion.is_some_and(|s| s.contains("restart")),
             "a failing daemon check must say how to recover"
         );
+    }
+
+    /// A socket served by another user is refused by every client, so doctor
+    /// must report it as a failure rather than "not running".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_socket_served_by_another_user_is_a_failure() {
+        let sock_dir = crate::daemon::private_tempdir();
+        let socket = sock_dir.path().join("d.sock");
+        let _listener = crate::daemon::transport::bind_or_yield(&socket)
+            .await
+            .unwrap()
+            .expect("bound");
+        global_with_socket(&socket, true);
+        crate::daemon::transport::set_expected_peer_uid_for_test(
+            crate::daemon::current_euid().wrapping_add(1),
+        );
+
+        let check = check_daemon().await;
+
+        assert!(!check.passed, "got: {}", check.message);
+        assert_eq!(check.status, Some(CheckStatus::Fail));
+        assert!(check.message.contains("another user"), "{}", check.message);
     }
 
     /// A loose daemon folder makes every spawn fail, so doctor must say so —

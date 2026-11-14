@@ -16,13 +16,16 @@
 //!   neither traverse to nor connect to the socket even when it falls back to
 //!   a shared location like `/tmp` (see [`super::default_daemon_dir`]). A
 //!   third layer — an `SO_PEERCRED` uid check — lives in the server's accept
-//!   loop.
+//!   loop, and the client makes the same check the other way: [`connect`]
+//!   refuses a socket whose listener runs as another uid, before writing.
 //! - **Windows:** a named pipe whose name is derived from the same resolved
 //!   path, so the `--socket` / `ENGRAMDB_DAEMON_SOCKET` / global
 //!   `[daemon].socket_path` override chain (and the per-user default path) carry over unchanged. The
 //!   pipe name is `\\.\pipe\engramdb-<hash>`; an explicit `\\.\pipe\...` value is
 //!   used verbatim. Named pipes vanish when their owning process exits, so no
-//!   stale-state reclamation is needed.
+//!   stale-state reclamation is needed. The name is predictable, so
+//!   [`connect`] refuses a pipe whose server process's token user is not
+//!   this user's SID.
 //!
 //! Both `bind_or_yield` implementations share the same contract: `Ok(Some(_))`
 //! means this process now owns the address, `Ok(None)` means a live daemon
@@ -33,6 +36,8 @@
 
 use std::path::Path;
 
+#[cfg(all(unix, test))]
+pub(crate) use unix::set_expected_peer_uid_for_test;
 #[cfg(unix)]
 pub use unix::{bind_or_yield, connect, daemon_dir_problem, prepare_daemon_dir, Listener};
 
@@ -249,9 +254,64 @@ mod unix {
         result
     }
 
-    /// Connect to the daemon's socket.
+    /// Connect to the daemon's socket, and refuse it unless the process
+    /// listening on it runs as this user ([`connect_checked`]).
     pub async fn connect(socket: &Path) -> std::io::Result<UnixStream> {
-        UnixStream::connect(socket).await
+        connect_checked(socket, expected_peer_uid()).await
+    }
+
+    /// The uid a daemon must run as: this process's effective uid. Tests can
+    /// pretend to be someone else ([`set_expected_peer_uid_for_test`]), since
+    /// they cannot bind a socket as another user without root.
+    fn expected_peer_uid() -> u32 {
+        #[cfg(test)]
+        {
+            let forced = EXPECTED_PEER_UID.load(std::sync::atomic::Ordering::SeqCst);
+            if forced != u64::MAX {
+                return forced as u32;
+            }
+        }
+        crate::daemon::current_euid()
+    }
+
+    #[cfg(test)]
+    static EXPECTED_PEER_UID: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(u64::MAX);
+
+    /// Make [`connect`] expect `uid` for the rest of this test process
+    /// (nextest runs one process per test).
+    #[cfg(test)]
+    pub(crate) fn set_expected_peer_uid_for_test(uid: u32) {
+        EXPECTED_PEER_UID.store(u64::from(uid), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Connect, then require the listener's uid to be `expected`.
+    ///
+    /// The server checks its clients with `SO_PEERCRED`; this is the same
+    /// check the other way round. Without it a client sends hook stdin and
+    /// model input to whatever answers on the path, and prints the reply as
+    /// context: another local user who created the socket first (a shared
+    /// `/tmp` fallback, or an override into a shared folder) would be talking
+    /// to every session. The kernel reports the uid of the process that
+    /// bound the socket, so a planted socket is refused before any byte is
+    /// written, and callers treat that like a daemon that is not there.
+    pub(crate) async fn connect_checked(
+        socket: &Path,
+        expected: u32,
+    ) -> std::io::Result<UnixStream> {
+        let stream = UnixStream::connect(socket).await?;
+        let peer = stream.peer_cred()?.uid();
+        if !crate::daemon::server::peer_allowed(peer, expected) {
+            return Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                format!(
+                    "the daemon socket {} is served by uid {peer}, not this user \
+                     (uid {expected}); refusing to talk to it",
+                    socket.display()
+                ),
+            ));
+        }
+        Ok(stream)
     }
 }
 
@@ -265,7 +325,7 @@ mod windows {
         ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
     };
 
-    // `winerror.h` codes we branch on (avoiding a `windows-sys` dep here).
+    // `winerror.h` codes we branch on.
     const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_PIPE_BUSY: i32 = 231;
 
@@ -393,18 +453,129 @@ mod windows {
     /// `ERROR_PIPE_BUSY`, as the Tokio docs prescribe. A missing pipe (no
     /// daemon) surfaces as `ERROR_FILE_NOT_FOUND`, which the caller maps to
     /// "not running".
+    ///
+    /// The pipe is refused unless the process serving it runs as this user
+    /// ([`connect_checked`]).
     pub async fn connect(socket: &Path) -> std::io::Result<NamedPipeClient> {
+        connect_checked(socket, &peer::current_user_sid()?).await
+    }
+
+    /// Open the pipe, then require its server process's token user to be
+    /// the SID `expected` (raw SID bytes).
+    ///
+    /// The pipe name is predictable, so on a machine with several users any
+    /// of them could create it first and receive every session's hook stdin.
+    /// Any failure in the owner lookup is a refusal.
+    pub(crate) async fn connect_checked(
+        socket: &Path,
+        expected: &[u8],
+    ) -> std::io::Result<NamedPipeClient> {
         let name = pipe_name(socket);
+        let mut client = None;
         for _ in 0..20 {
             match ClientOptions::new().open(&name) {
-                Ok(client) => return Ok(client),
+                Ok(c) => {
+                    client = Some(c);
+                    break;
+                }
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                     tokio::time::sleep(Duration::from_millis(25)).await;
                 }
                 Err(e) => return Err(e),
             }
         }
-        ClientOptions::new().open(&name)
+        let client = match client {
+            Some(c) => c,
+            None => ClientOptions::new().open(&name)?,
+        };
+        let owner = peer::pipe_server_sid(&client)?;
+        if owner != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("the daemon pipe {name} is served by another user; refusing to talk to it"),
+            ));
+        }
+        Ok(client)
+    }
+
+    /// Token-user lookups for the pipe peer check. Every handle opened here
+    /// is closed on every path.
+    pub(crate) mod peer {
+        use std::io;
+        use std::os::windows::io::AsRawHandle;
+        use tokio::net::windows::named_pipe::NamedPipeClient;
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Security::{
+            GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        };
+        use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        struct Owned(HANDLE);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                // SAFETY: the handle was returned open by the Win32 call that
+                // made this guard and is closed exactly once.
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+
+        /// The SID of this process's token user, as raw bytes.
+        pub(crate) fn current_user_sid() -> io::Result<Vec<u8>> {
+            // SAFETY: the pseudo-handle needs no close.
+            token_user_sid(unsafe { GetCurrentProcess() })
+        }
+
+        /// The SID of the token user of the process serving `client`.
+        pub(crate) fn pipe_server_sid(client: &NamedPipeClient) -> io::Result<Vec<u8>> {
+            let mut pid = 0u32;
+            // SAFETY: a live pipe handle and a valid out pointer.
+            if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle() as HANDLE, &mut pid) }
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: plain call; a null result is checked.
+            let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+            if process.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let process = Owned(process);
+            token_user_sid(process.0)
+        }
+
+        fn token_user_sid(process: HANDLE) -> io::Result<Vec<u8>> {
+            let mut token: HANDLE = std::ptr::null_mut();
+            // SAFETY: a process handle with query rights and a valid out pointer.
+            if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let token = Owned(token);
+            let mut len = 0u32;
+            // SAFETY: a size query with no buffer; it fails with the size set.
+            unsafe { GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &mut len) };
+            if len == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // u64 storage keeps TOKEN_USER (which holds a pointer) aligned.
+            let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+            // SAFETY: the buffer holds at least `len` bytes.
+            if unsafe {
+                GetTokenInformation(token.0, TokenUser, buf.as_mut_ptr().cast(), len, &mut len)
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: the call filled the buffer with a TOKEN_USER whose SID
+            // points into the same buffer.
+            let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+            // SAFETY: `sid` is a valid SID for the buffer's lifetime.
+            let sid_len = unsafe { GetLengthSid(sid) } as usize;
+            // SAFETY: GetLengthSid gave the SID's size in bytes.
+            Ok(unsafe { std::slice::from_raw_parts(sid.cast::<u8>(), sid_len) }.to_vec())
+        }
     }
 }
 
@@ -500,6 +671,56 @@ mod tests {
             connect(&addr).await.is_err(),
             "connecting with no listener must fail"
         );
+    }
+
+    /// The client refuses a listener that runs as another user, before it
+    /// writes anything. Driven with an expected uid that is not ours, because
+    /// a test cannot bind a socket as someone else without root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_refuses_a_listener_owned_by_another_uid() {
+        let tmp = crate::daemon::private_tempdir();
+        let addr = tmp.path().join("peer.sock");
+        let _listener = bind_or_yield(&addr).await.unwrap().expect("bound");
+        let me = crate::daemon::current_euid();
+        let err = super::unix::connect_checked(&addr, me.wrapping_add(1))
+            .await
+            .expect_err("a listener owned by another uid must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains(&format!("uid {me}")), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_accepts_the_users_own_listener() {
+        let tmp = crate::daemon::private_tempdir();
+        let addr = tmp.path().join("own.sock");
+        let _listener = bind_or_yield(&addr).await.unwrap().expect("bound");
+        super::unix::connect_checked(&addr, crate::daemon::current_euid())
+            .await
+            .expect("our own listener passes the peer check");
+        connect(&addr)
+            .await
+            .expect("and so does the default connect");
+    }
+
+    /// Windows: a pipe whose server is not the expected SID is refused.
+    /// `S-1-1-0` (Everyone) is never a process's token user.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn connect_refuses_a_pipe_owned_by_another_sid() {
+        let tmp = crate::daemon::private_tempdir();
+        let addr = tmp.path().join("peer.sock");
+        let _listener = bind_or_yield(&addr).await.unwrap().expect("bound");
+        // Revision 1, one sub-authority, authority 1 (World), RID 0.
+        let everyone = [1u8, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+        let err = super::windows::connect_checked(&addr, &everyone)
+            .await
+            .expect_err("a pipe served by another SID must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        connect(&addr)
+            .await
+            .expect("our own pipe passes the peer check");
     }
 
     // Unix-only permission hardening: these assert on real filesystem modes,

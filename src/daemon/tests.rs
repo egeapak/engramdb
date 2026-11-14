@@ -1890,6 +1890,34 @@ async fn delegate_hook_never_sends_to_an_older_protocol() {
     );
 }
 
+/// A listener that fails the client's peer check gets no hook: the connect
+/// is refused before any byte is written, so the hook runs in-process.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_is_not_sent_to_a_listener_that_fails_the_peer_check() {
+    use tokio::io::AsyncReadExt;
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let listener = super::transport::bind_or_yield(&socket)
+        .await
+        .unwrap()
+        .expect("bound");
+    let received = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut buf),
+        )
+        .await;
+        buf.len()
+    });
+    super::transport::set_expected_peer_uid_for_test(super::current_euid().wrapping_add(1));
+    let out = super::delegate_hook(&socket, &super::HookCall::PreCompact, tmp.path(), "{}").await;
+    assert!(matches!(out, super::HookDelegation::NotSent(_)), "{out:?}");
+    assert_eq!(received.await.unwrap(), 0, "the listener received bytes");
+}
+
 /// An older build of the current protocol would run its older handlers; the
 /// hook path never evicts it, so the client must run the hook itself.
 #[tokio::test]

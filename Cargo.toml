@@ -134,6 +134,16 @@ rustix = { version = "1", features = ["process"] }
 # heap back to the OS (already in the dependency tree via tempfile et al.).
 libc = "0.2"
 
+# Windows-only: the daemon client's named-pipe owner check (server process ->
+# token user SID). Already in the dependency tree via tokio et al.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # Enable storage's `test-support` module (global-store serialization lock) for
 # this crate's tests; `#[cfg(test)]` items don't cross crate boundaries.
