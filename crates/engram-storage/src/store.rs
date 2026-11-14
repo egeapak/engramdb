@@ -221,6 +221,7 @@ impl MemoryStore {
 
         // Create global LanceDB directory
         let lance_path = paths::lancedb_dir(&project_id)?;
+        paths::ensure_private_parent(&lance_path)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         // Load config to get embedding dimensions
@@ -319,6 +320,7 @@ impl MemoryStore {
 
         // Create global LanceDB directory
         let lance_path = paths::global_lancedb_dir()?;
+        paths::ensure_private_parent(&lance_path)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
@@ -350,6 +352,7 @@ impl MemoryStore {
 
         let project_id = paths::GLOBAL_PROJECT_ID.to_string();
         let lance_path = paths::global_lancedb_dir()?;
+        paths::ensure_private_parent(&lance_path)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         let config_path = engramdb_dir.join("config.toml");
@@ -422,6 +425,7 @@ impl MemoryStore {
 
         // Create group LanceDB directory
         let lance_path = paths::group_lancedb_dir(group_id)?;
+        paths::ensure_private_parent(&lance_path)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
@@ -453,6 +457,7 @@ impl MemoryStore {
 
         let project_id = group_id.to_string();
         let lance_path = paths::group_lancedb_dir(group_id)?;
+        paths::ensure_private_parent(&lance_path)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         let config_path = engramdb_dir.join("config.toml");
@@ -511,6 +516,7 @@ impl MemoryStore {
 
         // Open (or create) global LanceDB
         let lance_path = paths::lancedb_dir(&project_id)?;
+        paths::ensure_private_parent(&lance_path)?;
         async_fs::create_dir_all(&lance_path).await?;
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
@@ -8156,6 +8162,76 @@ mod tests {
             tree_snapshot(&paths::global_data_dir().unwrap()),
             tree_snapshot(&paths::global_config_dir().unwrap()),
         ]
+    }
+
+    #[cfg(unix)]
+    fn dir_mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// `projects/<id>/` holds personal memories, the conversations table and
+    /// the transcript copies; it used to be created with the umask default.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_project_data_dir_is_owner_only() {
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &registry).await.unwrap();
+        let data = paths::lancedb_dir(&store.project_id).unwrap();
+        assert_eq!(dir_mode(data.parent().unwrap()), 0o700);
+
+        let global = MemoryStore::open_global().await.unwrap();
+        drop(global);
+        assert_eq!(dir_mode(&paths::global_store_dir().unwrap()), 0o700);
+        let group = MemoryStore::open_group("__g_0123456789ab").await.unwrap();
+        drop(group);
+        assert_eq!(
+            dir_mode(&paths::group_store_dir("__g_0123456789ab").unwrap()),
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_existing_loose_project_data_dir_is_tightened_on_a_writable_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let project_id = {
+            let store = MemoryStore::init(tmp.path(), &registry).await.unwrap();
+            store.project_id.clone()
+        };
+        let data = paths::lancedb_dir(&project_id).unwrap();
+        let data = data.parent().unwrap();
+        // As a store created by an older binary under a 022 umask.
+        std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(dir_mode(data), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_only_open_changes_no_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let project_id = {
+            let store = MemoryStore::init(tmp.path(), &registry).await.unwrap();
+            store
+                .create(&create_test_memory("mode-1", Visibility::Shared))
+                .await
+                .unwrap();
+            store.project_id.clone()
+        };
+        let data = paths::lancedb_dir(&project_id).unwrap();
+        let data = data.parent().unwrap();
+        std::fs::set_permissions(data, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let store = MemoryStore::open_read_only(tmp.path()).await.unwrap();
+        assert_eq!(store.get("mode-1").await.unwrap().id, "mode-1");
+        assert_eq!(dir_mode(data), 0o755, "a read-only open tightened the dir");
     }
 
     #[tokio::test]

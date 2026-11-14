@@ -31,6 +31,9 @@ impl Drop for WriteLockGuard {
 /// the async executor. Returns an RAII guard that releases the lock on drop.
 pub async fn acquire_write_lock(project_id: &str) -> Result<WriteLockGuard> {
     let lock_dir = paths::global_data_dir()?.join("projects").join(project_id);
+    // This is usually what creates `projects/<id>/`, which goes on to hold
+    // the personal memories, the index and the transcript copies.
+    paths::ensure_private_dir(&lock_dir)?;
     acquire_write_lock_at(&lock_dir).await
 }
 
