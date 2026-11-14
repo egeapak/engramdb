@@ -142,10 +142,14 @@ pub(crate) fn model_demands(
         },
         embedding_pool_size.max(1),
     )];
-    if *nli_enabled {
+    // The model policy decides here, upstream of the loader: a repository a
+    // project config may not select produces no demand, so it is never
+    // loaded, never leased by a `Ping`, and never part of the signature.
+    let _ = (nli_enabled, nli_model);
+    if let Some(model) = super::model_policy::permitted_nli_model(&config.nli) {
         demands.push((
             ModelKey::Nli {
-                model: nli_model.clone(),
+                model: model.to_string(),
             },
             1,
         ));
@@ -910,7 +914,8 @@ mod tests {
         let mut enabled = base.clone();
         enabled.nli.enabled = true;
         let mut c = enabled.clone();
-        c.nli.model = "other-nli".to_string();
+        c.nli.model = crate::nli::NLI_DEBERTA_XSMALL.repo.to_string();
+        assert_ne!(c.nli.model, enabled.nli.model);
         assert_ne!(
             provider_cache_key(&enabled, None, 2),
             provider_cache_key(&c, None, 2)
@@ -924,6 +929,55 @@ mod tests {
         let mut c = base.clone();
         c.legacy_daemon = Some(toml::from_str("idle_timeout_secs = 61").unwrap());
         assert_eq!(k, provider_cache_key(&c, None, 2));
+    }
+
+    /// A project config is committed, so its author picks `[nli].model`. An
+    /// unlisted repository must never reach the loader: not on a request and
+    /// not on a lease. Before the policy, one `ModelKey::Nli` load was
+    /// recorded here.
+    #[tokio::test]
+    async fn an_unlisted_nli_repo_is_never_loaded() {
+        let (loader, cache) = fake_cache(4);
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "attacker/repo".to_string();
+
+        assert!(!model_demands(&config, None, 1, 4)
+            .iter()
+            .any(|(k, _)| matches!(k, ModelKey::Nli { .. })));
+        let providers = cache.get(&config, None).await;
+        assert!(providers.nli.is_none());
+        cache.touch(&config, None).await;
+        assert!(
+            loader
+                .loads_of(|k| matches!(k, ModelKey::Nli { .. }))
+                .is_empty(),
+            "an unlisted NLI repository reached the loader"
+        );
+
+        // A built-in repository still does.
+        config.nli.model = crate::nli::DEFAULT_NLI_MODEL.repo.to_string();
+        cache.get(&config, None).await;
+        assert_eq!(
+            loader.loads_of(|k| matches!(k, ModelKey::Nli { .. })).len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn the_global_opt_in_allows_a_custom_nli_repo() {
+        crate::ops::model_policy::set_custom_repos_allowed_for_test(true);
+        let (loader, cache) = fake_cache(4);
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "someone/custom-nli".to_string();
+        cache.get(&config, None).await;
+        assert_eq!(
+            loader
+                .loads_of(|k| matches!(k, ModelKey::Nli { model } if model == "someone/custom-nli"))
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

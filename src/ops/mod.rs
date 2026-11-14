@@ -20,6 +20,7 @@ pub mod link_proposals;
 pub mod links;
 pub mod list;
 pub mod maintenance;
+pub mod model_policy;
 pub mod parsing;
 pub mod projects;
 pub(crate) mod provider_cache;
@@ -645,8 +646,8 @@ pub fn resolve_engine_providers(
         .map(|(pool, _)| pool),
         ..EngineProviders::default()
     };
-    if config.nli.enabled {
-        providers.nli = build_nli(&config.nli.model);
+    if let Some(model) = model_policy::permitted_nli_model(&config.nli) {
+        providers.nli = build_nli(model);
     }
     if config.rerank.enabled {
         providers.reranker = build_reranker(&config.rerank.model);
@@ -727,7 +728,18 @@ pub(crate) fn build_embedding_pool(
 }
 
 /// Load the NLI contradiction model. ONNX-Runtime-only. Blocking.
+///
+/// Refuses a repository the model policy does not permit
+/// ([`model_policy::nli_repo_permitted`]) before anything touches the model
+/// cache or the network. The callers ask the policy first; this is the last
+/// line, so no path can load an unlisted repository by calling here directly.
 pub(crate) fn build_nli(model: &str) -> Option<Arc<dyn NliProvider>> {
+    if let Err(reason) =
+        model_policy::nli_repo_permitted(model, model_policy::custom_repos_allowed())
+    {
+        tracing::warn!("{reason}");
+        return None;
+    }
     #[cfg(feature = "onnxruntime")]
     {
         match OnnxNliProvider::try_new(model) {
@@ -880,6 +892,34 @@ pub async fn build_engine_without_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The direct path refuses an unlisted NLI repository on policy, before
+    /// the loader looks at the model cache or the network. (One process per
+    /// test under nextest, so the env changes are isolated.)
+    #[test]
+    fn build_nli_refuses_an_unlisted_repo_without_touching_the_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", cache.path());
+        std::env::set_var("ENGRAMDB_OFFLINE", "1");
+
+        assert!(model_policy::nli_repo_permitted(
+            "attacker/repo",
+            model_policy::custom_repos_allowed()
+        )
+        .unwrap_err()
+        .contains("allow_custom_model_repos"));
+        assert!(build_nli("attacker/repo").is_none());
+        assert_eq!(
+            std::fs::read_dir(cache.path()).unwrap().count(),
+            0,
+            "a refused repository must leave the model cache untouched"
+        );
+
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "attacker/repo".to_string();
+        assert!(model_policy::permitted_nli_model(&config.nli).is_none());
+    }
 
     /// Pooled embedding sessions split the cores; a single session keeps
     /// ORT's default; `ENGRAMDB_ONNX_INTRA_THREADS` wins over both.

@@ -2211,6 +2211,43 @@ fn embed_selection(pool: usize) -> ModelSelection {
     ModelSelection::from_config(&c, Some(EmbeddingBackend::Onnx))
 }
 
+/// The daemon serves every project, and a request's `ModelSelection` is
+/// built from a project config. A selection that names an NLI repository
+/// outside the built-in list gets no NLI model from a daemon whose own
+/// global config lacks the opt-in: the loader never sees it.
+#[tokio::test]
+async fn a_custom_nli_repo_in_a_request_is_not_loaded_by_the_daemon() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let loader = spawn_fake_daemon(&socket, Duration::from_secs(60));
+    let mut c = EngramConfig::default();
+    c.nli.enabled = true;
+    c.nli.model = "attacker/repo".to_string();
+    c.rerank.enabled = false;
+    c.title.strategy = crate::title::TitleStrategy::Keyword;
+    let models = ModelSelection::from_config(&c, Some(EmbeddingBackend::Onnx));
+    assert_eq!(models.to_config().nli.model, "attacker/repo");
+
+    lease(&socket, &models).await;
+    assert!(matches!(
+        meta(&socket, &models).await,
+        DaemonResponse::Meta { .. }
+    ));
+    assert_eq!(
+        loader
+            .loads_of(|k| matches!(k, crate::ops::provider_cache::ModelKey::Embedding { .. }))
+            .len(),
+        1,
+        "the request itself was served"
+    );
+    assert!(
+        loader
+            .loads_of(|k| matches!(k, crate::ops::provider_cache::ModelKey::Nli { .. }))
+            .is_empty(),
+        "the daemon loaded an NLI repository a project config named"
+    );
+}
+
 /// The daemon unloads a model nobody used or leased for its window, keeps
 /// one whose session renews its lease with heartbeat `Ping`s, and never
 /// loads a model for a `Ping`.

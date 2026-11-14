@@ -1028,6 +1028,26 @@ pub struct NliConfig {
     pub similarity_threshold: f64,
 }
 
+/// Whether `id` has the shape of a Hugging Face repository id:
+/// `owner/name`, each part made of ASCII letters, digits, `.`, `_` and `-`,
+/// and no `..` anywhere.
+///
+/// A model repository id from a config file is joined into a path under the
+/// model cache, so the shape is checked before it gets there.
+pub fn is_valid_hf_repo_id(id: &str) -> bool {
+    let part_ok = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let mut parts = id.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    part_ok(owner) && part_ok(name) && !id.contains("..")
+}
+
 impl NliConfig {
     /// Validate that NLI configuration values are within acceptable ranges.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
@@ -1045,6 +1065,12 @@ impl NliConfig {
         }
         if self.max_comparisons == 0 {
             anyhow::bail!("nli.max_comparisons must be > 0");
+        }
+        if !is_valid_hf_repo_id(&self.model) {
+            anyhow::bail!(
+                "nli.model ({:?}) must be a Hugging Face repository id of the form owner/name",
+                self.model
+            );
         }
         Ok(())
     }
@@ -3374,6 +3400,40 @@ threshold = 0.25
         assert!(!config.nli.enabled);
         assert_eq!(config.nli.contradiction_threshold, 0.7);
         assert_eq!(config.nli.max_comparisons, 10);
+    }
+
+    /// `[nli].model` is joined into a path under the model cache, so it must
+    /// have the shape of a repository id.
+    #[test]
+    fn nli_model_must_be_a_repo_id() {
+        for ok in [
+            DEFAULT_NLI_MODEL_REPO,
+            "cross-encoder/nli-deberta-v3-xsmall",
+            "a/b",
+            "Org_1/model.v2-q",
+        ] {
+            assert!(is_valid_hf_repo_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "noslash",
+            "a/b/c",
+            "../x",
+            "a/..",
+            "a/b..c",
+            "/abs/path",
+            "a/",
+            "/b",
+            "a b/c",
+            "a/b\\c",
+            "a/b?x",
+        ] {
+            assert!(!is_valid_hf_repo_id(bad), "{bad:?}");
+        }
+        let mut nli = NliConfig::default();
+        assert!(nli.validate().is_ok());
+        nli.model = "../../somewhere".to_string();
+        assert!(nli.validate().is_err());
     }
 
     #[test]

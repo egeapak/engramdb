@@ -62,9 +62,13 @@ pub const DEFAULT_NLI_MODEL: NliModelSpec = NLI_DEBERTA_XSMALL_Q;
 /// Every NLI spec this crate knows, for callers that need to map a repo id
 /// back to a spec (e.g. attributing a cached model directory to a model).
 ///
-/// NOT a whitelist: `[nli].model` is a HuggingFace repo id and an unlisted
-/// repo is loaded as requested with generic filenames. Listing a spec here
-/// only means its ONNX/tokenizer filenames are known.
+/// This is the list of repositories a project's `[nli].model` may select.
+/// The core's model policy (`engramdb::ops::model_policy`) refuses any other
+/// repository unless the global config sets
+/// `[security] allow_custom_model_repos = true`; only then is an unlisted
+/// repo loaded, with generic filenames. This crate's loaders do not check
+/// the policy themselves (benchmarks and examples load by explicit name), so
+/// production code must reach them through `ops`.
 pub const ALL_NLI_SPECS: &[NliModelSpec] = &[NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q];
 
 /// Model output label ordering:

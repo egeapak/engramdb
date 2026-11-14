@@ -1211,6 +1211,19 @@ fn ignored_sections(
     }
 }
 
+/// A project config that turns NLI on with a repository the model policy
+/// refuses: the message for `doctor`, or `None`.
+fn refused_nli_model(config: &crate::types::EngramConfig) -> Option<String> {
+    if !config.nli.enabled {
+        return None;
+    }
+    super::model_policy::nli_repo_permitted(
+        &config.nli.model,
+        super::model_policy::custom_repos_allowed(),
+    )
+    .err()
+}
+
 /// Check `.engramdb/config.toml` syntax and values.
 async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     let config_path = dir.join(".engramdb").join("config.toml");
@@ -1239,6 +1252,19 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
                          from .engramdb/config.toml"
                     )),
                     details,
+                    status: Some(CheckStatus::Warn),
+                },
+                None if refused_nli_model(&config).is_some() => EnvironmentCheck {
+                    name: "Config file".to_string(),
+                    passed: true,
+                    message: ".engramdb/config.toml selects an NLI model that is not loaded"
+                        .to_string(),
+                    suggestion: Some(
+                        "Use a built-in [nli].model, or set [security] \
+                         allow_custom_model_repos = true in the global config file"
+                            .to_string(),
+                    ),
+                    details: refused_nli_model(&config).into_iter().collect(),
                     status: Some(CheckStatus::Warn),
                 },
                 None => EnvironmentCheck {
@@ -4236,6 +4262,35 @@ mod tests {
         assert!(detail.contains("daemon.idle_timeout_secs"), "{detail}");
         let global = crate::storage::paths::global_config_path().unwrap();
         assert!(detail.contains(&global.display().to_string()), "{detail}");
+    }
+
+    /// `[nli].model` outside the built-in list is not loaded; doctor says why.
+    #[tokio::test]
+    async fn test_check_config_file_flags_a_refused_nli_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        let mut config = crate::types::EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "someone/custom-nli".to_string();
+        config
+            .to_toml_file(&engramdb_dir.join("config.toml"))
+            .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        let detail = result.details.join("\n");
+        assert!(detail.contains("someone/custom-nli"), "{detail}");
+        assert!(detail.contains("allow_custom_model_repos"), "{detail}");
+
+        // With the model built in, the config is plainly valid.
+        config.nli.model = crate::types::config::DEFAULT_NLI_MODEL_REPO.to_string();
+        config
+            .to_toml_file(&engramdb_dir.join("config.toml"))
+            .unwrap();
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.status, None, "{}", result.message);
     }
 
     /// A project config with `[security]` grants nothing. Doctor says so as
