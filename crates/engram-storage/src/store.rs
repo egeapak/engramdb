@@ -230,7 +230,7 @@ impl MemoryStore {
         // Initialize LanceIndex with configured dimensions
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB init failed: {}", e)))?;
+            .map_err(StorageError::index("init"))?;
 
         // Create personal directories
         async_fs::create_dir_all(paths::personal_memories_dir(&project_id)?).await?;
@@ -316,7 +316,7 @@ impl MemoryStore {
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("Global LanceDB init failed: {}", e)))?;
+            .map_err(StorageError::index("global init"))?;
 
         let store = Self {
             project_dir: global_dir,
@@ -348,7 +348,7 @@ impl MemoryStore {
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("Global LanceDB open failed: {}", e)))?;
+            .map_err(StorageError::index("global open"))?;
 
         let store = Self {
             project_dir: global_dir,
@@ -419,7 +419,7 @@ impl MemoryStore {
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("Group LanceDB init failed: {}", e)))?;
+            .map_err(StorageError::index("group init"))?;
 
         let store = Self {
             project_dir: group_dir,
@@ -451,7 +451,7 @@ impl MemoryStore {
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("Group LanceDB open failed: {}", e)))?;
+            .map_err(StorageError::index("group open"))?;
 
         let store = Self {
             project_dir: group_dir,
@@ -506,7 +506,7 @@ impl MemoryStore {
 
         let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?;
+            .map_err(StorageError::index("open"))?;
 
         let store = Self {
             project_dir: dir.to_path_buf(),
@@ -588,7 +588,7 @@ impl MemoryStore {
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
         let lance_index = LanceIndex::open_existing(lance_path, config.embeddings.dimensions)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB open failed: {}", e)))?
+            .map_err(StorageError::index("open"))?
             .ok_or_else(|| {
                 StorageError::Validation(format!(
                     "{} has not been indexed on this machine yet: run any engramdb \
@@ -668,7 +668,7 @@ impl MemoryStore {
             .lance_index
             .find_ids_by_prefix(&memory.id)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB id probe failed: {}", e)))?
+            .map_err(StorageError::index("id probe"))?
             .is_empty();
         if id_preexisting {
             for dir in [
@@ -695,14 +695,15 @@ impl MemoryStore {
         // `false` would otherwise drop an already-embedded memory from semantic
         // ranking (R3). For a brand-new memory this is `false` as expected.
         let mut entry = IndexEntry::for_file(memory, &digest);
-        entry.has_embedding =
-            self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
-                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
-            })?;
+        entry.has_embedding = self
+            .lance_index
+            .has_chunks(&memory.id)
+            .await
+            .map_err(StorageError::index("has_chunks"))?;
         self.lance_index
             .upsert(&entry)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+            .map_err(StorageError::index("upsert"))?;
         self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
         // Update manifest stats
@@ -809,9 +810,7 @@ impl MemoryStore {
             .lance_index
             .memory_ids_with_chunks(&ids)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB memory_ids_with_chunks failed: {}", e))
-            })?;
+            .map_err(StorageError::index("memory_ids_with_chunks"))?;
 
         let entries: Vec<IndexEntry> = memories
             .iter()
@@ -832,7 +831,7 @@ impl MemoryStore {
         self.lance_index
             .upsert_batch(&entries)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e)))?;
+            .map_err(StorageError::index("upsert_batch"))?;
         self.sync_edges_locked(memories).await?;
 
         self.update_manifest_stats().await?;
@@ -848,7 +847,6 @@ impl MemoryStore {
             .await
         {
             Ok(memory) => return Ok(memory),
-            Err(StorageError::Validation(msg)) => return Err(StorageError::Validation(msg)),
             Err(StorageError::NotFound(_)) => {
                 // Fall through to personal
             }
@@ -1130,18 +1128,21 @@ impl MemoryStore {
             };
 
             let mut entry = IndexEntry::for_file(&memory, &digest);
-            entry.has_embedding = self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
-                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
-            })?;
+            entry.has_embedding = self
+                .lance_index
+                .has_chunks(&memory.id)
+                .await
+                .map_err(StorageError::index("has_chunks"))?;
             entries.push(entry);
             written.push(memory);
             updated.push(canonical);
         }
 
         if !entries.is_empty() {
-            self.lance_index.upsert_batch(&entries).await.map_err(|e| {
-                StorageError::Validation(format!("LanceDB upsert_batch failed: {}", e))
-            })?;
+            self.lance_index
+                .upsert_batch(&entries)
+                .await
+                .map_err(StorageError::index("upsert_batch"))?;
             self.sync_edges_locked(&written).await?;
             // One refresh for the whole batch instead of one per memory.
             self.update_manifest_stats().await?;
@@ -1261,14 +1262,15 @@ impl MemoryStore {
         // Propagate a chunk-presence read error rather than defaulting to
         // `false`: silently clearing the flag would drop a still-embedded memory
         // from `has_embedding`-gated semantic ranking (R3) until the next reindex.
-        entry.has_embedding =
-            self.lance_index.has_chunks(&memory.id).await.map_err(|e| {
-                StorageError::Validation(format!("LanceDB has_chunks failed: {}", e))
-            })?;
+        entry.has_embedding = self
+            .lance_index
+            .has_chunks(&memory.id)
+            .await
+            .map_err(StorageError::index("has_chunks"))?;
         self.lance_index
             .upsert(&entry)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+            .map_err(StorageError::index("upsert"))?;
         self.sync_edges_locked(std::slice::from_ref(memory)).await?;
 
         // Update manifest stats
@@ -1316,7 +1318,7 @@ impl MemoryStore {
         crate::edge_index::load_all(self.lance_index.connection())
             .await
             .map(crate::edge_index::dedupe)
-            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+            .map_err(StorageError::index("edges read"))
     }
 
     /// Every row of the edges table, **not** deduplicated: one per declaring
@@ -1326,7 +1328,7 @@ impl MemoryStore {
     pub async fn list_edge_rows(&self) -> Result<Vec<crate::edge_index::EdgeRow>> {
         crate::edge_index::load_all(self.lance_index.connection())
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+            .map_err(StorageError::index("edges read"))
     }
 
     /// The rows with `id` at either end, not deduplicated (see
@@ -1337,7 +1339,7 @@ impl MemoryStore {
     ) -> Result<Vec<crate::edge_index::EdgeRow>> {
         crate::edge_index::load_touching(self.lance_index.connection(), id)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+            .map_err(StorageError::index("edges read"))
     }
 
     /// The edges touching any of `ids` (full ids), deduplicated, in one
@@ -1349,7 +1351,7 @@ impl MemoryStore {
         crate::edge_index::load_touching_any(self.lance_index.connection(), ids)
             .await
             .map(crate::edge_index::dedupe)
-            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+            .map_err(StorageError::index("edges read"))
     }
 
     /// Index rows for exactly `ids` (full ids; unknown ids are simply
@@ -1372,7 +1374,7 @@ impl MemoryStore {
         crate::edge_index::load_touching(self.lance_index.connection(), id)
             .await
             .map(crate::edge_index::dedupe)
-            .map_err(|e| StorageError::Validation(format!("LanceDB edges read failed: {e:#}")))
+            .map_err(StorageError::index("edges read"))
     }
 
     /// Delete a memory.
@@ -1491,13 +1493,11 @@ impl MemoryStore {
         self.lance_index
             .delete_batch(&to_delete)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB delete_batch failed: {}", e)))?;
+            .map_err(StorageError::index("delete_batch"))?;
         self.lance_index
             .delete_chunks_batch(&to_delete)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB delete_chunks_batch failed: {}", e))
-            })?;
+            .map_err(StorageError::index("delete_chunks_batch"))?;
         self.delete_edges_locked(&to_delete).await?;
 
         // One refresh for the whole sweep instead of one per deletion.
@@ -1533,10 +1533,11 @@ impl MemoryStore {
         self.lance_index
             .delete(full_id)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB delete failed: {}", e)))?;
-        self.lance_index.delete_chunks(full_id).await.map_err(|e| {
-            StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
-        })?;
+            .map_err(StorageError::index("delete"))?;
+        self.lance_index
+            .delete_chunks(full_id)
+            .await
+            .map_err(StorageError::index("delete_chunks"))?;
         self.delete_edges_locked(&[full_id.to_string()]).await?;
 
         // Update manifest stats
@@ -1571,7 +1572,7 @@ impl MemoryStore {
         self.lance_index
             .list_filterable()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB list_filterable failed: {}", e)))
+            .map_err(StorageError::index("list_filterable"))
     }
 
     /// List minimal columns for index-level filtering (6 of 14).
@@ -1580,9 +1581,10 @@ impl MemoryStore {
     /// Use this for the retrieval pipeline where full metadata is loaded
     /// later via `get()` for surviving entries only.
     pub async fn list_for_filtering(&self) -> Result<Vec<IndexForFiltering>> {
-        self.lance_index.list_for_filtering().await.map_err(|e| {
-            StorageError::Validation(format!("LanceDB list_for_filtering failed: {}", e))
-        })
+        self.lance_index
+            .list_for_filtering()
+            .await
+            .map_err(StorageError::index("list_for_filtering"))
     }
 
     /// Like [`Self::list_for_filtering`], but pushes an optional LanceDB
@@ -1597,9 +1599,7 @@ impl MemoryStore {
         self.lance_index
             .list_for_filtering_where(predicate)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB list_for_filtering_where failed: {}", e))
-            })
+            .map_err(StorageError::index("list_for_filtering_where"))
     }
 
     /// [`Self::list_for_filtering_where`] driven by a type-safe expression.
@@ -1611,21 +1611,17 @@ impl MemoryStore {
         self.lance_index
             .list_for_filtering_where_expr(predicate)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!(
-                    "LanceDB list_for_filtering_where_expr failed: {}",
-                    e
-                ))
-            })
+            .map_err(StorageError::index("list_for_filtering_where_expr"))
     }
 
     /// Build the memories-table scalar indexes. See
     /// [`LanceIndex::create_scalar_indexes`]. Best-effort: a scalar index only
     /// changes predicate speed, never which rows match.
     pub async fn create_scalar_indexes(&self) -> Result<Vec<String>> {
-        self.lance_index.create_scalar_indexes().await.map_err(|e| {
-            StorageError::Validation(format!("LanceDB create_scalar_indexes failed: {}", e))
-        })
+        self.lance_index
+            .create_scalar_indexes()
+            .await
+            .map_err(StorageError::index("create_scalar_indexes"))
     }
 
     /// Build the FM substring index on `tags`. See
@@ -1634,9 +1630,7 @@ impl MemoryStore {
         self.lance_index
             .create_tag_search_index()
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB create_tag_search_index failed: {}", e))
-            })
+            .map_err(StorageError::index("create_tag_search_index"))
     }
 
     /// List lightweight metadata summaries for all memories (7 columns).
@@ -1644,7 +1638,7 @@ impl MemoryStore {
         self.lance_index
             .list_summary()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB list_summary failed: {}", e)))
+            .map_err(StorageError::index("list_summary"))
     }
 
     /// Every memory id that has a **file on disk**, plus the bytes-on-disk
@@ -1678,7 +1672,7 @@ impl MemoryStore {
         self.lance_index
             .list_ids()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {}", e)))
+            .map_err(StorageError::index("list_ids"))
     }
 
     /// List every memory in this store that cites a source session
@@ -1689,9 +1683,7 @@ impl MemoryStore {
         self.lance_index
             .list_source_session_links()
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB source-session scan failed: {}", e))
-            })
+            .map_err(StorageError::index("source-session scan"))
     }
 
     /// How many uncompacted fragments this store's tables carry.
@@ -1704,7 +1696,7 @@ impl MemoryStore {
         self.lance_index
             .fragmentation()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB stats failed: {}", e)))
+            .map_err(StorageError::index("stats"))
     }
 
     /// Compact fragments and prune old LanceDB dataset versions for the
@@ -1718,7 +1710,7 @@ impl MemoryStore {
         self.lance_index
             .optimize()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB optimize failed: {}", e)))
+            .map_err(StorageError::index("optimize"))
     }
 
     /// Return the count of memories without loading data.
@@ -1731,14 +1723,14 @@ impl MemoryStore {
         self.lance_index
             .count_by_type()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB count_by_type failed: {}", e)))
+            .map_err(StorageError::index("count_by_type"))
     }
 
     pub async fn count(&self) -> Result<usize> {
         self.lance_index
             .count()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
+            .map_err(StorageError::index("count"))
     }
 
     /// Rebuild the LanceDB metadata index from memory files on disk.
@@ -1814,9 +1806,7 @@ impl MemoryStore {
             self.lance_index
                 .add_missing_chunk_columns()
                 .await
-                .map_err(|e| {
-                    StorageError::Validation(format!("chunks-table column add failed: {}", e))
-                })?;
+                .map_err(StorageError::index("chunks-table column add"))?;
         }
 
         // `force_schema_reset`: a schema migration must recreate the memories
@@ -1945,9 +1935,11 @@ impl MemoryStore {
         // digest-less row whose file is gone in the index permanently, since
         // it is absent from the map that decides what to remove.
         let (recorded, existing_ids): (HashMap<String, RowIdentity>, Vec<String>) = if incremental {
-            let rows = self.lance_index.list_digests().await.map_err(|e| {
-                StorageError::Validation(format!("LanceDB list_digests failed: {}", e))
-            })?;
+            let rows = self
+                .lance_index
+                .list_digests()
+                .await
+                .map_err(StorageError::index("list_digests"))?;
             let ids = rows.iter().map(|r| r.memory_id.clone()).collect();
             let map = rows
                 .into_iter()
@@ -2020,7 +2012,7 @@ impl MemoryStore {
                 .lance_index
                 .list_ids()
                 .await
-                .map_err(|e| StorageError::Validation(format!("LanceDB list_ids failed: {e}")))?
+                .map_err(StorageError::index("list_ids"))?
                 .into_iter()
                 .collect();
             kept_ids
@@ -2036,7 +2028,7 @@ impl MemoryStore {
             self.lance_index
                 .snapshot_rows(&existing_kept)
                 .await
-                .map_err(|e| StorageError::Validation(format!("LanceDB snapshot failed: {e:#}")))?
+                .map_err(StorageError::index("snapshot"))?
         } else {
             Vec::new()
         };
@@ -2051,14 +2043,10 @@ impl MemoryStore {
                 existing_kept.iter().map(String::as_str).collect();
             crate::edge_index::load_all(self.lance_index.connection())
                 .await
-                .map_err(|e| {
-                    StorageError::Validation(format!(
-                        "could not read the edges of {} unparseable memor{} (their rows would \
-                         be lost by the rebuild); reindex refused: {e:#}",
-                        owners.len(),
-                        if owners.len() == 1 { "y" } else { "ies" }
-                    ))
-                })?
+                .map_err(StorageError::index(
+                    "edges read for the unparseable memories (their rows would be lost by \
+                     the rebuild; reindex refused)",
+                ))?
                 .into_iter()
                 .filter(|r| owners.contains(r.owner_id.as_str()))
                 .collect()
@@ -2084,9 +2072,10 @@ impl MemoryStore {
                      `engramdb reindex` there if it already migrated)",
                     other.display()
                 );
-                self.lance_index.clear_memories().await.map_err(|e| {
-                    StorageError::Validation(format!("LanceDB clear failed: {}", e))
-                })?;
+                self.lance_index
+                    .clear_memories()
+                    .await
+                    .map_err(StorageError::index("clear"))?;
                 cleared = true;
             } else {
                 tracing::warn!(
@@ -2103,7 +2092,7 @@ impl MemoryStore {
             self.lance_index
                 .clear_memories()
                 .await
-                .map_err(|e| StorageError::Validation(format!("LanceDB clear failed: {}", e)))?;
+                .map_err(StorageError::index("clear"))?;
             cleared = true;
         }
 
@@ -2121,9 +2110,7 @@ impl MemoryStore {
             .lance_index
             .list_chunk_memory_ids()
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
-            })?
+            .map_err(StorageError::index("list_chunk_memory_ids"))?
             .into_iter()
             .collect();
 
@@ -2159,11 +2146,7 @@ impl MemoryStore {
                 .lance_index
                 .restore_rows(kept_rows)
                 .await
-                .map_err(|e| {
-                    StorageError::Validation(format!(
-                        "LanceDB restore of unparseable rows failed: {e:#}"
-                    ))
-                })?;
+                .map_err(StorageError::index("restore of unparseable rows"))?;
             if lost > 0 {
                 tracing::warn!(
                     "{lost} unparseable memory row(s) could not be carried across this schema \
@@ -2191,9 +2174,10 @@ impl MemoryStore {
                 .cloned()
                 .collect();
             if !removed.is_empty() {
-                self.lance_index.delete_batch(&removed).await.map_err(|e| {
-                    StorageError::Validation(format!("LanceDB delete_batch failed: {}", e))
-                })?;
+                self.lance_index
+                    .delete_batch(&removed)
+                    .await
+                    .map_err(StorageError::index("delete_batch"))?;
             }
         }
 
@@ -2214,9 +2198,7 @@ impl MemoryStore {
             self.lance_index
                 .delete_chunks_batch(&orphans)
                 .await
-                .map_err(|e| {
-                    StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e))
-                })?;
+                .map_err(StorageError::index("delete_chunks"))?;
         }
 
         // The derived edges table (schema 0.9.0). Rebuilt whole in one commit
@@ -2231,9 +2213,7 @@ impl MemoryStore {
         } else {
             crate::edge_index::replace_owned(conn, &indexed_ids, &edges).await
         };
-        edge_result.map_err(|e| {
-            StorageError::Validation(format!("LanceDB edges rebuild failed: {e:#}"))
-        })?;
+        edge_result.map_err(StorageError::index("edges rebuild"))?;
 
         // Update manifest stats
         self.update_manifest_stats().await?;
@@ -2256,7 +2236,7 @@ impl MemoryStore {
         self.lance_index
             .clear_chunks()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB clear_chunks failed: {}", e)))
+            .map_err(StorageError::index("clear_chunks"))
     }
 
     /// The vector width of the on-disk chunks table, or `None` when the
@@ -2265,9 +2245,7 @@ impl MemoryStore {
         self.lance_index
             .chunks_table_dimensions()
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB chunks schema read failed: {}", e))
-            })
+            .map_err(StorageError::index("chunks schema read"))
     }
 
     /// Upsert embedding chunks for a memory, recording no provenance for them.
@@ -2286,7 +2264,7 @@ impl MemoryStore {
         self.lance_index
             .upsert_chunks(memory_id, chunks, None)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e)))
+            .map_err(StorageError::index("upsert_chunks"))
     }
 
     /// Upsert embedding chunks only if the memory still matches the snapshot
@@ -2331,9 +2309,7 @@ impl MemoryStore {
         self.lance_index
             .upsert_chunks(memory_id, chunks, embed_sha256.as_deref())
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB upsert_chunks failed: {}", e))
-            })?;
+            .map_err(StorageError::index("upsert_chunks"))?;
         Ok(true)
     }
 
@@ -2381,9 +2357,7 @@ impl MemoryStore {
         self.lance_index
             .upsert_chunks_batch(&fresh)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB upsert_chunks_batch failed: {}", e))
-            })?;
+            .map_err(StorageError::index("upsert_chunks_batch"))?;
         Ok(fresh.into_iter().map(|(id, _, _)| id).collect())
     }
 
@@ -2393,7 +2367,7 @@ impl MemoryStore {
         self.lance_index
             .has_chunks(id)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB has_chunks failed: {}", e)))
+            .map_err(StorageError::index("has_chunks"))
     }
 
     /// Write an index row directly, bypassing the file write.
@@ -2410,7 +2384,7 @@ impl MemoryStore {
         self.lance_index
             .upsert(entry)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))
+            .map_err(StorageError::index("upsert"))
     }
 
     /// Every indexed row's content digest (schema v0.8.0).
@@ -2420,7 +2394,7 @@ impl MemoryStore {
         self.lance_index
             .list_digests()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB list_digests failed: {}", e)))
+            .map_err(StorageError::index("list_digests"))
     }
 
     /// Every memory's on-disk digest, computed in **two directory scans total**
@@ -2493,9 +2467,10 @@ impl MemoryStore {
     /// Every embedded memory's `embed_sha256` (schema v0.8.0), keyed by memory
     /// id. See [`crate::lance_index::LanceIndex::list_embed_digests`].
     pub async fn embed_digests(&self) -> Result<HashMap<String, Option<String>>> {
-        self.lance_index.list_embed_digests().await.map_err(|e| {
-            StorageError::Validation(format!("LanceDB list_embed_digests failed: {}", e))
-        })
+        self.lance_index
+            .list_embed_digests()
+            .await
+            .map_err(StorageError::index("list_embed_digests"))
     }
 
     /// Delete all embedding chunks for a memory.
@@ -2504,14 +2479,15 @@ impl MemoryStore {
         self.lance_index
             .delete_chunks(memory_id)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB delete_chunks failed: {}", e)))
+            .map_err(StorageError::index("delete_chunks"))
     }
 
     /// List all distinct memory_ids present in the chunks table.
     pub async fn list_chunk_memory_ids(&self) -> Result<Vec<String>> {
-        self.lance_index.list_chunk_memory_ids().await.map_err(|e| {
-            StorageError::Validation(format!("LanceDB list_chunk_memory_ids failed: {}", e))
-        })
+        self.lance_index
+            .list_chunk_memory_ids()
+            .await
+            .map_err(StorageError::index("list_chunk_memory_ids"))
     }
 
     /// Read every embedding chunk for `memory_id`, ordered by chunk index.
@@ -2522,9 +2498,7 @@ impl MemoryStore {
         self.lance_index
             .chunks_for_memory(memory_id)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB chunks_for_memory failed: {}", e))
-            })
+            .map_err(StorageError::index("chunks_for_memory"))
     }
 
     /// [`Self::export_chunks`] for many memories in one scan, keyed by id.
@@ -2540,9 +2514,7 @@ impl MemoryStore {
         self.lance_index
             .chunks_for_memories(&refs)
             .await
-            .map_err(|e| {
-                StorageError::Validation(format!("LanceDB chunks_for_memories failed: {}", e))
-            })
+            .map_err(StorageError::index("chunks_for_memories"))
     }
 
     /// Perform vector similarity search.
@@ -2560,7 +2532,7 @@ impl MemoryStore {
         self.lance_index
             .vector_search(query, limit, restrict_to)
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB vector_search failed: {}", e)))
+            .map_err(StorageError::index("vector_search"))
     }
 
     // ---- Helper methods ----
@@ -2599,12 +2571,14 @@ impl MemoryStore {
     }
 
     /// The full id a unique prefix (or a full id) names, from the index.
-    /// `NotFound` when nothing matches, `Validation` when the prefix is
+    /// `NotFound` when nothing matches, `AmbiguousId` when the prefix is
     /// ambiguous.
     pub async fn resolve_id(&self, id: &str) -> Result<String> {
-        let matches = self.lance_index.find_ids_by_prefix(id).await.map_err(|e| {
-            StorageError::Validation(format!("LanceDB prefix search failed: {}", e))
-        })?;
+        let matches = self
+            .lance_index
+            .find_ids_by_prefix(id)
+            .await
+            .map_err(StorageError::index("prefix search"))?;
 
         match matches.len() {
             0 => Err(StorageError::NotFound(id.to_string())),
@@ -2613,11 +2587,10 @@ impl MemoryStore {
             // ids can be prefixes of each other) — mirrors
             // `find_memory_files` and `paths::find_memory_in_dir`.
             _ if matches.iter().any(|m| m == id) => Ok(id.to_string()),
-            _ => Err(StorageError::Validation(format!(
-                "Ambiguous ID prefix '{}': matches {} memories",
-                id,
-                matches.len()
-            ))),
+            _ => Err(StorageError::AmbiguousId {
+                prefix: id.to_string(),
+                matches: matches.len(),
+            }),
         }
     }
 
@@ -2868,7 +2841,7 @@ impl MemoryStore {
             self.lance_index
                 .upsert_batch(&entries_batch)
                 .await
-                .map_err(|e| StorageError::Validation(format!("LanceDB upsert failed: {}", e)))?;
+                .map_err(StorageError::index("upsert"))?;
         }
         Ok(skipped)
     }
@@ -3043,7 +3016,7 @@ impl MemoryStore {
         self.lance_index
             .count()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB count failed: {}", e)))
+            .map_err(StorageError::index("count"))
     }
 
     /// Recompute and persist manifest stats (load-modify-save of
@@ -3090,7 +3063,7 @@ impl MemoryStore {
             .lance_index
             .count_and_logical_scopes()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB stats scan failed: {}", e)))?;
+            .map_err(StorageError::index("stats scan"))?;
         // Sorted for a deterministic manifest (HashSet order used to make
         // the scope list churn between otherwise-identical rewrites).
         let mut logical_scopes: Vec<String> = scope_set.into_iter().collect();
@@ -3148,7 +3121,7 @@ impl MemoryStore {
         self.lance_index
             .has_any_chunks()
             .await
-            .map_err(|e| StorageError::Validation(format!("LanceDB chunk count failed: {}", e)))
+            .map_err(StorageError::index("chunk count"))
     }
 
     /// Stamp the store with the embedding-model fingerprint its vectors
@@ -3230,7 +3203,10 @@ pub async fn atomic_write(path: &Path, content: &str) -> Result<()> {
         use std::io::Write;
 
         let parent = path.parent().ok_or_else(|| {
-            StorageError::Validation("atomic_write target has no parent directory".into())
+            StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "atomic_write target has no parent directory",
+            ))
         })?;
         let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
         tmp.as_file_mut().write_all(content.as_bytes())?;
@@ -3246,7 +3222,11 @@ pub async fn atomic_write(path: &Path, content: &str) -> Result<()> {
         Ok(())
     })
     .await
-    .map_err(|e| StorageError::Validation(format!("atomic_write task failed: {}", e)))?
+    .map_err(|e| {
+        StorageError::Io(std::io::Error::other(format!(
+            "atomic_write task failed: {e}"
+        )))
+    })?
 }
 
 /// Locate every file in `dir` whose stem matches the given ID (or ID prefix).
@@ -3289,11 +3269,10 @@ async fn find_memory_files(dir: &Path, id: &str) -> Result<Vec<PathBuf>> {
             });
             return Ok(matches);
         }
-        return Err(StorageError::Validation(format!(
-            "Ambiguous ID prefix '{}': matches {} memories",
-            id,
-            distinct_ids.len()
-        )));
+        return Err(StorageError::AmbiguousId {
+            prefix: id.to_string(),
+            matches: distinct_ids.len(),
+        });
     }
     Ok(matches)
 }
@@ -5541,15 +5520,26 @@ mod tests {
         let result = store.get("aaaa").await;
         assert!(result.is_err());
         match result {
-            Err(StorageError::Validation(msg)) => {
-                assert!(msg.contains("Ambiguous"));
-                assert!(msg.contains("2 memories"));
+            Err(e @ StorageError::AmbiguousId { .. }) => {
+                assert!(matches!(
+                    &e,
+                    StorageError::AmbiguousId { prefix, matches: 2 } if prefix == "aaaa"
+                ));
+                assert_eq!(
+                    e.to_string(),
+                    "Ambiguous ID prefix 'aaaa': matches 2 memories"
+                );
             }
             other => panic!(
-                "Expected Validation error for ambiguous prefix, got: {:?}",
+                "Expected AmbiguousId error for ambiguous prefix, got: {:?}",
                 other
             ),
         }
+        // The index-side resolver types it the same way.
+        assert!(matches!(
+            store.resolve_id("aaaa").await,
+            Err(StorageError::AmbiguousId { matches: 2, .. })
+        ));
     }
 
     #[tokio::test]

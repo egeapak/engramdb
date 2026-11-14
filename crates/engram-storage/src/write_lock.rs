@@ -65,7 +65,11 @@ pub(crate) async fn acquire_lock_file(lock_path: std::path::PathBuf) -> Result<W
         Ok(WriteLockGuard { _file: file })
     })
     .await
-    .map_err(|e| StorageError::Validation(format!("Write lock task failed: {}", e)))?
+    .map_err(|e| {
+        StorageError::Io(std::io::Error::other(format!(
+            "Write lock task failed: {e}"
+        )))
+    })?
 }
 
 #[cfg(test)]

@@ -1023,13 +1023,14 @@ fn is_not_found(e: &anyhow::Error) -> bool {
     )
 }
 
-/// True for the one `StorageError::Validation` that is the caller's to fix:
-/// an ambiguous id prefix. Storage reports every LanceDB failure as
-/// `Validation` too, and those must never read as the caller's fault.
+/// True for an ambiguous id prefix, which is the caller's to fix. A typed
+/// check: storage reports it as `StorageError::AmbiguousId`, and a LanceDB
+/// failure as `StorageError::Index`, which must never read as the caller's
+/// fault.
 fn is_ambiguous_prefix(e: &anyhow::Error) -> bool {
     matches!(
         e.downcast_ref::<engramdb::storage::StorageError>(),
-        Some(engramdb::storage::StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix")
+        Some(engramdb::storage::StorageError::AmbiguousId { .. })
     )
 }
 
@@ -5705,11 +5706,17 @@ mod error_mapping_tests {
             ErrorCode::ValidationError.as_str()
         );
         assert_eq!(
-            code(StorageError::Validation("Ambiguous ID prefix 'a': matches 2".into()).into()),
+            code(
+                StorageError::AmbiguousId {
+                    prefix: "a".into(),
+                    matches: 2
+                }
+                .into()
+            ),
             ErrorCode::ValidationError.as_str()
         );
         assert_eq!(
-            code(StorageError::Validation("LanceDB upsert failed".into()).into()),
+            code(StorageError::index("upsert")(anyhow::anyhow!("commit conflict")).into()),
             ErrorCode::InternalError.as_str()
         );
         assert_eq!(
@@ -5721,10 +5728,27 @@ mod error_mapping_tests {
     #[test]
     fn only_an_ambiguous_prefix_is_the_callers_validation_error() {
         assert!(is_ambiguous_prefix(
-            &StorageError::Validation("Ambiguous ID prefix 'a': matches 2 memories".into()).into()
+            &StorageError::AmbiguousId {
+                prefix: "a".into(),
+                matches: 2
+            }
+            .into()
         ));
         assert!(!is_ambiguous_prefix(
-            &StorageError::Validation("LanceDB open failed".into()).into()
+            &StorageError::index("open")(anyhow::anyhow!("no such table")).into()
         ));
+    }
+
+    /// The variant decides, not the message: an index failure whose text
+    /// happens to start like the ambiguity message is still internal, seen
+    /// through `.context()` layers.
+    #[test]
+    fn an_index_failure_is_internal_not_validation() {
+        let e = anyhow::Error::from(StorageError::index("prefix search")(anyhow::anyhow!(
+            "Ambiguous ID prefix 'a': matches 2 memories"
+        )))
+        .context("resolving the target");
+        assert!(!is_ambiguous_prefix(&e));
+        assert!(!is_not_found(&e));
     }
 }
