@@ -184,6 +184,7 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `task_current` | Declare (or read) the task this session is working on |
 | `task_complete` | Mark a task finished, demoting its task-scoped memories |
 | `stats` | Store statistics and health info |
+| `config` | Effective config values and the store's most-used tags |
 | `doctor` | Environment and store diagnostics |
 | `gc` | Garbage collect low-relevance memories |
 | `reindex` | Rebuild the vector index |
@@ -193,6 +194,11 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `projects_info` | Info about a specific project (id, name, path, memory count, scopes) |
 | `projects_link` | Link a registered project as a sub-project of another |
 | `projects_unlink` | Remove a project's parent link, promoting it back to a root project |
+| `harvest_list` | List past Claude Code sessions that may hold knowledge worth saving |
+| `harvest_show` | Digest one past session |
+| `harvest_mark` | Record what was decided about a session, so it is not offered again |
+| `harvest_search` | Search past conversations by meaning |
+| `harvest_ledger` | Read the review record of past sessions |
 
 ## Configuration
 
