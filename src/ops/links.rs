@@ -915,6 +915,58 @@ async fn remove_reverse_copy(
     Ok(())
 }
 
+/// `source_id` no longer supersedes `target_id`: hand the target's
+/// `superseded_by` mirror to another memory that still lists it in
+/// `supersedes`, or, when none does, reopen the target's validity window.
+///
+/// Only acts when the target's `superseded_by` names `source_id` (checked
+/// under the write lock); returns whether the target was reopened. Call it
+/// after `source_id`'s own list has dropped the target, so the edge rows no
+/// longer count it as a superseder.
+pub(crate) async fn release_superseded(
+    store: &MemoryStore,
+    source_id: &str,
+    target_id: &str,
+) -> Result<bool> {
+    let others: Vec<String> = store
+        .list_edge_rows_touching(target_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| {
+            r.kind == LinkKind::Supersedes
+                && r.field == EdgeField::Supersedes
+                && r.dst_id == target_id
+                && r.src_id != source_id
+        })
+        .map(|r| r.src_id)
+        .collect();
+    let successor = store
+        .get_batch(&others.iter().map(String::as_str).collect::<Vec<_>>())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(_, m)| m.supersedes.iter().any(|s| s == target_id))
+        .map(|(id, _)| id);
+    let mut reopened = false;
+    store
+        .update_with(target_id, |m| {
+            if m.superseded_by.as_deref() == Some(source_id) {
+                match successor {
+                    Some(next) => m.superseded_by = Some(next),
+                    None => {
+                        m.superseded_by = None;
+                        m.invalidated_at = None;
+                        reopened = true;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(reopened)
+}
+
 async fn unlink_supersedes(
     store: &MemoryStore,
     edge: EdgeRef,
@@ -948,47 +1000,8 @@ async fn unlink_supersedes(
             })
             .await?;
     }
-    // Reopen the target only when nothing else still supersedes it: another
-    // memory listing it in `supersedes` takes over the mirror instead, and
-    // the window stays closed.
     let reopened = if mirrored {
-        let src_id = src.id.clone();
-        let others: Vec<String> = store
-            .list_edge_rows_touching(&dst_id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| {
-                r.kind == LinkKind::Supersedes
-                    && r.field == EdgeField::Supersedes
-                    && r.dst_id == dst_id
-                    && r.src_id != src_id
-            })
-            .map(|r| r.src_id)
-            .collect();
-        let successor = store
-            .get_batch(&others.iter().map(String::as_str).collect::<Vec<_>>())
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .find(|(_, m)| m.supersedes.contains(&dst_id))
-            .map(|(id, _)| id);
-        let reopen = successor.is_none();
-        store
-            .update_with(&dst_id, |m| {
-                if m.superseded_by.as_deref() == Some(src_id.as_str()) {
-                    match successor {
-                        Some(next) => m.superseded_by = Some(next),
-                        None => {
-                            m.superseded_by = None;
-                            m.invalidated_at = None;
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .await?;
-        reopen
+        release_superseded(store, &src.id, &dst_id).await?
     } else {
         false
     };

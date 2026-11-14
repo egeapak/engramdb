@@ -196,8 +196,13 @@ async fn update_memory_unrecorded(
     // memory inside the per-project write lock, so two concurrent updates
     // cannot snapshot the same old state and silently erase each other's
     // changes (the old get-merge-update flow did exactly that).
+    // The list the memory held under the lock, so targets the update drops
+    // can be released after the write (finding 14).
+    let mut previous_supersedes: Vec<String> = Vec::new();
+    let previous_slot = &mut previous_supersedes;
     let saved = store
         .update_with(id, move |memory| {
+            *previous_slot = memory.supersedes.clone();
             // Apply direct field updates
             let mut update = MemoryUpdate::new();
             update.type_ = params.type_;
@@ -333,6 +338,21 @@ async fn update_memory_unrecorded(
     // are skipped inside the helper, so re-sending the same list is a no-op.
     if let Some(ref supersedes) = supersedes_for_close {
         super::close_superseded_windows(store, supersedes, &saved.id).await;
+        // A target the update dropped is released the way `unlink` releases
+        // it: reopened unless another memory still supersedes it. Best-effort
+        // like the window close — the update itself is already written.
+        for dropped in previous_supersedes
+            .iter()
+            .filter(|old| !saved.supersedes.contains(old))
+        {
+            if let Err(e) = super::links::release_superseded(store, &saved.id, dropped).await {
+                tracing::warn!(
+                    superseded = %dropped,
+                    by = %saved.id,
+                    "failed to release a target dropped from supersedes: {e:#}"
+                );
+            }
+        }
     }
 
     // Re-embed the updated memory if an engine with embeddings is available.
@@ -379,6 +399,70 @@ mod tests {
         let mut m = Memory::new(MemoryType::Decision, id, "content", Provenance::human());
         m.id = id.to_string();
         store.create(&m).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_dropping_a_supersedes_target_reopens_it() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        create_memory_with_id(&store, "drop-target").await;
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["drop-target".into()]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        assert!(store
+            .get("drop-target")
+            .await
+            .unwrap()
+            .invalidated_at
+            .is_some());
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec![]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let target = store.get("drop-target").await.unwrap();
+        assert!(target.invalidated_at.is_none(), "window reopened");
+        assert!(target.superseded_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_dropping_a_supersedes_target_keeps_it_closed_when_another_memory_supersedes_it()
+    {
+        let (_temp, store) = setup_test_store().await;
+        let first = create_test_memory(&store).await;
+        let second = create_test_memory(&store).await;
+        create_memory_with_id(&store, "shared-target").await;
+
+        for holder in [&first, &second] {
+            let mut p = empty_update_params();
+            p.supersedes = Some(vec!["shared-target".into()]);
+            update_memory(&store, holder, p, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap();
+        }
+        // `first` closed the window and holds the mirror.
+        assert_eq!(
+            store
+                .get("shared-target")
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(first.as_str())
+        );
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec![]);
+        update_memory(&store, &first, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let target = store.get("shared-target").await.unwrap();
+        assert!(target.invalidated_at.is_some(), "still superseded");
+        assert_eq!(target.superseded_by.as_deref(), Some(second.as_str()));
     }
 
     #[tokio::test]

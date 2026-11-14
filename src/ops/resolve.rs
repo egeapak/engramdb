@@ -140,6 +140,11 @@ async fn resolve_memory_unrecorded(
                         Err(e) => return Err(e.into()),
                     };
                     let holder = store.get(&params.id).await?;
+                    // Both sides are full ids here (the holder from its file,
+                    // the successor resolved above).
+                    if succ == holder.id {
+                        anyhow::bail!("a memory cannot supersede itself");
+                    }
                     super::links::check_privacy(
                         store,
                         Some(&holder.id),
@@ -170,6 +175,38 @@ mod tests {
     use crate::storage::InMemoryRegistry;
     use crate::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn resolve_invalidate_refuses_its_own_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let memory = Memory::new(MemoryType::Decision, "Self", "content", Provenance::human());
+        let id = memory.id.clone();
+        store.create(&memory).await.unwrap();
+
+        for succ in [id.clone(), id[..8].to_string()] {
+            let err = resolve_memory(
+                &store,
+                ResolveParams {
+                    id: id[..8].to_string(),
+                    action: ResolveAction::Invalidate,
+                    updated_content: None,
+                    updated_summary: None,
+                    superseded_by: Some(succ),
+                },
+                crate::ops::Surface::Cli,
+            )
+            .await
+            .err()
+            .expect("self-supersession must be refused")
+            .to_string();
+            assert!(err.contains("cannot supersede itself"), "{err}");
+        }
+        let m = store.get(&id).await.unwrap();
+        assert!(m.invalidated_at.is_none());
+        assert!(m.superseded_by.is_none());
+    }
 
     #[tokio::test]
     async fn test_resolve_keep() {
