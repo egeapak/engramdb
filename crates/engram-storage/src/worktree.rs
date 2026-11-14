@@ -1531,4 +1531,24 @@ mod tests {
         assert_eq!(moved.visibility, engram_types::Visibility::Personal);
         assert_eq!(git(&wt, &["status", "--porcelain"]), "");
     }
+
+    /// Resolution runs on every command and hook in a worktree; once the
+    /// worktree is linked it must not rewrite the global registry again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resolving_a_linked_worktree_twice_saves_the_registry_once() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        let (main, wt) = make_fake_worktree(tmp.path());
+        let path = tmp.path().join("registry.json");
+        let registry = crate::FileRegistry::new(path.clone());
+        MemoryStore::init(&main, &registry).await.unwrap();
+
+        resolve_project_root(&wt, &registry).await.unwrap();
+        let first = fs::metadata(&path).unwrap().ino();
+        resolve_project_root(&wt, &registry).await.unwrap();
+        resolve_project_root(&wt, &registry).await.unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().ino(), first);
+    }
 }

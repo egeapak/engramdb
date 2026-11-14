@@ -183,8 +183,29 @@ where
     B: RegistryBackend + ?Sized,
 {
     let mut registry = backend.load().await?;
-
     let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if apply_registration(
+        &mut registry,
+        &abs_path,
+        project_id,
+        parent_project_id,
+        overwrite_parent,
+    ) {
+        backend.save(&registry).await?;
+    }
+    Ok(())
+}
+
+/// Upsert one project entry in `registry`. Returns whether anything changed,
+/// so a caller can skip the save (and the lock) for a registration that is
+/// already recorded — which is every command after the first.
+fn apply_registration(
+    registry: &mut Registry,
+    abs_path: &Path,
+    project_id: &str,
+    parent_project_id: Option<&str>,
+    overwrite_parent: bool,
+) -> bool {
     let path_str = abs_path.to_string_lossy().to_string();
 
     if let Some(entry) = registry
@@ -192,6 +213,7 @@ where
         .iter_mut()
         .find(|e| e.project_id == project_id)
     {
+        let mut changed = false;
         // Keep the first registration. Two independent clones of the same
         // git remote hash to the same project ID (a deliberate feature:
         // the ID is stable across moves and re-clones), so they share one
@@ -201,24 +223,29 @@ where
         // steal ownership. Repoint only when the registered path no
         // longer exists (the legitimate moved/re-cloned self-heal case)
         // or when it is the same directory under a different spelling.
-        let registered = PathBuf::from(&entry.project_path);
-        let registered_canon = registered
-            .canonicalize()
-            .unwrap_or_else(|_| registered.clone());
-        if registered_canon == abs_path || !registered_canon.exists() {
-            entry.project_path = path_str;
-        } else {
-            tracing::warn!(
-                "Registry entry for project '{}' already points at existing checkout {}; \
-                 keeping it ({} shares the same project ID)",
-                project_id,
-                entry.project_path,
-                path_str
-            );
+        if entry.project_path != path_str {
+            let registered = PathBuf::from(&entry.project_path);
+            let registered_canon = registered
+                .canonicalize()
+                .unwrap_or_else(|_| registered.clone());
+            if registered_canon == abs_path || !registered_canon.exists() {
+                entry.project_path = path_str;
+                changed = true;
+            } else if warn_other_owner_once(project_id) {
+                tracing::warn!(
+                    "Registry entry for project '{}' already points at existing checkout {}; \
+                     keeping it ({} shares the same project ID)",
+                    project_id,
+                    entry.project_path,
+                    path_str
+                );
+            }
         }
-        if overwrite_parent {
+        if overwrite_parent && entry.parent_project_id.as_deref() != parent_project_id {
             entry.parent_project_id = parent_project_id.map(|s| s.to_string());
+            changed = true;
         }
+        changed
     } else {
         registry.projects.push(RegistryEntry {
             project_id: project_id.to_string(),
@@ -226,9 +253,21 @@ where
             parent_project_id: parent_project_id.map(|s| s.to_string()),
             subscriptions: vec![],
         });
+        true
     }
+}
 
-    backend.save(&registry).await
+/// Whether the "another checkout owns this id" warning has not been given
+/// for `project_id` in this process yet. The registration that triggers it
+/// runs on every command and every hook from the second clone.
+fn warn_other_owner_once(project_id: &str) -> bool {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(project_id.to_string()))
+        .unwrap_or(false)
 }
 
 /// Load → mutate → save body shared by the trait's default `set_parent` and
@@ -608,6 +647,25 @@ impl RegistryBackend for FileRegistry {
         parent_project_id: Option<&str>,
         overwrite_parent: bool,
     ) -> Result<()> {
+        // A registration that changes nothing takes no lock and writes
+        // nothing. This runs on every command and every hook (worktree
+        // resolution, store open), and it used to cost a cross-process lock
+        // plus an fsynced rewrite of the whole registry each time. Reading
+        // without the lock is safe because `save` replaces the file by an
+        // atomic rename: a reader sees the old registry or the new one. A
+        // failed read falls through to the locked path, which reports it.
+        if let Ok(mut current) = self.load().await {
+            let abs_path = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            if !apply_registration(
+                &mut current,
+                &abs_path,
+                project_id,
+                parent_project_id,
+                overwrite_parent,
+            ) {
+                return Ok(());
+            }
+        }
         let _lock = write_lock::acquire_lock_file(self.lock_path()).await?;
         update_inner_impl(self, dir, project_id, parent_project_id, overwrite_parent).await
     }
@@ -1572,5 +1630,73 @@ mod tests {
         // Descendants of `a` includes `b` (whose parent is `a`). `a` itself
         // is not reported. The walk must not loop forever.
         assert_eq!(desc, vec!["b"]);
+    }
+
+    // ---- a registration that changes nothing ----
+
+    /// The registry file's identity: `atomic_write` replaces it by rename,
+    /// so a save always changes the inode.
+    #[cfg(unix)]
+    fn registry_inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().ino()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_identical_registration_does_not_rewrite_the_registry() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("registry.json");
+        let registry = FileRegistry::new(path.clone());
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        registry
+            .update_with_parent(&project, "child", Some("parent"))
+            .await
+            .unwrap();
+        let first = registry_inode(&path);
+        let lock = registry.lock_path();
+        let _ = std::fs::remove_file(&lock);
+
+        registry
+            .update_with_parent(&project, "child", Some("parent"))
+            .await
+            .unwrap();
+        registry.update(&project, "child").await.unwrap();
+
+        assert_eq!(registry_inode(&path), first, "nothing changed: no save");
+        assert!(!lock.exists(), "nothing changed: the lock was not taken");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_changed_parent_still_saves() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("registry.json");
+        let registry = FileRegistry::new(path.clone());
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        registry
+            .update_with_parent(&project, "child", Some("parent"))
+            .await
+            .unwrap();
+        let first = registry_inode(&path);
+        registry
+            .update_with_parent(&project, "child", Some("other"))
+            .await
+            .unwrap();
+
+        assert_ne!(registry_inode(&path), first);
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects[0].parent_project_id.as_deref(), Some("other"));
+        // Clearing the parent is a change too.
+        registry
+            .update_with_parent(&project, "child", None)
+            .await
+            .unwrap();
+        let reg = registry.load().await.unwrap();
+        assert_eq!(reg.projects[0].parent_project_id, None);
     }
 }
