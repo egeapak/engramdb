@@ -428,8 +428,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -449,12 +447,9 @@ jobs:
         # real shared library has to be present even though a static one is also
         # linked in. Before the runtime became external, the static link alone
         # was enough here.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       - name: Restore the ONNX model cache
         # Saved by the `coverage` job (see there); restore-only here, so three
@@ -654,8 +649,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -670,12 +663,9 @@ jobs:
         # The official Microsoft build. Deliberately not the one `ort` would
         # download: that prebuilt executes quantized models incorrectly on
         # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       - name: Restore the ONNX model cache
         # Saved by the `coverage` job (see there); restore-only here, so three
@@ -715,8 +705,6 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
       - uses: actions/checkout@v7
 
@@ -745,12 +733,9 @@ jobs:
         # real shared library has to be present even though a static one is also
         # linked in. Before the runtime became external, the static link alone
         # was enough here.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       # The HuggingFace models the suite loads (embedding, T5, NLI, reranker)
       # live in `model_cache_dir()` = ~/.cache/engramdb/models. Without a

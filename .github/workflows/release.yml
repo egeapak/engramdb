@@ -70,9 +70,6 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      # Must match ci.yml's pin: the runtime this job installs is the one the
-      # model-loading tests dlopen.
-      ONNXRUNTIME_VERSION: "1.24.2"
       # Same nextest profile as ci.yml: slow-test termination and a JUnit
       # report (see .config/nextest.toml).
       NEXTEST_PROFILE: ci
@@ -105,12 +102,9 @@ jobs:
         # Microsoft's official build, not the `ort` download: that prebuilt executes
         # quantized models incorrectly on AVX-512/AMX hosts. See
         # docs/contributors/embedding-model-alternatives.md (R6/R9).
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
