@@ -2446,3 +2446,177 @@ fn accept_errors_back_off() {
     assert_eq!(d, AcceptBackoff::MIN);
     assert_eq!(warn, Some(0));
 }
+
+/// A stand-in daemon that answers every `Ping` with `Pong { version, build }`
+/// and acks `Shutdown`. On `Shutdown` it closes its listener after
+/// `close_after` (`None`: never). Returns a counter of frames it received.
+#[cfg(unix)]
+fn spawn_version_fake(
+    socket: &std::path::Path,
+    version: &str,
+    build: &str,
+    close_after: Option<Duration>,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let frames = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let (version, build) = (version.to_string(), build.to_string());
+    let counter = Arc::clone(&frames);
+    tokio::spawn(async move {
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        loop {
+            let stream = tokio::select! {
+                _ = stop_rx.changed() => return,
+                res = listener.accept() => match res {
+                    Ok((s, _)) => s,
+                    Err(_) => return,
+                },
+            };
+            let (version, build) = (version.clone(), build.clone());
+            let counter = Arc::clone(&counter);
+            let stop_tx = stop_tx.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = tokio::io::split(stream);
+                let mut reader = BufReader::new(r);
+                while let Ok(Some(req)) = read_msg::<_, DaemonRequest>(&mut reader).await {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let resp = match req.op {
+                        DaemonOp::Shutdown => {
+                            if let Some(after) = close_after {
+                                let stop_tx = stop_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(after).await;
+                                    let _ = stop_tx.send(true);
+                                });
+                            }
+                            DaemonResponse::ShuttingDown
+                        }
+                        _ => DaemonResponse::Pong {
+                            version: version.clone(),
+                            build: Some(build.clone()),
+                        },
+                    };
+                    if write_msg(&mut w, &resp).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    frames
+}
+
+/// The `Shutdown` handler signals the accept loop before it persists, so a
+/// client evicting this daemon finds the socket refusing while the persist
+/// is still running (it used to keep accepting until the persist finished).
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_stops_accepting_before_persist() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let (entered, release) = super::server::persist_pause::arm();
+    assert!(super::request_shutdown(&socket).await.unwrap());
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the shutdown persist must start");
+    let mut refused = false;
+    for _ in 0..100 {
+        if super::transport::connect(&socket).await.is_err() {
+            refused = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    release.notify_one();
+    assert!(refused, "the socket kept accepting while the persist ran");
+}
+
+/// Evicting an older daemon waits for its socket to go before spawning: a
+/// spawn while it still listened yielded to it and left no daemon.
+#[cfg(unix)]
+#[tokio::test]
+async fn evicting_an_older_daemon_ends_with_a_current_one() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    spawn_version_fake(
+        &socket,
+        super::PROTOCOL_VERSION,
+        "0.0.1",
+        Some(Duration::from_millis(300)),
+    );
+    let outcome = super::DaemonHandle::connect_or_spawn_outcome(socket.clone(), None).await;
+    let (spawns, while_listening) = super::client::test_seam::spawns();
+    assert_eq!(spawns, 1, "a replacement must be spawned");
+    assert_eq!(
+        while_listening, 0,
+        "the replacement was spawned while the old daemon still listened"
+    );
+    // The test binary cannot be a daemon, so nothing answers afterwards.
+    assert!(matches!(outcome, super::client::SpawnOutcome::SpawnFailed));
+}
+
+/// An older daemon that keeps answering past the eviction wait is
+/// "still evicting": no spawn, and the cell backs off only the short
+/// cooldown, not the `idle/3` failure window.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slow_eviction_uses_the_short_backoff() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    spawn_version_fake(&socket, super::PROTOCOL_VERSION, "0.0.1", None);
+    let cell = super::DaemonCell::new();
+    assert!(cell
+        .get(&socket, 3600, super::DaemonPolicy::ConnectOrSpawn)
+        .await
+        .is_none());
+    assert_eq!(
+        super::client::test_seam::spawns().0,
+        0,
+        "no spawn over a live socket"
+    );
+    assert_eq!(cell.spawn_backoff().await, Some(Duration::from_secs(10)));
+}
+
+/// A daemon of a newer build is never spawned over, and the client returns
+/// at once instead of running the post-spawn retry loop (~3.8 s).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_newer_daemon_is_never_spawned_over() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    spawn_version_fake(&socket, super::PROTOCOL_VERSION, "999.0.0", None);
+    let cell = super::DaemonCell::new();
+    let started = std::time::Instant::now();
+    assert!(cell
+        .get(&socket, 3600, super::DaemonPolicy::ConnectOrSpawn)
+        .await
+        .is_none());
+    assert_eq!(super::client::test_seam::spawns().0, 0);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Once a newer daemon is seen, the cell stops pinging it for the window:
+/// each ping refreshed its idle clock and cost a round-trip per tool call.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_incompatible_daemon_is_not_pinged_again_inside_the_window() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let frames = spawn_version_fake(&socket, super::PROTOCOL_VERSION, "999.0.0", None);
+    let cell = super::DaemonCell::new();
+    for _ in 0..3 {
+        assert!(cell
+            .get(&socket, 3600, super::DaemonPolicy::ConnectOrSpawn)
+            .await
+            .is_none());
+    }
+    assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

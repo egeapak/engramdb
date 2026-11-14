@@ -116,10 +116,38 @@ struct Ctx {
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
+/// A one-shot pause point at the start of [`Ctx::persist`], for tests that
+/// need to observe the daemon while a persist is in progress.
+#[cfg(test)]
+pub(crate) mod persist_pause {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    type Gate = (Arc<Notify>, Arc<Notify>);
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    /// Arm the pause for the next persist: returns `(entered, release)`.
+    pub(crate) fn arm() -> Gate {
+        let gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *GATE.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    pub(super) async fn wait() {
+        let gate = GATE.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+    }
+}
+
 impl Ctx {
     /// Persist the request counters and write buffered hook events. Every
     /// shutdown path calls this.
     async fn persist(&self) {
+        #[cfg(test)]
+        persist_pause::wait().await;
         self.hook_telemetry.flush().await;
         metrics::persist(
             self.pid,
@@ -437,10 +465,11 @@ pub(crate) async fn run_daemon_with_cache(
     // bounded window to finish before the front-end exits the process.
     drop(listener);
     drain_connections(&active, Duration::from_secs(30)).await;
-    // Persist once more AFTER the drain: the Shutdown handler persisted
-    // before requesting shutdown, so counter increments from connections
-    // that finished during the drain would otherwise be silently dropped
-    // across the restart (the next daemon seeds from the last snapshot).
+    // Persist once more AFTER the drain: the Shutdown handler's persist ran
+    // while other connections could still be finishing, so counter
+    // increments from connections that finished during the drain would
+    // otherwise be silently dropped across the restart (the next daemon
+    // seeds from the last snapshot).
     ctx.persist().await;
     Ok(())
 }
@@ -566,13 +595,19 @@ where
         let Some(req) = req else {
             return Ok(());
         };
-        // Shutdown is terminal: ack, flush, persist, then signal the accept
-        // loop so `run_daemon` returns (the daemon binary's main then exits).
+        // Shutdown is terminal: ack, signal the accept loop to stop, then
+        // persist, so `run_daemon` returns (the daemon binary's main then
+        // exits). Stop accepting *before* the persist: a client evicting this
+        // (older) daemon spawns a replacement once the socket refuses, and a
+        // listener kept open through a slow persist made that replacement
+        // yield to a daemon that was about to exit. This connection stays
+        // counted in `active` until it returns, so the drain still waits for
+        // this persist.
         if let DaemonOp::Shutdown = req.op {
             write_msg(&mut write_half, &DaemonResponse::ShuttingDown).await?;
             tracing::info!("engramdb daemon shutting down on request");
-            ctx.persist().await;
             ctx.request_shutdown();
+            ctx.persist().await;
             return Ok(());
         }
 

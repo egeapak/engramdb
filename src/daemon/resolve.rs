@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
+use super::client::{Health, SpawnOutcome};
 use super::protocol::ModelSelection;
 use super::DaemonHandle;
 use crate::ops::{resolve_engine_providers, EngineProviders, ProviderCache};
@@ -44,7 +45,16 @@ struct State {
     /// imposes: `idle/3` for a failed spawn, the short
     /// [`SPAWN_SUCCESS_COOLDOWN`] for a successful one.
     last_spawn: Option<(Instant, Duration)>,
+    /// A newer daemon answered on the socket: until this instant `get`
+    /// neither pings nor spawns. Pinging it would keep refreshing its idle
+    /// clock (it never reaps while an old session pings), and each ping costs
+    /// a round-trip per tool call for an answer that cannot change.
+    incompatible_until: Option<Instant>,
 }
+
+/// How long a cell leaves a newer daemon alone before probing it again: the
+/// daemon's idle timeout, but at least this.
+const INCOMPATIBLE_MIN_WINDOW: Duration = Duration::from_secs(600);
 
 /// A re-resolvable cell holding an optional live [`DaemonHandle`].
 ///
@@ -64,8 +74,15 @@ impl DaemonCell {
             state: Mutex::new(State {
                 current: None,
                 last_spawn: None,
+                incompatible_until: None,
             }),
         }
+    }
+
+    /// The backoff window the last spawn attempt imposed (test inspection).
+    #[cfg(test)]
+    pub(crate) async fn spawn_backoff(&self) -> Option<Duration> {
+        self.state.lock().await.last_spawn.map(|(_, window)| window)
     }
 
     /// Resolve a live daemon handle per `policy`.
@@ -88,6 +105,17 @@ impl DaemonCell {
 
         let mut st = self.state.lock().await;
 
+        // A newer daemon holds the socket: leave it alone (no ping, no
+        // spawn) until the window passes. After it, one probe is allowed —
+        // the newer daemon may have been reaped and the socket freed.
+        if let Some(until) = st.incompatible_until {
+            if Instant::now() < until {
+                return None;
+            }
+            st.incompatible_until = None;
+        }
+        let incompatible_window = Duration::from_secs(idle_secs).max(INCOMPATIBLE_MIN_WINDOW);
+
         // Fast path: cached handle still answers Ping.
         if let Some(h) = &st.current {
             if h.check_health().await {
@@ -100,9 +128,18 @@ impl DaemonCell {
         // daemon is alive but wasn't cached (fresh process, or after a
         // previous poll loop that cleared `current`).
         let sock = socket.to_path_buf();
-        if let Some(h) = DaemonHandle::connect_only(sock.clone()).await {
-            st.current = Some(Arc::clone(&h));
-            return Some(h);
+        match DaemonHandle::probe(sock.clone()).await {
+            (Health::Healthy, h) => {
+                st.current = Some(Arc::clone(&h));
+                return Some(h);
+            }
+            (Health::Incompatible, _) => {
+                st.incompatible_until = Some(Instant::now() + incompatible_window);
+                return None;
+            }
+            // Absent, or an older daemon that was just asked to shut down:
+            // a spawn (below) replaces it.
+            (Health::Absent | Health::Evicting, _) => {}
         }
 
         if policy == DaemonPolicy::ConnectOnly {
@@ -142,15 +179,28 @@ impl DaemonCell {
 
         // No idle timeout on the command line: the daemon reads the global
         // config itself (`idle_secs` above only sizes this cell's backoff).
-        let h = DaemonHandle::connect_or_spawn(sock, None).await;
-
-        if h.is_some() {
-            // Confirmed successful spawn: shrink the backoff to the short
-            // cooldown so a daemon that later dies is recovered quickly —
-            // but never immediately, or a ponge-then-crash daemon would be
-            // respawned on every single resolve (spawn storm).
-            st.last_spawn = Some((Instant::now(), SPAWN_SUCCESS_COOLDOWN));
-        }
+        let h = match DaemonHandle::connect_or_spawn_outcome(sock, None).await {
+            SpawnOutcome::Connected(h) => {
+                // Confirmed successful spawn: shrink the backoff to the short
+                // cooldown so a daemon that later dies is recovered quickly —
+                // but never immediately, or a ponge-then-crash daemon would be
+                // respawned on every single resolve (spawn storm).
+                st.last_spawn = Some((Instant::now(), SPAWN_SUCCESS_COOLDOWN));
+                Some(h)
+            }
+            SpawnOutcome::StillEvicting => {
+                // Nothing failed: the older daemon is draining. The next
+                // resolve a few seconds later finds the socket free, so use
+                // the short cooldown, not the failure window.
+                st.last_spawn = Some((Instant::now(), SPAWN_SUCCESS_COOLDOWN));
+                None
+            }
+            SpawnOutcome::Incompatible => {
+                st.incompatible_until = Some(Instant::now() + incompatible_window);
+                None
+            }
+            SpawnOutcome::SpawnFailed => None,
+        };
 
         st.current = h.clone();
         h

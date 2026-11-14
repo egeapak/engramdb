@@ -186,6 +186,79 @@ fn build_is_older(daemon: Option<&str>, client: &str) -> bool {
     }
 }
 
+/// How long a client waits for an evicted (older) daemon to stop listening
+/// before giving up on spawning a replacement this time.
+pub(crate) const EVICT_WAIT: Duration = Duration::from_secs(5);
+
+/// What a `Ping` health check found on the socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Health {
+    /// A daemon of this protocol and build answered.
+    Healthy,
+    /// Nothing answered (no daemon, a dead socket, a refused peer, a timeout).
+    Absent,
+    /// An older daemon (protocol or build) answered and was sent `Shutdown`.
+    Evicting,
+    /// A newer (or unorderable) daemon answered; it is left alone.
+    Incompatible,
+}
+
+/// Why [`DaemonHandle::connect_or_spawn_outcome`] did or did not return a
+/// handle.
+pub(crate) enum SpawnOutcome {
+    Connected(Arc<DaemonHandle>),
+    /// A spawn was attempted and no daemon came up in time.
+    SpawnFailed,
+    /// An evicted older daemon was still answering at [`EVICT_WAIT`].
+    StillEvicting,
+    /// A newer daemon holds the socket.
+    Incompatible,
+}
+
+/// Poll `socket` until it refuses a connection, bounded by `limit`. Returns
+/// whether it went away.
+async fn wait_until_refused(socket: &Path, limit: Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match super::transport::connect(socket).await {
+            Err(_) => return true,
+            Ok(stream) => drop(stream),
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Test-only record of spawn attempts (nextest runs one test per process, so
+/// a static is per test).
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SPAWNS: AtomicUsize = AtomicUsize::new(0);
+    static SPAWNS_WHILE_LISTENING: AtomicUsize = AtomicUsize::new(0);
+
+    pub(crate) fn record_spawn(socket: &std::path::Path) {
+        SPAWNS.fetch_add(1, Ordering::SeqCst);
+        #[cfg(unix)]
+        if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+            SPAWNS_WHILE_LISTENING.fetch_add(1, Ordering::SeqCst);
+        }
+        #[cfg(not(unix))]
+        let _ = socket;
+    }
+
+    /// `(spawns, spawns made while something still listened on the socket)`.
+    pub(crate) fn spawns() -> (usize, usize) {
+        (
+            SPAWNS.load(Ordering::SeqCst),
+            SPAWNS_WHILE_LISTENING.load(Ordering::SeqCst),
+        )
+    }
+}
+
 /// A connection factory for the shared daemon.
 ///
 /// Each request opens a short-lived connection (connecting to a Unix socket is
@@ -228,11 +301,44 @@ impl DaemonHandle {
         socket: PathBuf,
         idle_override: Option<u64>,
     ) -> Option<Arc<Self>> {
+        match Self::connect_or_spawn_outcome(socket, idle_override).await {
+            SpawnOutcome::Connected(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
+    /// [`Self::connect_or_spawn`], saying why no handle came back.
+    ///
+    /// - A daemon that is current answers at once (`Connected`).
+    /// - A provably older daemon was sent `Shutdown`: wait (bounded by
+    ///   [`EVICT_WAIT`]) until its socket refuses connections, then spawn. A
+    ///   spawn while it still listens would yield to it and leave the
+    ///   session without a daemon; if it is still answering at the bound
+    ///   (draining in-flight requests), return `StillEvicting` without
+    ///   spawning.
+    /// - A newer (or unorderable) daemon is `Incompatible`: never spawned
+    ///   over, no retry loop.
+    pub(crate) async fn connect_or_spawn_outcome(
+        socket: PathBuf,
+        idle_override: Option<u64>,
+    ) -> SpawnOutcome {
         let handle = Self {
             socket: socket.clone(),
         };
-        if handle.healthy().await {
-            return Some(Arc::new(handle));
+        match handle.health().await {
+            Health::Healthy => return SpawnOutcome::Connected(Arc::new(handle)),
+            Health::Incompatible => return SpawnOutcome::Incompatible,
+            Health::Evicting => {
+                if !wait_until_refused(&socket, EVICT_WAIT).await {
+                    tracing::warn!(
+                        "the older engramdb daemon on {} is still finishing requests; \
+                         using in-process models for now",
+                        socket.display()
+                    );
+                    return SpawnOutcome::StillEvicting;
+                }
+            }
+            Health::Absent => {}
         }
 
         Self::spawn_daemon(&socket, idle_override);
@@ -242,25 +348,20 @@ impl DaemonHandle {
         // total) so a failed spawn degrades to in-process instead of hanging.
         for delay_ms in [25u64, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 1250] {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            if handle.healthy().await {
-                return Some(Arc::new(handle));
+            match handle.health().await {
+                Health::Healthy => return SpawnOutcome::Connected(Arc::new(handle)),
+                Health::Incompatible => return SpawnOutcome::Incompatible,
+                Health::Absent | Health::Evicting => {}
             }
         }
         tracing::warn!("engramdb daemon unreachable after spawn; using in-process models");
-        None
+        SpawnOutcome::SpawnFailed
     }
 
-    /// Connect to an already-running daemon without spawning. Returns `None`
-    /// if no daemon is listening on `socket` or if it fails the protocol
-    /// version check. Used by [`DaemonCell`] to probe liveness before
-    /// deciding whether to spawn.
-    pub(crate) async fn connect_only(socket: PathBuf) -> Option<Arc<Self>> {
-        let handle = Self { socket };
-        if handle.healthy().await {
-            Some(Arc::new(handle))
-        } else {
-            None
-        }
+    /// Probe the daemon on `socket` without spawning, with the verdict.
+    pub(crate) async fn probe(socket: PathBuf) -> (Health, Arc<Self>) {
+        let handle = Arc::new(Self { socket });
+        (handle.health().await, handle)
     }
 
     /// Renew this session's lease on the daemon's models for `models`.
@@ -288,10 +389,12 @@ impl DaemonHandle {
 
     /// True if a daemon answers `Ping` with a matching protocol version.
     pub(crate) async fn check_health(&self) -> bool {
-        self.healthy().await
+        self.health().await == Health::Healthy
     }
 
-    async fn healthy(&self) -> bool {
+    /// Ping the daemon and classify it (see [`Health`]). An older daemon is
+    /// sent `Shutdown` here, which is what `Evicting` reports.
+    pub(crate) async fn health(&self) -> Health {
         match self
             .request_with_timeout(
                 DaemonRequest {
@@ -310,17 +413,23 @@ impl DaemonHandle {
                 // older protocol is evicted. Newer build: leave it alone, for
                 // the same reason as the protocol case below.
                 match build.as_deref() {
-                    Some(env!("CARGO_PKG_VERSION")) => true,
+                    Some(env!("CARGO_PKG_VERSION")) => Health::Healthy,
                     b => {
                         let reported = b.unwrap_or("pre-4");
-                        tracing::warn!(
-                            "engramdb daemon build {reported} differs from client {}; requesting shutdown so a current daemon can start",
-                            env!("CARGO_PKG_VERSION")
-                        );
                         if build_is_older(b, env!("CARGO_PKG_VERSION")) {
+                            tracing::warn!(
+                                "engramdb daemon build {reported} is older than client {}; requesting shutdown so a current daemon can start",
+                                env!("CARGO_PKG_VERSION")
+                            );
                             let _ = oneshot(&self.socket, DaemonOp::Shutdown).await;
+                            Health::Evicting
+                        } else {
+                            tracing::warn!(
+                                "engramdb daemon build {reported} is newer than client {} (or not comparable); leaving it running and using in-process models",
+                                env!("CARGO_PKG_VERSION")
+                            );
+                            Health::Incompatible
                         }
-                        false
                     }
                 }
             }
@@ -340,14 +449,15 @@ impl DaemonHandle {
                         "engramdb daemon protocol {version} is older than client {PROTOCOL_VERSION}; requesting shutdown so a current daemon can start"
                     );
                     let _ = oneshot(&self.socket, DaemonOp::Shutdown).await;
+                    Health::Evicting
                 } else {
                     tracing::warn!(
                         "engramdb daemon protocol mismatch (daemon {version}, client {PROTOCOL_VERSION}); using in-process models"
                     );
+                    Health::Incompatible
                 }
-                false
             }
-            _ => false,
+            _ => Health::Absent,
         }
     }
 
@@ -363,6 +473,16 @@ impl DaemonHandle {
     /// linger as a zombie. `kill_on_drop` stays false (tokio's default), so
     /// the daemon outlives the parent exactly as before.
     fn spawn_daemon(socket: &std::path::Path, idle_override: Option<u64>) {
+        // Tests count spawns (and whether the socket still answered at that
+        // moment) instead of forking the test binary, which has no `daemon`
+        // subcommand.
+        #[cfg(test)]
+        {
+            test_seam::record_spawn(socket);
+            let _ = idle_override;
+            return;
+        }
+        #[allow(unreachable_code)]
         let exe = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
