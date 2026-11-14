@@ -11,7 +11,7 @@ One section is the exception: `[daemon]` is read only from the **global** config
 | Built-in defaults | `crates/engram-types/src/config.rs` |
 | `config.toml` | `<project>/.engramdb/config.toml` — every section except `[daemon]` |
 | Global `config.toml` | `<global config dir>/config.toml` — `[daemon]` only |
-| Environment | `ENGRAMDB_DAEMON_SOCKET`, `ENGRAMDB_EMBEDDING_BACKEND`, `ENGRAMDB_DATA_DIR`, `ENGRAMDB_CONFIG_DIR`, `CLAUDE_CONFIG_DIR` |
+| Environment | See [Environment variables](#environment-variables) |
 | CLI flag | `--embedding-backend`, `--socket`, etc. |
 
 Higher rows lose to lower rows.
@@ -271,20 +271,33 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 
 ## Environment variables
 
+"Truthy" means one of `1`, `true`, `yes`, `on`.
+
 | Variable | Effect |
 |----------|--------|
-| `ENGRAMDB_DAEMON_SOCKET` | Override daemon socket path. Outranks the global `[daemon].socket_path`. The socket's folder (which also holds the daemon's lock and log) must be yours with mode 0700. |
-| `ENGRAMDB_EMBEDDING_BACKEND` | Override `[embeddings].backend` (`auto`/`onnx`/`ollama`). CLI flag wins. |
-| `ENGRAMDB_IN_PROCESS` | Truthy (`1`/`true`/`yes`/`on`) forces CLI model loading in-process instead of via the daemon. The `--in-process` flag wins. |
-| `ENGRAMDB_DATA_DIR` | Override platform global data dir. Used by tests for isolation. |
-| `ENGRAMDB_CONFIG_DIR` | Override platform global config dir (the registry and the global `config.toml` with `[daemon]`). Used by tests. |
-| `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
-| `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
+| `ENGRAMDB_DATA_DIR` | Global data directory. Overrides the platform default. Tests use it for isolation. |
+| `ENGRAMDB_CONFIG_DIR` | Global config directory (the registry and the global `config.toml` with `[daemon]`). Overrides the platform default. Tests use it. |
+| `ENGRAMDB_REGISTRY_PATH` | Path of the registry file itself. Overrides `<config dir>/registry.json`. Meant for tests. |
+| `ENGRAMDB_MODEL_CACHE_DIR` | Model cache directory (used verbatim). Separate from the data directory. |
+| `ENGRAMDB_OFFLINE` | Truthy: the embedding, NLI and T5 loaders never download a model that is not cached. They fail at once instead. |
+| `ENGRAMDB_EMBEDDING_BACKEND` | Overrides `[embeddings].backend` (`auto` / `onnx` / `ollama`). The `--embedding-backend` flag wins. |
+| `ENGRAMDB_IN_PROCESS` | Truthy: the CLI loads models in its own process and never uses the daemon. The same as `--in-process`. |
+| `ENGRAMDB_DAEMON_SOCKET` | Daemon socket path. Outranks the global `[daemon].socket_path`; the `--socket` flag wins. The socket's folder (which also holds the daemon's lock and log) must be yours with mode 0700. |
+| `ENGRAMDB_DISABLE_AUTO_MAINTENANCE` | Truthy: skip the automatic maintenance pass. The same as `--no-maintenance`. |
+| `ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS` | Seconds between automatic maintenance passes. Overrides `[maintenance].interval_secs`. `0` makes a pass due on every command. A value that is not a whole number is ignored. |
+| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `ENGRAMDB_DASHBOARD_CACHE_DIR` | Where `engramdb dashboard` keeps its layout cache (default `<cache dir>/engramdb/dashboard/layouts/`; must be yours with mode 0700). See [dashboard.md](./dashboard.md#what-it-reads-and-what-it-never-does). |
 | `ENGRAMDB_DASHBOARD_LAYOUT_CACHE` | `0` turns the dashboard's layout cache off (memory and disk). |
-| `CLAUDE_CONFIG_DIR` | Claude Code's own config root (default `~/.claude`). Read, never written — it is how `harvest` locates session transcripts. |
-| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
+| `ORT_DYLIB_PATH` | Full path of the ONNX Runtime library to load. It is checked before every other location. See [installation.md](./installation.md#onnx-runtime). |
+| `OLLAMA_HOST` | Address of the Ollama server. Default `http://localhost:11434`. |
+| `CLAUDE_CONFIG_DIR` | Claude Code's own config directory (default `~/.claude`). Read, never written. `harvest` uses it to find session transcripts. |
+| `CLAUDE_SESSION_ID`, `MCP_SESSION_ID` | The session id. The first one that is set and not empty wins. The MCP server and `engramdb task` use it, and the CLI attaches it to the usage events of `query` and `get`. Without one, the MCP server makes a new id per process, and CLI usage events have no session. |
+| `EDITOR` | Editor for `add -e`, `update -e` and the `harvest` editor flow. Default `vi`. |
+| `HF_ENDPOINT` | Hugging Face mirror for model downloads. The download library reads it, not EngramDB. A daemon that EngramDB starts keeps it. |
+| `XDG_RUNTIME_DIR` | On Linux, the daemon folder is `$XDG_RUNTIME_DIR/engramdb` when this is set. |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |
+
+Variables read only by benches and examples are not listed.
 
 ## Links and usage in scoring
 
