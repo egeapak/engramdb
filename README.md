@@ -9,7 +9,7 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 
 ## Features
 
-- **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L6-v2 embeddings
+- **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L12-v2 embeddings
 - **Automatic context injection** — hooks surface relevant memories when your agent touches files
 - **Contradiction detection** — NLI-based challenge system flags conflicting information
 - **Epistemic classes** — every memory is a `fact`, `observation`, or `decision`, orthogonal to its type; retrieval reweights classes by situation (observations surface while debugging, decisions while designing)
@@ -19,17 +19,28 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 - **MCP server** — full Model Context Protocol integration (stdio and SSE transports)
 - **Shared embedding daemon** — auto-spawned and self-healing; loads models once machine-wide instead of once per agent session, stays resident while sessions are connected, and is usable from the CLI too, with graceful in-process fallback
 - **Claude Code plugin** — one-command install with hooks, MCP, and permissions
-- **Offline-first** — all embeddings run locally via ONNX Runtime (or optionally Ollama)
+- **Offline-first** — all embeddings run locally via ONNX Runtime (or optionally Ollama); ONNX Runtime is installed separately
 - **Multiple output formats** — pretty, JSON, or plain text for scripting
 
 ## Quick Start
 
 ### Install
 
-Build from source (requires a recent stable Rust toolchain):
+EngramDB needs ONNX Runtime 1.24 or later on the machine. It is not bundled.
 
 ```bash
-cargo install --git https://github.com/egeapak/engramdb
+brew install onnxruntime                 # macOS / Linuxbrew
+sudo apt-get install -y libonnxruntime   # where packaged
+```
+
+Or set `ORT_DYLIB_PATH` to a library you already have. Without a runtime
+EngramDB still runs, with keyword search only. See
+[installation](docs/users/installation.md#onnx-runtime).
+
+Then build from source (needs a recent stable Rust toolchain and `protoc`):
+
+```bash
+cargo install --locked --git https://github.com/egeapak/engramdb engram-cli
 ```
 
 ### Set up Claude Code integration
@@ -80,7 +91,7 @@ EngramDB stores memories as structured files (TOML + markdown) in `.engramdb/mem
 
 - **Type** — decision, convention, hazard, context, intent, relationship, debug, preference
 - **Epistemic class** — fact, observation, or decision (defaults from the type), with a bi-temporal validity window: memories are invalidated, not deleted
-- **Visibility** — project, team, or personal scope
+- **Visibility** — `shared` (committed with the project) or `personal` (kept outside the repository)
 - **Criticality** — 0.0 to 1.0 score that decays over time
 - **Embeddings** — vector representations stored in a LanceDB index for semantic search
 
@@ -218,7 +229,7 @@ idle_timeout_secs = 900   # Daemon reaps this long after the last session discon
 ### Embedding backends
 
 - **auto** (default) — tries ONNX first, falls back to Ollama
-- **onnx** — local ONNX Runtime with all-MiniLM-L6-v2, no external dependencies
+- **onnx** — local inference with ONNX Runtime and all-MiniLM-L12-v2 (uint8). Needs ONNX Runtime installed.
 - **ollama** — uses a local Ollama instance for embeddings (requires `ollama` running)
 
 Models are cached in the system cache directory (`~/Library/Caches/engramdb/models` on macOS).

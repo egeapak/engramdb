@@ -7,7 +7,7 @@ Persistent memory for your coding agent. This plugin gives Claude Code the abili
 EngramDB must be installed and available on your PATH:
 
 ```bash
-cargo install --git https://github.com/egeapak/engramdb engram-cli
+cargo install --locked --git https://github.com/egeapak/engramdb engram-cli
 ```
 
 (The `engramdb` binary ships in the `engram-cli` workspace crate.)

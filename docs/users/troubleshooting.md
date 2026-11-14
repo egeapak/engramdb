@@ -21,9 +21,10 @@ EngramDB loads ONNX Runtime at startup rather than embedding it, so it has to be
 
 ```bash
 brew install onnxruntime          # macOS / Linuxbrew
-scoop install onnxruntime         # Windows
 sudo apt-get install -y libonnxruntime   # where packaged
 ```
+
+Windows: download the official ONNX Runtime zip from the Microsoft releases page, unpack it, and set `ORT_DYLIB_PATH` to `onnxruntime.dll` (or put its `lib` folder on `PATH`).
 
 Or point at a specific library with `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`. Until one is found EngramDB still runs — search falls back to keyword matching.
 

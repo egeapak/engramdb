@@ -1,5 +1,7 @@
 # Packaging
 
+Status: the Scoop manifests in `scoop/` are templates. No bucket is published.
+
 Package definitions for distributing EngramDB. They are kept in-tree so the
 runtime contract below is versioned next to the code that depends on it, but
 they are **not** consumed by any build: publishing means copying them into a
