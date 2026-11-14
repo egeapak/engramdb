@@ -2077,6 +2077,45 @@ impl LanceIndex {
             }))
     }
 
+    /// [`Self::clear_chunks`], sparing the vectors of the memories in `keep`.
+    ///
+    /// For a forced re-embed when some memory files do not parse: their
+    /// vectors cannot be rebuilt from the file, and under an unchanged model
+    /// they are still right. Every other chunk row is deleted (one delete
+    /// commit) and every other row's `has_embedding` is reset (one update
+    /// commit). The predicates are `NOT IN` lists, chunked by 500 and joined
+    /// with `AND`. Requires the chunks table to exist with the right width;
+    /// a missing table or a width change goes through `clear_chunks`.
+    pub async fn clear_chunks_keeping(&self, keep: &[String]) -> Result<()> {
+        if keep.is_empty() {
+            return self.clear_chunks().await;
+        }
+        let not_kept = |column: &str| {
+            keep.chunks(500)
+                .map(|batch| !is_in(col(column), batch.iter().map(lit).collect::<Vec<_>>()))
+                .reduce(|a, b| a.and(b))
+                .expect("keep is not empty")
+        };
+        let chunks = self.open_chunks_table().await?;
+        chunks
+            .delete(&not_kept("memory_id"))
+            .await
+            .context("Failed to delete chunks outside the kept set")?;
+        let filter = lancedb::expr::expr_to_sql_string(
+            &col("has_embedding").eq(lit(true)).and(not_kept("id")),
+        )
+        .context("Failed to render the has_embedding reset filter")?;
+        self.open_table()
+            .await?
+            .update()
+            .only_if(filter)
+            .column("has_embedding", "false")
+            .execute()
+            .await
+            .context("Failed to reset has_embedding outside the kept set")?;
+        Ok(())
+    }
+
     /// Empty only the chunks (vectors) table.
     ///
     /// Recreates the table with the currently configured dimensions, so this

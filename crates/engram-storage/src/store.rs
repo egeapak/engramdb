@@ -2434,6 +2434,17 @@ impl MemoryStore {
             .map_err(StorageError::index("clear_chunks"))
     }
 
+    /// [`Self::clear_chunks`], keeping the vectors (and `has_embedding`) of
+    /// the memories in `keep` — the unparseable files of a forced re-embed
+    /// under an unchanged model. See `LanceIndex::clear_chunks_keeping`.
+    pub async fn clear_chunks_keeping(&self, keep: &[String]) -> Result<()> {
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        self.lance_index
+            .clear_chunks_keeping(keep)
+            .await
+            .map_err(StorageError::index("clear_chunks_keeping"))
+    }
+
     /// The vector width of the on-disk chunks table, or `None` when the
     /// table doesn't exist yet. See `LanceIndex::chunks_table_dimensions`.
     pub async fn chunks_table_dimensions(&self) -> Result<Option<usize>> {
@@ -7025,6 +7036,41 @@ mod tests {
             vec!["reindex-chunks-live".to_string()],
             "ghost chunks must be pruned, live chunks kept"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_chunks_keeping_spares_only_the_named_ids() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let ids = ["keep-a", "keep-b", "drop-c", "drop-d"];
+        for id in ids {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .upsert_chunks(id, vec![vec![0.5f32; 384]])
+                .await
+                .unwrap();
+        }
+        store
+            .clear_chunks_keeping(&["keep-a".to_string(), "keep-b".to_string()])
+            .await
+            .unwrap();
+        let mut left = store.list_chunk_memory_ids().await.unwrap();
+        left.sort();
+        assert_eq!(left, vec!["keep-a".to_string(), "keep-b".to_string()]);
+        let flags: HashMap<String, bool> = store
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.id, e.has_embedding))
+            .collect();
+        assert!(flags["keep-a"] && flags["keep-b"]);
+        assert!(!flags["drop-c"] && !flags["drop-d"]);
     }
 
     /// The freshness-guarded upsert used by detached ingest tasks: a write
