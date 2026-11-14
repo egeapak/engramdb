@@ -8,7 +8,7 @@ use crate::types::{
     Visibility,
 };
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 /// Parameters for updating a memory.
 ///
@@ -386,6 +386,7 @@ mod tests {
     use super::*;
     use crate::storage::{InMemoryRegistry, MemoryStore};
     use crate::types::{Memory, MemoryType, Provenance};
+    use chrono::Duration;
     use tempfile::TempDir;
 
     async fn setup_test_store() -> (TempDir, MemoryStore) {
