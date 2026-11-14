@@ -1,9 +1,9 @@
 version: 2
 
-# Keeps the committed Cargo.lock moving on its own. CI builds with `--locked`
-# and the only supply-chain gate (.github/workflows/audit.yml) runs cargo-deny
-# weekly with `continue-on-error: true`, so without this a published advisory
-# is *reported* but never *fixed* until someone runs `cargo update` by hand.
+# Keeps the committed Cargo.lock moving on its own. CI builds with `--locked`,
+# and the advisory check (.github/workflows/audit.yml) only reports: it files
+# an issue when its weekly run fails. Without this a published advisory is
+# *reported* but never *fixed* until someone runs `cargo update` by hand.
 updates:
   - package-ecosystem: cargo
     directory: "/"

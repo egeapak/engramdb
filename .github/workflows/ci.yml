@@ -233,6 +233,30 @@ jobs:
           print("OK: all engram-cli output goes through OutputFormatter")
           PY
 
+  # Supply-chain gate on what a pull request itself changes: banned or
+  # wildcard crates, licenses outside deny.toml's allow-list, and crates from
+  # a registry or git source other than crates.io. All three are decided by
+  # the PR's own Cargo.lock and deny.toml, so this job cannot go red for a
+  # reason outside the PR. `advisories` is deliberately not here: it depends
+  # on a database that changes daily, and runs on master pushes and weekly in
+  # audit.yml, which files an issue when it fails.
+  #
+  # Blocking from the start: the audit run on master 5b44fc7 (2026-11-09),
+  # same deny.toml and Cargo.lock, printed `bans ok, licenses ok, sources ok`.
+  # A PR that adds a crate under a license the list does not name must add
+  # the license (or a per-crate exception) to deny.toml in the same PR.
+  deny:
+    name: cargo-deny (bans, licenses, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check bans licenses sources
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
@@ -844,6 +868,7 @@ jobs:
       - manifest-version
       - fuzz-lockfile-parity
       - formatter-output
+      - deny
       - check
       - check-cross
       - test-build
