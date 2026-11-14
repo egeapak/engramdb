@@ -457,9 +457,27 @@ impl DaemonHandle {
 /// and the daemon must bind exactly that path. The idle timeout is not: the
 /// daemon reads `idle_timeout_secs` from the global config itself, which is
 /// the same value every session's heartbeat interval is derived from.
+///
+/// The daemon starts in its own folder, not in the spawner's directory: the
+/// spawner is usually a hook or an MCP server running in a project checkout,
+/// and a daemon that outlives the session must neither resolve anything
+/// against that checkout nor keep its directory busy. Because the directory
+/// changes, a relative socket and relative path variables are made absolute
+/// here, against the spawner's directory, which is where the client resolved
+/// them.
 fn spawn_command(exe: &Path, socket: &Path, idle_override: Option<u64>) -> tokio::process::Command {
+    let socket = absolute_or_same(socket);
+    let socket = socket.as_path();
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("daemon").arg("run").arg("--socket").arg(socket);
+    let folder = super::daemon_dir_for(socket);
+    cmd.current_dir(if folder.is_dir() {
+        folder
+    } else {
+        // The log open creates the folder before a real spawn; this is the
+        // case where that failed.
+        std::env::temp_dir()
+    });
     if let Some(secs) = idle_override {
         cmd.arg("--idle-timeout").arg(secs.to_string());
     }
@@ -472,6 +490,31 @@ fn spawn_command(exe: &Path, socket: &Path, idle_override: Option<u64>) -> tokio
     cmd.env_clear().envs(daemon_env(std::env::vars_os()));
     cmd
 }
+
+/// `path` made absolute against the current directory, or `path` itself when
+/// it already is (a Windows pipe name is) or the current directory is unknown.
+fn absolute_or_same(path: &Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Kept variables whose value is a path. A spawned daemon does not start in
+/// the spawner's directory, so a relative value is made absolute for it.
+/// `ORT_DYLIB_PATH` is not here: a relative one is resolved against the
+/// executable, never the current directory.
+const DAEMON_ENV_PATHS: &[&str] = &[
+    "ENGRAMDB_DATA_DIR",
+    "ENGRAMDB_CONFIG_DIR",
+    "ENGRAMDB_REGISTRY_PATH",
+    "ENGRAMDB_MODEL_CACHE_DIR",
+    "ENGRAMDB_DASHBOARD_CACHE_DIR",
+    "ENGRAMDB_DAEMON_SOCKET",
+    "CLAUDE_CONFIG_DIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
 
 /// Variables a spawned daemon keeps, compared without regard to case
 /// (Windows names are case-insensitive, and proxy variables come in both
@@ -529,7 +572,10 @@ const DAEMON_ENV_KEEP_PREFIXES: &[&str] = &["ENGRAMDB_", "LC_", "XDG_"];
 /// [`DAEMON_ENV_KEEP`] or [`DAEMON_ENV_KEEP_PREFIXES`] name.
 ///
 /// `ENGRAMDB_IN_PROCESS` is dropped: it is one session's opt-out from the
-/// daemon, not a setting of the daemon.
+/// daemon, not a setting of the daemon. A relative value of a
+/// [`DAEMON_ENV_PATHS`] variable is made absolute. A session that has such a
+/// relative value then differs from the daemon in `HOOK_ENV_KEYS` and runs
+/// its hooks in-process, which is the safe side.
 fn daemon_env(
     vars: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
@@ -544,6 +590,17 @@ fn daemon_env(
                     || DAEMON_ENV_KEEP_PREFIXES
                         .iter()
                         .any(|p| upper.starts_with(p)))
+        })
+        .map(|(name, value)| {
+            let is_path = name
+                .to_str()
+                .is_some_and(|n| DAEMON_ENV_PATHS.contains(&n.to_ascii_uppercase().as_str()));
+            if is_path && !value.is_empty() {
+                let absolute = absolute_or_same(Path::new(&value));
+                (name, absolute.into_os_string())
+            } else {
+                (name, value)
+            }
         })
         .collect()
 }
@@ -588,6 +645,59 @@ mod spawn_tests {
                 "90"
             ]
         );
+    }
+
+    /// The spawner is usually a hook or an MCP server in a project checkout.
+    /// The daemon must not start there, and since its directory changes, the
+    /// socket it is told to bind must not be relative.
+    #[test]
+    fn a_spawned_daemon_does_not_start_in_the_callers_directory() {
+        let dir = crate::daemon::private_tempdir();
+        let socket = dir.path().join("d.sock");
+        let cmd = spawn_command(Path::new("/bin/engramdb"), &socket, None);
+        assert_eq!(cmd.as_std().get_current_dir(), Some(dir.path()));
+
+        // A relative socket: absolute on the command line, and the working
+        // directory is its (absolute) folder or the temp dir, never ".".
+        let cmd = spawn_command(Path::new("/bin/engramdb"), Path::new("rel/d.sock"), None);
+        let socket_arg = args(&cmd)[3].clone();
+        assert!(Path::new(&socket_arg).is_absolute(), "{socket_arg}");
+        assert_eq!(
+            Path::new(&socket_arg),
+            std::env::current_dir().unwrap().join("rel/d.sock")
+        );
+        let cwd = cmd.as_std().get_current_dir().expect("a working directory");
+        assert!(cwd.is_absolute(), "{}", cwd.display());
+        assert_ne!(cwd, std::env::current_dir().unwrap());
+    }
+
+    /// The daemon's directory differs from the spawner's, so a relative path
+    /// variable would point somewhere else in the daemon.
+    #[test]
+    fn relative_path_variables_are_made_absolute_for_the_daemon() {
+        let kept = daemon_env(
+            [
+                ("ENGRAMDB_DATA_DIR", "rel/data"),
+                ("ENGRAMDB_CONFIG_DIR", "/abs/config"),
+                ("ENGRAMDB_OFFLINE", "1"),
+                ("ORT_DYLIB_PATH", "lib/ort.so"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.into(), v.into())),
+        );
+        let get = |name: &str| {
+            kept.iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.to_string_lossy().into_owned())
+                .unwrap()
+        };
+        assert_eq!(
+            Path::new(&get("ENGRAMDB_DATA_DIR")),
+            std::env::current_dir().unwrap().join("rel/data")
+        );
+        assert_eq!(get("ENGRAMDB_CONFIG_DIR"), "/abs/config");
+        assert_eq!(get("ENGRAMDB_OFFLINE"), "1");
+        assert_eq!(get("ORT_DYLIB_PATH"), "lib/ort.so");
     }
 
     fn names(vars: &[(&str, &str)]) -> Vec<String> {
