@@ -23,7 +23,7 @@ cargo nextest run -p engramdb --lib
 cargo nextest run --workspace --all-features -E 'test(retrieval::engine::tests::)'
 
 # One specific test by exact name
-cargo nextest run --workspace --all-features -E 'test(=retrieval::engine::tests::test_search_with_real)'
+cargo nextest run --workspace --all-features -E 'test(=retrieval::engine::tests::test_search_with_real_reranker)'
 
 # Doctests (nextest doesn't run them; run separately if you have them)
 cargo test --doc
@@ -45,6 +45,8 @@ max-threads = 1
 filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real)"
 test-group = "ml-models"
 ```
+
+This excerpt is shortened. The filter in `.config/nextest.toml` is the full list: it also names single tests in the MCP server and the daemon that load a real model. `test_rerank` and `test_search_with_real` are name prefixes, not exact names.
 
 These tests:
 
