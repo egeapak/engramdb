@@ -2192,7 +2192,7 @@ json\:"JSON output for programmatic parsing"
 plain\:"Plain text output without colors"))' \
 '--dir=[Working directory (default\: current directory)]:DIR:_files' \
 '--embedding-backend=[Embedding backend\: auto, onnx, or ollama]:EMBEDDING_BACKEND:_default' \
-'--no-plugin[Skip plugin install in global mode, write hooks and MCP directly to settings.json]' \
+'--no-plugin[Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json]' \
 '--global[Install to ~/.claude/ instead of project-local .claude/]' \
 '--dry-run[Show what would be changed without writing]' \
 '--json[Output as JSON]' \
@@ -3399,8 +3399,8 @@ _engramdb__subcmd__help__subcmd__hook_commands() {
 'pre-tool-use:Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)' \
 'session-start:Handle SessionStart hook events (outputs high-criticality memories)' \
 'user-prompt-submit:Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)' \
-'post-tool-use:Handle PostToolUse hook events (warn when an edit touches a memory'\''s watch paths)' \
-'session-end:Handle SessionEnd hook events (housekeeping; no context output)' \
+'post-tool-use:Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)' \
+'session-end:Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)' \
 'pre-compact:Handle PreCompact hook events (store-your-memories reminder before compaction)' \
     )
     _describe -t commands 'engramdb help hook commands' commands "$@"
@@ -3594,8 +3594,8 @@ _engramdb__subcmd__hook_commands() {
 'pre-tool-use:Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)' \
 'session-start:Handle SessionStart hook events (outputs high-criticality memories)' \
 'user-prompt-submit:Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)' \
-'post-tool-use:Handle PostToolUse hook events (warn when an edit touches a memory'\''s watch paths)' \
-'session-end:Handle SessionEnd hook events (housekeeping; no context output)' \
+'post-tool-use:Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)' \
+'session-end:Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)' \
 'pre-compact:Handle PreCompact hook events (store-your-memories reminder before compaction)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
@@ -3607,8 +3607,8 @@ _engramdb__subcmd__hook__subcmd__help_commands() {
 'pre-tool-use:Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)' \
 'session-start:Handle SessionStart hook events (outputs high-criticality memories)' \
 'user-prompt-submit:Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)' \
-'post-tool-use:Handle PostToolUse hook events (warn when an edit touches a memory'\''s watch paths)' \
-'session-end:Handle SessionEnd hook events (housekeeping; no context output)' \
+'post-tool-use:Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)' \
+'session-end:Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)' \
 'pre-compact:Handle PreCompact hook events (store-your-memories reminder before compaction)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )

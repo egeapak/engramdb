@@ -460,6 +460,18 @@ fn ledger_prune_dry_run_with_no_archives() {
     );
 }
 
+/// `--older-than 0d` is refused, and the hint must name a command that does
+/// what it says (`--max-bytes 0` disables the size limit, so it evicted
+/// nothing).
+#[test]
+fn ledger_prune_older_than_zero() {
+    let f = corpus();
+    insta::assert_snapshot!(
+        "harvest_ledger_prune_older_than_zero",
+        f.run(&["harvest", "ledger", "prune", "--older-than", "0d"])
+    );
+}
+
 // =====================================================================
 // index / search — the no-model branch
 // =====================================================================

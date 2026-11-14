@@ -5,7 +5,7 @@ expression: "f.run_bare(& [\"hook\", \"session-end\", \"--help\"])"
 $ engramdb hook session-end --help
 exit: 0
 --- stdout ---
-Handle SessionEnd hook events (housekeeping; no context output)
+Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)
 
 Usage: engramdb hook session-end [OPTIONS]
 

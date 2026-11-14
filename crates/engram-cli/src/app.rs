@@ -19,9 +19,9 @@ pub enum HookCommand {
     },
     /// Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)
     UserPromptSubmit,
-    /// Handle PostToolUse hook events (warn when an edit touches a memory's watch paths)
+    /// Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)
     PostToolUse,
-    /// Handle SessionEnd hook events (housekeeping; no context output)
+    /// Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)
     SessionEnd,
     /// Handle PreCompact hook events (store-your-memories reminder before compaction)
     PreCompact,
@@ -1500,7 +1500,7 @@ pub enum Command {
 
     /// Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)
     Setup {
-        /// Skip plugin install in global mode, write hooks and MCP directly to settings.json
+        /// Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json
         #[arg(long)]
         no_plugin: bool,
 

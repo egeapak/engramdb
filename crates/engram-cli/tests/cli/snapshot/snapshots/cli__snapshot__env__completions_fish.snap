@@ -1127,8 +1127,8 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_s
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "pre-tool-use" -d 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "session-start" -d 'Handle SessionStart hook events (outputs high-criticality memories)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "user-prompt-submit" -d 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
-complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "post-tool-use" -d 'Handle PostToolUse hook events (warn when an edit touches a memory\'s watch paths)'
-complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "session-end" -d 'Handle SessionEnd hook events (housekeeping; no context output)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "post-tool-use" -d 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "session-end" -d 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "pre-compact" -d 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and not __fish_seen_subcommand_from pre-tool-use session-start user-prompt-submit post-tool-use session-end pre-compact help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from pre-tool-use" -l format -d 'Output format' -r -f -a "pretty\t'Human-friendly colored output with formatting'
@@ -1213,8 +1213,8 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "pre-tool-use" -d 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "session-start" -d 'Handle SessionStart hook events (outputs high-criticality memories)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "user-prompt-submit" -d 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
-complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "post-tool-use" -d 'Handle PostToolUse hook events (warn when an edit touches a memory\'s watch paths)'
-complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "session-end" -d 'Handle SessionEnd hook events (housekeeping; no context output)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "post-tool-use" -d 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "session-end" -d 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "pre-compact" -d 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand hook; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l claude-dir -d 'Override .claude directory path (for testing)' -r -F
@@ -1223,7 +1223,7 @@ json\t'JSON output for programmatic parsing'
 plain\t'Plain text output without colors'"
 complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l dir -d 'Working directory (default: current directory)' -r -F
 complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l embedding-backend -d 'Embedding backend: auto, onnx, or ollama' -r
-complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l no-plugin -d 'Skip plugin install in global mode, write hooks and MCP directly to settings.json'
+complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l no-plugin -d 'Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json'
 complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l global -d 'Install to ~/.claude/ instead of project-local .claude/'
 complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l dry-run -d 'Show what would be changed without writing'
 complete -c engramdb -n "__fish_engramdb_using_subcommand setup" -l json -d 'Output as JSON'
@@ -1318,7 +1318,7 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_
 complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "pre-tool-use" -d 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "session-start" -d 'Handle SessionStart hook events (outputs high-criticality memories)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "user-prompt-submit" -d 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
-complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "post-tool-use" -d 'Handle PostToolUse hook events (warn when an edit touches a memory\'s watch paths)'
-complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "session-end" -d 'Handle SessionEnd hook events (housekeeping; no context output)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "post-tool-use" -d 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)'
+complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "session-end" -d 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)'
 complete -c engramdb -n "__fish_engramdb_using_subcommand help; and __fish_seen_subcommand_from hook" -f -a "pre-compact" -d 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
 --- stderr ---

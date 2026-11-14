@@ -5,7 +5,7 @@
 //! agent's, and saving is the user's. Nothing here writes a memory.
 
 use crate::app::{HarvestCommand, LedgerCommand};
-use crate::output::{outln, outraw, HarvestSessionOutput, OutputFormatter};
+use crate::output::{errln, outln, outraw, HarvestSessionOutput, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::{bail, Context, Result};
 use engramdb::daemon::{DaemonCell, DaemonPolicy};
@@ -1173,6 +1173,14 @@ citation{}.",
                         "bytes_remaining": outcome.bytes_remaining,
                         "pinned_bytes": outcome.pinned_bytes,
                         "pinned_count": outcome.pinned_count,
+                        "failed": outcome
+                            .failed
+                            .iter()
+                            .map(|(session, error)| serde_json::json!({
+                                "session_id": session,
+                                "error": error,
+                            }))
+                            .collect::<Vec<_>>(),
                     }))?
                 );
             } else if outcome.removed.is_empty() {
@@ -1197,9 +1205,36 @@ citation{}.",
                     outln!(formatter, "Re-run with --apply to delete.");
                 }
             }
+            if !formatter.is_json() {
+                print_failed_removals(&outcome, formatter);
+            }
         }
     }
     Ok(())
+}
+
+/// Name the copies an eviction chose but could not delete.
+///
+/// They stay on disk and in the ledger, and their bytes count as remaining, so
+/// a later prune retries them. Saying nothing made "Removed N" read as if the
+/// budget had been met.
+fn print_failed_removals(outcome: &transcript_archive::PruneOutcome, formatter: &OutputFormatter) {
+    if outcome.failed.is_empty() {
+        return;
+    }
+    errln!(
+        formatter,
+        "Could not remove {} transcript copy(ies); they are kept and still count toward the budget:",
+        outcome.failed.len()
+    );
+    for (session, error) in &outcome.failed {
+        errln!(
+            formatter,
+            "  {}: {}",
+            harvest::defang_metadata(session),
+            harvest::defang_metadata(error)
+        );
+    }
 }
 
 /// Report the copies the budget did not apply to.
@@ -1261,12 +1296,13 @@ fn parse_days(spec: &str) -> Result<u64> {
     })?;
     // Same rejection `HarvestConfig::validate` applies to the config field.
     // Going through the flag must not be a way around it: `0d` means "older
-    // than now", which evicts every archive — never what someone typing a
+    // than now", which evicts every transcript copy — never what someone typing a
     // retention window intends.
     if days == 0 {
         bail!(
-            "invalid --older-than value '{spec}': 0 is ambiguous — it would evict every \
-archive immediately. Use `--max-bytes 0 --apply` if you really mean to drop them all."
+            "invalid --older-than value '{spec}': 0 would evict every transcript copy at once. \
+To drop every unpinned copy on purpose, use `--max-bytes 1 --apply` (0 means no size limit); \
+pinned copies need `harvest ledger rm <id> --unpin`."
         );
     }
     if days > 3650 {
@@ -1649,5 +1685,33 @@ mod tests {
             !json.contains("<system-reminder>"),
             "a harness tag reached the model verbatim: {json}"
         );
+    }
+
+    /// The `--older-than 0d` refusal hints at `--max-bytes 1 --apply`. That
+    /// hint must do what it says: every unpinned copy goes, the pinned one
+    /// stays. The previous hint (`--max-bytes 0`) disabled the size limit and
+    /// evicted nothing.
+    #[test]
+    fn harvest_prune_max_bytes_one_evicts_every_unpinned_copy() {
+        let err = parse_days("0d").unwrap_err().to_string();
+        assert!(err.contains("--max-bytes 1 --apply"), "{err}");
+        assert!(!err.contains("--max-bytes 0"), "{err}");
+
+        let src = tempfile::TempDir::new().unwrap();
+        let project = "hintproj00000000";
+        for name in ["kept", "gone"] {
+            let path = src.path().join(format!("{name}.jsonl"));
+            std::fs::write(&path, "{\"type\":\"user\"}\n".repeat(50)).unwrap();
+            transcript_archive::archive_transcript(project, name, &path).unwrap();
+        }
+        let pinned: std::collections::HashSet<String> = ["kept".to_string()].into();
+        let outcome = transcript_archive::prune_archives(project, None, 1, false, &pinned).unwrap();
+        assert_eq!(outcome.removed, vec!["gone".to_string()]);
+        let left: Vec<String> = transcript_archive::list_archives(project)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.session_id)
+            .collect();
+        assert_eq!(left, vec!["kept".to_string()]);
     }
 }

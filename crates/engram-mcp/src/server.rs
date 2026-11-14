@@ -2207,9 +2207,10 @@ impl EngramDbServer {
                  symptom, the cause and the fix). Save it yourself rather than offering to, \
                  unless the user asked you not to save memories. Skip it when the docs or \
                  the error already said what to do, or when the fix was a change to the code. \
-                 All tools accept an optional `project` parameter (absolute path, 16-char \
+                 Memory tools accept an optional `project` parameter (absolute path, 16-char \
                  project ID, \"global\", or \"group:<name>\") to operate on a different \
-                 store's memories. \
+                 store's memories; the harvest tools and projects_info accept a path or \
+                 project ID only. \
                  Use project=\"global\" for cross-project memories like personal preferences, \
                  coding conventions, or knowledge that applies everywhere. \
                  Use project=\"group:<name>\" to write to or read a named group store shared \

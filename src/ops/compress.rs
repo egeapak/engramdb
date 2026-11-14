@@ -320,8 +320,9 @@ pub async fn compress_apply(
     if !failed_sources.is_empty() {
         bail!(
             "Compressed memory {} was created, but {} source memor{} could not be invalidated: {}. \
-             Re-run compress or `resolve --action invalidate` the listed memories manually \
-             (the compressed memory is valid and supersedes them).",
+             Re-run compress, or invalidate the listed memories yourself (CLI: \
+             `engramdb update <id> --invalidate`; MCP: `resolve` with `action: \"invalidate\"`); \
+             the compressed memory is valid and supersedes them.",
             result.id,
             failed_sources.len(),
             if failed_sources.len() == 1 { "y" } else { "ies" },
@@ -874,6 +875,13 @@ mod tests {
         assert!(
             msg.contains("could not be invalidated"),
             "partial failure must be reported: {}",
+            msg
+        );
+        // The remedy must name commands that exist on both front ends
+        // (the CLI has no `resolve` command; MCP has no `update --invalidate`).
+        assert!(
+            msg.contains("engramdb update <id> --invalidate") && !msg.contains("resolve --"),
+            "remedy must name real commands: {}",
             msg
         );
         assert!(

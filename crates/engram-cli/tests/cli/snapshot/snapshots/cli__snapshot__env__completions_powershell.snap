@@ -1663,8 +1663,8 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('pre-tool-use', 'pre-tool-use', [CompletionResultType]::ParameterValue, 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)')
             [CompletionResult]::new('session-start', 'session-start', [CompletionResultType]::ParameterValue, 'Handle SessionStart hook events (outputs high-criticality memories)')
             [CompletionResult]::new('user-prompt-submit', 'user-prompt-submit', [CompletionResultType]::ParameterValue, 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)')
-            [CompletionResult]::new('post-tool-use', 'post-tool-use', [CompletionResultType]::ParameterValue, 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)')
-            [CompletionResult]::new('session-end', 'session-end', [CompletionResultType]::ParameterValue, 'Handle SessionEnd hook events (housekeeping; no context output)')
+            [CompletionResult]::new('post-tool-use', 'post-tool-use', [CompletionResultType]::ParameterValue, 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)')
+            [CompletionResult]::new('session-end', 'session-end', [CompletionResultType]::ParameterValue, 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)')
             [CompletionResult]::new('pre-compact', 'pre-compact', [CompletionResultType]::ParameterValue, 'Handle PreCompact hook events (store-your-memories reminder before compaction)')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -1776,8 +1776,8 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('pre-tool-use', 'pre-tool-use', [CompletionResultType]::ParameterValue, 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)')
             [CompletionResult]::new('session-start', 'session-start', [CompletionResultType]::ParameterValue, 'Handle SessionStart hook events (outputs high-criticality memories)')
             [CompletionResult]::new('user-prompt-submit', 'user-prompt-submit', [CompletionResultType]::ParameterValue, 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)')
-            [CompletionResult]::new('post-tool-use', 'post-tool-use', [CompletionResultType]::ParameterValue, 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)')
-            [CompletionResult]::new('session-end', 'session-end', [CompletionResultType]::ParameterValue, 'Handle SessionEnd hook events (housekeeping; no context output)')
+            [CompletionResult]::new('post-tool-use', 'post-tool-use', [CompletionResultType]::ParameterValue, 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)')
+            [CompletionResult]::new('session-end', 'session-end', [CompletionResultType]::ParameterValue, 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)')
             [CompletionResult]::new('pre-compact', 'pre-compact', [CompletionResultType]::ParameterValue, 'Handle PreCompact hook events (store-your-memories reminder before compaction)')
             [CompletionResult]::new('help', 'help', [CompletionResultType]::ParameterValue, 'Print this message or the help of the given subcommand(s)')
             break
@@ -1808,7 +1808,7 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('--format', '--format', [CompletionResultType]::ParameterName, 'Output format')
             [CompletionResult]::new('--dir', '--dir', [CompletionResultType]::ParameterName, 'Working directory (default: current directory)')
             [CompletionResult]::new('--embedding-backend', '--embedding-backend', [CompletionResultType]::ParameterName, 'Embedding backend: auto, onnx, or ollama')
-            [CompletionResult]::new('--no-plugin', '--no-plugin', [CompletionResultType]::ParameterName, 'Skip plugin install in global mode, write hooks and MCP directly to settings.json')
+            [CompletionResult]::new('--no-plugin', '--no-plugin', [CompletionResultType]::ParameterName, 'Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json')
             [CompletionResult]::new('--global', '--global', [CompletionResultType]::ParameterName, 'Install to ~/.claude/ instead of project-local .claude/')
             [CompletionResult]::new('--dry-run', '--dry-run', [CompletionResultType]::ParameterName, 'Show what would be changed without writing')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Output as JSON')
@@ -2111,8 +2111,8 @@ Register-ArgumentCompleter -Native -CommandName 'engramdb' -ScriptBlock {
             [CompletionResult]::new('pre-tool-use', 'pre-tool-use', [CompletionResultType]::ParameterValue, 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)')
             [CompletionResult]::new('session-start', 'session-start', [CompletionResultType]::ParameterValue, 'Handle SessionStart hook events (outputs high-criticality memories)')
             [CompletionResult]::new('user-prompt-submit', 'user-prompt-submit', [CompletionResultType]::ParameterValue, 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)')
-            [CompletionResult]::new('post-tool-use', 'post-tool-use', [CompletionResultType]::ParameterValue, 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)')
-            [CompletionResult]::new('session-end', 'session-end', [CompletionResultType]::ParameterValue, 'Handle SessionEnd hook events (housekeeping; no context output)')
+            [CompletionResult]::new('post-tool-use', 'post-tool-use', [CompletionResultType]::ParameterValue, 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)')
+            [CompletionResult]::new('session-end', 'session-end', [CompletionResultType]::ParameterValue, 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)')
             [CompletionResult]::new('pre-compact', 'pre-compact', [CompletionResultType]::ParameterValue, 'Handle PreCompact hook events (store-your-memories reminder before compaction)')
             break
         }

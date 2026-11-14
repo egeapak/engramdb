@@ -1871,6 +1871,22 @@ async fn archive_ending_session(
         // Evicted files must stop being advertised by the ledger, or
         // `harvest ledger show` offers an export that cannot succeed.
         Ok(outcome) => {
+            // A copy the sweep chose but could not delete stays on disk and
+            // in the ledger and still counts toward the budget; the next
+            // sweep retries it. Warn so a persistent failure (permissions, a
+            // read-only volume) is visible rather than a silent overrun.
+            if !outcome.failed.is_empty() {
+                let names: Vec<String> = outcome
+                    .failed
+                    .iter()
+                    .map(|(session, error)| format!("{session} ({error})"))
+                    .collect();
+                tracing::warn!(
+                    "SessionEnd archive: could not remove {} transcript copy(ies), kept: {}",
+                    outcome.failed.len(),
+                    names.join(", ")
+                );
+            }
             if let Err(e) =
                 engramdb::storage::harvest_state::clear_archive_refs(&ledger_dir, &outcome.removed)
             {

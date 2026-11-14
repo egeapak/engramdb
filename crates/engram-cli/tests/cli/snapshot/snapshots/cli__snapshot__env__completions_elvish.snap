@@ -1542,8 +1542,8 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand pre-tool-use 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
             cand session-start 'Handle SessionStart hook events (outputs high-criticality memories)'
             cand user-prompt-submit 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
-            cand post-tool-use 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)'
-            cand session-end 'Handle SessionEnd hook events (housekeeping; no context output)'
+            cand post-tool-use 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)'
+            cand session-end 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)'
             cand pre-compact 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
@@ -1648,8 +1648,8 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand pre-tool-use 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
             cand session-start 'Handle SessionStart hook events (outputs high-criticality memories)'
             cand user-prompt-submit 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
-            cand post-tool-use 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)'
-            cand session-end 'Handle SessionEnd hook events (housekeeping; no context output)'
+            cand post-tool-use 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)'
+            cand session-end 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)'
             cand pre-compact 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
             cand help 'Print this message or the help of the given subcommand(s)'
         }
@@ -1672,7 +1672,7 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand --format 'Output format'
             cand --dir 'Working directory (default: current directory)'
             cand --embedding-backend 'Embedding backend: auto, onnx, or ollama'
-            cand --no-plugin 'Skip plugin install in global mode, write hooks and MCP directly to settings.json'
+            cand --no-plugin 'Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json'
             cand --global 'Install to ~/.claude/ instead of project-local .claude/'
             cand --dry-run 'Show what would be changed without writing'
             cand --json 'Output as JSON'
@@ -1909,8 +1909,8 @@ set edit:completion:arg-completer[engramdb] = {|@words|
             cand pre-tool-use 'Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)'
             cand session-start 'Handle SessionStart hook events (outputs high-criticality memories)'
             cand user-prompt-submit 'Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)'
-            cand post-tool-use 'Handle PostToolUse hook events (warn when an edit touches a memory''s watch paths)'
-            cand session-end 'Handle SessionEnd hook events (housekeeping; no context output)'
+            cand post-tool-use 'Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)'
+            cand session-end 'Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)'
             cand pre-compact 'Handle PreCompact hook events (store-your-memories reminder before compaction)'
         }
         &'engramdb;help;hook;pre-tool-use'= {
