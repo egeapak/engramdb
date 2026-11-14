@@ -16,6 +16,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
+use lancedb::database::CreateTableMode;
 use lancedb::expr::{col, is_in, lit};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
@@ -432,6 +433,36 @@ pub struct LanceIndex {
     dimensions: usize,
 }
 
+/// Create `name` only when it does not exist.
+///
+/// "Does not exist" is `lancedb::Error::TableNotFound` and nothing else. This
+/// used to create on **any** open error, so a transient failure (a reader
+/// racing a writer, an I/O error) answered with an attempt to create an empty
+/// table over a live one. Any other open error propagates. A create that
+/// loses a race to another process re-opens what the winner made.
+async fn ensure_named_table(
+    connection: &Connection,
+    name: &str,
+    schema: Arc<Schema>,
+) -> Result<()> {
+    match connection.open_table(name).execute().await {
+        Ok(_) => return Ok(()),
+        Err(lancedb::Error::TableNotFound { .. }) => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to open LanceDB {name} table"));
+        }
+    }
+    match connection.create_empty_table(name, schema).execute().await {
+        Ok(_) => Ok(()),
+        Err(create_err) => match connection.open_table(name).execute().await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                Err(create_err).with_context(|| format!("Failed to create LanceDB {name} table"))
+            }
+        },
+    }
+}
+
 impl LanceIndex {
     /// Create or open a LanceIndex at the given path.
     pub async fn new(db_path: &Path, dimensions: usize) -> Result<Self> {
@@ -647,39 +678,16 @@ impl LanceIndex {
     }
 
     async fn ensure_table_exists(&self) -> Result<()> {
-        let table_name = self.table_name.clone();
-        let schema = self.memories_schema();
-        let connection = Arc::clone(&self.connection);
-
-        match connection.open_table(&table_name).execute().await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                connection
-                    .create_empty_table(&table_name, schema)
-                    .execute()
-                    .await
-                    .context("Failed to create LanceDB memories table")?;
-                Ok(())
-            }
-        }
+        ensure_named_table(&self.connection, &self.table_name, self.memories_schema()).await
     }
 
     async fn ensure_chunks_table_exists(&self) -> Result<()> {
-        let table_name = self.chunks_table_name.clone();
-        let schema = self.chunks_schema();
-        let connection = Arc::clone(&self.connection);
-
-        match connection.open_table(&table_name).execute().await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                connection
-                    .create_empty_table(&table_name, schema)
-                    .execute()
-                    .await
-                    .context("Failed to create LanceDB chunks table")?;
-                Ok(())
-            }
-        }
+        ensure_named_table(
+            &self.connection,
+            &self.chunks_table_name,
+            self.chunks_schema(),
+        )
+        .await
     }
 
     async fn open_table(&self) -> Result<Table> {
@@ -1875,7 +1883,7 @@ impl LanceIndex {
         Ok(matches)
     }
 
-    /// Drop and recreate both memories and chunks tables.
+    /// Empty both the memories and the chunks table.
     ///
     /// Destroys all embedding vectors. Only call this when the caller can
     /// re-embed everything afterwards (or explicitly wants a full wipe) —
@@ -1887,18 +1895,21 @@ impl LanceIndex {
         Ok(())
     }
 
-    /// Drop and recreate only the memories (metadata) table.
+    /// Empty only the memories (metadata) table, with the current schema.
+    ///
+    /// One overwrite commit: a new, empty version of the **same** dataset.
+    /// The table never disappears — a drop followed by a create left a
+    /// window in which a lock-free reader saw no table, and a concurrent
+    /// open created an empty one over the rebuild — and a reader that opened
+    /// earlier keeps its snapshot.
     ///
     /// Leaves the chunks (vectors) table untouched, so a reindex that
     /// rebuilds metadata from the markdown files does not destroy
     /// embeddings. Chunks are keyed by `memory_id`, not by table identity.
     pub async fn clear_memories(&self) -> Result<()> {
-        let connection = Arc::clone(&self.connection);
-
-        let _ = connection.drop_table(&self.table_name, &[]).await;
-        let memories_schema = self.memories_schema();
-        connection
-            .create_empty_table(&self.table_name, memories_schema)
+        self.connection
+            .create_empty_table(&self.table_name, self.memories_schema())
+            .mode(CreateTableMode::Overwrite)
             .execute()
             .await
             .context("Failed to recreate LanceDB memories table")?;
@@ -2009,18 +2020,17 @@ impl LanceIndex {
             }))
     }
 
-    /// Drop and recreate only the chunks (vectors) table.
+    /// Empty only the chunks (vectors) table.
     ///
     /// Recreates the table with the currently configured dimensions, so this
     /// is also the remediation path when the embedding dimensions change.
     /// Destroys all vectors — only call when a re-embed is about to follow.
     pub async fn clear_chunks(&self) -> Result<()> {
-        let connection = Arc::clone(&self.connection);
-
-        let _ = connection.drop_table(&self.chunks_table_name, &[]).await;
-        let chunks_schema = self.chunks_schema();
-        connection
-            .create_empty_table(&self.chunks_table_name, chunks_schema)
+        // One overwrite commit, like `clear_memories`: the table is never
+        // absent.
+        self.connection
+            .create_empty_table(&self.chunks_table_name, self.chunks_schema())
+            .mode(CreateTableMode::Overwrite)
             .execute()
             .await
             .context("Failed to recreate LanceDB chunks table")?;
@@ -4244,5 +4254,42 @@ mod tests {
             .unwrap();
         let from_fm = fm.list_for_filtering_where(Some(pred)).await.unwrap();
         assert_eq!(sorted_ids(&from_plain), sorted_ids(&from_fm));
+    }
+
+    /// Only "the table does not exist" may create it. Any other open error
+    /// used to be answered with an attempt to create an empty table.
+    #[tokio::test]
+    async fn an_open_error_other_than_not_found_does_not_create_a_table() {
+        let tmp = TempDir::new().unwrap();
+        LanceIndex::new(tmp.path(), 384).await.unwrap();
+
+        // Corrupt every manifest of the memories table: it exists, and it
+        // cannot be opened.
+        let versions = tmp.path().join("memories.lance").join("_versions");
+        let mut corrupted = 0;
+        for entry in std::fs::read_dir(&versions).unwrap() {
+            std::fs::write(entry.unwrap().path(), b"not a manifest").unwrap();
+            corrupted += 1;
+        }
+        assert!(corrupted > 0);
+        let before: Vec<_> = std::fs::read_dir(&versions)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+
+        let err = LanceIndex::new(tmp.path(), 384)
+            .await
+            .err()
+            .expect("an unreadable table is an error");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("Failed to open LanceDB memories table"),
+            "the open error must propagate, not a create attempt: {text}"
+        );
+        let after: Vec<_> = std::fs::read_dir(&versions)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "no new table version was written");
     }
 }

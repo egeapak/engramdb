@@ -154,6 +154,11 @@ async fn write_state_gitignore(engramdb_dir: &Path) {
     }
 }
 
+/// How many schema migrations actually rebuilt the index in this process
+/// (the re-check under the lock passed), for `concurrent_opens_migrate_once`.
+#[cfg(test)]
+static MIGRATION_REBUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl MemoryStore {
     /// Initialize a new EngramDB store in the given directory.
     ///
@@ -1759,9 +1764,19 @@ impl MemoryStore {
     /// `has_embedding`) while the chunks/vectors table is preserved untouched —
     /// so it takes seconds and never re-embeds. Idempotent: a store already at
     /// the current version is a no-op, and a second open after a successful
-    /// migration does nothing. Callers MUST NOT hold the write lock (reindex
-    /// acquires it). Migration failures propagate so a broken store is loud
+    /// migration does nothing. Callers MUST NOT hold the write lock: a stale
+    /// store takes it once, re-checks the manifest under it (so concurrent
+    /// opens migrate once), and holds it across the column add, the rebuild
+    /// and the stamp. Migration failures propagate so a broken store is loud
     /// rather than silently half-migrated.
+    ///
+    /// **Cancellation.** A migration (or any reindex) whose task is aborted
+    /// midway is restart-safe: the files are never modified, the table is
+    /// emptied by one overwrite commit and refilled by upserts, and the
+    /// manifest is stamped last. An aborted run leaves a table with some rows
+    /// missing and the old stamp, so the next open migrates again; an aborted
+    /// plain `reindex` leaves rows missing until the next `reindex` (the
+    /// staleness check reports the count mismatch meanwhile).
     async fn migrate_schema_if_needed(&self) -> Result<()> {
         let manifest_path = paths::project_dir(&self.project_dir).join("manifest.toml");
         let loaded = manifest::load_manifest(&manifest_path).await.ok();
@@ -1784,6 +1799,27 @@ impl MemoryStore {
         if !schema_stale && !normalizer_stale {
             return Ok(());
         }
+
+        // Stale by the unlocked read. Take the write lock ONCE for the whole
+        // migration and look again: several processes opening a stale store
+        // at the same moment (every session's hooks after an upgrade) all
+        // pass the check above, and without the re-check each rebuilt the
+        // table in turn — while the lock was released between the column
+        // add, the rebuild and the stamp, so another writer could land
+        // between any two of them.
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        let loaded = manifest::load_manifest(&manifest_path).await.ok();
+        let stored = loaded.as_ref().map(|m| m.schema_version.clone());
+        let stored_normalizer = loaded.as_ref().and_then(|m| m.normalizer.clone());
+        let schema_stale = stored
+            .as_deref()
+            .is_none_or(|v| !manifest::schema_version_is_current(v));
+        let normalizer_stale = stored_normalizer.as_deref() != Some(engram_types::NORMALIZER_STAMP);
+        if !schema_stale && !normalizer_stale {
+            return Ok(());
+        }
+        #[cfg(test)]
+        MIGRATION_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         tracing::info!(
             "Migrating EngramDB store (schema {} -> {}, normalizer {} -> {}): rebuilding index \
              from memory files (vectors preserved, no re-embed)",
@@ -1799,35 +1835,26 @@ impl MemoryStore {
         // because it commits a Lance `Merge`, which conflicts with any
         // concurrent write: unlocked at open, a parallel MCP session writing
         // chunks would fail the loser's `MemoryStore::open` and break an
-        // ordinary read command. `reindex_with` below takes the lock, so this
-        // runs just before it, under the lock acquired for the stamp.
-        {
-            let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
-            self.lance_index
-                .add_missing_chunk_columns()
-                .await
-                .map_err(StorageError::index("chunks-table column add"))?;
-        }
+        // ordinary read command.
+        self.lance_index
+            .add_missing_chunk_columns()
+            .await
+            .map_err(StorageError::index("chunks-table column add"))?;
 
         // `force_schema_reset`: a schema migration must recreate the memories
         // table with the current columns. The default (upsert-only) reindex path
         // taken under a foreign checkout can't add columns and would fail on a
         // schema mismatch, so migration forces the table rebuild even then.
-        self.reindex_with(true, false).await?;
+        // `reindex_locked`, not `reindex_with`: the lock is already held and
+        // is not reentrant.
+        self.reindex_locked(true, false).await?;
         // reindex's `update_manifest_stats` rewrote the manifest but preserved
         // the old `schema_version`; stamp the new one now that the rebuild
         // succeeded (mirrors how the embedding fingerprint is stamped only on
         // success). Propagate a load failure rather than clobbering the store's
-        // identity with a default manifest.
-        //
-        // Stamp under the write lock: like `set_embedding_fingerprint`, this
-        // is a load-modify-save of `manifest.toml` racing every mutating op's
-        // `update_manifest_stats` — unlocked, the stamp could be lost to a
-        // concurrent stats rewrite (forcing a redundant re-migration) or
-        // itself clobber a fingerprint a parallel `reindex --embeddings-only`
-        // just stamped. `reindex_with` released its lock above, so acquiring
-        // here cannot self-deadlock.
-        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        // identity with a default manifest. Still under the same lock: this is
+        // a load-modify-save of `manifest.toml` racing every mutating op's
+        // `update_manifest_stats`.
         let mut manifest = manifest::load_manifest(&manifest_path).await?;
         manifest.schema_version = manifest::CURRENT_SCHEMA_VERSION.to_string();
         // Stamped together and only on success: the rebuild that refreshed the
@@ -1922,7 +1949,17 @@ impl MemoryStore {
         incremental: bool,
     ) -> Result<ReindexCounts> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+        self.reindex_locked(force_schema_reset, incremental).await
+    }
 
+    /// [`Self::reindex_with`] for a caller that already holds the project
+    /// write lock (the schema migration). Nothing in here may acquire it:
+    /// `flock` on a fresh descriptor blocks in the same process too.
+    async fn reindex_locked(
+        &self,
+        force_schema_reset: bool,
+        incremental: bool,
+    ) -> Result<ReindexCounts> {
         // What each row was built from, read before any file is touched. Empty
         // in full-rebuild mode, which makes every file a miss and every row a
         // rewrite — the same work the unconditional path always did.
@@ -7875,5 +7912,93 @@ mod tests {
         assert_eq!(before, machine_snapshot(tmp.path()));
         let id = project_id::compute_project_id(tmp.path());
         assert!(!paths::lancedb_dir(&id).unwrap().exists());
+    }
+
+    /// Several processes opening a stale store at once (every session's
+    /// hooks after an upgrade) all see the old stamp. Only the first may
+    /// rebuild; the rest must find the store current once they hold the lock.
+    #[tokio::test]
+    async fn concurrent_opens_migrate_once() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            for i in 0..5 {
+                store
+                    .create(&create_test_memory(
+                        &format!("mig-once-{i}"),
+                        Visibility::Shared,
+                    ))
+                    .await
+                    .unwrap();
+            }
+        }
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.8.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+        MIGRATION_REBUILDS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let dir = tmp.path().to_path_buf();
+        let opens: Vec<_> = (0..3)
+            .map(|_| {
+                let dir = dir.clone();
+                tokio::spawn(async move { MemoryStore::open(&dir).await })
+            })
+            .collect();
+        for open in opens {
+            let store = open.await.unwrap().unwrap();
+            assert_eq!(store.list_summary().await.unwrap().len(), 5);
+        }
+
+        assert_eq!(
+            MIGRATION_REBUILDS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a stale store is rebuilt once, however many opens saw it stale"
+        );
+        let m = manifest::load_manifest(&manifest_path).await.unwrap();
+        assert_eq!(m.schema_version, manifest::CURRENT_SCHEMA_VERSION);
+    }
+
+    /// A reindex empties the table with one overwrite commit. With a drop
+    /// followed by a create, a lock-free reader in between saw no table at
+    /// all (and a concurrent open created an empty one over the rebuild).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_memories_table_never_disappears_during_a_reindex() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        for i in 0..10 {
+            store
+                .create(&create_test_memory(
+                    &format!("never-gone-{i}"),
+                    Visibility::Shared,
+                ))
+                .await
+                .unwrap();
+        }
+        let lance_path = paths::lancedb_dir(&store.project_id).unwrap();
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let done = std::sync::Arc::clone(&done);
+            tokio::spawn(async move {
+                let mut looks = 0usize;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let index = LanceIndex::open_existing(&lance_path, 384)
+                        .await
+                        .expect("the index opens")
+                        .expect("the memories table exists at every instant");
+                    index.count().await.expect("the table is readable");
+                    looks += 1;
+                }
+                looks
+            })
+        };
+        for _ in 0..20 {
+            assert_eq!(store.reindex().await.unwrap(), 10);
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(reader.await.unwrap() > 0);
+        assert_eq!(store.list_summary().await.unwrap().len(), 10);
     }
 }
