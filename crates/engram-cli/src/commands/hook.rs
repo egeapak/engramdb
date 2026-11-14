@@ -1953,6 +1953,19 @@ fn pre_compact(input: &str, dir: &Path) -> Result<Option<String>> {
     )?))
 }
 
+/// The warning for a hook command line clap could not parse (an unknown
+/// flag or a bad flag value: version skew between the hook wiring and the
+/// binary). Printed from here because this file is the declared raw-output
+/// surface; the hook is not run and records no stats.
+pub fn warn_unparseable_hook_args(error_line: &str) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "engramdb hook: ignoring unparseable arguments (version skew?): {error_line}"
+    );
+}
+
 /// Report a `hook` invocation this binary cannot serve, then let the caller
 /// exit 0.
 ///

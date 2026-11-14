@@ -175,6 +175,17 @@ fn hook_all_subcommands_malformed_stdin_exit_zero() {
                 "hook {sub} must exit 0 on stdin {stdin:?}; stderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            // The same event from newer hook wiring that passes a flag this
+            // binary does not know: still exit 0, never clap's exit 2.
+            let output = hook_cmd(project.path(), &[sub, "--bogus"], &empty_cache)
+                .write_stdin(stdin)
+                .output()
+                .unwrap_or_else(|e| panic!("failed to run hook {sub} --bogus: {e}"));
+            assert!(
+                output.status.success(),
+                "hook {sub} --bogus must exit 0 on stdin {stdin:?}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }
