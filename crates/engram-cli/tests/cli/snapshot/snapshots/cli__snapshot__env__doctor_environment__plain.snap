@@ -38,7 +38,7 @@ Global settings & models
   ○ Global gitignore: .engramdb not in global excludes
   Hint: Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories
   ⚠ Claude Code plugin: not found
-  Hint: Install with `claude plugin add https://github.com/egeapak/engramdb`
+  Hint: Install in Claude Code with `/plugin marketplace add egeapak/engramdb`, then `/plugin install engram@engramdb`
   ⚠ Hook configuration: not configured
   Hint: Install the Claude Code plugin to configure hooks automatically
   ○ Auto-maintenance: disabled

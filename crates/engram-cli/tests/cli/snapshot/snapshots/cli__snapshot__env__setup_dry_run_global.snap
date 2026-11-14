@@ -5,7 +5,7 @@ expression: "f.run(&[\"setup\", \"--dry-run\", \"--global\", \"--claude-dir\",\n
 $ engramdb --no-maintenance --dir [PROJECT] setup --dry-run --global --claude-dir [PROJECT]/claude-home
 exit: 0
 --- stdout ---
-{"message":"Claude CLI not found, falling back to settings.json."}
+{"message":"Claude CLI not found, falling back to writing the hooks to settings.json and the MCP server entry to ~/.claude.json."}
 {"message":"Would add hooks to settings.json."}
 {"message":"Would register the engramdb MCP server in [PROJECT]/claude-home/.claude.json."}
 {"message":"Would add MCP tool permissions to settings.json."}

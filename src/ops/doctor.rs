@@ -808,6 +808,11 @@ fn claude_plugin_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// How to install the plugin, as README.md and docs/users/claude-code.md give
+/// it: the marketplace is `engramdb` (`.claude-plugin/marketplace.json`) and
+/// the plugin in it `engram`.
+const PLUGIN_INSTALL_HINT: &str = "Install in Claude Code with `/plugin marketplace add egeapak/engramdb`, then `/plugin install engram@engramdb`";
+
 /// Check if the Claude Code plugin is installed.
 fn check_claude_plugin() -> EnvironmentCheck {
     let found = claude_plugin_installed();
@@ -823,7 +828,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
         suggestion: if found {
             None
         } else {
-            Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
+            Some(PLUGIN_INSTALL_HINT.to_string())
         },
         details: vec![],
         status: if found { None } else { Some(CheckStatus::Warn) },

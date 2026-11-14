@@ -255,6 +255,28 @@ fn is_plugin_installed_in(plugins_dir: Option<&Path>) -> bool {
         .any(|key| key.starts_with("engramdb@") || key.starts_with("engram@"))
 }
 
+/// What the fallback does: hooks go to settings.json, but the MCP server entry
+/// goes to `~/.claude.json` (Claude Code reads a user-scope server nowhere
+/// else). Only `setup --global` tries the plugin, so the fallback is user scope.
+const FALLBACK_NO_CLI: &str = "Claude CLI not found, falling back to writing the hooks to settings.json and the MCP server entry to ~/.claude.json.";
+
+/// The plugin-install failure line, with the CLI's first stderr line (it used
+/// to be swallowed, hiding why the fallback ran).
+fn install_failed_message(reason: Option<&str>) -> String {
+    let reason = reason
+        .map(|r| {
+            engramdb::storage::transcripts::sanitize_one_line(r.trim())
+                .chars()
+                .take(200)
+                .collect::<String>()
+        })
+        .filter(|r| !r.is_empty());
+    let reason = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+    format!(
+        "Plugin install failed{reason}, falling back to writing the hooks to settings.json and the MCP server entry to ~/.claude.json."
+    )
+}
+
 /// Try to install the engramdb plugin via `claude plugin add`.
 /// Returns true if successful, false if claude CLI is unavailable or the command fails.
 fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
@@ -265,7 +287,7 @@ fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
         .unwrap_or(false);
 
     if !claude_available {
-        formatter.print_message("Claude CLI not found, falling back to settings.json.");
+        formatter.print_message(FALLBACK_NO_CLI);
         return false;
     }
 
@@ -289,12 +311,12 @@ fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
                 formatter.print_message("Plugin already installed.");
                 true
             } else {
-                formatter.print_message("Plugin install failed, falling back to settings.json.");
+                formatter.print_message(&install_failed_message(stderr.lines().next()));
                 false
             }
         }
-        Err(_) => {
-            formatter.print_message("Plugin install failed, falling back to settings.json.");
+        Err(e) => {
+            formatter.print_message(&install_failed_message(Some(&e.to_string())));
             false
         }
     }
@@ -2466,5 +2488,15 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("being modified by another program"), "{err}");
+    }
+
+    #[test]
+    fn install_failure_names_the_cli_error_and_where_the_fallback_writes() {
+        let msg = install_failed_message(Some("  error: unknown plugin 'engramdb'\x1b[0m  "));
+        assert!(msg.contains("(error: unknown plugin 'engramdb'"), "{msg}");
+        assert!(!msg.contains('\x1b'), "{msg}");
+        assert!(msg.contains("~/.claude.json"), "{msg}");
+        assert!(!install_failed_message(None).contains("()"));
+        assert!(!install_failed_message(Some("  ")).contains("()"));
     }
 }

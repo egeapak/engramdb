@@ -193,7 +193,7 @@ fn setup_dry_run_global_scope() {
 /// stub on PATH produces bytes identical to running it without one.
 ///
 /// Every other `setup` case runs with `claude` stripped from `PATH`, so they
-/// all take the "not found, falling back to settings.json" route. That was not
+/// all take the "Claude CLI not found, falling back" route. That was not
 /// a choice until now — it was whatever the machine happened to have installed,
 /// and `setup_dry_run_global` duly passed on a developer box with the CLI and
 /// failed on CI without it. Both branches are pinned now, neither by accident.
