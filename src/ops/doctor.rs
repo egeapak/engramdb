@@ -4274,7 +4274,7 @@ mod tests {
         config.nli.enabled = true;
         config.nli.model = "someone/custom-nli".to_string();
         config
-            .to_toml_file(&engramdb_dir.join("config.toml"))
+            .to_toml_file(engramdb_dir.join("config.toml"))
             .unwrap();
 
         let result = check_config_file(temp_dir.path()).await;
@@ -4287,7 +4287,7 @@ mod tests {
         // With the model built in, the config is plainly valid.
         config.nli.model = crate::types::config::DEFAULT_NLI_MODEL_REPO.to_string();
         config
-            .to_toml_file(&engramdb_dir.join("config.toml"))
+            .to_toml_file(engramdb_dir.join("config.toml"))
             .unwrap();
         let result = check_config_file(temp_dir.path()).await;
         assert_eq!(result.status, None, "{}", result.message);
