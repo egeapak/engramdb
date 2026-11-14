@@ -14,6 +14,7 @@
 //! [`rerank`]).
 
 pub mod embeddings;
+pub mod integrity;
 pub mod nli;
 pub mod rerank;
 pub mod title;

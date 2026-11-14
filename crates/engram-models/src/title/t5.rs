@@ -257,6 +257,9 @@ fn download_model_files(spec: &T5ModelSpec) -> Result<(PathBuf, PathBuf, PathBuf
     let tokenizer_path = repo
         .get(spec.tokenizer_file)
         .context("Failed to download T5 tokenizer")?;
+    crate::integrity::verify(spec.repo, spec.encoder_file, &encoder_path)?;
+    crate::integrity::verify(spec.repo, spec.decoder_file, &decoder_path)?;
+    crate::integrity::verify(spec.repo, spec.tokenizer_file, &tokenizer_path)?;
 
     Ok((encoder_path, decoder_path, tokenizer_path))
 }

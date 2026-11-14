@@ -478,6 +478,7 @@ impl OnnxProvider {
             let path = repo
                 .get(file)
                 .with_context(|| format!("fetch {}/{file}", source.repo))?;
+            crate::integrity::verify(source.repo, file, &path)?;
             std::fs::read(&path).with_context(|| format!("read {}", path.display()))
         };
 

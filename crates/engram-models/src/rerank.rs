@@ -191,6 +191,7 @@ impl LocalReranker {
             let path = repo
                 .get(file)
                 .with_context(|| format!("fetch {}/{file}", spec.repo))?;
+            crate::integrity::verify(spec.repo, file, &path)?;
             std::fs::read(&path).with_context(|| format!("read {}", path.display()))
         };
 

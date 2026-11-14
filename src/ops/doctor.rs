@@ -2922,6 +2922,35 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
         false
     };
 
+    // A cached built-in file whose SHA-256 does not match is refused by its
+    // loader (that model then falls back as if missing), and deleting it is
+    // the fix, so it is a failure. Hashing is memoized under the cache.
+    let mismatches = {
+        let cache_dir = cache_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || engram_models::integrity::check_cache(&cache_dir))
+            .await
+            .unwrap_or_default()
+    };
+    if !mismatches.is_empty() {
+        return EnvironmentCheck {
+            name: "Embedding model cache".to_string(),
+            passed: false,
+            message: format!(
+                "{} cached model file(s) fail the SHA-256 check and will not load",
+                mismatches.len()
+            ),
+            suggestion: Some(format!(
+                "Delete the listed files under {} so they download again",
+                cache_dir.display()
+            )),
+            details: mismatches
+                .into_iter()
+                .map(|(file, reason)| format!("{file}: {reason}"))
+                .collect(),
+            status: Some(CheckStatus::Fail),
+        };
+    }
+
     // Advisory: an uncached model is downloaded on first use, so a cold cache
     // doesn't mean the store is broken — render it as a warning, not a failure
     // that flips the exit code.
@@ -4140,6 +4169,32 @@ mod tests {
         assert_eq!(result.status, Some(CheckStatus::Warn));
         assert_eq!(result.message, "not cached");
         assert!(result.suggestion.is_some());
+    }
+
+    /// A cached built-in model file with the wrong SHA-256 is refused by its
+    /// loader, so doctor fails the cache check and names the file.
+    #[tokio::test]
+    async fn test_check_embedding_model_cached_flags_a_tampered_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = TempDir::new().unwrap();
+        let root = cache_dir.path().join("models--Xenova--t5-small");
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("refs/main"), "main").unwrap();
+        std::fs::create_dir_all(root.join("snapshots/main")).unwrap();
+        std::fs::write(root.join("snapshots/main/tokenizer.json"), b"{}").unwrap();
+
+        let result = check_embedding_model_cached(temp_dir.path(), cache_dir.path()).await;
+
+        assert!(!result.passed, "{}", result.message);
+        assert_eq!(result.status, Some(CheckStatus::Fail));
+        assert!(
+            result
+                .details
+                .iter()
+                .any(|d| d.contains("Xenova/t5-small/tokenizer.json")),
+            "{:?}",
+            result.details
+        );
     }
 
     // `validate_models` (added in #54) is otherwise only exercised end-to-end

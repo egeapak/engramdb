@@ -241,6 +241,8 @@ fn download_model_files(
     let tokenizer_path = repo
         .get(tokenizer_file)
         .context("Failed to download NLI tokenizer")?;
+    crate::integrity::verify(model_repo, model_file, &model_path)?;
+    crate::integrity::verify(model_repo, tokenizer_file, &tokenizer_path)?;
 
     Ok((model_path, tokenizer_path))
 }
