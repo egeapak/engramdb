@@ -653,6 +653,12 @@ mod tests {
             format!("gitdir: {}\n", wt_gitdir.display()),
         )
         .unwrap();
+        // git's back-link from the per-worktree gitdir to the worktree's `.git`.
+        fs::write(
+            wt_gitdir.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
         (main, wt)
     }
 

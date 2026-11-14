@@ -59,6 +59,10 @@ pub struct WorktreeLink {
 ///   main `.git` directory, and return the canonicalized parent of that
 ///   directory (the main worktree's project root).
 /// - Malformed worktree files / unreadable commondir: returns `None`.
+/// - A pointer git's own back-link does not confirm (`<gitdir>/gitdir` must
+///   name this directory's `.git`, and the gitdir must sit in the main
+///   repository's `worktrees/`): returns `None`, with a one-time warning. A
+///   worktree moved by hand is in this state until `git worktree repair`.
 pub fn detect_worktree_main(dir: &Path) -> Option<PathBuf> {
     detect_worktree(dir).map(|link| link.main_root)
 }
@@ -116,10 +120,83 @@ pub fn detect_worktree(dir: &Path) -> Option<WorktreeLink> {
     // the final `..`, landing one directory too deep.
     let main_git_dir = main_git_dir.canonicalize().ok()?;
     let main_root = main_git_dir.parent()?.to_path_buf();
+
+    // Follow the pointer only when git's own records agree with it. `.git`
+    // is file content anyone can write (an unpacked archive, a cloned
+    // repository's subdirectory): without these two checks it could name any
+    // directory on the machine as "the main worktree" and have this
+    // directory's operations routed, and its stray store moved, there.
+    if let Err(why) = verify_back_link(dir, &git_entry, &worktree_gitdir, &main_git_dir) {
+        warn_unverified_once(dir, why);
+        return None;
+    }
+
     Some(WorktreeLink {
         main_root,
         gitdir: worktree_gitdir,
     })
+}
+
+/// The two facts git records for every linked worktree:
+///
+/// 1. `<gitdir>/gitdir` names this worktree's `.git` file (the back-link
+///    `git worktree add` writes and `git worktree repair` rewrites), and
+/// 2. the per-worktree gitdir sits directly in `<main .git>/worktrees/`.
+fn verify_back_link(
+    dir: &Path,
+    git_entry: &Path,
+    worktree_gitdir: &Path,
+    main_git_dir: &Path,
+) -> Result<(), &'static str> {
+    let back_raw = fs::read_to_string(worktree_gitdir.join("gitdir"))
+        .map_err(|_| "the git directory it names has no back-link file")?;
+    let back_trimmed = back_raw.trim();
+    if back_trimmed.is_empty() {
+        return Err("the git directory it names has an empty back-link");
+    }
+    let back = {
+        let p = PathBuf::from(back_trimmed);
+        if p.is_absolute() {
+            p
+        } else {
+            // `worktree.useRelativePaths`: relative to the per-worktree gitdir.
+            worktree_gitdir.join(p)
+        }
+    };
+    let back_canon = back
+        .canonicalize()
+        .map_err(|_| "the back-link names a path that does not exist")?;
+    let entry_canon = git_entry
+        .canonicalize()
+        .or_else(|_| dir.canonicalize().map(|d| d.join(".git")))
+        .map_err(|_| "its .git file could not be resolved")?;
+    if back_canon != entry_canon {
+        return Err("the back-link names another worktree");
+    }
+    let gitdir_canon = worktree_gitdir
+        .canonicalize()
+        .map_err(|_| "the git directory it names does not exist")?;
+    if gitdir_canon.parent() != Some(main_git_dir.join("worktrees").as_path()) {
+        return Err("the git directory it names is not under the main repository's worktrees/");
+    }
+    Ok(())
+}
+
+/// Warn once per process and directory that a worktree pointer was ignored.
+fn warn_unverified_once(dir: &Path, why: &'static str) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let first = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(dir.to_path_buf()))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(
+            "{} looks like a linked git worktree but {why}; treating it as a standalone              directory (if the worktree was moved by hand, run `git worktree repair`)",
+            dir.display()
+        );
+    }
 }
 
 fn get_git_remote(project_dir: &Path) -> Option<String> {
@@ -316,5 +393,101 @@ mod tests {
         fs::create_dir_all(&gitdir).unwrap();
         fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
         assert!(detect_worktree_main(&wt).is_none());
+    }
+
+    /// A `.git` file is content anyone can write. Without git's back-link a
+    /// pointer could route this directory's operations into any repository.
+    #[test]
+    fn a_worktree_pointer_without_a_back_link_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_main, wt) = make_fake_worktree(tmp.path());
+        let gitdir = tmp.path().join("main/.git/worktrees/wt");
+        assert!(detect_worktree_main(&wt).is_some());
+
+        // No back-link at all.
+        fs::remove_file(gitdir.join("gitdir")).unwrap();
+        assert!(detect_worktree_main(&wt).is_none());
+
+        // A back-link that names another directory's `.git`.
+        let other = tmp.path().join("other");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join(".git"), "gitdir: nowhere\n").unwrap();
+        fs::write(
+            gitdir.join("gitdir"),
+            other.join(".git").to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        assert!(detect_worktree_main(&wt).is_none());
+    }
+
+    /// The back-link agrees, but the "per-worktree gitdir" is not inside the
+    /// main repository's `worktrees/`: a hand-built pair of files, not
+    /// something `git worktree add` creates.
+    #[test]
+    fn a_gitdir_outside_worktrees_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        fs::create_dir_all(victim.join(".git")).unwrap();
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&wt).unwrap();
+        let gitdir = tmp.path().join("elsewhere");
+        fs::create_dir_all(&gitdir).unwrap();
+        fs::write(
+            gitdir.join("commondir"),
+            victim.join(".git").to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        fs::write(
+            gitdir.join("gitdir"),
+            wt.join(".git").to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        assert!(detect_worktree_main(&wt).is_none());
+    }
+
+    #[test]
+    fn a_real_worktree_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt");
+        fs::create_dir_all(&main).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args([
+                    "-c",
+                    "user.name=test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .expect("git must be on PATH for the worktree tests");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        fs::write(main.join("README"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            wt.to_str().unwrap(),
+        ]);
+
+        let link = detect_worktree(&wt).expect("a real worktree is detected");
+        assert_eq!(link.main_root, main.canonicalize().unwrap());
+        assert!(link.gitdir.join("index").exists());
+        assert!(detect_worktree(&main).is_none());
     }
 }

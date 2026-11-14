@@ -184,7 +184,7 @@ alone. `projects delete --purge` is the one way to say you mean it anyway.
 
 When you run a memory operation inside a linked git worktree, EngramDB **routes the operation to the main worktree's project**:
 
-1. Detects the linked worktree via the `.git` file pointing to `<main>/.git/worktrees/<name>`.
+1. Detects the linked worktree via the `.git` file pointing to `<main>/.git/worktrees/<name>`. The pointer is followed only when git's own back-link (`<main>/.git/worktrees/<name>/gitdir`) names this worktree; a worktree moved by hand acts as a standalone directory (with a warning) until you run `git worktree repair`.
 2. Ensures the main worktree's project is registered.
 3. Registers the current worktree as a sub-project (parent = main).
 4. Consolidates any memories previously written to a stray worktree-local `.engramdb/` into the main store.

@@ -388,6 +388,12 @@ mod tests {
             format!("gitdir: {}\n", wt_gitdir.display()),
         )
         .unwrap();
+        // git's back-link from the per-worktree gitdir to the worktree's `.git`.
+        fs::write(
+            wt_gitdir.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .unwrap();
 
         let formatter = OutputFormatter::new(None, false, true);
         let registry = InMemoryRegistry::new();
@@ -438,6 +444,12 @@ mod tests {
         fs::write(
             wt.join(".git"),
             format!("gitdir: {}\n", wt_gitdir.display()),
+        )
+        .unwrap();
+        // git's back-link from the per-worktree gitdir to the worktree's `.git`.
+        fs::write(
+            wt_gitdir.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
         )
         .unwrap();
 

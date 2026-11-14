@@ -3827,6 +3827,12 @@ fn make_fake_worktree_mcp(root: &std::path::Path) -> (PathBuf, PathBuf) {
         format!("gitdir: {}\n", wt_gitdir.display()),
     )
     .unwrap();
+    // git's back-link from the per-worktree gitdir to the worktree's `.git`.
+    std::fs::write(
+        wt_gitdir.join("gitdir"),
+        format!("{}\n", wt.join(".git").display()),
+    )
+    .unwrap();
     (main.canonicalize().unwrap(), wt.canonicalize().unwrap())
 }
 

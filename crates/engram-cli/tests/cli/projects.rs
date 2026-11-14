@@ -245,6 +245,12 @@ fn projects_discover_reports_skipped_worktrees_in_json() {
         format!("gitdir: {}\n", wt_gitdir.display()),
     )
     .unwrap();
+    // git's back-link from the per-worktree gitdir to the worktree's `.git`.
+    std::fs::write(
+        wt_gitdir.join("gitdir"),
+        format!("{}\n", wt.join(".git").display()),
+    )
+    .unwrap();
 
     let output = helpers::cmd()
         .args([
