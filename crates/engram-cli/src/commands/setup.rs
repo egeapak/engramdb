@@ -80,8 +80,6 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "compress_apply",
     "projects_list",
     "projects_info",
-    "projects_link",
-    "projects_unlink",
     "harvest_list",
     "harvest_show",
     "harvest_search",
@@ -94,6 +92,15 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
 /// stale allowlist entries under the old names silently stop matching the
 /// current tools and the user gets a permission prompt every invocation.
 const STALE_MCP_TOOL_SUFFIXES: &[&str] = &["search", "retrieve"];
+
+/// MCP tools that still exist but are no longer approved automatically, so
+/// an approval written by an earlier `setup` is removed.
+///
+/// `projects_link` / `projects_unlink` change which projects share past
+/// conversations. That is a rare decision and the user's: with these gone
+/// from the allow list, Claude Code asks before an agent links a project.
+/// Kept apart from [`STALE_MCP_TOOL_SUFFIXES`], whose tools no longer exist.
+const NO_LONGER_AUTO_APPROVED_SUFFIXES: &[&str] = &["projects_link", "projects_unlink"];
 
 /// Tool prefix when engramdb is installed as a Claude Code plugin.
 const PLUGIN_MCP_PREFIX: &str = "mcp__plugin_engram_memory__";
@@ -732,6 +739,7 @@ fn ensure_mcp_permissions(
     // prefixes so the cleanup works regardless of which layout the user has.
     let stale_names: std::collections::HashSet<String> = STALE_MCP_TOOL_SUFFIXES
         .iter()
+        .chain(NO_LONGER_AUTO_APPROVED_SUFFIXES)
         .flat_map(|suffix| {
             [
                 format!("{PLUGIN_MCP_PREFIX}{suffix}"),
@@ -1691,21 +1699,107 @@ mod tests {
         }
     }
 
-    /// `MCP_TOOL_SUFFIXES` must cover exactly the tools the MCP server
-    /// exposes: a missing suffix means a permission prompt on every
-    /// invocation of that tool, an extra one is a stale allowlist entry.
+    /// `MCP_TOOL_SUFFIXES` plus the deliberately unapproved tools must cover
+    /// exactly the tools the MCP server exposes: a missing suffix means a
+    /// permission prompt on every invocation of that tool, an extra one is a
+    /// stale allowlist entry.
     /// `engram-cli` depends on `engram-mcp`, so this pins directly against
     /// the server's tool router instead of a hand-maintained count.
     #[test]
     fn mcp_tool_suffixes_match_server_tools() {
         let mut server_tools = engram_mcp::EngramDbServer::tool_names();
         server_tools.sort();
-        let mut suffixes: Vec<String> = MCP_TOOL_SUFFIXES.iter().map(|s| s.to_string()).collect();
+        let mut suffixes: Vec<String> = MCP_TOOL_SUFFIXES
+            .iter()
+            .chain(NO_LONGER_AUTO_APPROVED_SUFFIXES)
+            .map(|s| s.to_string())
+            .collect();
         suffixes.sort();
         assert_eq!(
             suffixes, server_tools,
             "MCP_TOOL_SUFFIXES (setup.rs) drifted from the MCP server's tool surface"
         );
+    }
+
+    /// Linking projects shares past conversations between them, so the agent
+    /// must ask: `setup` approves neither link tool.
+    #[tokio::test]
+    async fn setup_no_longer_auto_approves_projects_link() {
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join("claude");
+        let plugins_dir = fake_plugins_dir_with_engram(&tmp);
+        let f = test_formatter();
+        run_setup_inner(
+            tmp.path(),
+            false,
+            false,
+            false,
+            Some(&claude_dir),
+            Some(&plugins_dir),
+            &f,
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+        assert!(!content.contains("projects_link"), "{content}");
+        assert!(!content.contains("projects_unlink"), "{content}");
+        assert!(content.contains("projects_list"), "{content}");
+        for tool in NO_LONGER_AUTO_APPROVED_SUFFIXES {
+            assert!(!MCP_TOOL_SUFFIXES.contains(tool), "{tool}");
+        }
+    }
+
+    /// An approval written by an earlier `setup` is removed by the next one,
+    /// under both prefixes; other entries stay.
+    #[tokio::test]
+    async fn setup_strips_a_previous_projects_link_approval() {
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join("claude");
+        let plugins_dir = fake_plugins_dir_with_engram(&tmp);
+        let f = test_formatter();
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let preexisting = serde_json::json!({
+            "permissions": {
+                "allow": [
+                    format!("{PLUGIN_MCP_PREFIX}projects_link"),
+                    format!("{PLUGIN_MCP_PREFIX}projects_unlink"),
+                    format!("{SETTINGS_MCP_PREFIX}projects_link"),
+                    format!("{PLUGIN_MCP_PREFIX}projects_list"),
+                    "Bash(ls:*)",
+                ]
+            }
+        });
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&preexisting).unwrap(),
+        )
+        .unwrap();
+        run_setup_inner(
+            tmp.path(),
+            false,
+            false,
+            false,
+            Some(&claude_dir),
+            Some(&plugins_dir),
+            &f,
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&content).unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let perms: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !perms
+                .iter()
+                .any(|p| p.ends_with("projects_link") || p.ends_with("projects_unlink")),
+            "{perms:?}"
+        );
+        assert!(perms.contains(&"Bash(ls:*)"), "{perms:?}");
+        let list = format!("{PLUGIN_MCP_PREFIX}projects_list");
+        assert!(perms.contains(&list.as_str()), "{perms:?}");
     }
 
     #[tokio::test]

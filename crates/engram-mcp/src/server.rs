@@ -1796,19 +1796,86 @@ impl EngramDbServer {
             return Ok(());
         }
 
-        // Different project: consult the SESSION's own project config.
-        let config = self.load_config_for(None).await?;
-        if config.security.allow_cross_project_writes {
+        // Different project: consult the user's global config.
+        if self.security_config().await.allow_cross_project_writes {
             return Ok(());
         }
 
         Err(error_response(
             ErrorCode::ValidationError,
             &format!(
-                "Cross-project writes are disabled by [security].allow_cross_project_writes = false. \
-                 This session's project (id: {own_id}) may not write to a different registered \
-                 project (id: {target_id}). Omit the `project` parameter to write to your own \
-                 project, or use project=\"global\" for the shared store.",
+                "Cross-project writes are disabled by [security].allow_cross_project_writes = \
+                 false (the default). This session's project (id: {own_id}) may not write to a \
+                 different registered project (id: {target_id}). Omit the `project` parameter \
+                 to write to your own project, or use project=\"global\" for the shared store. \
+                 Only the user can enable cross-project writes, in {}. A project's \
+                 .engramdb/config.toml cannot.",
+                Self::global_config_hint()
+            ),
+        ))
+    }
+
+    /// Guard for the two registry writes an agent can make: `projects_link`
+    /// and `projects_unlink`.
+    ///
+    /// A link is not bookkeeping. The harvest scope is "the root of the
+    /// hierarchy plus every descendant", so linking another project under
+    /// this one (or this one under another) hands this session that
+    /// project's raw conversations through a plain `harvest_list`, with no
+    /// `project` argument for the harvest gate to see. It also adopts that
+    /// project's ledger and lets the two prune each other's transcript
+    /// copies.
+    ///
+    /// `ids` are the projects the call names. One is "own" when its root in
+    /// the registry is this session's root. All own: allowed (re-parenting
+    /// inside one hierarchy changes no scope). Otherwise the global config
+    /// must allow cross-project writes, and for a link (`widens_scope`) the
+    /// machine-wide harvest read as well.
+    async fn check_registry_link(&self, ids: &[&str], widens_scope: bool) -> Result<(), String> {
+        let registry = self
+            .registry
+            .load()
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        let own_id = engramdb::storage::project_id::compute_project_id(&self.effective_dir);
+        let own_root = engramdb::storage::registry::resolve_root_project_id(&registry, &own_id);
+        let foreign: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                engramdb::storage::registry::resolve_root_project_id(&registry, id) != own_root
+            })
+            .collect();
+        if foreign.is_empty() {
+            return Ok(());
+        }
+        let security = self.security_config().await;
+        let allowed = security.allow_cross_project_writes
+            && (!widens_scope || security.allow_all_projects_harvest);
+        if allowed {
+            return Ok(());
+        }
+        let (needs, cli) = if widens_scope {
+            (
+                "[security] allow_cross_project_writes = true and allow_all_projects_harvest = \
+                 true (linking shares past conversations between the two projects)",
+                "engramdb projects link",
+            )
+        } else {
+            (
+                "[security] allow_cross_project_writes = true",
+                "engramdb projects unlink",
+            )
+        };
+        Err(error_response(
+            ErrorCode::ValidationError,
+            &format!(
+                "Refused: project {} is outside this session's own project hierarchy (root id: \
+                 {own_root}). Changing its links from an agent needs {needs} in {}; a project's \
+                 .engramdb/config.toml cannot grant it. The user can run `{cli}` in a shell \
+                 instead.",
+                foreign.join(", "),
+                Self::global_config_hint()
             ),
         ))
     }
@@ -4038,7 +4105,7 @@ impl EngramDbServer {
 
     #[tool(
         name = "projects_link",
-        description = "Link a registered project as a sub-project of another. Rejects self-links and cycles. Use projects_list to discover project IDs."
+        description = "Link a registered project as a sub-project of another. Rejects self-links and cycles. Use projects_list to discover project IDs. Linking shares harvest scope (past conversations) between the two projects, so a link that involves a project outside this session's own hierarchy is refused unless the user set both [security] allow_cross_project_writes and allow_all_projects_harvest in the global config file. The user can always link from a shell with `engramdb projects link`."
     )]
     async fn projects_link(
         &self,
@@ -4046,6 +4113,9 @@ impl EngramDbServer {
     ) -> Result<String, String> {
         let _scope = self.scope_system("projects_link");
         // (`projects_link` is registry-level — no per-project bucket)
+        // Before the registry write: a refused link changes nothing.
+        self.check_registry_link(&[&input.child, &input.parent], true)
+            .await?;
         ops::projects::link_project(self.registry.as_ref(), &input.child, &input.parent)
             .await
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
@@ -4061,13 +4131,15 @@ impl EngramDbServer {
 
     #[tool(
         name = "projects_unlink",
-        description = "Remove the parent link on a project, promoting it back to a root project. No-op if the project has no parent."
+        description = "Remove the parent link on a project, promoting it back to a root project. No-op if the project has no parent. A project outside this session's own hierarchy is refused unless the user set [security] allow_cross_project_writes in the global config file."
     )]
     async fn projects_unlink(
         &self,
         Parameters(input): Parameters<ProjectsUnlinkInput>,
     ) -> Result<String, String> {
         let _scope = self.scope_system("projects_unlink");
+        self.check_registry_link(&[&input.project_id], false)
+            .await?;
         ops::projects::unlink_project(self.registry.as_ref(), &input.project_id)
             .await
             .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;

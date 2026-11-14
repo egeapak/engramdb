@@ -4219,6 +4219,9 @@ async fn projects_info_by_id() {
 #[tokio::test]
 async fn projects_link_then_unlink_roundtrip() {
     let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+    // Linking two unrelated projects from an agent needs both grants.
+    write_global_security("allow_cross_project_writes = true\nallow_all_projects_harvest = true")
+        .await;
 
     let link_res = server
         .projects_link(Parameters(ProjectsLinkInput {
@@ -4257,6 +4260,189 @@ async fn projects_link_then_unlink_roundtrip() {
     assert!(child_entry.get("parent_project_id").is_none());
 }
 
+/// The registry as bytes, to prove a refused call wrote nothing.
+async fn registry_bytes(server: &EngramDbServer) -> String {
+    serde_json::to_string(&server.registry.load().await.unwrap()).unwrap()
+}
+
+/// A link is how one project gets another's past conversations: the harvest
+/// scope is the whole hierarchy. With the default config an agent cannot
+/// make one, in either direction, and the registry is untouched.
+#[tokio::test]
+async fn projects_link_cannot_pull_another_project_into_the_harvest_scope() {
+    let (_p, _c, server, own_id, other_id) = setup_two_registered_projects().await;
+    let before = registry_bytes(&server).await;
+
+    for (child, parent) in [(&other_id, &own_id), (&own_id, &other_id)] {
+        let err = parse_err(
+            &server
+                .projects_link(Parameters(ProjectsLinkInput {
+                    child: child.clone(),
+                    parent: parent.clone(),
+                }))
+                .await,
+        );
+        assert_eq!(err["error"]["code"], "VALIDATION_ERROR", "{err}");
+        let message = err["error"]["message"].as_str().unwrap();
+        assert!(message.contains("allow_cross_project_writes"), "{message}");
+        assert!(message.contains("allow_all_projects_harvest"), "{message}");
+        assert!(message.contains("engramdb projects link"), "{message}");
+    }
+    assert_eq!(registry_bytes(&server).await, before);
+
+    // The write grant alone is not enough: a link widens a *read*.
+    write_global_security("allow_cross_project_writes = true").await;
+    let result = server
+        .projects_link(Parameters(ProjectsLinkInput {
+            child: other_id.clone(),
+            parent: own_id.clone(),
+        }))
+        .await;
+    parse_err(&result);
+    assert_eq!(registry_bytes(&server).await, before);
+
+    // A project's own config grants nothing.
+    write_config_toml(
+        &server.dir,
+        "[security]\nallow_cross_project_writes = true\nallow_all_projects_harvest = true\n",
+    )
+    .await;
+    write_global_security("").await;
+    let result = server
+        .projects_link(Parameters(ProjectsLinkInput {
+            child: other_id,
+            parent: own_id,
+        }))
+        .await;
+    parse_err(&result);
+    assert_eq!(registry_bytes(&server).await, before);
+}
+
+/// End to end: after a refused link, a plain `harvest_list` still shows only
+/// the session's own project, and the other project's ledger was not adopted.
+#[tokio::test]
+async fn a_refused_link_leaves_harvest_list_on_the_own_project() {
+    let home = ScopedClaudeHome::new();
+    let (own, other, server, own_id, other_id) = setup_two_registered_projects().await;
+    home.plant_session(own.path(), "own-1111");
+    home.plant_session(other.path(), "far-2222");
+    let other_ledger = other.path().join(".engramdb/state/harvest_ledger.jsonl");
+    std::fs::create_dir_all(other_ledger.parent().unwrap()).unwrap();
+    std::fs::write(&other_ledger, "").unwrap();
+
+    parse_err(
+        &server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: other_id,
+                parent: own_id,
+            }))
+            .await,
+    );
+
+    let out = parse_ok(
+        &server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: None,
+                project: None,
+            }))
+            .await,
+    );
+    let raw = out.to_string();
+    assert!(raw.contains("own-1111"), "{raw}");
+    assert!(!raw.contains("far-2222"), "{raw}");
+    assert!(
+        other_ledger.exists(),
+        "the other project's ledger was moved"
+    );
+    assert!(
+        !other
+            .path()
+            .join(".engramdb/state/harvest_ledger.jsonl.adopted")
+            .exists(),
+        "the other project's ledger was adopted"
+    );
+}
+
+#[tokio::test]
+async fn projects_unlink_of_a_foreign_project_is_refused() {
+    let (_p, other_parent, server, _own_id, other_id) = setup_two_registered_projects().await;
+    // A third project, linked under the other one by the user.
+    let third = TempDir::new().unwrap();
+    let third_id = MemoryStore::init(third.path(), server.registry.as_ref())
+        .await
+        .unwrap()
+        .project_id
+        .clone();
+    engramdb::ops::projects::link_project(server.registry.as_ref(), &third_id, &other_id)
+        .await
+        .unwrap();
+    let _ = other_parent;
+    let before = registry_bytes(&server).await;
+
+    let err = parse_err(
+        &server
+            .projects_unlink(Parameters(ProjectsUnlinkInput {
+                project_id: third_id.clone(),
+            }))
+            .await,
+    );
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(message.contains("allow_cross_project_writes"), "{message}");
+    assert_eq!(registry_bytes(&server).await, before);
+
+    write_global_security("allow_cross_project_writes = true").await;
+    let out = parse_ok(
+        &server
+            .projects_unlink(Parameters(ProjectsUnlinkInput {
+                project_id: third_id,
+            }))
+            .await,
+    );
+    assert_eq!(out["unlinked"], true);
+}
+
+/// Re-parenting inside the session's own hierarchy changes no scope, so it
+/// needs no grant.
+#[tokio::test]
+async fn projects_link_inside_the_own_hierarchy_is_allowed() {
+    let (_p, _c, server, own_id, sub_id) = setup_two_registered_projects().await;
+    // The user linked `sub` under the session's project.
+    engramdb::ops::projects::link_project(server.registry.as_ref(), &sub_id, &own_id)
+        .await
+        .unwrap();
+    let third = TempDir::new().unwrap();
+    let third_id = MemoryStore::init(third.path(), server.registry.as_ref())
+        .await
+        .unwrap()
+        .project_id
+        .clone();
+    engramdb::ops::projects::link_project(server.registry.as_ref(), &third_id, &own_id)
+        .await
+        .unwrap();
+
+    // Move `third` under `sub`: both are in the own hierarchy.
+    let out = parse_ok(
+        &server
+            .projects_link(Parameters(ProjectsLinkInput {
+                child: third_id.clone(),
+                parent: sub_id,
+            }))
+            .await,
+    );
+    assert_eq!(out["linked"], true);
+    let out = parse_ok(
+        &server
+            .projects_unlink(Parameters(ProjectsUnlinkInput {
+                project_id: third_id,
+            }))
+            .await,
+    );
+    assert_eq!(out["unlinked"], true);
+}
+
 #[tokio::test]
 async fn projects_link_rejects_self() {
     let (_p, _c, server, parent_id, _child_id) = setup_two_registered_projects().await;
@@ -4273,6 +4459,9 @@ async fn projects_link_rejects_self() {
 #[tokio::test]
 async fn projects_link_rejects_cycle() {
     let (_p, _c, server, parent_id, child_id) = setup_two_registered_projects().await;
+    // Linking two unrelated projects from an agent needs both grants.
+    write_global_security("allow_cross_project_writes = true\nallow_all_projects_harvest = true")
+        .await;
 
     // child → parent
     server
