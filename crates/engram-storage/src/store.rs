@@ -656,7 +656,7 @@ impl MemoryStore {
     /// followed by a chunk upsert costs (the row, then its flag).
     ///
     /// `embed_sha256` describes the text `chunks` were embedded from, as for
-    /// [`Self::upsert_chunks_if_current`]. Empty `chunks` is plain `create`.
+    /// [`Self::upsert_chunks_if`]. Empty `chunks` is plain `create`.
     ///
     /// A crash between the chunks and the row leaves a file with vectors and
     /// no row: `doctor` reports the missing row and `reindex` rebuilds it,
@@ -2452,7 +2452,7 @@ impl MemoryStore {
     /// not compute (and cannot compute a digest for: the source store has its
     /// own config, so its model, dimensions, composition and chunk size may all
     /// differ), and tests. The digest-carrying paths are
-    /// [`Self::upsert_chunks_if_current`] and [`Self::upsert_chunks_batch`],
+    /// [`Self::upsert_chunks_if`] and [`Self::upsert_chunks_batch_if`],
     /// which the retrieval engine drives.
     pub async fn upsert_chunks(&self, memory_id: &str, chunks: Vec<Vec<f32>>) -> Result<()> {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
@@ -2462,8 +2462,9 @@ impl MemoryStore {
             .map_err(StorageError::index("upsert_chunks"))
     }
 
-    /// Upsert embedding chunks only if the memory still matches the snapshot
-    /// they were computed from. Returns `true` when the chunks were written.
+    /// Upsert embedding chunks only if the memory, re-read under the write
+    /// lock, still passes `still_current`. Returns `true` when the chunks were
+    /// written.
     ///
     /// Detached ingest tasks embed a `Memory` snapshot with no ordering
     /// guarantee: two rapid updates spawn two tasks whose `upsert_chunks`
@@ -2472,31 +2473,39 @@ impl MemoryStore {
     /// file holds v2 until the next update/reindex); and a create-then-delete
     /// leaves a late embed re-inserting chunks for a deleted memory (orphan
     /// rows occupying top-k slots until doctor/reindex prunes them). This
-    /// variant re-reads the memory UNDER the write lock and skips the write
-    /// when the memory is gone or its `updated_at` no longer equals
-    /// `snapshot_updated_at`.
+    /// re-reads the memory UNDER the write lock and skips the write when the
+    /// memory is gone or `still_current` refuses it.
+    ///
+    /// The predicate belongs to the caller because what the vectors depend on
+    /// (the embedding composition) lives above this crate. The engine passes
+    /// "the memory still embeds to the same texts", so a metadata-only write
+    /// (a link, a challenge, `harvest mark --memory`) racing the embed no
+    /// longer drops its vectors — comparing `updated_at` did.
     ///
     /// `embed_sha256` describes the text `chunks` were computed from and is
     /// written in the same `RecordBatch` as the vectors, so it can never end up
     /// describing a different snapshot than the vectors beside it.
-    pub async fn upsert_chunks_if_current(
+    pub async fn upsert_chunks_if<F>(
         &self,
         memory_id: &str,
         chunks: Vec<Vec<f32>>,
-        snapshot_updated_at: chrono::DateTime<chrono::Utc>,
         embed_sha256: Option<String>,
-    ) -> Result<bool> {
+        still_current: F,
+    ) -> Result<bool>
+    where
+        F: FnOnce(&Memory) -> bool + Send,
+    {
         let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
         match self.get(memory_id).await {
-            Ok(current) if current.updated_at == snapshot_updated_at => {}
+            Ok(current) if still_current(&current) => {}
             Ok(_) => {
-                tracing::debug!(
-                    "skipping stale chunk upsert for {memory_id}: memory changed since snapshot"
+                tracing::info!(
+                    "skipping stale chunk upsert for {memory_id}: its text changed since the snapshot"
                 );
                 return Ok(false);
             }
             Err(StorageError::NotFound(_)) => {
-                tracing::debug!("skipping chunk upsert for deleted memory {memory_id}");
+                tracing::info!("skipping chunk upsert for deleted memory {memory_id}");
                 return Ok(false);
             }
             Err(e) => return Err(e),
@@ -2508,12 +2517,60 @@ impl MemoryStore {
         Ok(true)
     }
 
-    /// [`Self::upsert_chunks_if_current`] for many memories at once.
+    /// [`Self::upsert_chunks_if`] for many memories at once.
     ///
     /// Takes the per-project write lock **once**, re-reads every memory in a
-    /// single batched directory scan, drops the entries whose `updated_at` no
-    /// longer matches the snapshot (or that vanished), and writes what is left
-    /// in one merge_insert.
+    /// single batched directory scan, drops the entries `still_current`
+    /// refuses (called with the re-read memory and the entry's digest) or that
+    /// vanished, and writes what is left in one merge_insert. Returns the ids
+    /// actually written.
+    pub async fn upsert_chunks_batch_if<F>(
+        &self,
+        entries: Vec<crate::lance_index::ChunkWrite>,
+        still_current: F,
+    ) -> Result<Vec<String>>
+    where
+        F: Fn(&Memory, Option<&str>) -> bool + Send,
+    {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _lock = write_lock::acquire_write_lock(&self.project_id).await?;
+
+        let ids: Vec<&str> = entries.iter().map(|(id, _, _)| id.as_str()).collect();
+        let current: HashMap<String, Memory> = self.get_batch(&ids).await?.into_iter().collect();
+
+        let mut fresh: Vec<crate::lance_index::ChunkWrite> = Vec::with_capacity(entries.len());
+        for (id, chunks, digest) in entries {
+            match current.get(&id) {
+                Some(mem) if still_current(mem, digest.as_deref()) => {
+                    fresh.push((id, chunks, digest))
+                }
+                Some(_) => tracing::info!(
+                    "skipping stale chunk upsert for {id}: its text changed since the snapshot"
+                ),
+                None => tracing::info!("skipping chunk upsert for deleted memory {id}"),
+            }
+        }
+        if fresh.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        self.lance_index
+            .upsert_chunks_batch(&fresh)
+            .await
+            .map_err(StorageError::index("upsert_chunks_batch"))?;
+        Ok(fresh.into_iter().map(|(id, _, _)| id).collect())
+    }
+
+    /// The `updated_at`-guarded batch write: like
+    /// [`Self::upsert_chunks_batch_if`], but an entry is written only while the
+    /// memory's `updated_at` still equals the entry's snapshot.
+    ///
+    /// Kept for worktree consolidation, which **relocates** vectors it did not
+    /// compute and so has no digest or composition to compare; any metadata
+    /// write in between makes it skip, which there only costs a re-embed. The
+    /// engine's own writes use [`Self::upsert_chunks_batch_if`].
     ///
     /// The per-memory version costs a lock, a full directory scan and two
     /// LanceDB commits *each*, so re-embedding a whole store through it is
@@ -6970,11 +7027,11 @@ mod tests {
         );
     }
 
-    /// The freshness-guarded upsert used by detached ingest tasks: a stale
-    /// snapshot (older updated_at) or a deleted memory must not write chunks;
-    /// the current snapshot must.
+    /// The freshness-guarded upsert used by detached ingest tasks: a write
+    /// the predicate refuses or a deleted memory must not write chunks; one it
+    /// accepts must, and the predicate sees the memory re-read under the lock.
     #[tokio::test]
-    async fn test_upsert_chunks_if_current_guards_stale_and_deleted() {
+    async fn upsert_chunks_if_writes_when_predicate_holds_and_skips_deleted() {
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
             .await
@@ -6983,20 +7040,17 @@ mod tests {
         let memory = create_test_memory("guarded-chunks", Visibility::Shared);
         store.create(&memory).await.unwrap();
 
-        // Current snapshot: written.
+        // Predicate holds: written.
         let written = store
-            .upsert_chunks_if_current(
-                "guarded-chunks",
-                vec![vec![0.1f32; 384]],
-                memory.updated_at,
-                None,
-            )
+            .upsert_chunks_if("guarded-chunks", vec![vec![0.1f32; 384]], None, |m| {
+                m.summary == memory.summary
+            })
             .await
             .unwrap();
         assert!(written);
 
-        // The memory moves on (updated_at bumps)...
-        let newer = store
+        // The memory moves on; the predicate sees the newer state...
+        store
             .update_with("guarded-chunks", |m| {
                 m.summary = "v2".to_string();
                 Ok(())
@@ -7004,24 +7058,19 @@ mod tests {
             .await
             .unwrap();
         let written = store
-            .upsert_chunks_if_current(
-                "guarded-chunks",
-                vec![vec![0.9f32; 384]],
-                newer.updated_at,
-                None,
-            )
+            .upsert_chunks_if("guarded-chunks", vec![vec![0.9f32; 384]], None, |m| {
+                m.summary == "v2"
+            })
             .await
             .unwrap();
         assert!(written);
 
         // ...so the OLD snapshot's late-arriving vectors are refused.
+        let old_summary = memory.summary.clone();
         let written = store
-            .upsert_chunks_if_current(
-                "guarded-chunks",
-                vec![vec![0.1f32; 384]],
-                memory.updated_at,
-                None,
-            )
+            .upsert_chunks_if("guarded-chunks", vec![vec![0.1f32; 384]], None, move |m| {
+                m.summary == old_summary
+            })
             .await
             .unwrap();
         assert!(!written, "stale snapshot must not overwrite newer vectors");
@@ -7031,15 +7080,11 @@ mod tests {
             "newer vectors survive"
         );
 
-        // Deleted memory: a late embed must not re-insert orphan chunks.
+        // Deleted memory: a late embed must not re-insert orphan chunks, even
+        // with a predicate that would accept anything.
         store.delete("guarded-chunks").await.unwrap();
         let written = store
-            .upsert_chunks_if_current(
-                "guarded-chunks",
-                vec![vec![0.5f32; 384]],
-                newer.updated_at,
-                None,
-            )
+            .upsert_chunks_if("guarded-chunks", vec![vec![0.5f32; 384]], None, |_| true)
             .await
             .unwrap();
         assert!(!written, "deleted memory must not get orphan chunks");

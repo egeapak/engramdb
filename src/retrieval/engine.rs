@@ -551,7 +551,7 @@ impl RetrievalEngine {
         let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let vectors = self.embed_texts(&text_refs).await;
 
-        let mut entries: Vec<crate::storage::lance_index::GuardedChunkWrite> =
+        let mut entries: Vec<crate::storage::lance_index::ChunkWrite> =
             Vec::with_capacity(memories.len());
         let mut errors: Vec<(String, String)> = Vec::new();
         for (memory, (start, end)) in memories.iter().zip(spans) {
@@ -580,11 +580,44 @@ impl RetrievalEngine {
                 metadata_vector,
                 chunk_tokens,
             );
-            entries.push((memory.id.clone(), memory.updated_at, chunks, Some(digest)));
+            entries.push((memory.id.clone(), chunks, Some(digest)));
         }
 
-        match self.store.upsert_chunks_batch(entries).await {
-            Ok(written) => (written.len(), errors),
+        // Guarded on what the vectors depend on: the memory, re-read under
+        // the write lock, must still embed to the same texts (same digest). A
+        // metadata-only write racing the embed no longer drops the vectors;
+        // a text change or a delete still does, and is reported below.
+        let sent: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
+        let guard_provider = Arc::clone(provider);
+        let still_current = move |current: &Memory, digest: Option<&str>| {
+            let texts = embedding_texts(current, chunk_tokens, metadata_vector);
+            digest.is_some_and(|d| {
+                embed_digest(
+                    &texts,
+                    guard_provider.as_ref(),
+                    metadata_vector,
+                    chunk_tokens,
+                ) == d
+            })
+        };
+        match self
+            .store
+            .upsert_chunks_batch_if(entries, still_current)
+            .await
+        {
+            Ok(written) => {
+                // Declare the loss rather than report success for vectors that
+                // were dropped (this also keeps the fingerprint unstamped).
+                let written_set: std::collections::HashSet<&str> =
+                    written.iter().map(String::as_str).collect();
+                for id in sent.iter().filter(|id| !written_set.contains(id.as_str())) {
+                    errors.push((
+                        id.clone(),
+                        "changed while it was being embedded; run reindex again".to_string(),
+                    ));
+                }
+                (written.len(), errors)
+            }
             Err(e) => {
                 errors.push(("*".to_string(), format!("batched chunk write failed: {e}")));
                 (0, errors)
@@ -2402,14 +2435,24 @@ async fn embed_memory_with(
     // Freshness-guarded: this runs in detached ingest tasks with no ordering
     // guarantee, so an embed of an older snapshot must not overwrite newer
     // vectors, and an embed racing a delete must not re-insert orphan chunks.
+    //
+    // The guard compares what the vectors depend on — the texts this memory
+    // embeds to, under the same provider and config — not `updated_at`: a
+    // link, challenge, verify or `harvest mark --memory` write racing the
+    // embed bumps `updated_at` without changing a single vector, and used to
+    // drop them for good (nothing retries a detached ingest). Equal texts
+    // under one provider and config is exactly an equal `embed_digest`. A
+    // memory edited to other text (or to none) or deleted is still refused.
     let digest = embed_digest(&chunks, provider, metadata_vector, chunk_tokens);
     let written = store
-        .upsert_chunks_if_current(&memory.id, vectors, memory.updated_at, Some(digest))
+        .upsert_chunks_if(&memory.id, vectors, Some(digest), move |current| {
+            embedding_texts(current, chunk_tokens, metadata_vector) == chunks
+        })
         .await?;
     if !written {
-        tracing::debug!(
+        tracing::info!(
             memory_id = %memory.id,
-            "skipped chunk upsert: memory changed or was deleted since this snapshot"
+            "skipped chunk upsert: the memory's text changed, or it was deleted, since this snapshot"
         );
     }
     if let Some(t_) = telemetry {
@@ -6444,6 +6487,114 @@ mod tests {
         fn model_id(&self) -> String {
             "onnx/constant-stub".to_string()
         }
+    }
+
+    /// [`ConstantEmbedding`] whose `embed_batch` signals that it started and
+    /// then waits to be released: a pause point inside a detached ingest.
+    struct PausingEmbedding {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl PausingEmbedding {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for PausingEmbedding {
+        async fn embed(&self, t: &str) -> anyhow::Result<Vec<f32>> {
+            ConstantEmbedding.embed(t).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            ConstantEmbedding.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/constant-stub".to_string()
+        }
+    }
+
+    /// Start a detached ingest of a fresh memory, pause it inside the embed,
+    /// apply `write` to the memory, release, and return the store.
+    async fn ingest_racing_a_write(
+        write: impl FnOnce(&mut Memory) + Send + 'static,
+    ) -> (tempfile::TempDir, MemoryStore, String) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(
+            MemoryType::Decision,
+            "racing summary",
+            "racing body",
+            crate::types::Provenance::human(),
+        );
+        store.create(&m).await.unwrap();
+        let provider = PausingEmbedding::new();
+        let dyn_provider: Arc<dyn EmbeddingProvider> = provider.clone();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(dyn_provider);
+        let handle = engine.spawn_ingest(m.clone(), None).unwrap();
+        provider.entered.notified().await;
+        store
+            .update_with(&m.id, move |mem| {
+                write(mem);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        provider.release.notify_one();
+        handle.await.unwrap();
+        (temp_dir, store, m.id)
+    }
+
+    /// A metadata-only write (here a link) between the snapshot and the
+    /// chunk write bumps `updated_at` but changes no vector: the vectors must
+    /// still be written. The `updated_at` guard dropped them.
+    #[tokio::test]
+    async fn embed_survives_a_metadata_write_during_ingest() {
+        let (_t, store, id) = ingest_racing_a_write(|m| {
+            m.links.push(crate::types::Link::new(
+                "some-other-memory",
+                crate::types::LinkKind::RelatedTo,
+                crate::types::LinkOrigin::Human,
+            ));
+        })
+        .await;
+        assert!(store.has_chunks_for(&id).await.unwrap(), "vectors kept");
+        let row = store
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert!(row.has_embedding);
+    }
+
+    /// A real text change in between still refuses the stale vectors.
+    #[tokio::test]
+    async fn embed_is_dropped_when_the_text_changed_during_ingest() {
+        let (_t, store, id) = ingest_racing_a_write(|m| {
+            m.content = "a different body".to_string();
+        })
+        .await;
+        assert!(
+            !store.has_chunks_for(&id).await.unwrap(),
+            "stale vectors must not be written"
+        );
     }
 
     async fn ingest_fixture(

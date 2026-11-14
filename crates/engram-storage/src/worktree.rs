@@ -186,7 +186,7 @@ async fn migrate_dir(
     // `reindex --embeddings-only` — never vectors pointing at absent
     // memories.
     //
-    // This is the *guarded* batch (the batched `upsert_chunks_if_current`),
+    // This is the *guarded* batch (the `updated_at`-guarded `upsert_chunks_batch`),
     // where the per-memory original used the unguarded `upsert_chunks`. The
     // snapshot is the `updated_at` we just wrote via `create`, so the guard
     // is a no-op unless another writer changed the memory in between — and in

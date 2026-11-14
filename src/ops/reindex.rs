@@ -375,7 +375,7 @@ pub async fn reindex(
             // skipping is live, the surviving vectors ARE the result, so
             // clearing them would delete precisely what the skip predicate is
             // about to decide to keep. Nothing is leaked by not clearing:
-            // `upsert_chunks_batch` replaces a memory's chunks atomically and
+            // `upsert_chunks_batch_if` replaces a memory's chunks atomically and
             // drops surplus ones, and the metadata rebuild above prunes chunks
             // orphaned by deleted memories.
             //
@@ -432,7 +432,7 @@ pub async fn reindex(
             //
             // Read outside the write lock, which is safe in the only direction
             // that matters: a memory updated between this read and the write is
-            // caught by `upsert_chunks_batch`'s re-read under the lock, so the
+            // caught by `upsert_chunks_batch_if`'s re-read under the lock, so the
             // worst case is embedding something that did not need it.
             if !full_rebuild {
                 let stored = store.embed_digests().await?;
@@ -634,6 +634,80 @@ mod tests {
         fn model_id(&self) -> String {
             self.model.clone()
         }
+    }
+
+    /// [`StubEmbeddingProvider`] that rewrites one memory's content during
+    /// its first `embed_batch`: a write racing the batched embed.
+    struct EditingProvider {
+        store: MemoryStore,
+        victim: String,
+        done: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for EditingProvider {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5f32; 384])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.store
+                    .update_with(&self.victim, |m| {
+                        m.content = "edited while embedding".to_string();
+                        Ok(())
+                    })
+                    .await?;
+            }
+            Ok(texts.iter().map(|_| vec![0.5f32; 384]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/stub-model".to_string()
+        }
+    }
+
+    /// A memory whose text changes while the batch embeds is not written
+    /// (its vectors would be stale) and the reindex says so instead of
+    /// reporting success for vectors it dropped.
+    #[tokio::test]
+    async fn reindex_reports_a_memory_changed_mid_embed() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 3).await;
+        let provider = EditingProvider {
+            store: store.clone(),
+            victim: ids[1].clone(),
+            done: Default::default(),
+        };
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(Arc::new(provider));
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            reindex(
+                &store,
+                Some(&engine),
+                ReindexOptions {
+                    embeddings_only: true,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("no deadlock")
+        .unwrap();
+        assert_eq!(r.embedded, 2, "{r:?}");
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains(&ids[1]) && e.contains("changed while it was being embedded")),
+            "{:?}",
+            r.errors
+        );
+        assert!(!store.has_chunks_for(&ids[1]).await.unwrap());
     }
 
     fn calls(c: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
