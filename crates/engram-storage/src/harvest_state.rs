@@ -2351,4 +2351,26 @@ mod tests {
         }
         panic!("reading a ledger path occupied by a FIFO never returned");
     }
+
+    /// One torn multibyte character made the strict read fail, and a failed
+    /// read folds as an empty ledger: every review record looked gone.
+    #[test]
+    fn a_ledger_with_one_invalid_byte_keeps_every_other_entry() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        mark_harvested(dir, "s2", &[], HarvestDecision::Skipped, None).unwrap();
+        // A torn line between two good ones.
+        let path = ledger_path(dir);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"session_id\":\"s3\",\"note\":\"caf");
+        bytes.push(0xC3);
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+        mark_harvested(dir, "s4", &[], HarvestDecision::Skipped, None).unwrap();
+
+        assert!(is_harvested(dir, "s1"));
+        assert!(is_harvested(dir, "s2"));
+        assert!(is_harvested(dir, "s4"));
+    }
 }

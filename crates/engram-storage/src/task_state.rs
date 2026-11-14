@@ -48,39 +48,106 @@ fn mapping_path(project_dir: &Path) -> PathBuf {
 }
 
 /// Sync advisory lock guarding the read-modify-write cycle. Returns `None`
-/// (proceed unlocked) only if the lock file itself can't be created — the
+/// (proceed unlocked) only if the lock file itself can't be opened — the
 /// mapping is advisory state and must never hard-fail an operation.
+///
+/// Opened through `state_file`, like everything else under `state/`: a
+/// symlink committed at the lock path is refused (with a warning) instead of
+/// followed, which with a plain open created or touched whatever it named.
 fn lock_mapping(project_dir: &Path) -> Option<std::fs::File> {
     let lock_path = mapping_path(project_dir).with_extension("json.lock");
-    if let Some(parent) = lock_path.parent() {
-        std::fs::create_dir_all(parent).ok()?;
-    }
-    let file = std::fs::File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .ok()?;
+    let file = match crate::state_file::open_lock_file(&lock_path) {
+        Ok(file) => file,
+        Err(e) => {
+            tracing::warn!(
+                "session tasks: could not open the lock file {} ({e}); proceeding unlocked \
+                 (if that path is a symlink, remove it)",
+                lock_path.display()
+            );
+            return None;
+        }
+    };
     file.lock().ok()?;
     Some(file)
 }
 
-/// Read the whole session→task mapping. Missing or malformed files read as
-/// empty (the mapping is advisory state, never a hard failure).
-pub fn read_session_tasks(project_dir: &Path) -> HashMap<String, TaskEntry> {
+/// What is on disk: the mapping, nothing, or something that does not parse.
+enum Stored {
+    Mapping(HashMap<String, TaskEntry>),
+    Malformed,
+}
+
+fn load_mapping(project_dir: &Path) -> Stored {
     let path = mapping_path(project_dir);
     // Through the shared reader, which refuses to follow a symlink planted at
     // this path or to block on a FIFO — the same delivery `state_file`'s docs
     // describe for the write side, and this file is read by the unattended
     // hooks.
     match crate::state_file::read_state_file(&path) {
-        Ok(Some(s)) => serde_json::from_str(&s).unwrap_or_default(),
-        Ok(None) => HashMap::new(),
+        Ok(Some(s)) => match serde_json::from_str(&s) {
+            Ok(map) => Stored::Mapping(map),
+            Err(e) => {
+                warn_malformed_once(&path, &e);
+                Stored::Malformed
+            }
+        },
+        Ok(None) => Stored::Mapping(HashMap::new()),
         Err(e) => {
             tracing::warn!(
                 "session tasks: refusing to read {} ({e}); it reads as empty",
                 path.display()
             );
+            Stored::Mapping(HashMap::new())
+        }
+    }
+}
+
+/// Warn once per process and path: every hook reads this file.
+fn warn_malformed_once(path: &Path, e: &serde_json::Error) {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let first = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .map(|mut seen| seen.insert(path.to_path_buf()))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(
+            "session tasks: {} does not parse ({e}); it reads as empty and is kept aside \
+             as session_tasks.json.malformed before the next write",
+            path.display()
+        );
+    }
+}
+
+/// Read the whole session→task mapping. Missing or malformed files read as
+/// empty (the mapping is advisory state, never a hard failure); a malformed
+/// one is warned about once.
+pub fn read_session_tasks(project_dir: &Path) -> HashMap<String, TaskEntry> {
+    match load_mapping(project_dir) {
+        Stored::Mapping(map) => map,
+        Stored::Malformed => HashMap::new(),
+    }
+}
+
+/// The mapping for a read-modify-write cycle. A malformed file is renamed to
+/// `session_tasks.json.malformed` first: it used to read as empty and be
+/// overwritten by the next write, silently discarding whatever it held.
+fn read_for_write(project_dir: &Path) -> HashMap<String, TaskEntry> {
+    match load_mapping(project_dir) {
+        Stored::Mapping(map) => map,
+        Stored::Malformed => {
+            let path = mapping_path(project_dir);
+            let aside = path.with_extension("json.malformed");
+            // `rename` never dereferences its source, and replaces a planted
+            // destination rather than following it.
+            if let Err(e) = std::fs::rename(&path, &aside) {
+                tracing::warn!(
+                    "session tasks: could not keep the malformed {} aside ({e}); it will be \
+                     overwritten",
+                    path.display()
+                );
+            }
             HashMap::new()
         }
     }
@@ -124,7 +191,7 @@ pub fn set_current_task(project_dir: &Path, session_id: &str, task: &str) -> Res
         ));
     }
     let _lock = lock_mapping(project_dir);
-    let mut map = read_session_tasks(project_dir);
+    let mut map = read_for_write(project_dir);
     map.insert(
         session_id.to_string(),
         TaskEntry {
@@ -145,7 +212,7 @@ pub fn clear_session_task(project_dir: &Path, session_id: &str) -> Result<Option
         return Ok(None);
     }
     let _lock = lock_mapping(project_dir);
-    let mut map = read_session_tasks(project_dir);
+    let mut map = read_for_write(project_dir);
     let removed = map.remove(session_id).map(|e| e.task);
     let before = map.len();
     let prune_cutoff = Utc::now() - Duration::days(PRUNE_AFTER_DAYS);
@@ -290,5 +357,49 @@ mod tests {
         );
         assert!(result.is_err(), "a redirected write reported success");
         assert!(!path.exists(), "the symlink was renamed onto the mapping");
+    }
+
+    /// A symlink committed at the lock path used to be followed: the open
+    /// created (or touched) whatever it named.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_lock_file_is_not_followed() {
+        let tmp = TempDir::new().unwrap();
+        let state = tmp.path().join(".engramdb").join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let victim = tmp.path().join("victim");
+        std::os::unix::fs::symlink(&victim, state.join("session_tasks.json.lock")).unwrap();
+
+        // The mapping is advisory: the write still succeeds, unlocked.
+        set_current_task(tmp.path(), "s", "t").unwrap();
+        assert_eq!(current_task(tmp.path(), "s").as_deref(), Some("t"));
+        assert!(
+            !victim.exists(),
+            "the lock open created the symlink's target"
+        );
+    }
+
+    /// A file that does not parse read as empty and was overwritten by the
+    /// next write, discarding whatever it held without a word.
+    #[test]
+    fn a_malformed_mapping_is_kept_aside_and_warned() {
+        let tmp = TempDir::new().unwrap();
+        let state = tmp.path().join(".engramdb").join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let path = state.join("session_tasks.json");
+        std::fs::write(&path, "{\"s0\": {\"task\": \"half").unwrap();
+
+        // Reading alone moves nothing.
+        assert!(read_session_tasks(tmp.path()).is_empty());
+        assert!(path.exists());
+        assert!(!state.join("session_tasks.json.malformed").exists());
+
+        set_current_task(tmp.path(), "s", "t").unwrap();
+        assert_eq!(current_task(tmp.path(), "s").as_deref(), Some("t"));
+        assert_eq!(
+            std::fs::read_to_string(state.join("session_tasks.json.malformed")).unwrap(),
+            "{\"s0\": {\"task\": \"half",
+            "the unparseable bytes are kept for the user"
+        );
     }
 }

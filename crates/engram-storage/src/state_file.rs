@@ -109,13 +109,88 @@ pub(crate) fn append_state_file(path: &Path, contents: &str) -> Result<()> {
 /// deliberate act and the operator has to be told, and never a deletion
 /// either, for the same reason [`write_state_json`] refuses a planted temp
 /// rather than clearing it.
+///
+/// **Lossy on invalid UTF-8.** Every file read here is line-oriented and
+/// append-only, and a crash can tear a multibyte character in half. A strict
+/// `read_to_string` then failed the whole read — one bad byte made a ledger
+/// fold as empty and a claimed stats file fail every later drain. Invalid
+/// sequences become U+FFFD (warned, with the count): the damaged line either
+/// still parses (the damage was inside a string) or is skipped and counted
+/// by its reader's malformed-line handling, and every other line survives.
+/// Byte offsets into the file must come from [`read_state_bytes`], never from
+/// this string (U+FFFD is three bytes).
 pub(crate) fn read_state_file(path: &Path) -> Result<Option<String>> {
+    let Some(bytes) = read_state_bytes(path)? else {
+        return Ok(None);
+    };
+    Ok(Some(lossy_text(bytes, path)))
+}
+
+/// The raw bytes behind [`read_state_file`], same refusals.
+pub(crate) fn read_state_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     let Some(mut file) = open_state_file_for_read(path)? else {
         return Ok(None);
     };
-    let mut out = String::new();
-    file.read_to_string(&mut out)?;
+    let mut out = Vec::new();
+    file.read_to_end(&mut out)?;
     Ok(Some(out))
+}
+
+/// Decode state-file bytes, replacing invalid UTF-8 and saying so.
+pub(crate) fn lossy_text(bytes: Vec<u8>, path: &Path) -> String {
+    match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => {
+            let bytes = e.into_bytes();
+            let bad = bytes
+                .utf8_chunks()
+                .filter(|chunk| !chunk.invalid().is_empty())
+                .count();
+            tracing::warn!(
+                "{} holds {bad} invalid UTF-8 sequence(s) (a torn write?); they are read as \
+                 U+FFFD and the lines they are in may be skipped",
+                path.display()
+            );
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+    }
+}
+
+/// Open (creating it) a lock file under a state dir for `flock`.
+///
+/// Same protections as every other open here: a symlink planted at the lock
+/// path is refused rather than followed (opening it for write would create
+/// or touch whatever it names), and so is anything that is not a regular
+/// file. The caller decides what a refusal means; for advisory state that is
+/// "proceed unlocked, with a warning".
+pub(crate) fn open_lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    open_lock(path)
+}
+
+#[cfg(unix)]
+fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    ensure_regular(file)
+}
+
+#[cfg(not(unix))]
+fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    ensure_regular(file)
 }
 
 /// The handle behind [`read_state_file`], for the one caller that reads a
@@ -399,5 +474,39 @@ mod tests {
 
         write_state_json(&target, "{\"a\":1}").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":1}");
+    }
+
+    /// A crash can leave half of a multibyte character at the end of an
+    /// append. The strict read failed the whole file on it.
+    #[test]
+    fn a_torn_multibyte_character_does_not_fail_the_read() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("state").join("log.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = b"{\"a\":1}\n{\"b\":\"caf".to_vec();
+        bytes.push(0xC3); // first half of U+00E9, never completed
+        bytes.extend_from_slice(b"\n{\"c\":3}\n");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let text = read_state_file(&path).unwrap().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "every line survives: {text:?}");
+        assert_eq!(lines[0], "{\"a\":1}");
+        assert!(lines[1].contains('\u{FFFD}'), "{:?}", lines[1]);
+        assert_eq!(lines[2], "{\"c\":3}");
+        // The byte reader is exact.
+        assert_eq!(read_state_bytes(&path).unwrap().unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_file_open_refuses_a_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let victim = tmp.path().join("victim");
+        let lock = tmp.path().join("state").join("x.lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, &lock).unwrap();
+        assert!(open_lock_file(&lock).is_err());
+        assert!(!victim.exists(), "the open created the symlink's target");
     }
 }
