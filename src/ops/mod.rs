@@ -231,6 +231,62 @@ struct ProviderSpecs {
     onnx: OnnxModelSpec,
     #[cfg(feature = "ollama")]
     ollama: OllamaModelSpec,
+    /// Rough download size of the ONNX model, for `init`'s progress line.
+    approx_download: &'static str,
+}
+
+/// Every provider string [`provider_specs`] accepts, in documentation order.
+///
+/// The `match` cannot be iterated, so this list is the enumeration and
+/// `known_providers_all_resolve` ties the two together: a name added to one
+/// and not the other fails that test.
+pub const KNOWN_PROVIDERS: &[&str] = &[
+    "onnx",
+    "all-minilm",
+    "all-minilm-l6",
+    "all-minilm-l12",
+    "all-minilm-l12-int8",
+    "all-minilm-l6-int8",
+    "all-minilm-l12-fp32",
+    "nomic-embed-text",
+    "mxbai-embed-large",
+    "mxbai-embed-large-q",
+    "bge-large-en-q",
+    "gte-large-en-q",
+];
+
+/// What a front end needs to know about a configured provider string, read
+/// from the one [`provider_specs`] table (so `stats` and `init` can never
+/// accept a different set of names than the resolver).
+#[derive(Debug, Clone)]
+pub struct ProviderInfo {
+    /// The name to show: `"all-minilm"` for the `onnx` alias, else the
+    /// configured string.
+    pub display_name: &'static str,
+    #[cfg(feature = "onnxruntime")]
+    pub onnx: OnnxModelSpec,
+    #[cfg(feature = "ollama")]
+    pub ollama: OllamaModelSpec,
+    /// Rough download size of the ONNX model (e.g. `"~33MB"`).
+    pub approx_download: &'static str,
+}
+
+/// Look up a configured provider string. `None` ⇒ unknown provider.
+pub fn provider_info(provider: &str) -> Option<ProviderInfo> {
+    let specs = provider_specs(provider)?;
+    let display_name = KNOWN_PROVIDERS
+        .iter()
+        .copied()
+        .find(|name| *name == provider)
+        .map(|name| if name == "onnx" { "all-minilm" } else { name })?;
+    Some(ProviderInfo {
+        display_name,
+        #[cfg(feature = "onnxruntime")]
+        onnx: specs.onnx,
+        #[cfg(feature = "ollama")]
+        ollama: specs.ollama,
+        approx_download: specs.approx_download,
+    })
 }
 
 /// Map a configured provider string to its ONNX / Ollama model spec
@@ -246,18 +302,21 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: DEFAULT_ONNX_EMBEDDING,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~33MB",
         },
         "all-minilm-l6" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L6_U8,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~22MB",
         },
         "all-minilm-l12" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12_U8,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~33MB",
         },
         // The signed-int8 exports. Kept selectable so an existing store can
         // stay on its current vectors without a reindex, and so the
@@ -269,12 +328,14 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: ONNX_ALL_MINILM_L12_Q,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~33MB",
         },
         "all-minilm-l6-int8" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_Q,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~22MB",
         },
         // fp32: bit-exact like uint8, but 4x the disk and ~1.4x the latency.
         "all-minilm-l12-fp32" => ProviderSpecs {
@@ -282,18 +343,21 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: ONNX_ALL_MINILM_L12,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~127MB",
         },
         "nomic-embed-text" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_NOMIC_EMBED_TEXT,
             #[cfg(feature = "ollama")]
             ollama: NOMIC_EMBED_TEXT,
+            approx_download: "~270MB",
         },
         "mxbai-embed-large" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_MXBAI_EMBED_LARGE,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~650MB",
         },
         // The quantized 1024-dim family. Selectable, never a default: each is
         // 4-13x the shipped model's 34 MB on disk and resident in the daemon,
@@ -304,18 +368,21 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: ONNX_MXBAI_EMBED_LARGE_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~337MB",
         },
         "bge-large-en-q" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_BGE_LARGE_EN_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~638MB",
         },
         "gte-large-en-q" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_GTE_LARGE_EN_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~446MB",
         },
         _ => return None,
     })
@@ -948,6 +1015,26 @@ mod tests {
         // regardless of the `ollama` feature / backend auto-resolution.
         config.embeddings.backend = EmbeddingBackend::Onnx;
         config
+    }
+
+    /// `KNOWN_PROVIDERS` is the only enumeration of the `provider_specs`
+    /// match: every entry must resolve (spec and fingerprint), and a name
+    /// outside it must not.
+    #[test]
+    fn known_providers_all_resolve() {
+        for name in KNOWN_PROVIDERS {
+            let info = provider_info(name).unwrap_or_else(|| panic!("{name} does not resolve"));
+            assert!(info.approx_download.starts_with('~'), "{name}");
+            let mut config = EngramConfig::default();
+            config.embeddings.provider = (*name).to_string();
+            assert!(
+                expected_embedding_fingerprint(&config).is_some(),
+                "{name} has no fingerprint"
+            );
+        }
+        assert_eq!(provider_info("onnx").unwrap().display_name, "all-minilm");
+        assert!(provider_info("definitely-not-a-model").is_none());
+        assert!(provider_specs("definitely-not-a-model").is_none());
     }
 
     #[test]

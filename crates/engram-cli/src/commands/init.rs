@@ -3,9 +3,7 @@
 use crate::output::OutputFormatter;
 use anyhow::{Context, Result};
 #[cfg(feature = "ollama")]
-use engramdb::embeddings::{
-    OllamaModelSpec, OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT,
-};
+use engramdb::embeddings::{OllamaModelSpec, OllamaProvider};
 use engramdb::storage::{project_id, MemoryStore, RegistryBackend};
 use engramdb::types::EmbeddingBackend;
 use std::fs;
@@ -91,47 +89,25 @@ pub async fn run_init(
 
         let backend = engramdb::ops::resolve_backend(config.embeddings.backend, embedding_backend);
 
-        match config.embeddings.provider.as_str() {
-            "onnx" | "all-minilm" => {
+        // The one provider table (`ops::provider_specs`), so `init` warms
+        // every provider the resolver accepts.
+        match engramdb::ops::provider_info(config.embeddings.provider.as_str()) {
+            Some(info) => {
                 init_model_with_backend(
                     backend,
-                    "all-minilm",
-                    "~23MB",
-                    || warm_embedding("all-minilm"),
+                    info.display_name,
+                    info.approx_download,
+                    || warm_embedding(&info),
                     #[cfg(feature = "ollama")]
-                    ALL_MINILM,
+                    info.ollama,
                     formatter,
                 )
                 .await;
             }
-            "nomic-embed-text" => {
-                init_model_with_backend(
-                    backend,
-                    "nomic-embed-text",
-                    "~270MB",
-                    || warm_embedding("nomic-embed-text"),
-                    #[cfg(feature = "ollama")]
-                    NOMIC_EMBED_TEXT,
-                    formatter,
-                )
-                .await;
-            }
-            "mxbai-embed-large" => {
-                init_model_with_backend(
-                    backend,
-                    "mxbai-embed-large",
-                    "~650MB",
-                    || warm_embedding("mxbai-embed-large"),
-                    #[cfg(feature = "ollama")]
-                    MXBAI_EMBED_LARGE,
-                    formatter,
-                )
-                .await;
-            }
-            other => {
+            None => {
                 formatter.print_error(&format!(
                     "Unknown embedding provider '{}', skipping initialization.",
-                    other
+                    config.embeddings.provider
                 ));
             }
         }
@@ -171,22 +147,16 @@ pub async fn run_init(
     Ok(())
 }
 
-/// Warm the on-disk model cache for the configured embedding `provider` by
-/// constructing it once (the first construction downloads the model). A build
-/// without ONNX Runtime has no local engine to warm, so this is a no-op there.
-#[allow(unused_variables)]
-#[allow(clippy::needless_return)]
-fn warm_embedding(provider: &str) -> anyhow::Result<()> {
-    #[cfg(feature = "onnxruntime")]
-    {
-        use engramdb::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
-        return match provider {
-            "nomic-embed-text" => OnnxProvider::with_model(ONNX_NOMIC_EMBED_TEXT).map(|_| ()),
-            "mxbai-embed-large" => OnnxProvider::with_model(ONNX_MXBAI_EMBED_LARGE).map(|_| ()),
-            _ => OnnxProvider::new().map(|_| ()),
-        };
-    }
-    #[cfg(not(feature = "onnxruntime"))]
+/// Warm the on-disk model cache for the configured embedding model by
+/// constructing it once (the first construction downloads the model).
+#[cfg(feature = "onnxruntime")]
+fn warm_embedding(info: &engramdb::ops::ProviderInfo) -> anyhow::Result<()> {
+    engramdb::embeddings::OnnxProvider::with_model(info.onnx.clone()).map(|_| ())
+}
+
+/// A build without ONNX Runtime has no local engine to warm.
+#[cfg(not(feature = "onnxruntime"))]
+fn warm_embedding(_info: &engramdb::ops::ProviderInfo) -> anyhow::Result<()> {
     Ok(())
 }
 

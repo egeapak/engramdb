@@ -234,3 +234,45 @@ fn stats_daemon_json_is_valid_when_not_running() {
         )
     });
 }
+
+/// `stats` kept its own four-name table, so 8 of the 12 providers the resolver
+/// accepts read as "unknown provider". It now reads `ops::provider_info`.
+#[test]
+fn stats_embeddings_status_accepts_every_known_provider() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    let empty_cache = TempDir::new().unwrap();
+    for provider in engramdb::ops::KNOWN_PROVIDERS {
+        write_embeddings_config(
+            dir.path(),
+            &format!(
+                "[embeddings]\nprovider = \"{provider}\"\ndimensions = 384\nmax_tokens = 256\n"
+            ),
+        );
+        let output = helpers::cmd()
+            .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
+            .env("ENGRAMDB_OFFLINE", "1")
+            .args([
+                "--dir",
+                dir.path().to_str().unwrap(),
+                "--embedding-backend",
+                "onnx",
+                "--format",
+                "plain",
+                "stats",
+            ])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{provider}: {stdout}");
+        assert!(
+            !stderr.contains("using defaults"),
+            "{provider}: the test config did not load: {stderr}"
+        );
+        assert!(
+            !stdout.contains("unknown provider"),
+            "{provider} reported as unknown: {stdout}"
+        );
+    }
+}

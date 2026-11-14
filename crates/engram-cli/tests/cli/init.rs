@@ -111,3 +111,41 @@ fn double_init_succeeds_or_warns() {
         stderr
     );
 }
+
+/// `init` matched four provider names and skipped every other documented one
+/// with "Unknown embedding provider". It now reads `ops::provider_info`.
+#[test]
+fn init_does_not_skip_a_documented_provider() {
+    let dir = TempDir::new().unwrap();
+    helpers::init_store(dir.path());
+    std::fs::write(
+        dir.path().join(".engramdb/config.toml"),
+        "[embeddings]\nprovider = \"all-minilm-l12-fp32\"\ndimensions = 384\nmax_tokens = 256\n",
+    )
+    .unwrap();
+    let empty_cache = TempDir::new().unwrap();
+
+    let output = helpers::cmd()
+        .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
+        .env("ENGRAMDB_OFFLINE", "1")
+        .args([
+            "--dir",
+            dir.path().to_str().unwrap(),
+            "--embedding-backend",
+            "onnx",
+            "init",
+        ])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !all.contains("using defaults"),
+        "the test config did not load: {all}"
+    );
+    assert!(!all.contains("Unknown embedding provider"), "{all}");
+    assert!(all.contains("all-minilm-l12-fp32"), "{all}");
+}
