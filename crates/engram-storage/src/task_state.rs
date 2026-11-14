@@ -349,14 +349,22 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&victim, path.with_extension("json.tmp")).unwrap();
 
-        let result = set_current_task(dir, "s1", "some-task");
+        // The temp name is unpredictable now, so the planted path is never
+        // opened at all: the write succeeds beside it.
+        set_current_task(dir, "s1", "some-task").unwrap();
         assert_eq!(
             std::fs::read_to_string(&victim).unwrap(),
             "do not touch",
             "the mapping write landed on the symlink's target"
         );
-        assert!(result.is_err(), "a redirected write reported success");
-        assert!(!path.exists(), "the symlink was renamed onto the mapping");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "the symlink was renamed onto the mapping"
+        );
+        assert_eq!(current_task(dir, "s1").as_deref(), Some("some-task"));
     }
 
     /// A symlink committed at the lock path used to be followed: the open

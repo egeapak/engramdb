@@ -15,9 +15,16 @@
 //! through it and `rename(2)` moves the symlink rather than its target,
 //! leaving the victim file overwritten and no trace in the state dir.
 //!
-//! `O_NOFOLLOW` is the fix: the open fails outright rather than following.
-//! The `rename` needs no equivalent — it never dereferences its source, so
-//! once the temp file is known to be a real file the move is safe.
+//! The temp is now a name nobody can plant ahead of time
+//! (`.<name>.<pid>.<8 random hex>.tmp`) opened `O_CREAT|O_EXCL|O_NOFOLLOW`:
+//! an existing path of any kind fails the open, and another name is tried.
+//! A unique name is also what lets two writers of one state file (two
+//! processes, or two hooks inside the daemon) run at once — with the fixed
+//! name each truncated and renamed the other's half-written temp. The
+//! `rename` needs no protection of its own — it never dereferences its
+//! source. The temp is removed on every error path; a process killed between
+//! the create and the rename leaves one behind, which nothing reads and
+//! nothing reuses.
 //!
 //! [`append_state_file`] needs the same flag for a stronger reason: it opens
 //! the *live* path rather than a temp, so a symlink planted there is followed
@@ -43,25 +50,30 @@ use std::path::{Path, PathBuf};
 
 /// Write `contents` to a `.json` file under a state dir, atomically.
 ///
-/// Creates the parent directory, writes a sibling `<name>.json.tmp`, then
-/// renames over `path`. A planted temp path is refused rather than cleaned
-/// up: silently unlinking whatever sits there is how a *legitimate* file gets
-/// destroyed, and advisory state is not worth that trade.
+/// Creates the parent directory, writes a uniquely named sibling temp (see the
+/// module docs), syncs it, renames it over `path` and syncs the directory.
 pub(crate) fn write_state_json(path: &Path, contents: &str) -> Result<()> {
-    write_via_temp(path, path.with_extension("json.tmp"), contents)
+    write_via_temp(path, contents.as_bytes(), || true).map(|_| ())
 }
 
-/// Replace a state file of any extension, atomically.
-///
-/// Same discipline as [`write_state_json`], but the temp name is the file name
-/// with `.tmp` *appended* rather than the extension replaced: on
-/// `harvest_ledger.jsonl` the latter yields `harvest_ledger.tmp`, colliding
-/// with any sibling of another extension.
+/// Replace a state file of any extension, atomically. Same discipline as
+/// [`write_state_json`].
 pub(crate) fn write_state_file(path: &Path, contents: &str) -> Result<()> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    let tmp: PathBuf = path.with_file_name(name);
-    write_via_temp(path, tmp, contents)
+    write_via_temp(path, contents.as_bytes(), || true).map(|_| ())
+}
+
+/// [`write_state_file`] for exact bytes, with a last check before the rename.
+///
+/// `still_current` runs after the temp is complete and synced, immediately
+/// before the `rename`; when it answers `false` nothing is replaced, the temp
+/// is removed and the result is `Ok(false)`. Ledger compaction uses it to
+/// give up when the file it read is no longer the file at `path`.
+pub(crate) fn replace_state_file_if(
+    path: &Path,
+    contents: &[u8],
+    still_current: impl FnOnce() -> bool,
+) -> Result<bool> {
+    write_via_temp(path, contents, still_current)
 }
 
 /// Append to a state file, creating it if needed.
@@ -79,14 +91,20 @@ pub(crate) fn write_state_file(path: &Path, contents: &str) -> Result<()> {
 /// ("a partial write costs the partial line") into a lie the very next time
 /// anything is written.
 pub(crate) fn append_state_file(path: &Path, contents: &str) -> Result<()> {
+    append_state_bytes(path, contents.as_bytes())
+}
+
+/// [`append_state_file`] for exact bytes (a tail carried over verbatim may
+/// hold a torn character).
+pub(crate) fn append_state_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     if contents.is_empty() {
         return Ok(());
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Named rather than inlined, for the same reason as `open_temp`: a bare
-    // ELOOP reads like a broken filesystem instead of a planted file.
+    // Named rather than inlined: a bare ELOOP reads like a broken filesystem
+    // instead of a planted file.
     let mut file = open_append(path).map_err(|e| {
         StorageError::Validation(format!(
             "could not append to {} ({e}); if that path is a symlink, remove it — \
@@ -97,7 +115,7 @@ pub(crate) fn append_state_file(path: &Path, contents: &str) -> Result<()> {
     if ends_mid_line(&mut file).unwrap_or(false) {
         file.write_all(b"\n")?;
     }
-    file.write_all(contents.as_bytes())?;
+    file.write_all(contents)?;
     Ok(())
 }
 
@@ -107,8 +125,8 @@ pub(crate) fn append_state_file(path: &Path, contents: &str) -> Result<()> {
 /// already relies on. Anything that exists but is not a plain regular file is
 /// an error naming the cause, never a silent empty read: a planted path is a
 /// deliberate act and the operator has to be told, and never a deletion
-/// either, for the same reason [`write_state_json`] refuses a planted temp
-/// rather than clearing it.
+/// either: silently unlinking whatever sits there is how a *legitimate* file
+/// gets destroyed.
 ///
 /// **Lossy on invalid UTF-8.** Every file read here is line-oriented and
 /// append-only, and a crash can tear a multibyte character in half. A strict
@@ -261,57 +279,111 @@ fn ends_mid_line(file: &mut std::fs::File) -> std::io::Result<bool> {
     Ok(last[0] != b'\n')
 }
 
-fn write_via_temp(path: &Path, tmp: PathBuf, contents: &str) -> Result<()> {
+/// How many fresh names to try before giving up. A collision needs the same
+/// pid and the same 32 random bits, so the second attempt is already unheard
+/// of; the bound only keeps a broken random source from looping.
+const TEMP_NAME_ATTEMPTS: usize = 8;
+
+/// `.<name>.<pid>.<8 random hex>.tmp` beside `path`.
+fn temp_path_for(path: &Path) -> PathBuf {
+    // The random tail of a v7 UUID: 32 of its 62 random bits.
+    let random = uuid::Uuid::now_v7().as_u128() as u32;
+    let mut name = std::ffi::OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(".{}.{random:08x}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
+/// Create a fresh temp beside `path`. Never reuses and never follows.
+fn create_temp(path: &Path) -> Result<(std::fs::File, PathBuf)> {
+    let mut last = None;
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let tmp = temp_path_for(path);
+        match open_temp(&tmp) {
+            Ok(file) => return Ok((file, tmp)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(last
+        .unwrap_or_else(|| std::io::Error::other("no temp name available"))
+        .into())
+}
+
+fn write_via_temp(
+    path: &Path,
+    contents: &[u8],
+    still_current: impl FnOnce() -> bool,
+) -> Result<bool> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    {
-        // Named rather than inlined: `?` on the open would surface an attack
-        // as a bare ELOOP ("Too many levels of symbolic links"), which reads
-        // like a broken filesystem instead of a planted file.
-        let mut file = open_temp(&tmp).map_err(|e| {
-            StorageError::Validation(format!(
-                "could not create {} ({e}); if that path exists and is a symlink, \
-                 remove it — state writes deliberately refuse to follow one",
-                tmp.display()
-            ))
-        })?;
-        file.write_all(contents.as_bytes())?;
+    let (mut file, tmp) = create_temp(path)?;
+    let written = (|| -> std::io::Result<bool> {
+        file.write_all(contents)?;
+        // Before the rename: a rename that reaches the disk ahead of the data
+        // it names leaves an empty or short state file after a power cut.
+        file.sync_all()?;
+        if !still_current() {
+            return Ok(false);
+        }
+        std::fs::rename(&tmp, path)?;
+        Ok(true)
+    })();
+    drop(file);
+    match written {
+        Ok(true) => {
+            sync_parent_dir(path);
+            Ok(true)
+        }
+        Ok(false) => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e.into())
+        }
     }
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+}
+
+/// Make the rename itself durable. Best-effort: the new file is already in
+/// place, and not every filesystem lets a directory be synced.
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Mode at *creation*, matching [`crate::transcript_archive`]: the ledger
 /// carries session ids and free-text review notes, and a `chmod` after the
-/// fact would leave it `0644` for the whole write window.
+/// fact would leave it `0644` for the whole write window. `O_EXCL` means the
+/// path did not exist, so there is nothing to follow and nothing to reuse.
 #[cfg(unix)]
 fn open_temp(tmp: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(tmp)?;
-    ensure_regular(file)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(tmp)
 }
 
-/// No `O_NOFOLLOW` equivalent off unix, and no committed-symlink delivery
-/// path either (git checks a symlink out as a plain file without developer
-/// mode). Same fallback shape as `transcript_archive::restrict_to_owner`.
 #[cfg(not(unix))]
 fn open_temp(tmp: &Path) -> std::io::Result<std::fs::File> {
-    let file = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
-        .open(tmp)?;
-    ensure_regular(file)
+        .create_new(true)
+        .open(tmp)
 }
 
-/// Same protections as [`open_temp`], on the live path.
+/// The live path: never follow a symlink, never block on a FIFO.
 #[cfg(unix)]
 fn open_append(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -340,28 +412,124 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// The temp name used to be fixed (`<name>.json.tmp`), so a symlink
+    /// committed there redirected the write. It is now unpredictable and
+    /// opened `O_EXCL`: the planted path is simply never opened.
+    #[cfg(unix)]
     #[test]
-    fn a_symlinked_temp_path_cannot_redirect_the_write() {
+    fn a_symlink_at_the_old_fixed_temp_path_is_never_written_through() {
         let tmp = TempDir::new().unwrap();
         let victim = tmp.path().join("victim.txt");
         std::fs::write(&victim, "do not touch").unwrap();
 
         let target = tmp.path().join("state").join("thing.json");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&victim, target.with_extension("json.tmp")).unwrap();
+        let planted = target.with_extension("json.tmp");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
 
-        let result = write_state_json(&target, "{}");
+        write_state_json(&target, "{}").unwrap();
         assert_eq!(
             std::fs::read_to_string(&victim).unwrap(),
             "do not touch",
             "the write landed on the symlink's target"
         );
-        let err = result.unwrap_err();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}");
         assert!(
-            err.to_string().contains("symlink"),
-            "the refusal should name the cause: {err}"
+            std::fs::symlink_metadata(&target)
+                .unwrap()
+                .file_type()
+                .is_file(),
+            "the symlink was renamed over the target"
         );
-        assert!(!target.exists(), "the symlink was renamed over the target");
+        assert!(
+            std::fs::symlink_metadata(&planted)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the planted path was touched"
+        );
+    }
+
+    fn temps_in(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    /// With one fixed temp name, two writers of the same file truncated and
+    /// renamed each other's half-written temp.
+    #[test]
+    fn temp_names_do_not_collide() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("state").join("thing.jsonl");
+        let names: std::collections::HashSet<PathBuf> =
+            (0..256).map(|_| temp_path_for(&target)).collect();
+        assert_eq!(names.len(), 256);
+        let name = names
+            .iter()
+            .next()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with(&format!(".thing.jsonl.{}.", std::process::id()))
+                && name.ends_with(".tmp"),
+            "{name}"
+        );
+
+        // 16 threads replacing one file: every write succeeds, the result is
+        // one of the bodies in full, and no temp is left.
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let target = &target;
+                scope.spawn(move || {
+                    let body = format!("{i}\n").repeat(4096);
+                    for _ in 0..8 {
+                        write_state_file(target, &body).unwrap();
+                    }
+                });
+            }
+        });
+        let text = std::fs::read_to_string(&target).unwrap();
+        let first = text.lines().next().unwrap();
+        assert_eq!(text.lines().count(), 4096);
+        assert!(text.lines().all(|l| l == first), "two writers interleaved");
+        assert!(temps_in(target.parent().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp() {
+        let tmp = TempDir::new().unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        // The rename fails: a non-empty directory sits at the target.
+        let target = state.join("thing.json");
+        std::fs::create_dir_all(target.join("child")).unwrap();
+        assert!(write_state_json(&target, "{}").is_err());
+        assert!(temps_in(&state).is_empty(), "{:?}", temps_in(&state));
+
+        // A refused replacement removes its temp too, and replaces nothing.
+        let other = state.join("other.jsonl");
+        std::fs::write(&other, "old").unwrap();
+        assert!(!replace_state_file_if(&other, b"new", || false).unwrap());
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "old");
+        assert!(temps_in(&state).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("thing.json");
+        write_state_json(&target, "{}").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]
@@ -465,12 +633,13 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_temp_file_is_reused_not_refused() {
-        // A crash mid-write leaves the temp behind. Refusing it (`O_EXCL`)
-        // would wedge every later write to that state file permanently.
+    fn a_stale_temp_file_does_not_wedge_later_writes() {
+        // A crash mid-write leaves a temp behind (under the old fixed name,
+        // or a unique one). Neither may stop the next write.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("thing.json");
         std::fs::write(target.with_extension("json.tmp"), "leftover garbage").unwrap();
+        std::fs::write(tmp.path().join(".thing.json.1.deadbeef.tmp"), "leftover").unwrap();
 
         write_state_json(&target, "{\"a\":1}").unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"a\":1}");
