@@ -149,10 +149,15 @@ pub(crate) async fn resolve_supersedes(
     own_id: Option<&str>,
     keep: &[String],
 ) -> anyhow::Result<Vec<String>> {
+    // An exact id whose file is on disk is taken as is: the prefix lookup
+    // below reads the index, which can lack a row for a file that exists
+    // (a crash between the file write and the index write; `compress`
+    // supersedes such sources by their full ids).
+    let on_disk = store.batch_exists(ids).await.unwrap_or_default();
     let mut out: Vec<String> = Vec::with_capacity(ids.len());
     for raw in ids {
         let id = raw.trim();
-        let full = if keep.iter().any(|k| k == id) {
+        let full = if keep.iter().any(|k| k == id) || on_disk.contains(id) {
             id.to_string()
         } else {
             match store.resolve_id(id).await {
