@@ -2130,6 +2130,50 @@ async fn daemon_refuses_a_hook_from_a_different_environment() {
     }
 }
 
+/// A session that opted out of auto-maintenance must not have its hook run
+/// by a daemon that did not: the daemon would run `auto_compact` for it.
+#[tokio::test]
+async fn a_hook_with_a_different_maintenance_opt_out_is_refused() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let exec = std::sync::Arc::new(EchoExecutor {
+        project_id: "test-daemon-hook-maint-env".to_string(),
+        root: tmp.path().to_path_buf(),
+    });
+    tokio::spawn(super::run_daemon_with_hooks(
+        socket.clone(),
+        super::server::DaemonOptions::from_idle_timeout(Duration::from_secs(3600)),
+        Some(exec),
+    ));
+    wait_connectable(&socket).await;
+
+    let mut env = super::hooks::hook_env();
+    let flipped = match env.get("ENGRAMDB_DISABLE_AUTO_MAINTENANCE") {
+        Some(v) if v == "1" => "0",
+        _ => "1",
+    };
+    env.insert(
+        "ENGRAMDB_DISABLE_AUTO_MAINTENANCE".to_string(),
+        flipped.to_string(),
+    );
+    let req = DaemonRequest {
+        models: None,
+        op: DaemonOp::Hook {
+            call: super::HookCall::PreCompact,
+            dir: tmp.path().to_path_buf(),
+            stdin: "{}".to_string(),
+            env,
+        },
+    };
+    match wait_request(&socket, req).await {
+        DaemonResponse::Error { message } => assert!(
+            message.contains("ENGRAMDB_DISABLE_AUTO_MAINTENANCE"),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
 /// A full batch is written in the background; a shutdown right after it
 /// must still wait for that write.
 #[tokio::test]
