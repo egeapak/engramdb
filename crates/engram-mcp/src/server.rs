@@ -70,7 +70,9 @@ struct CreateInput {
     #[schemars(description = "Visibility: shared|personal (default shared)")]
     visibility: Option<String>,
 
-    #[schemars(description = "IDs of memories this supersedes")]
+    #[schemars(
+        description = "IDs of memories this supersedes (full id or unique prefix; an id that matches no memory, or more than one, fails the call)"
+    )]
     supersedes: Option<Vec<String>>,
 
     #[schemars(
@@ -265,7 +267,9 @@ struct UpdateInput {
     #[schemars(description = "Status: active|needsreview|challenged")]
     status: Option<String>,
 
-    #[schemars(description = "IDs of memories this supersedes")]
+    #[schemars(
+        description = "IDs of memories this supersedes (full id or unique prefix; an id that matches no memory, or more than one, fails the call)"
+    )]
     supersedes: Option<Vec<String>>,
 
     #[schemars(

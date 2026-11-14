@@ -84,7 +84,7 @@ pub async fn update_memory(
 async fn update_memory_unrecorded(
     store: &MemoryStore,
     id: &str,
-    params: UpdateParams,
+    mut params: UpdateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<bool> {
     // Validate score fields in the shared core so every front-end path is
@@ -131,9 +131,6 @@ async fn update_memory_unrecorded(
         || params.decay_ttl.is_some()
         || params.decay_floor.is_some();
     let embed_async = params.embed_async;
-    // Keep a copy for the post-update supersession pass (§2.4 writer 1) —
-    // the list itself is moved into the update closure below.
-    let supersedes_for_close = params.supersedes.clone();
 
     // Scope hygiene (cross-repo correctness): a group/everyone(global) store is
     // shared across repos, so a repo-relative physical scope is meaningless (and
@@ -151,6 +148,21 @@ async fn update_memory_unrecorded(
     // several files, which `update_with`'s one-file closure cannot.
     if params.visibility.is_some() || params.supersedes.is_some() {
         let current = store.get(id).await?;
+        // New `supersedes` entries may be prefixes: resolve them (or fail the
+        // call) before anything is written. Entries the memory already lists
+        // are kept verbatim, so re-sending a list that names a since-deleted
+        // target does not start failing.
+        if let Some(requested) = params.supersedes.take() {
+            params.supersedes = Some(
+                super::resolve_supersedes(
+                    store,
+                    &requested,
+                    Some(&current.id),
+                    &current.supersedes,
+                )
+                .await?,
+            );
+        }
         let visibility = params.visibility.unwrap_or(current.visibility);
         let supersedes = params
             .supersedes
@@ -174,6 +186,11 @@ async fn update_memory_unrecorded(
         )
         .await?;
     }
+
+    // Keep a copy for the post-update supersession pass (§2.4 writer 1) —
+    // the list itself is moved into the update closure below. Taken after
+    // the ids were resolved above.
+    let supersedes_for_close = params.supersedes.clone();
 
     // Merge the params into the memory atomically: `update_with` re-reads the
     // memory inside the per-project write lock, so two concurrent updates
@@ -358,6 +375,60 @@ mod tests {
         (temp_dir, store)
     }
 
+    async fn create_memory_with_id(store: &MemoryStore, id: &str) {
+        let mut m = Memory::new(MemoryType::Decision, id, "content", Provenance::human());
+        m.id = id.to_string();
+        store.create(&m).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_resolves_new_supersedes_entries_and_keeps_existing_dangling_ones() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        create_memory_with_id(&store, "gone-target").await;
+        create_memory_with_id(&store, "fresh-target-123").await;
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["gone-target".into()]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        store.delete("gone-target").await.unwrap();
+
+        // Re-send the list (now naming a deleted target) plus a new prefix.
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["gone-target".into(), "fresh-tar".into()]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let m = store.get(&id).await.unwrap();
+        assert_eq!(
+            m.supersedes,
+            vec!["gone-target".to_string(), "fresh-target-123".to_string()]
+        );
+        let fresh = store.get("fresh-target-123").await.unwrap();
+        assert_eq!(fresh.superseded_by.as_deref(), Some(id.as_str()));
+
+        // A new unknown id still fails, and nothing changes.
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["gone-target".into(), "never-was".into()]);
+        let err = update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no memory matches 'never-was'"), "{err}");
+        assert_eq!(store.get(&id).await.unwrap().supersedes, m.supersedes);
+
+        // Its own id is refused.
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec![id.clone()]);
+        assert!(
+            update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+                .await
+                .is_err()
+        );
+    }
+
     async fn create_test_memory(store: &MemoryStore) -> String {
         let mut memory = Memory::new(
             MemoryType::Decision,
@@ -463,6 +534,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_rejects_an_out_of_range_decay_ttl() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        let before = store.get(&id).await.unwrap();
+        for ttl in [99_999_999_999_999, u64::MAX] {
+            let mut p = empty_update_params();
+            p.decay_ttl = Some(ttl);
+            let err = update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_ttl must be at most"), "{err}");
+        }
+        let after = store.get(&id).await.unwrap();
+        assert_eq!(format!("{:?}", before.decay), format!("{:?}", after.decay));
+        assert_eq!(before.updated_at, after.updated_at);
+    }
+
+    #[tokio::test]
     async fn test_update_tags_add_appends_and_deduplicates() {
         let (_temp, store) = setup_test_store().await;
         let id = create_test_memory(&store).await;
@@ -542,28 +632,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_rejects_an_out_of_range_decay_ttl() {
-        let (_temp, store) = setup_test_store().await;
-        let id = create_test_memory(&store).await;
-        let before = store.get(&id).await.unwrap();
-        for ttl in [99_999_999_999_999, u64::MAX] {
-            let mut p = empty_update_params();
-            p.decay_ttl = Some(ttl);
-            let err = update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
-                .await
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("decay_ttl must be at most"), "{err}");
-        }
-        let after = store.get(&id).await.unwrap();
-        assert_eq!(format!("{:?}", before.decay), format!("{:?}", after.decay));
-        assert_eq!(before.updated_at, after.updated_at);
-    }
-
-    #[tokio::test]
     async fn test_update_supersedes_persists() {
         let (_temp, store) = setup_test_store().await;
         let id = create_test_memory(&store).await;
+        for old in ["old-id-1", "old-id-2"] {
+            create_memory_with_id(&store, old).await;
+        }
 
         // Set supersedes
         let mut params = empty_update_params();
@@ -583,6 +657,7 @@ mod tests {
     async fn test_update_supersedes_roundtrip() {
         let (_temp, store) = setup_test_store().await;
         let id = create_test_memory(&store).await;
+        create_memory_with_id(&store, "prev-memory").await;
 
         // Set supersedes
         let mut params = empty_update_params();

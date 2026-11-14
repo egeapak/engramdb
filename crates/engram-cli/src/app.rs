@@ -697,7 +697,8 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         audience: Vec<String>,
 
-        /// IDs of memories this one supersedes (comma-separated)
+        /// IDs of memories this one supersedes (comma-separated; full id or
+        /// unique prefix — an id that matches nothing fails the command)
         #[arg(long)]
         supersedes: Option<String>,
 
@@ -1000,7 +1001,8 @@ pub enum Command {
         #[arg(long)]
         status: Option<String>,
 
-        /// IDs of memories this one supersedes (comma-separated)
+        /// IDs of memories this one supersedes (comma-separated; full id or
+        /// unique prefix — an id that matches nothing fails the command)
         #[arg(long)]
         supersedes: Option<String>,
 

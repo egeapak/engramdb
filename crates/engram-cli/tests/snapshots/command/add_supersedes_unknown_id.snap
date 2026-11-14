@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+--- stderr ---
+--- error ---
+supersedes: no memory matches 'no-such-memory'

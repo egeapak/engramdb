@@ -166,6 +166,14 @@ async fn create_memory_unrecorded(
     if let Some(floor) = params.decay_floor {
         super::validate_score(floor, "decay_floor")?;
     }
+    // `supersedes` entries may be prefixes; resolve them to full ids (or fail
+    // the call) before anything is written, so the privacy check and the
+    // window close below see the ids the file will store.
+    let supersedes = if params.supersedes.is_empty() {
+        Vec::new()
+    } else {
+        super::resolve_supersedes(store, &params.supersedes, None, &[]).await?
+    };
     let summary = params.summary;
 
     // Use default physical scope if empty
@@ -248,7 +256,7 @@ async fn create_memory_unrecorded(
     memory.confidence = params.confidence;
     memory.details = params.details;
     memory.visibility = params.visibility;
-    memory.supersedes = params.supersedes;
+    memory.supersedes = supersedes;
     // Normalize an empty audience list to `None` (whole-group visibility) so an
     // empty `--audience` never accidentally hides a memory from everyone.
     memory.audience = params.audience.filter(|a| !a.is_empty());
@@ -1091,7 +1099,7 @@ mod epistemic_create_tests {
         .unwrap();
 
         let mut p = params(MemoryType::Decision);
-        p.supersedes = vec![old.id.clone(), "missing-id".into()];
+        p.supersedes = vec![old.id.clone()];
         let new = create_memory(&store, p, None, crate::ops::Surface::Cli)
             .await
             .unwrap();
@@ -1099,8 +1107,101 @@ mod epistemic_create_tests {
         let old_mem = store.get(&old.id).await.unwrap();
         assert!(old_mem.invalidated_at.is_some(), "window closed");
         assert_eq!(old_mem.superseded_by.as_deref(), Some(new.id.as_str()));
-        // The missing id was skipped without failing the create.
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_unknown_supersedes_id() {
+        let (_t, store) = setup().await;
+        let old = create_memory(
+            &store,
+            params(MemoryType::Decision),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let before = store.list_ids().await.unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec![old.id.clone(), "missing-id".into()];
+        let err = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no memory matches 'missing-id'"), "{err}");
+        assert_eq!(store.list_ids().await.unwrap(), before, "nothing written");
+        assert!(store.get(&old.id).await.unwrap().invalidated_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_resolves_a_supersedes_prefix() {
+        let (_t, store) = setup().await;
+        let old = create_memory(
+            &store,
+            params(MemoryType::Decision),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec![old.id[..8].to_string()];
+        let new = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+
+        let old_mem = store.get(&old.id).await.unwrap();
+        assert!(old_mem.invalidated_at.is_some(), "window closed");
+        assert_eq!(old_mem.superseded_by.as_deref(), Some(new.id.as_str()));
         let new_mem = store.get(&new.id).await.unwrap();
-        assert!(new_mem.supersedes.contains(&"missing-id".to_string()));
+        assert_eq!(new_mem.supersedes, vec![old.id.clone()], "full id stored");
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_ambiguous_supersedes_prefix() {
+        let (_t, store) = setup().await;
+        for id in ["dupe-aaaa", "dupe-bbbb"] {
+            let mut m = Memory::new(MemoryType::Decision, id, "content", Provenance::human());
+            m.id = id.to_string();
+            store.create(&m).await.unwrap();
+        }
+        let before = store.list_ids().await.unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec!["dupe-".into()];
+        let err = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("supersedes"), "{err}");
+        assert_eq!(store.list_ids().await.unwrap(), before, "nothing written");
+    }
+
+    #[tokio::test]
+    async fn create_supersedes_prefix_obeys_the_privacy_rule() {
+        let (_t, store) = setup().await;
+        let mut personal = params(MemoryType::Decision);
+        personal.visibility = Visibility::Personal;
+        let personal = create_memory(&store, personal, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let before = store.list_ids().await.unwrap();
+
+        // A shared (committed) memory naming a personal one by prefix: the
+        // check used to be skipped because the prefix did not load.
+        let mut p = params(MemoryType::Decision);
+        p.visibility = Visibility::Shared;
+        p.supersedes = vec![personal.id[..8].to_string()];
+        assert!(create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .is_err());
+        assert_eq!(store.list_ids().await.unwrap(), before, "nothing written");
+        assert!(store
+            .get(&personal.id)
+            .await
+            .unwrap()
+            .invalidated_at
+            .is_none());
     }
 }

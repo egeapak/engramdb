@@ -1264,4 +1264,33 @@ Line 3"#;
             "an aborted interactive add must not leave a partial memory behind"
         );
     }
+
+    /// A `--supersedes` id that matches no memory fails the add (nothing is
+    /// written) instead of being stored verbatim.
+    #[tokio::test]
+    async fn snap_add_supersedes_unknown_id() {
+        let p = TempProject::new();
+        let (store, engine) = test_store_and_engine(p.path(), &p.registry).await;
+        let (formatter, cap) = capturing_plain();
+
+        let params = AddParams {
+            type_str: Some("decision".to_string()),
+            summary: Some("Replaces a memory that does not exist".to_string()),
+            content: Some("Supersedes nothing".to_string()),
+            criticality: Some(0.5),
+            supersedes: Some("no-such-memory".to_string()),
+            interactive: false,
+            ..snap_params()
+        };
+        let err = run_direct_mode(&store, params, None, &formatter, &engine)
+            .await
+            .unwrap_err();
+
+        snap_command(
+            "add_supersedes_unknown_id",
+            p.path(),
+            format!("{}--- error ---\n{err:#}\n", cap.transcript()),
+        );
+        assert!(store.list_ids().await.unwrap().is_empty());
+    }
 }

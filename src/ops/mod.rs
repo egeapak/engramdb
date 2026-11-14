@@ -133,6 +133,46 @@ use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatu
 use crate::types::{EmbeddingBackend, EngramConfig};
 use std::sync::Arc;
 
+/// Resolve a caller-supplied `supersedes` list to full memory ids.
+///
+/// Each entry is either a full id or a unique prefix. An entry that matches
+/// nothing, or more than one memory, fails the whole call (before anything is
+/// written): a `supersedes` that supersedes nothing is never what the caller
+/// meant, and storing it verbatim left the old memory live and a permanent
+/// dangling entry, both silently. Entries listed in `keep` are kept verbatim
+/// without a lookup, so an update that re-sends a list naming a since-deleted
+/// target does not start failing. An entry equal to `own_id` is refused. The
+/// result is de-duplicated, order preserved.
+pub(crate) async fn resolve_supersedes(
+    store: &MemoryStore,
+    ids: &[String],
+    own_id: Option<&str>,
+    keep: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::with_capacity(ids.len());
+    for raw in ids {
+        let id = raw.trim();
+        let full = if keep.iter().any(|k| k == id) {
+            id.to_string()
+        } else {
+            match store.resolve_id(id).await {
+                Ok(full) => full,
+                Err(crate::storage::StorageError::NotFound(_)) => {
+                    anyhow::bail!("supersedes: no memory matches '{id}'")
+                }
+                Err(e) => return Err(anyhow::anyhow!("supersedes: {e}")),
+            }
+        };
+        if own_id == Some(full.as_str()) {
+            anyhow::bail!("supersedes: a memory cannot supersede itself ('{id}')");
+        }
+        if !out.contains(&full) {
+            out.push(full);
+        }
+    }
+    Ok(out)
+}
+
 /// Close the validity windows of memories superseded by `new_id` (§2.4
 /// writer 1): each referenced LIVE memory gets `invalidated_at = now`,
 /// `superseded_by = new_id`. Missing and already-invalidated ids are skipped
