@@ -1908,6 +1908,11 @@ async fn setup_cross_project() -> (TempDir, TempDir, EngramDbServer) {
         .await
         .unwrap();
 
+    // Cross-project writes are off by default and only the user's global
+    // config grants them. These tests are about what happens once granted;
+    // the gate's own tests set the policy they need.
+    write_security_config(dir_a.path(), true).await;
+
     (dir_a, dir_b, server)
 }
 
@@ -2090,14 +2095,33 @@ async fn cross_project_delete() {
 // Cross-project write gate ([security].allow_cross_project_writes)
 // -----------------------------------------------------------------------
 
-/// Write a `[security]` config into a project's `.engramdb/config.toml`.
-async fn write_security_config(dir: &std::path::Path, allow_cross_project_writes: bool) {
-    let engramdb_dir = dir.join(".engramdb");
-    tokio::fs::create_dir_all(&engramdb_dir).await.unwrap();
-    let toml = format!("[security]\nallow_cross_project_writes = {allow_cross_project_writes}\n");
-    tokio::fs::write(engramdb_dir.join("config.toml"), toml)
+/// Write the `[security]` section of the **global** config file, replacing
+/// the file. `body` is the section's lines. The test harness points
+/// `ENGRAMDB_CONFIG_DIR` at a per-process temp dir and nextest runs one
+/// process per test, so this reaches no other test.
+async fn write_global_security(body: &str) {
+    let path = engramdb::storage::paths::global_config_path().unwrap();
+    tokio::fs::create_dir_all(path.parent().unwrap())
         .await
         .unwrap();
+    tokio::fs::write(&path, format!("[security]\n{body}\n"))
+        .await
+        .unwrap();
+}
+
+/// Grant the machine-wide harvest read in the global config. Cross-project
+/// writes stay granted, as `setup_cross_project` leaves them.
+async fn grant_all_projects_harvest() {
+    write_global_security("allow_all_projects_harvest = true\nallow_cross_project_writes = true")
+        .await;
+}
+
+/// Set the user's cross-project write policy (global config).
+async fn write_security_config(_dir: &std::path::Path, allow_cross_project_writes: bool) {
+    write_global_security(&format!(
+        "allow_cross_project_writes = {allow_cross_project_writes}"
+    ))
+    .await;
 }
 
 /// Build an `UpdateInput` with only `id`/`project` set (all else `None`).
@@ -2137,29 +2161,129 @@ fn update_input(id: &str, project: Option<String>) -> UpdateInput {
     }
 }
 
-/// Default config (gate on): the helper does not block a write to a different
-/// registered project — by project id or by path.
+/// The harvest tools, each asked for the whole machine and for project B.
+/// `Ok(())` when every one of the six calls is refused by the harvest gate.
+async fn harvest_reads_refused(server: &EngramDbServer, other: &str) -> Result<(), String> {
+    for (all, project) in [(Some(true), None), (None, Some(other.to_string()))] {
+        let list = server
+            .harvest_list(Parameters(HarvestListInput {
+                since: None,
+                limit: None,
+                include_harvested: None,
+                all_projects: all,
+                project: project.clone(),
+            }))
+            .await;
+        let mut search = search_input("token");
+        search.all_projects = all;
+        search.project = project.clone();
+        let search = server.harvest_search(Parameters(search)).await;
+        let show = server
+            .harvest_show(Parameters(HarvestShowInput {
+                session_id: "anything".into(),
+                max_chars: None,
+                include_thinking: None,
+                all_projects: all,
+                project: project.clone(),
+            }))
+            .await;
+        for (tool, result) in [("list", list), ("search", search), ("show", show)] {
+            match result {
+                Err(e) if e.contains("allow_all_projects_harvest") => {}
+                other => return Err(format!("harvest_{tool} passed the gate: {other:?}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A project's config file is committed, so in a cloned repository its
+/// author wrote it. It must not be able to open the transcript read for the
+/// agent working there. Before the fix the gate read exactly this file.
 #[tokio::test]
-async fn cross_project_write_gate_allows_by_default() {
+async fn a_project_config_cannot_grant_itself_machine_wide_harvest() {
+    let _home = ScopedClaudeHome::new();
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+    write_config_toml(
+        dir_a.path(),
+        "[security]\nallow_all_projects_harvest = true\nallow_cross_project_writes = true\n",
+    )
+    .await;
+    let other = dir_b.path().to_string_lossy().to_string();
+    harvest_reads_refused(&server, &other).await.unwrap();
+
+    // The refusal names the file that does decide.
+    let err = server
+        .harvest_list(Parameters(HarvestListInput {
+            since: None,
+            limit: None,
+            include_harvested: None,
+            all_projects: Some(true),
+            project: None,
+        }))
+        .await
+        .unwrap_err();
+    let global = engramdb::storage::paths::global_config_path().unwrap();
+    assert!(err.contains(&global.display().to_string()), "{err}");
+}
+
+/// The same for writes: with no global grant, a project config that sets
+/// `allow_cross_project_writes = true` opens nothing.
+#[tokio::test]
+async fn a_project_config_cannot_grant_itself_cross_project_writes() {
+    let (dir_a, dir_b, server) = setup_cross_project().await;
+    // Back to the default: no global config at all.
+    tokio::fs::remove_file(engramdb::storage::paths::global_config_path().unwrap())
+        .await
+        .unwrap();
+    write_config_toml(
+        dir_a.path(),
+        "[security]\nallow_cross_project_writes = true\n",
+    )
+    .await;
+
+    let mut input = create_input("decision", "Planted", "In B");
+    input.project = Some(dir_b.path().to_string_lossy().to_string());
+    let err = server
+        .memory_create(Parameters(input))
+        .await
+        .expect_err("a cross-project create must be refused by default");
+    assert!(err.contains("allow_cross_project_writes"), "{err}");
+    let global = engramdb::storage::paths::global_config_path().unwrap();
+    assert!(err.contains(&global.display().to_string()), "{err}");
+
+    // Nothing was written to project B.
+    let store_b = MemoryStore::open(dir_b.path()).await.unwrap();
+    assert!(store_b.list_file_ids().await.unwrap().is_empty());
+}
+
+/// The user's global config opens each gate, and only the one it names.
+#[tokio::test]
+async fn global_security_opens_both_gates() {
+    let _home = ScopedClaudeHome::new();
     let (_dir_a, dir_b, server) = setup_cross_project().await;
-    let project_b_path = dir_b.path().to_string_lossy().to_string();
-    let project_id_b = engramdb::storage::project_id::compute_project_id(dir_b.path());
+    let other = dir_b.path().to_string_lossy().to_string();
 
-    // No [security] section => default true => not blocked.
+    write_global_security("allow_cross_project_writes = true").await;
     server
-        .check_cross_project_write(Some(&project_b_path))
+        .check_cross_project_write(Some(&other))
         .await
-        .expect("gate should allow by default (path)");
-    server
-        .check_cross_project_write(Some(&project_id_b))
-        .await
-        .expect("gate should allow by default (id)");
+        .expect("writes granted");
+    harvest_reads_refused(&server, &other).await.unwrap();
 
-    // And a real cross-project create actually succeeds under the default.
-    let mut input = create_input("decision", "Allowed by default", "In B");
-    input.project = Some(project_b_path);
-    let result = server.memory_create(Parameters(input)).await;
-    assert!(parse_ok(&result)["created"].as_bool().unwrap());
+    write_global_security("allow_all_projects_harvest = true").await;
+    server
+        .check_cross_project_write(Some(&other))
+        .await
+        .expect_err("writes not granted");
+    assert!(!server
+        .check_harvest_scope(Some(&other), None)
+        .await
+        .expect("another project's transcripts granted"));
+    assert!(server
+        .check_harvest_scope(None, Some(true))
+        .await
+        .expect("machine-wide granted"));
 }
 
 /// Gate off: create/update/delete/challenge targeting a DIFFERENT registered
@@ -2624,6 +2748,10 @@ async fn cross_project_create_on_uninitialized_errors() {
         Some(EmbeddingBackend::Onnx),
         registry,
     );
+
+    // The user allows cross-project writes; this test is about what
+    // happens after the gate.
+    write_security_config(dir_a.path(), true).await;
 
     // Try to create in uninitialized B — should fail, NOT auto-init
     let project_b = dir_b.path().to_string_lossy().to_string();
@@ -5473,14 +5601,10 @@ async fn harvest_mark_cross_project_is_gated_not_blocked() {
     // hard blocking every cross-project mark, which is not the documented
     // policy — the two gates are opt-outs, not walls.
     let home = ScopedClaudeHome::new();
-    let (dir_a, dir_b, server) = setup_cross_project().await;
+    let (_dir_a, dir_b, server) = setup_cross_project().await;
     home.plant_session(dir_b.path(), "sess-2222");
     let target = Some(dir_b.path().to_string_lossy().to_string());
-    write_config_toml(
-        dir_a.path(),
-        "[security]\nallow_all_projects_harvest = true\n",
-    )
-    .await;
+    grant_all_projects_harvest().await;
 
     let out = parse_ok(
         &server
@@ -5571,7 +5695,7 @@ async fn harvest_mark_in_your_own_project_is_never_gated_by_the_read_rule() {
 #[tokio::test]
 async fn harvest_all_projects_requires_opt_in() {
     let _home = ScopedClaudeHome::new();
-    let (dir, server) = setup().await;
+    let (_dir, server) = setup().await;
 
     let err = parse_err(
         &server
@@ -5614,11 +5738,7 @@ async fn harvest_all_projects_requires_opt_in() {
     );
 
     // With the opt-in written, the scan runs (and finds nothing here).
-    write_config_toml(
-        dir.path(),
-        "[security]\nallow_all_projects_harvest = true\n",
-    )
-    .await;
+    grant_all_projects_harvest().await;
     let out = parse_ok(
         &server
             .harvest_list(Parameters(HarvestListInput {
@@ -5641,7 +5761,7 @@ async fn harvest_mark_can_settle_what_harvest_show_was_allowed_to_read() {
     // unchanged: the flag is refused without the opt-in, exactly as it is on
     // the read tools.
     let home = ScopedClaudeHome::new();
-    let (dir, server) = setup().await;
+    let (_dir, server) = setup().await;
     // Filed under a directory that is not this project's, so only an
     // `all_projects` scan reaches it.
     let elsewhere = TempDir::new().unwrap();
@@ -5658,11 +5778,7 @@ async fn harvest_mark_can_settle_what_harvest_show_was_allowed_to_read() {
         "the flag must be gated, not silently honored: {err}"
     );
 
-    write_config_toml(
-        dir.path(),
-        "[security]\nallow_all_projects_harvest = true\n",
-    )
-    .await;
+    grant_all_projects_harvest().await;
     let mut wide = mark_input("far-", None);
     wide.all_projects = Some(true);
     let out = parse_ok(&server.harvest_mark(Parameters(wide)).await);
@@ -6280,7 +6396,7 @@ async fn reading_another_projects_transcripts_needs_the_opt_in() {
     // curated. A transcript is the raw conversation, so it rides the same
     // opt-in rather than being free.
     let _home = ScopedClaudeHome::new();
-    let (dir_a, dir_b, server) = setup_cross_project().await;
+    let (_dir_a, dir_b, server) = setup_cross_project().await;
 
     let err = parse_err(
         &server
@@ -6302,11 +6418,7 @@ async fn reading_another_projects_transcripts_needs_the_opt_in() {
     );
 
     // With the caller's own project opted in, it is allowed.
-    write_config_toml(
-        dir_a.path(),
-        "[security]\nallow_all_projects_harvest = true\n",
-    )
-    .await;
+    grant_all_projects_harvest().await;
     let out = parse_ok(
         &server
             .harvest_list(Parameters(HarvestListInput {
@@ -6439,7 +6551,7 @@ async fn harvest_search_all_projects_rides_the_same_gate_as_harvest_list() {
     // already found this hole in `harvest_mark`, where prefix resolution
     // leaked session ids past the gate.
     let _home = ScopedClaudeHome::new();
-    let (dir, server) = setup().await;
+    let (_dir, server) = setup().await;
 
     let mut wide = search_input("anything");
     wide.all_projects = Some(true);
@@ -6458,11 +6570,7 @@ async fn harvest_search_all_projects_rides_the_same_gate_as_harvest_list() {
         "the gate ran after provider resolution: {err}"
     );
 
-    write_config_toml(
-        dir.path(),
-        "[security]\nallow_all_projects_harvest = true\n",
-    )
-    .await;
+    grant_all_projects_harvest().await;
     // With the opt-in the call is no longer refused *by the gate*. It may
     // still fail for want of a model in a bare test environment, which is a
     // different error and the point of the assertion.

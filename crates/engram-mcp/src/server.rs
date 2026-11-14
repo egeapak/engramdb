@@ -751,7 +751,7 @@ struct HarvestListInput {
     include_harvested: Option<bool>,
 
     #[schemars(
-        description = "Ignore project scoping and list every session on this machine. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default). Scope otherwise is this project's root plus its worktrees and linked sub-projects."
+        description = "Ignore project scoping and list every session on this machine. Off by default, and refused unless the user set [security] allow_all_projects_harvest = true in the global config file (false by default; a project config cannot grant it). Scope otherwise is this project's root plus its worktrees and linked sub-projects."
     )]
     all_projects: Option<bool>,
 
@@ -778,7 +778,7 @@ struct HarvestShowInput {
     all_projects: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless the user set [security] allow_all_projects_harvest = true in the global config file (a project config cannot grant it)."
     )]
     project: Option<String>,
 }
@@ -810,12 +810,12 @@ struct HarvestMarkInput {
     clear: Option<bool>,
 
     #[schemars(
-        description = "Resolve session_id against every session on this machine, not just this project's — the same scope harvest_show accepts. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default)."
+        description = "Resolve session_id against every session on this machine, not just this project's — the same scope harvest_show accepts. Off by default, and refused unless the user set [security] allow_all_projects_harvest = true in the global config file (false by default; a project config cannot grant it)."
     )]
     all_projects: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless the user set [security] allow_all_projects_harvest = true in the global config file (a project config cannot grant it)."
     )]
     project: Option<String>,
 }
@@ -834,12 +834,12 @@ struct HarvestSearchInput {
     since: Option<String>,
 
     #[schemars(
-        description = "Search every project's conversations on this machine. Off by default, and refused unless [security] allow_all_projects_harvest = true in YOUR OWN project config (it is false by default)."
+        description = "Search every project's conversations on this machine. Off by default, and refused unless the user set [security] allow_all_projects_harvest = true in the global config file (false by default; a project config cannot grant it)."
     )]
     all_projects: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless the user set [security] allow_all_projects_harvest = true in the global config file (a project config cannot grant it)."
     )]
     project: Option<String>,
 }
@@ -860,7 +860,7 @@ struct HarvestLedgerInput {
     with_archive: Option<bool>,
 
     #[schemars(
-        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless [security] allow_all_projects_harvest = true in your own config."
+        description = "Target project: absolute path or 16-char project ID (see harvest_list). \"global\" and \"group:<name>\" are NOT valid here. Naming a project other than your own is refused unless the user set [security] allow_all_projects_harvest = true in the global config file (a project config cannot grant it)."
     )]
     project: Option<String>,
 }
@@ -1626,14 +1626,31 @@ impl EngramDbServer {
         Ok(load_config_or_default(&config_path).await)
     }
 
+    /// The user's `[security]` settings, from the **global** config file.
+    ///
+    /// Never from a project's `.engramdb/config.toml`, neither the target's
+    /// nor the session's own. The target's made any one repository with the
+    /// key set a universal opener, since the agent picks the target. The
+    /// session's own is no better: that file is committed, so in a cloned
+    /// repository the repository's author wrote it, and a permission a caller
+    /// can grant itself is not a permission.
+    async fn security_config(&self) -> engramdb::types::config::SecurityConfig {
+        engramdb::storage::config::load_global_config_or_default()
+            .await
+            .security
+    }
+
+    /// Where the user sets `[security]`, for refusal messages.
+    fn global_config_hint() -> String {
+        engramdb::storage::paths::global_config_path()
+            .map(|p| format!("the global config file {}", p.display()))
+            .unwrap_or_else(|_| "the global config file".to_string())
+    }
+
     /// Confused-deputy guard for the harvest tools' *read* scope.
     ///
-    /// Two things, both keyed off the **session's own** config rather than the
-    /// target's — the same choice `check_cross_project_write` makes, and for
-    /// the same reason: a permission a caller grants itself is not a
-    /// permission. Reading the target's config made any single repo on the
-    /// machine with `allow_all_projects_harvest = true` a universal opener,
-    /// since the agent picks the target.
+    /// Two things, both keyed off the user's global config
+    /// ([`Self::security_config`]), never a project's.
     ///
     /// 1. `all_projects` needs the opt-in.
     /// 2. So does naming a *different* project. Cross-project reads are
@@ -1647,16 +1664,19 @@ impl EngramDbServer {
         project: Option<&str>,
         all_projects: Option<bool>,
     ) -> Result<bool, String> {
-        let own = self.load_config_for(None).await?;
-        let allowed = own.security.allow_all_projects_harvest;
+        let allowed = self.security_config().await.allow_all_projects_harvest;
 
         if all_projects == Some(true) && !allowed {
             return Err(error_response(
                 ErrorCode::ValidationError,
-                "Machine-wide harvest is disabled by [security] \
-                 allow_all_projects_harvest = false (the default). It reads every Claude Code \
-                 transcript on this machine, including other projects' conversations. Enable it \
-                 in this project's .engramdb/config.toml if that is intended.",
+                &format!(
+                    "Machine-wide harvest is disabled by [security] \
+                     allow_all_projects_harvest = false (the default). It reads every Claude \
+                     Code transcript on this machine, including other projects' conversations. \
+                     Only the user can enable it, in {}. A project's .engramdb/config.toml \
+                     cannot.",
+                    Self::global_config_hint()
+                ),
             ));
         }
 
@@ -1674,10 +1694,13 @@ impl EngramDbServer {
             if target_id != own_id && !allowed {
                 return Err(error_response(
                     ErrorCode::ValidationError,
-                    "Reading another project's transcripts is disabled by [security] \
-                     allow_all_projects_harvest = false (the default). Unlike memories, a \
-                     transcript is the raw conversation. Enable it in *this* project's \
-                     .engramdb/config.toml if that is intended.",
+                    &format!(
+                        "Reading another project's transcripts is disabled by [security] \
+                         allow_all_projects_harvest = false (the default). Unlike memories, a \
+                         transcript is the raw conversation. Only the user can enable it, in \
+                         {}. A project's .engramdb/config.toml cannot.",
+                        Self::global_config_hint()
+                    ),
                 ));
             }
         }
@@ -1690,8 +1713,9 @@ impl EngramDbServer {
     /// [`Self::resolve_dir`] resolves to *any* project in the global registry,
     /// not just the session's own. A steered agent could therefore mutate a
     /// different registered project on the same machine. This gate — consulted
-    /// at the top of every mutating handler — enforces the session's
-    /// `[security].allow_cross_project_writes` policy.
+    /// at the top of every mutating handler — enforces the user's
+    /// `[security].allow_cross_project_writes` policy, read from the global
+    /// config ([`Self::security_config`]).
     ///
     /// Always `Ok` when:
     /// - `project` is `None` (the session's own project), or
@@ -1702,7 +1726,7 @@ impl EngramDbServer {
     ///   cross-project write), or
     /// - the override resolves to the session's *own* root project id (a
     ///   worktree of the session's own project is not cross-project), or
-    /// - the session's config allows cross-project writes (the default).
+    /// - the global config allows cross-project writes (off by default).
     ///
     /// Otherwise (a different registered project, or a group the session is not
     /// a member of, with the gate off) returns a structured error and the write
@@ -1745,18 +1769,19 @@ impl EngramDbServer {
                 return Ok(());
             }
             // Non-member: fall through to the config gate (gated, not blocked).
-            let config = self.load_config_for(None).await?;
-            if config.security.allow_cross_project_writes {
+            if self.security_config().await.allow_cross_project_writes {
                 return Ok(());
             }
             return Err(error_response(
                 ErrorCode::ValidationError,
                 &format!(
                     "Cross-project writes are disabled by \
-                     [security].allow_cross_project_writes = false. This session's project \
-                     (id: {own_id}) is not subscribed to group '{name}' (id: {gid}), so it may \
-                     not write there. Subscribe with `engramdb groups subscribe {name}`, or omit \
-                     the `project` parameter to write to your own project.",
+                     [security].allow_cross_project_writes = false (the default). This \
+                     session's project (id: {own_id}) is not subscribed to group '{name}' \
+                     (id: {gid}), so it may not write there. The user can subscribe with \
+                     `engramdb groups subscribe {name}`, or enable cross-project writes in \
+                     {}. Or omit the `project` parameter to write to your own project.",
+                    Self::global_config_hint()
                 ),
             ));
         }
@@ -4463,7 +4488,7 @@ impl EngramDbServer {
         // the summary, the first prompt, the cwd, and the *count* of hits —
         // says something about a project the caller may not be allowed to
         // read. Gated on exactly the same terms as `harvest_list`, from the
-        // caller's own config, and BEFORE `session_scope`, which is not a
+        // user's global config, and BEFORE `session_scope`, which is not a
         // pure read: it adopts ledgers and reconciles archive references, so
         // running it first would let a refused call mutate the target.
         let all_projects = self

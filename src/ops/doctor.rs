@@ -1187,6 +1187,30 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
     (!health.is_quiet()).then_some(health)
 }
 
+/// The sections of a project config that are read only from the global
+/// config file (`[daemon]`, `[security]`) and are set here anyway: their
+/// names joined for a headline, and one message per section.
+fn ignored_sections(
+    config_path: &Path,
+    config: &crate::types::EngramConfig,
+) -> Option<(String, Vec<String>)> {
+    let mut names = Vec::new();
+    let mut details = Vec::new();
+    if let Some(message) = crate::storage::config::legacy_daemon_message(config_path, config) {
+        names.push("[daemon]");
+        details.push(message);
+    }
+    if let Some(message) = crate::storage::config::legacy_security_message(config_path, config) {
+        names.push("[security]");
+        details.push(message);
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some((names.join(" and "), details))
+    }
+}
+
 /// Check `.engramdb/config.toml` syntax and values.
 async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     let config_path = dir.join(".engramdb").join("config.toml");
@@ -1202,21 +1226,19 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     }
     match crate::storage::config::load_config(&config_path).await {
         Ok(config) => match config.validate() {
-            // A leftover `[daemon]` table is ignored, not invalid: warn (the
-            // user's settings are silently not applying) without failing the
-            // check or the exit code.
-            Ok(()) => match crate::storage::config::legacy_daemon_message(&config_path, &config) {
-                Some(message) => EnvironmentCheck {
+            // A leftover `[daemon]` or `[security]` table is ignored, not
+            // invalid: warn (the user's settings are silently not applying)
+            // without failing the check or the exit code.
+            Ok(()) => match ignored_sections(&config_path, &config) {
+                Some((sections, details)) => EnvironmentCheck {
                     name: "Config file".to_string(),
                     passed: true,
-                    message: ".engramdb/config.toml sets [daemon] keys that are ignored"
-                        .to_string(),
-                    suggestion: Some(
-                        "Move the [daemon] keys to the global config file and delete them \
+                    message: format!(".engramdb/config.toml sets {sections} keys that are ignored"),
+                    suggestion: Some(format!(
+                        "Move the {sections} keys to the global config file and delete them \
                          from .engramdb/config.toml"
-                            .to_string(),
-                    ),
-                    details: vec![message],
+                    )),
+                    details,
                     status: Some(CheckStatus::Warn),
                 },
                 None => EnvironmentCheck {
@@ -4212,6 +4234,34 @@ mod tests {
         let detail = result.details.join("\n");
         assert!(detail.contains("daemon.enabled"), "{detail}");
         assert!(detail.contains("daemon.idle_timeout_secs"), "{detail}");
+        let global = crate::storage::paths::global_config_path().unwrap();
+        assert!(detail.contains(&global.display().to_string()), "{detail}");
+    }
+
+    /// A project config with `[security]` grants nothing. Doctor says so as
+    /// a warning that names each key and the global file.
+    #[tokio::test]
+    async fn test_check_config_file_flags_legacy_security_section() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[security]\nallow_all_projects_harvest = true\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "an ignored section must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(result.message.contains("[security]"), "{}", result.message);
+        let detail = result.details.join("\n");
+        assert!(
+            detail.contains("security.allow_all_projects_harvest"),
+            "{detail}"
+        );
+        assert!(detail.contains("grants nothing"), "{detail}");
         let global = crate::storage::paths::global_config_path().unwrap();
         assert!(detail.contains(&global.display().to_string()), "{detail}");
     }

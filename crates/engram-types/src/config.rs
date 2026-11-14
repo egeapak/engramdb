@@ -1265,9 +1265,18 @@ pub struct EngramConfig {
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
 
-    /// Security / access-control settings
-    #[serde(default)]
-    pub security: SecurityConfig,
+    /// A `[security]` table left over in a **project** config.
+    ///
+    /// The security gates decide what an agent may do outside its own
+    /// project, and a project's config file is committed: in a cloned
+    /// repository it is written by whoever wrote the repository. So
+    /// `[security]` is read only from the global config file
+    /// ([`GlobalConfig`]). The table is still parsed so an old project config
+    /// keeps loading, but it is kept as raw TOML on purpose: nothing can read
+    /// it as settings by mistake. The loader warns and `doctor` reports when
+    /// it is set; see [`EngramConfig::legacy_security_keys`].
+    #[serde(rename = "security", default, skip_serializing_if = "Option::is_none")]
+    pub legacy_security: Option<toml::Table>,
 
     /// Epistemic-class lifecycle settings (verification, demotion,
     /// promotion, consolidation, invalidation retention)
@@ -2039,9 +2048,10 @@ impl Default for DaemonConfig {
 
 /// The global, per-user config file: `<global_config_dir>/config.toml`.
 ///
-/// It holds the settings that belong to the user rather than to a project.
-/// Today that is only `[daemon]`: the daemon is one process shared by every
-/// project and session, so its settings must come from one place. Model
+/// It holds the settings that belong to the user rather than to a project:
+/// `[daemon]` (the daemon is one process shared by every project and session,
+/// so its settings must come from one place) and `[security]` (a permission a
+/// project's own committed config could grant would be no permission). Model
 /// selection (`[embeddings]`, `[nli]`, `[rerank]`, `[title]`) stays per
 /// project, because vectors are stored per project and checked against the
 /// project's manifest fingerprint.
@@ -2050,12 +2060,17 @@ pub struct GlobalConfig {
     /// Shared embedding daemon settings.
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    /// Security / access-control settings.
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl GlobalConfig {
     /// Validate every section.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
-        self.daemon.validate()
+        self.daemon.validate()?;
+        self.security.validate()
     }
 
     /// Top-level keys of a global config file that this version does not
@@ -2064,7 +2079,7 @@ impl GlobalConfig {
     pub fn unknown_top_level_keys(table: &toml::Table) -> Vec<String> {
         table
             .keys()
-            .filter(|k| k.as_str() != "daemon")
+            .filter(|k| !matches!(k.as_str(), "daemon" | "security"))
             .cloned()
             .collect()
     }
@@ -2076,6 +2091,18 @@ impl EngramConfig {
     /// project config has no `[daemon]` table (or an empty one).
     pub fn legacy_daemon_keys(&self) -> Vec<String> {
         self.legacy_daemon
+            .as_ref()
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+impl EngramConfig {
+    /// The `[security]` keys a project config still sets. They are ignored:
+    /// security settings come only from the global config file. Empty when
+    /// the project config has no `[security]` table (or an empty one).
+    pub fn legacy_security_keys(&self) -> Vec<String> {
+        self.legacy_security
             .as_ref()
             .map(|t| t.keys().cloned().collect())
             .unwrap_or_default()
@@ -2173,11 +2200,15 @@ impl Default for MaintenanceConfig {
 /// project. An MCP agent operating in project A, if steered (e.g. by injected
 /// memory content) with project B's path/id, could otherwise mutate a
 /// different registered project B on the same machine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Read **only** from the global config file ([`GlobalConfig::security`]),
+/// never from a project's `.engramdb/config.toml`: that file is committed, so
+/// in a cloned repository it is the repository author's, and a gate the
+/// gated party can open is no gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Whether MCP mutating tools may write to a *different* registered
-    /// project than the session's own. Default `true` (preserves historical
-    /// behavior — cross-project writes allowed). When `false`, MCP mutating
+    /// project than the session's own. Default `false`. Unless `true`, MCP mutating
     /// tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`,
     /// `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) are
     /// rejected when their `project` override resolves to a project id other
@@ -2192,7 +2223,7 @@ pub struct SecurityConfig {
     /// Keep this list in step with the `check_cross_project_write` call sites
     /// in `engram_mcp::server` and with `docs/users/configuration.md`; the
     /// three drifted apart once already.
-    #[serde(default = "default_allow_cross_project_writes")]
+    #[serde(default)]
     pub allow_cross_project_writes: bool,
 
     /// Whether the **MCP** harvest tools may read transcripts beyond the
@@ -2214,33 +2245,30 @@ pub struct SecurityConfig {
     /// `harvest_mark` rides this too, even though it is a write. It resolves
     /// a session-id *prefix* against the target's transcripts and ledger and
     /// names every match in its ambiguity error, so under the write gate
-    /// alone (which defaults to allow) it answered the question `harvest_list`
-    /// refuses: which sessions does that project have?
+    /// alone it answered the question `harvest_list` refuses: which sessions
+    /// does that project have?
     ///
     /// The CLI's `--all-projects` is deliberately **not** gated: a human
     /// typing the flag is the request. This only governs an agent asking on
     /// its own behalf.
     #[serde(default)]
     pub allow_all_projects_harvest: bool,
-}
 
-fn default_allow_cross_project_writes() -> bool {
-    true
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            allow_cross_project_writes: default_allow_cross_project_writes(),
-            allow_all_projects_harvest: false,
-        }
-    }
+    /// Whether a project's `[nli].model` may name a Hugging Face repository
+    /// that is not one of the built-in NLI models. Default `false`.
+    ///
+    /// A project config is committed, and the model it names is downloaded
+    /// and loaded (in the shared daemon when one is up) as soon as a session
+    /// starts. Without this, opening a cloned repository could make the
+    /// daemon fetch and parse any repository its author chose.
+    #[serde(default)]
+    pub allow_custom_model_repos: bool,
 }
 
 impl SecurityConfig {
     /// Validate security configuration. There are no numeric bounds, so this
     /// is trivially `Ok`; it exists to mirror the other sections' `validate`
-    /// pattern and give `EngramConfig::validate` a uniform call site.
+    /// pattern and give `GlobalConfig::validate` a uniform call site.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         Ok(())
     }
@@ -2371,7 +2399,6 @@ impl EngramConfig {
         self.nli.validate()?;
         self.rerank.validate()?;
         self.stats.validate()?;
-        self.security.validate()?;
         self.review.validate()?;
         self.harvest.validate()?;
         self.index.validate()?;
@@ -3183,63 +3210,64 @@ interval_secs = 60
         assert_eq!(c.effective_digest_budget(), usize::MAX, "0 means unlimited");
     }
 
+    /// Every security gate is closed by default, also when the section is
+    /// present but silent about a key.
     #[test]
-    fn test_security_config_defaults() {
-        // Default: cross-project writes allowed (preserves historical behavior).
-        let config = EngramConfig::default();
-        assert!(config.security.allow_cross_project_writes);
-        assert!(SecurityConfig::default().allow_cross_project_writes);
+    fn cross_project_writes_default_to_refused() {
+        let default = SecurityConfig::default();
+        assert!(!default.allow_cross_project_writes);
+        assert!(!default.allow_all_projects_harvest);
+        assert!(!default.allow_custom_model_repos);
 
-        // A config.toml with NO [security] section parses to the default true.
-        let from_empty: EngramConfig = toml::from_str("").unwrap();
-        assert!(from_empty.security.allow_cross_project_writes);
-
-        // The machine-wide harvest read is opt-in, and stays opt-in when the
-        // section is present but silent about it. A default of `true` here
-        // would let an auto-approved MCP tool pull every conversation on the
-        // machine into context without anyone asking.
-        assert!(!config.security.allow_all_projects_harvest);
-        assert!(!SecurityConfig::default().allow_all_projects_harvest);
-        assert!(!from_empty.security.allow_all_projects_harvest);
-        let partial: EngramConfig =
-            toml::from_str("[security]\nallow_cross_project_writes = false\n").unwrap();
-        assert!(!partial.security.allow_all_projects_harvest);
-        let enabled: EngramConfig =
+        let from_empty: GlobalConfig = toml::from_str("").unwrap();
+        assert!(!from_empty.security.allow_cross_project_writes);
+        let partial: GlobalConfig =
             toml::from_str("[security]\nallow_all_projects_harvest = true\n").unwrap();
-        assert!(enabled.security.allow_all_projects_harvest);
+        assert!(partial.security.allow_all_projects_harvest);
+        assert!(!partial.security.allow_cross_project_writes);
+        assert!(!partial.security.allow_custom_model_repos);
     }
 
     #[test]
-    fn test_security_config_partial_toml_defaults_field() {
-        // A partial [security] section (present but empty) still defaults the
-        // field to true via the field-level `#[serde(default = "...")]`.
-        let config: EngramConfig = toml::from_str("[security]\n").unwrap();
-        assert!(config.security.allow_cross_project_writes);
+    fn global_config_reads_security() {
+        let cfg: GlobalConfig = toml::from_str(
+            "[security]\nallow_cross_project_writes = true\nallow_custom_model_repos = true\n",
+        )
+        .unwrap();
+        assert!(cfg.security.allow_cross_project_writes);
+        assert!(cfg.security.allow_custom_model_repos);
+        assert!(!cfg.security.allow_all_projects_harvest);
+        assert!(cfg.validate().is_ok());
+
+        let table: toml::Table = toml::from_str("[security]\n[daemon]\n").unwrap();
+        assert!(GlobalConfig::unknown_top_level_keys(&table).is_empty());
     }
 
+    /// A project config's `[security]` still parses (an old config keeps
+    /// loading) but grants nothing: it is kept as a raw table, reported by
+    /// key, and never written back out.
     #[test]
-    fn test_security_config_custom_toml() {
-        let toml = r#"
-[security]
-allow_cross_project_writes = false
-"#;
-        let config: EngramConfig = toml::from_str(toml).unwrap();
-        assert!(!config.security.allow_cross_project_writes);
-        // Validation is trivially Ok regardless of the flag.
-        config.validate().unwrap();
-    }
+    fn a_project_security_table_is_kept_raw() {
+        let cfg: EngramConfig = toml::from_str(
+            "[security]\nallow_all_projects_harvest = true\nallow_cross_project_writes = true\n",
+        )
+        .unwrap();
+        let mut keys = cfg.legacy_security_keys();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["allow_all_projects_harvest", "allow_cross_project_writes"]
+        );
+        assert!(cfg.validate().is_ok());
+        // A value of the wrong type cannot make the project config unreadable.
+        let odd: EngramConfig =
+            toml::from_str("[security]\nallow_cross_project_writes = \"yes\"\n").unwrap();
+        assert_eq!(odd.legacy_security_keys(), ["allow_cross_project_writes"]);
 
-    #[test]
-    fn test_security_config_toml_roundtrip() {
-        let mut config = EngramConfig::default();
-        config.security.allow_cross_project_writes = false;
-
-        let temp_path = std::env::temp_dir().join("test_security_config_roundtrip.toml");
-        config.to_toml_file(&temp_path).unwrap();
-        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
-        std::fs::remove_file(&temp_path).ok();
-
-        assert!(!loaded.security.allow_cross_project_writes);
+        let none: EngramConfig = toml::from_str("").unwrap();
+        assert!(none.legacy_security_keys().is_empty());
+        let out = toml::to_string_pretty(&EngramConfig::default()).unwrap();
+        assert!(!out.contains("[security]"), "{out}");
     }
 
     #[test]
