@@ -67,6 +67,7 @@ project's `.engramdb/config.toml`, where `[daemon]` is ignored.
 - **PreToolUse (Read/Write/Edit)** — surfaces relevant memories as context when the agent touches files
 - **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
 - **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
+- **PostToolUse / PostToolUseFailure (Bash)** — notices a command that failed and later succeeded in the same session, and asks once to save the cause
 - **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own. Like the other hooks it does nothing at all in a directory where EngramDB was never initialized — the plugin registers hooks machine-wide, and a project with no store gets no archive
 
 > **What the transcript archive stores.** Claude Code prunes its own

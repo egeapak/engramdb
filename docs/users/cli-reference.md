@@ -4,12 +4,12 @@
 
 ## Global flags
 
-These apply to every subcommand and must appear **before** the subcommand:
+These apply to every subcommand. They may appear before or after it (`engramdb --json stats` and `engramdb stats --json` are the same).
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dir <DIR>` | current working dir | Project directory to operate on. |
-| `--format <pretty\|json\|plain>` | `pretty` | Output format. |
+| `--format <pretty\|json\|plain>` | `pretty` on a terminal, `json` when stdout is not a terminal (a pipe, a file, a script) | Output format. |
 | `--json` | off | Shorthand for `--format json`. |
 | `--no-color` | off | Disable ANSI colors. |
 | `-q, --quiet` | off | Suppress non-essential output. |
@@ -70,6 +70,8 @@ Positional argument: content. Alternatively `-c, --content <text>`, or `-i, --in
 | `-i, --interactive` | Launch interactive prompts. |
 | `-e, --editor` | Open `$EDITOR` for the content. |
 | `--global` | Write to the global cross-project store instead of this project. |
+| `--group <name>` | Write to a named group store instead of this project. Not with `--global`. See [`groups`](#groups--memory-shared-by-a-set-of-projects). |
+| `--audience <id,id,…>` | With `--group` or `--global` only: show the memory only to the listed project ids or group ids. See [`groups`](#groups--memory-shared-by-a-set-of-projects). |
 
 ## `get` — fetch a memory
 
@@ -110,6 +112,7 @@ engramdb query --mode <rank|filter> [query] [flags...]
 | `--expand-links[=N]` | Add up to N one-hop neighbours of the results over confirmed `supports` / `derived_from` / `related_to` links (bare flag: 5; give another N as `--expand-links=N` — the `=` is required, so a word after the bare flag stays the query; `0` = off; max 20 per query, across every fanned-in store; default `[retrieval].expand_links`, 0). Each is marked `via <id> (<kind>)`. A neighbour passes every filter a direct result would. See [links.md](./links.md#following-links-from-results). |
 | `--include-global` | Merge global-store memories into results. |
 | `--global` | Search the global store instead of the current project. |
+| `--group <name>` | Search only the named group store. Not with `--global`. Subscribed groups are already part of a project query. See [`groups`](#groups--memory-shared-by-a-set-of-projects). |
 
 See [agents/query-modes.md](../agents/query-modes.md) for when to use which.
 
@@ -150,6 +153,9 @@ Same flags as `add`, plus:
 | `--superseded-by <id>` | Record which memory supersedes this one (only with `--invalidate`). |
 | `--clear-invalidated` | Reopen a closed validity window (clears `invalidated_at` + `superseded_by`). |
 | `-e, --editor` | Open the memory file in `$EDITOR`. |
+| `--group <name>` | Update a memory that lives in the named group store. Not with `--global`. |
+| `--audience <id,id,…>` | Replace the audience of a group or global memory. See [`groups`](#groups--memory-shared-by-a-set-of-projects). |
+| `--clear-audience` | Remove the audience, so every subscriber sees the memory. Wins over `--audience`. |
 
 For type/content/summary/scope/tags, the value **replaces** existing. Use `--tags-add` / `--tags-remove` for incremental tag changes.
 
@@ -248,6 +254,23 @@ Returned and injected also count distinct sessions. Writes are counted too (upda
 - **Sessions.** A CLI `query` or `get` records the session in `CLAUDE_SESSION_ID` (or `MCP_SESSION_ID`) when set, the variables `task current` and the MCP server already use, and no session otherwise. Only events with a session count toward promoting a task-bound memory, so a query typed in a plain terminal does not re-confirm one.
 - **What is lost.** A group store's log is drained by its subscribers' maintenance (or `gc` on the group itself); a query into a group nobody subscribed to writes a log that only rotation bounds. A line written by a newer engramdb, with a kind this version does not know, is kept and stored but not counted. A daemon killed with `SIGKILL` loses up to 60 s of buffered hook events; a hook whose daemon reply was lost records nothing; uninitialized directories and `[stats].enabled = false` record nothing. Counts are machine-local: they do not travel with a clone, and deleting a store's `lancedb/` directory deletes them.
 
+## `config` — show the settings in effect
+
+```bash
+engramdb config [--top-tags <N>] [--global]
+```
+
+Prints the values EngramDB is using for this store: content limits, retrieval
+thresholds, which optional features are on (reranker, contradiction
+detection, title strategy), the embedding provider and dimensions, and the
+most-used tags. It reads; it changes nothing. To change a setting, edit
+`.engramdb/config.toml` ([configuration.md](./configuration.md)).
+
+| Flag | Meaning |
+|------|---------|
+| `--top-tags <N>` | How many tags to list, most used first. Default 20. |
+| `--global` | Show the global store's settings. |
+
 ## `doctor` — health check
 
 ```bash
@@ -287,18 +310,23 @@ Reports candidates only. The actual merge happens via the MCP `compress_apply` t
 ## `reindex` — rebuild vectors and index
 
 ```bash
-engramdb reindex [[--embeddings-only|--index-only] [--dry-run] [--global] | --archive-only]
+engramdb reindex [--embeddings-only | --index-only] [--force] [--incremental] [--dry-run] [--global]
+engramdb reindex --archive-only
 ```
 
 | Flag | What runs |
 |------|-----------|
-| (no flag) | Re-embed everything + rebuild the LanceDB index. |
+| (no flag) | Rebuild the index rows and embed every memory whose vectors are not current. |
 | `--embeddings-only` | Re-embed only. |
 | `--index-only` | Rebuild the index without re-embedding. |
 | `--dry-run` | Change nothing; report what a rebuild would fix. Names the memories whose file changed since it was indexed, whose vectors no longer match their text, and which are not indexed or not embedded at all. `--index-only` is ignored here: it narrows what a *rebuild* touches, not what the report may look at. |
 | `--force` | Re-embed every memory, including ones whose vectors are provably current. The repair-grade rebuild — see below. |
 | `--incremental` | Rebuild only the index rows whose file changed. Opt-in; 56–72% faster on an unchanged store — see below. |
 | `--archive-only` | Rebuild the **conversation** search rows from the stored transcript copies — the copies, not the live transcripts, even where Claude Code still has one. Touches no memory; see [`harvest search`](#harvest--mine-past-claude-code-sessions). Curated summaries are preserved — they are the one thing a rebuild cannot recreate. This is also the remediation when `[embeddings].dimensions` changed under an existing conversation index: the table's vector width is fixed at creation, so it is recreated at the new width (carrying the summaries across) before the rows are rebuilt. Rejected alongside any other flag, `--global` included: conversation rows live in the **root project's** index, which has no global-store counterpart. |
+
+Flags that cannot be combined: `--embeddings-only` with `--index-only`;
+`--force` with `--dry-run`; `--incremental` with `--dry-run` or
+`--embeddings-only`; `--archive-only` with any other flag.
 
 ### Reused embeddings, and when to override
 
@@ -408,10 +436,10 @@ The cheap version of the same question runs automatically on every
 
 ```bash
 engramdb migrate [--dry-run] [--global]
-engramdb rollback --target-version <N> [--dry-run] [--global]
+engramdb rollback [--target-version <N>] [--dry-run] [--global]
 ```
 
-Move memory files between format versions. Both exit non-zero when the store is missing or when any per-file error occurred, so they can gate scripts (see [Exit codes](#exit-codes)).
+Move memory files between format versions. `--target-version` defaults to `1`. Both exit non-zero when the store is missing or when any per-file error occurred, so they can gate scripts (see [Exit codes](#exit-codes)).
 
 ## `serve` — start the MCP server
 
@@ -419,7 +447,7 @@ Move memory files between format versions. Both exit non-zero when the store is 
 engramdb serve [--transport stdio|sse] [--port <N>]
 ```
 
-`stdio` (default) is what Claude Code uses. `sse` runs an HTTP streaming server on `--port`. The plugin's `mcpServers` entry runs `engramdb serve --dir .`.
+`stdio` (default) is what Claude Code uses. `sse` runs an HTTP streaming server on `--port`. `--port` defaults to `3100` and is used only with `--transport sse`. The plugin's `mcpServers` entry runs `engramdb serve --dir .`.
 
 The HTTP server listens on `127.0.0.1` only and has no authentication. It refuses two kinds of request with `403`:
 
@@ -476,7 +504,7 @@ See [claude-code.md](./claude-code.md).
 engramdb hook pre-tool-use                            # PreToolUse for Read/Write/Edit
 engramdb hook session-start [--min-criticality <0..1>] # SessionStart, default 0.6
 engramdb hook user-prompt-submit                      # UserPromptSubmit: prompt-relevant memories
-engramdb hook post-tool-use                           # PostToolUse for Write/Edit/MultiEdit: watch-path warnings
+engramdb hook post-tool-use                           # PostToolUse for Write/Edit/MultiEdit (watch-path warnings) and Bash; also PostToolUseFailure for Bash (the retry prompt)
 engramdb hook session-end                             # SessionEnd: housekeeping + transcript copy, no output
 engramdb hook pre-compact                             # PreCompact: store-your-memories reminder
 ```
@@ -683,6 +711,58 @@ so run `engramdb reindex`.
 and `doctor --fix` offers this repair.
 
 See [projects-and-worktrees.md](./projects-and-worktrees.md).
+
+## `groups` — memory shared by a set of projects
+
+```bash
+engramdb groups create <name>
+engramdb groups subscribe <name> [-y|--yes]
+engramdb groups unsubscribe <name> [-y|--yes]
+engramdb groups list
+engramdb groups members <name>
+```
+
+A group is a named memory store on this machine that several projects share.
+It sits between one project's store and the global store. A project that
+subscribes to a group sees the group's memories in its own queries, and may
+write to the group.
+
+| Subcommand | What it does |
+|------------|--------------|
+| `create <name>` | Creates the group store and prints its group id. Safe to repeat. |
+| `subscribe <name>` | Subscribes the current project. Creates the group if needed. Shows how many memories the group holds and which projects share it, then asks to confirm. |
+| `unsubscribe <name>` | Unsubscribes the current project. Shows how many memories the project will stop seeing, then asks to confirm. The group's memories are kept. Not an error if the project was not subscribed. |
+| `list` | Lists every group and marks the ones this project subscribes to. |
+| `members <name>` | Lists the projects subscribed to the group and the group's memory count. |
+
+`--yes` skips the confirmation. It is required with `--json` / `--format json`,
+because JSON mode never prompts.
+
+A group name is trimmed and lowercased, so `Backend Family` and
+`backend family` are the same group. The group id is `__g_` followed by twelve
+hex digits. Subscriptions are stored in the registry (`registry.json`). The
+group's memories are stored under the global data directory, not in any
+repository, so a group is local to this machine. In a git worktree the
+subscription belongs to the main checkout's project.
+
+### Reading and writing a group
+
+| Command | Flag | Effect |
+|---------|------|--------|
+| `add` | `--group <name>` | Write the memory to the group store instead of the project. Repository-relative file scope is removed, because paths differ between projects. Cannot be combined with `--global`. |
+| `add` | `--audience <id,id,…>` | With `--group` or `--global` only: show this memory only to the listed project ids or group ids. Without it, every subscriber sees the memory. Ignored (with a warning) on a project memory. |
+| `query` | `--group <name>` | Query only that group store. Not needed for normal use: subscribed groups are already part of a project query. Cannot be combined with `--global`. |
+| `update` | `--group <name>` | Update a memory that lives in the group store. Cannot be combined with `--global`. |
+| `update` | `--audience <id,id,…>` | Replace the audience of a group or global memory. |
+| `update` | `--clear-audience` | Remove the audience, so every subscriber sees the memory. Wins over `--audience`. |
+
+`--audience` narrows which projects a memory is shown to when group and global
+results are merged into a project's query. It is not access control: a direct
+query of the shared store (`query --group <name>`, `query --global`) still
+returns the memory.
+
+Only `add`, `query` and `update` take `--group`. `link … --store group:<name>`
+names a group as the far end of a link.
 
 ## `harvest` — mine past Claude Code sessions
 

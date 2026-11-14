@@ -100,8 +100,8 @@ When integrated with Claude Code:
 1. **SessionStart hook** — injects high-criticality memories into the conversation at startup
 2. **PreToolUse hook** — when the agent reads/writes/edits a file, relevant memories are surfaced as context
 3. **UserPromptSubmit hook** — surfaces memories relevant to the prompt, inferring the situation (e.g. debugging vs. design)
-4. **PostToolUse hook** — warns when an edit touches paths a memory's validity depends on
-5. **SessionEnd / PreCompact hooks** — housekeeping and a store-your-memories reminder before compaction
+4. **PostToolUse hook** — warns when an edit touches paths a memory's validity depends on; after a Bash command that failed and later succeeded, asks once to save the cause
+5. **SessionEnd / PreCompact hooks** — task housekeeping, a compressed copy of the session transcript, and a store-your-memories reminder before compaction
 6. **MCP server** — the agent can search, create, update, and manage memories through tool calls
 
 ## CLI Reference
@@ -121,17 +121,21 @@ When integrated with Claude Code:
 | `link` / `unlink` / `links` | Add, remove and list typed edges between memories (contradicts, supports, supersedes, …) |
 | `task` | Declare or complete the task this session works on (`current`/`complete`) |
 | `stats` | Show store statistics |
+| `config` | Show effective config values, thresholds, and the store's top tags |
 | `doctor` | Check environment and store health (`--fix` to repair, `validate` to test models) |
 | `gc` | Garbage collect low-relevance memories |
 | `compress` | List compression candidates |
-| `reindex` | Rebuild index and re-embed all memories |
+| `reindex` | Rebuild the index and embed memories whose vectors are not current |
 | `migrate` | Migrate memory files to latest format |
 | `rollback` | Roll back memory files to previous format |
 | `serve` | Start the MCP server |
+| `dashboard` | Open a local, read-only web dashboard of every store on this machine |
 | `daemon` | Manage the shared embedding daemon (`run`/`status`/`stop`/`restart`) |
 | `setup` | Set up Claude Code integration |
 | `hook` | Claude Code plugin hook handler |
 | `projects` | Manage registered EngramDB projects |
+| `groups` | Manage multi-project memory groups and this project's subscriptions |
+| `harvest` | Inspect past Claude Code sessions for knowledge worth remembering |
 | `completions` | Generate shell completions |
 
 `stats --daemon` shows the embedding daemon's cumulative request metrics

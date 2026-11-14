@@ -60,6 +60,14 @@ engramdb query --mode rank --path src/foo.rs --include-global
 
 The global data directory is `<global_data_dir>/projects/<global_id>/` (no `.engramdb/` in any project tree — global memories live entirely in user-space).
 
+## Groups
+
+A group is a named memory store that several projects on this machine share.
+A project that subscribes to a group sees the group's memories in its own
+queries, and may write to the group. Set one up with
+`engramdb groups subscribe <name>`; see the
+[`groups` reference](./cli-reference.md#groups--memory-shared-by-a-set-of-projects).
+
 ## Project identity drift
 
 A project's ID is derived from its git remote when it has one, and from its
