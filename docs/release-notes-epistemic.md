@@ -1,6 +1,6 @@
-# Release notes draft — epistemic memory classes (0.9.0)
+# Release notes — epistemic memory classes (0.9.0)
 
-> Draft for the release that ships the epistemic-memory feature
+> Notes for the release that ships the epistemic-memory feature
 > (spec: `docs/plans/2026-07-19-epistemic-memory-spec.md`).
 
 ## Highlights

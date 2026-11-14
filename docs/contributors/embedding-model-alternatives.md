@@ -203,7 +203,7 @@ plausible reason reranking stays off in practice. (4-core sandbox absolutes;
 the ratios are what transfers.)
 
 Both the fastembed path and the **tract** path now support the new default:
-`tract_spec` in `rerank.rs` carries the two fp32 exports that load under tract
+`tract_spec` (removed with the tract backend) in `rerank.rs` carries the two fp32 exports that load under tract
 (`jinaai/jina-reranker-v1-turbo-en` ~145 MB and the historical
 `Xenova/bge-reranker-base` ~1.1 GB), and `tract_reranker_orders_relevant_first`
 asserts the ordering property for each, so an Intel-Mac build gets the smaller
@@ -395,7 +395,7 @@ fp32-only. Two things make it a different decision from the ONNX default:
 every input to it, so a one-line query costs a full 256-token forward pass; and
 there is no int8 option at all.
 
-Measured on the tract engine (`examples/tract_model_bench.rs`, new), all fp32:
+Measured on the tract engine (`examples/tract_model_bench.rs`, removed with the tract backend), all fp32:
 
 | Model | disk | cold ms | warm mean | ms/text (batch 8) | quality: P@1 / MRR@10 / nDCG@10 |
 |---|---|---|---|---|---|
@@ -619,7 +619,7 @@ cargo run --release --example embed_matrix              # embedding quality
 cargo run --release --example embed_model_bench         # embedding latency / footprint
 cargo run --release --example rerank_bench              # reranker quality + cost
 cargo run --release --example model_cost_matrix         # every model x every action (R8)
-cargo run --release --features tract --example tract_model_bench
+cargo run --release --features tract --example tract_model_bench   # removed with the tract backend
 PROBE_LOAD_THREADS=16 \
   cargo run --release --example embed_determinism_probe # reproducibility (R6)
 cargo run --release -p engram-models --example int8_determinism_bisect
