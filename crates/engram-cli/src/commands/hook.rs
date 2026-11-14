@@ -2353,23 +2353,10 @@ impl DaemonHookExecutor {
         };
         let config_path = root.join(".engramdb").join("config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-        let situation =
-            if matches!(call, HookCall::UserPromptSubmit) && config.hooks.situation_classifier {
-                // The embedding model only, like the in-process path: `get`
-                // loads (and leases) every model a config enables, and T5,
-                // NLI or the reranker would hold up a cold prompt for seconds.
-                let mut embedding_only = config.clone();
-                embedding_only.nli.enabled = false;
-                embedding_only.rerank.enabled = false;
-                embedding_only.title.strategy = engramdb::title::TitleStrategy::Keyword;
-                let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
-                match models.get(&embedding_only, Some(backend)).await.embedding {
-                    Some(p) => SituationModel::Provider(p),
-                    None => SituationModel::KeywordOnly,
-                }
-            } else {
-                SituationModel::KeywordOnly
-            };
+        let engramdb_dir = engramdb::storage::paths::project_dir(&root);
+        let initialized =
+            engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
+        let situation = daemon_situation(call, &config, initialized, models).await;
         let usage_events = std::sync::Mutex::new(Vec::new());
         let env = HookEnv {
             stores: StoreSource::Cached(&self.stores),
@@ -2384,9 +2371,6 @@ impl DaemonHookExecutor {
                 (None, false)
             }
         };
-        let engramdb_dir = engramdb::storage::paths::project_dir(&root);
-        let initialized =
-            engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
         let project = initialized.then(|| engramdb::daemon::HookProject {
             project_id: engramdb::storage::project_id::compute_project_id(&root),
             root: root.clone(),
@@ -2400,6 +2384,34 @@ impl DaemonHookExecutor {
             project,
             usage_events: usage_events.into_inner().unwrap_or_else(|e| e.into_inner()),
         }
+    }
+}
+
+/// The situation model for a hook the daemon serves.
+///
+/// Only UserPromptSubmit uses one, and only in an initialized project (the
+/// hook returns nothing elsewhere, so no model is touched there). The
+/// embedding model is used only when the daemon already has it loaded; on a
+/// cold daemon this prompt classifies by keywords and a background load
+/// (pool of one, only when the model can load locally) readies the next one.
+/// A hook never waits on a model load and never grows a pool.
+async fn daemon_situation(
+    call: &HookCall,
+    config: &engramdb::types::EngramConfig,
+    initialized: bool,
+    models: &engramdb::ops::ProviderCache,
+) -> SituationModel {
+    if !(matches!(call, HookCall::UserPromptSubmit)
+        && config.hooks.situation_classifier
+        && initialized)
+    {
+        return SituationModel::KeywordOnly;
+    }
+    let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
+    let warm = engramdb::ops::onnx_embedding_cached(config, backend);
+    match models.embedding_for_hook(config, backend, warm).await {
+        Some(p) => SituationModel::Provider(p),
+        None => SituationModel::KeywordOnly,
     }
 }
 
@@ -5268,6 +5280,25 @@ mod daemon_executor_tests {
         assert_eq!(project.project_id, store.project_id);
         assert_eq!(project.session_id.as_deref(), Some("sess-9"));
         assert!(project.stats_enabled);
+    }
+
+    /// A daemon-served UserPromptSubmit in a directory with no store returns
+    /// nothing, so it must not load (or start loading) a model either: it
+    /// used to load the config's whole embedding pool before looking.
+    #[tokio::test]
+    async fn daemon_user_prompt_submit_in_an_uninitialized_dir_touches_no_model() {
+        use engramdb::daemon::HookExecutor;
+        let exec = DaemonHookExecutor::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let models = engramdb::ops::ProviderCache::new();
+        let input = serde_json::json!({ "prompt": "why does the build fail?" }).to_string();
+        let run = exec
+            .run(&HookCall::UserPromptSubmit, bare.path(), &input, &models)
+            .await;
+        assert!(run.project.is_none());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(models.loaded_count().await, 0, "a model was loaded");
+        assert!(models.model_ids().await.is_empty());
     }
 
     /// stdin is read through a cap: an over-cap event is cut (and flagged),

@@ -656,6 +656,30 @@ pub fn cached_onnx_embedding_provider(
     }
 }
 
+/// Whether `config`'s embedding model can be loaded locally without a
+/// download or an Ollama fallback: ONNX Runtime is compiled in, the resolved
+/// backend is not Ollama, and the model files are already in the cache.
+///
+/// The daemon's UserPromptSubmit path uses this to decide whether warming
+/// the model in the background is worth starting.
+pub fn onnx_embedding_cached(
+    config: &crate::types::EngramConfig,
+    backend: crate::types::EmbeddingBackend,
+) -> bool {
+    #[cfg(feature = "onnxruntime")]
+    {
+        if backend == crate::types::EmbeddingBackend::Ollama {
+            return false;
+        }
+        provider_specs(config.embeddings.provider.as_str()).is_some_and(|s| s.onnx.is_cached())
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        let _ = (config, backend);
+        false
+    }
+}
+
 /// Intra-op threads for each ONNX session of an embedding pool:
 /// `ENGRAMDB_ONNX_INTRA_THREADS` when set, else
 /// [`EmbeddingsConfig::session_intra_threads`](crate::types::config::EmbeddingsConfig::session_intra_threads)

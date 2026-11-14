@@ -640,6 +640,64 @@ impl ProviderCache {
         known
     }
 
+    /// The embedding model `config` selects, only if it is already loaded.
+    ///
+    /// Never loads, never resizes, and records a demand of **1** (never the
+    /// config's pool size), so a latency-bound caller (the daemon's
+    /// UserPromptSubmit hook) can neither stall on a load nor grow a pool.
+    pub async fn loaded_embedding(
+        &self,
+        config: &EngramConfig,
+        backend_override: Option<EmbeddingBackend>,
+    ) -> Option<Arc<dyn EmbeddingProvider>> {
+        let (key, _) = model_demands(config, backend_override, 1, self.inner.cores)
+            .into_iter()
+            .find(|(k, _)| matches!(k, ModelKey::Embedding { .. }))?;
+        let slot = lock(&self.inner.slots).get(&key).cloned()?;
+        let mut st = lock(&slot.state);
+        let provider = match &st.loaded {
+            Some((ModelHandle::Embedding(p), _)) => Arc::clone(p),
+            _ => return None,
+        };
+        st.demands.insert(1, Instant::now());
+        Some(provider)
+    }
+
+    /// The embedding model for a daemon-served UserPromptSubmit hook.
+    ///
+    /// Returns the model only when it is already loaded ([`Self::loaded_embedding`]),
+    /// and never an Ollama provider (parity with the in-process path, which
+    /// never falls back to Ollama). When nothing is loaded and `warm` is set
+    /// (the caller checked the model can load locally), starts one load in the
+    /// background at a pool of one so the *next* prompt has it; the slot's
+    /// single-flight lock and the failed-load backoff keep these from stacking.
+    /// The hook never waits for it.
+    pub async fn embedding_for_hook(
+        &self,
+        config: &EngramConfig,
+        backend: EmbeddingBackend,
+        warm: bool,
+    ) -> Option<Arc<dyn EmbeddingProvider>> {
+        if let Some(p) = self.loaded_embedding(config, Some(backend)).await {
+            if p.model_id().starts_with("ollama/") {
+                return None;
+            }
+            return Some(p);
+        }
+        if warm {
+            let mut embedding_only = config.clone();
+            embedding_only.nli.enabled = false;
+            embedding_only.rerank.enabled = false;
+            embedding_only.title.strategy = crate::title::TitleStrategy::Keyword;
+            embedding_only.embeddings.pool_size = Some(1);
+            let cache = self.clone();
+            tokio::spawn(async move {
+                let _ = cache.get(&embedding_only, Some(backend)).await;
+            });
+        }
+        None
+    }
+
     /// Expire demands older than `max_idle`, shrink pools whose largest
     /// demand expired, and unload models with no demand left.
     ///
@@ -854,6 +912,70 @@ mod tests {
             .embedding
             .expect("embedding")
             .model_id()
+    }
+
+    /// `loaded_embedding` is a lookup, not a load: nothing on an empty
+    /// cache, and once loaded it records a demand of one without resizing.
+    #[tokio::test]
+    async fn loaded_embedding_never_loads() {
+        let (loader, cache) = fake_cache(8);
+        assert!(cache.loaded_embedding(&embed_only(4), None).await.is_none());
+        assert!(loader.loads_of(is_embedding).is_empty());
+        let empty_demands = cache
+            .all_slots()
+            .iter()
+            .all(|s| lock(&s.state).demands.is_empty());
+        assert!(empty_demands, "a lookup on an empty cache records nothing");
+
+        embed_id(&cache, 2).await;
+        let p = cache.loaded_embedding(&embed_only(8), None).await;
+        assert!(p.is_some());
+        assert_eq!(loader.loads_of(is_embedding), vec![2], "no second load");
+        assert_eq!(
+            embedding_pool(&cache),
+            Some(2),
+            "no resize to the config's pool"
+        );
+        let slot = cache
+            .all_slots()
+            .into_iter()
+            .find(|s| is_embedding(&s.key))
+            .unwrap();
+        assert!(lock(&slot.state).demands.contains_key(&1));
+        assert!(!lock(&slot.state).demands.contains_key(&8));
+    }
+
+    /// The hook path returns at once on a cold cache and loads in the
+    /// background (pool of one), so a later prompt gets the model.
+    #[tokio::test]
+    async fn embedding_for_hook_warms_in_the_background() {
+        let (loader, cache) = fake_cache(8);
+        loader.delay_ms.store(300, Ordering::SeqCst);
+        let config = embed_only(4);
+        let started = Instant::now();
+        let first = cache
+            .embedding_for_hook(&config, EmbeddingBackend::Onnx, true)
+            .await;
+        assert!(first.is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "the hook waited for the load"
+        );
+        eventually(|| embedding_pool(&cache).is_some()).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![1]);
+        let later = cache
+            .embedding_for_hook(&config, EmbeddingBackend::Onnx, true)
+            .await;
+        assert!(later.is_some());
+
+        // `warm = false` (model not loadable locally): no load at all.
+        let (loader, cache) = fake_cache(8);
+        assert!(cache
+            .embedding_for_hook(&config, EmbeddingBackend::Onnx, false)
+            .await
+            .is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(loader.loads_of(is_embedding).is_empty());
     }
 
     #[test]
