@@ -154,6 +154,10 @@ async fn write_state_gitignore(engramdb_dir: &Path) {
     }
 }
 
+/// Failpoint: make the chunk-presence probe of a batched update fail.
+#[cfg(test)]
+static FAIL_CHUNK_PROBE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// How many schema migrations actually rebuilt the index in this process
 /// (the re-check under the lock passed), for `concurrent_opens_migrate_once`.
 #[cfg(test)]
@@ -1121,6 +1125,7 @@ impl MemoryStore {
         let mut errors: Vec<(String, String)> = Vec::new();
         let mut entries: Vec<IndexEntry> = Vec::new();
         let mut written: Vec<Memory> = Vec::new();
+        let mut probe_error: Option<StorageError> = None;
 
         for given in ids {
             let key = aliases.get(given).unwrap_or(given);
@@ -1154,11 +1159,18 @@ impl MemoryStore {
             };
 
             let mut entry = IndexEntry::for_file(&memory, &digest);
-            entry.has_embedding = self
-                .lance_index
-                .has_chunks(&memory.id)
-                .await
-                .map_err(StorageError::index("has_chunks"))?;
+            // The file is already written. Returning on a failed probe left
+            // this file — and every file written earlier in the batch —
+            // without an index row. Record the row as un-embedded (a reindex
+            // derives the flag from chunk presence again), finish the batch's
+            // index writes, and report the error afterwards.
+            entry.has_embedding = match self.probe_has_chunks(&memory.id).await {
+                Ok(has) => has,
+                Err(e) => {
+                    probe_error.get_or_insert(e);
+                    false
+                }
+            };
             entries.push(entry);
             written.push(memory);
             updated.push(canonical);
@@ -1172,6 +1184,9 @@ impl MemoryStore {
             self.sync_edges_locked(&written).await?;
             // One refresh for the whole batch instead of one per memory.
             self.update_manifest_stats().await?;
+        }
+        if let Some(e) = probe_error {
+            return Err(e);
         }
 
         Ok((updated, errors))
@@ -2657,6 +2672,20 @@ impl MemoryStore {
     /// All files matching the ID are removed: `find_memory_files` guarantees
     /// they share one full ID, so any extra file is a stale duplicate left by
     /// a crashed rename-update — deleting the memory sweeps it up too.
+    /// Whether `id` has embedding chunks, for a row about to be written.
+    async fn probe_has_chunks(&self, id: &str) -> Result<bool> {
+        #[cfg(test)]
+        if FAIL_CHUNK_PROBE.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StorageError::index("has_chunks")(anyhow::anyhow!(
+                "injected chunk-probe failure"
+            )));
+        }
+        self.lance_index
+            .has_chunks(id)
+            .await
+            .map_err(StorageError::index("has_chunks"))
+    }
+
     /// Remove every file of `id` from the shared AND the personal directory.
     ///
     /// Both, always: stopping at the first directory that had a copy left a
@@ -3390,6 +3419,13 @@ async fn find_memory_files(dir: &Path, id: &str) -> Result<Vec<PathBuf>> {
     let mut entries = async_fs::read_dir(dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
+        // Memory files only. `<id>.bak` has the stem `<id>` and
+        // `<id>.md.orig` a stem that starts with it; without this filter an
+        // editor's backup was read as the memory, and removed by the next
+        // update or delete.
+        if path.extension().and_then(|s| s.to_str()) != Some("md") {
+            continue;
+        }
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
             if memory_file::stem_matches_id_prefix(stem, id) {
                 distinct_ids.insert(memory_file::extract_id_from_stem(stem).to_string());
@@ -3717,7 +3753,12 @@ async fn scan_dir_to_stats(dir: &Path) -> DirStats {
         };
         match by_id.get(&id) {
             Some(existing) => {
-                if file_mtime(&stat.path).await >= file_mtime(&existing.path).await {
+                // `prefers_newer`, like every other duplicate resolution: a
+                // bare `>=` let equal mtimes resolve by directory order.
+                if prefers_newer(
+                    (file_mtime(&stat.path).await, &stat.path),
+                    (file_mtime(&existing.path).await, &existing.path),
+                ) {
                     by_id.insert(id, stat);
                 }
             }
@@ -3750,7 +3791,10 @@ async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
                     // Stale duplicate from a crashed rename-update: keep the
                     // newest file (the rename path writes the new file last).
                     Some(existing) => {
-                        if file_mtime(&path).await >= file_mtime(existing).await {
+                        if prefers_newer(
+                            (file_mtime(&path).await, &path),
+                            (file_mtime(existing).await, existing),
+                        ) {
                             map.insert(id, path);
                         }
                     }
@@ -8438,5 +8482,136 @@ mod tests {
         let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
         let none: [&str; 0] = [];
         assert!(store.get_batch(&none).await.unwrap().is_empty());
+    }
+
+    // ---- file selection ----
+
+    /// `<id>.bak` and `<id>.md.orig` are not the memory: `get` reads the
+    /// `.md`, and update / delete leave the backups alone.
+    #[tokio::test]
+    async fn a_backup_file_is_not_the_memory() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let memory = create_test_memory("backup-victim", Visibility::Shared);
+        store.create(&memory).await.unwrap();
+        let dir = paths::memories_dir(tmp.path());
+        let bak = dir.join("backup-victim.bak");
+        let orig = dir.join("backup-victim.md.orig");
+        std::fs::write(&bak, "an editor's backup, not a memory file").unwrap();
+        std::fs::write(&orig, "a merge tool's leftover").unwrap();
+
+        assert_eq!(
+            store.get("backup-victim").await.unwrap().summary,
+            "Test summary"
+        );
+        store
+            .update_with("backup-victim", |m| {
+                m.summary = "Edited".to_string();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(store.get("backup-victim").await.unwrap().summary, "Edited");
+        assert!(bak.exists() && orig.exists(), "an update removed a backup");
+
+        store.delete("backup-victim").await.unwrap();
+        assert!(bak.exists() && orig.exists(), "a delete removed a backup");
+        assert!(!dir.join("backup-victim.md").exists());
+    }
+
+    /// Two files for one id with the same mtime: every scan must pick the
+    /// same one (`prefers_newer`: the greater path), not whichever the
+    /// directory happened to list last.
+    #[tokio::test]
+    async fn equal_mtime_duplicates_resolve_the_same_in_every_scan() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let mut a = Memory::new(MemoryType::Decision, "Copy A", "c", Provenance::human());
+        store.create(&a).await.unwrap();
+        let id = a.id.clone();
+        let dir = paths::memories_dir(tmp.path());
+        let path_a = dir.join(format!("{id}.md"));
+        // A second file for the same id, as a crashed rename leaves one.
+        a.summary = "Copy B".to_string();
+        let path_b = dir.join(format!("zzz_{id}.md"));
+        std::fs::write(&path_b, memory_file::write_memory_file(&a).unwrap()).unwrap();
+        let when =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for path in [&path_a, &path_b] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(when)
+                .unwrap();
+        }
+        assert!(path_b > path_a);
+
+        for _ in 0..3 {
+            assert_eq!(store.get(&id).await.unwrap().summary, "Copy B");
+            let batch = store.get_batch(&[id.as_str()]).await.unwrap();
+            assert_eq!(batch[0].1.summary, "Copy B");
+            let (digests, _) = store.file_digests().await.unwrap();
+            assert_eq!(
+                digests[&id],
+                FileDigest::of(&std::fs::read(&path_b).unwrap())
+            );
+        }
+        // Reindex keeps the same file (and removes the other).
+        store.reindex().await.unwrap();
+        assert!(path_b.exists());
+        assert!(!path_a.exists());
+        assert_eq!(store.get(&id).await.unwrap().summary, "Copy B");
+    }
+
+    /// A failed chunk probe in the middle of a batched update used to return
+    /// at once: the files were written and no row was. The index writes now
+    /// finish before the error is reported.
+    #[tokio::test]
+    async fn a_failed_chunk_probe_still_indexes_the_written_files() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        let ids: Vec<String> = (0..3).map(|i| format!("probe-fail-{i}")).collect();
+        for id in &ids {
+            store
+                .create(&create_test_memory(id, Visibility::Shared))
+                .await
+                .unwrap();
+        }
+
+        FAIL_CHUNK_PROBE.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = store
+            .update_batch_with(&ids, |m| {
+                m.criticality = 0.9;
+                Ok(())
+            })
+            .await;
+        FAIL_CHUNK_PROBE.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(
+            matches!(
+                result,
+                Err(StorageError::Index {
+                    op: "has_chunks",
+                    ..
+                })
+            ),
+            "the probe error is still reported"
+        );
+        // Files and rows agree: no drift left behind.
+        for id in &ids {
+            assert_eq!(store.get(id).await.unwrap().criticality, 0.9);
+        }
+        let rows = store.list_summary().await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.criticality == 0.9));
+        let cfg = IndexConfig {
+            staleness_check: StalenessCheck::Content,
+            ..IndexConfig::default()
+        };
+        assert_eq!(store.check_staleness(&cfg).await.unwrap(), None);
     }
 }
