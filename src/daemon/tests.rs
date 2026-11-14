@@ -2416,3 +2416,33 @@ async fn projects_share_one_pool_sized_to_the_largest_request() {
         "load, grow, shrink — nothing else"
     );
 }
+
+/// The accept loop's backoff: doubles from 10 ms to a 1 s cap, resets on a
+/// successful accept, and warns once per 10 s window with the count it
+/// suppressed. The real trigger (`EMFILE` on accept) cannot be reproduced in a
+/// unit test, so the policy is tested on its own.
+#[test]
+fn accept_errors_back_off() {
+    use super::server::AcceptBackoff;
+    let start = std::time::Instant::now();
+    let mut b = AcceptBackoff::default();
+    let (d, warn) = b.on_error(start);
+    assert_eq!(d, AcceptBackoff::MIN);
+    assert_eq!(warn, Some(0), "the first error of a run is warned");
+    let (d, warn) = b.on_error(start + Duration::from_millis(10));
+    assert_eq!(d, AcceptBackoff::MIN * 2);
+    assert_eq!(warn, None, "inside the window: suppressed");
+    let mut last = d;
+    for i in 0..20 {
+        let (d, _) = b.on_error(start + Duration::from_millis(20 + i));
+        assert!(d >= last && d <= AcceptBackoff::MAX);
+        last = d;
+    }
+    assert_eq!(last, AcceptBackoff::MAX);
+    let (_, warn) = b.on_error(start + AcceptBackoff::WARN_EVERY + Duration::from_secs(1));
+    assert_eq!(warn, Some(21), "the next window reports what it suppressed");
+    b.reset();
+    let (d, warn) = b.on_error(start + Duration::from_secs(60));
+    assert_eq!(d, AcceptBackoff::MIN);
+    assert_eq!(warn, Some(0));
+}
