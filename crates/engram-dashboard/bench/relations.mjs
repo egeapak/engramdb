@@ -2,6 +2,7 @@
 // (web/js/graph/themes/plain/relations.js). Exits 1 on a failed check.
 //
 //   node bench/relations.mjs
+//   node bench/relations.mjs --no-timing   (CI: print the timings, never fail on them)
 //
 // Checks, over every kind (including unknown names and inherited-property
 // names such as `constructor`), status, length and zoom unit:
@@ -14,6 +15,11 @@
 // and times building 2,000 relations at Fit (k ≈ 2), at the view's maximum
 // zoom (k ≈ 0.3) and at the unit's floor (k = 0.25), against the dashboard's filter-toggle budget (≤ 100 ms at 2k;
 // this is the JS share only, before any DOM work).
+//
+// `--no-timing` keeps every geometry check and still prints the timings, but
+// a slow run is not a failure: on a shared CI runner the wall clock says more
+// about the neighbours than about this code. Run without the flag on a quiet
+// machine when the drawing code changes.
 
 import { relationPath, zoomFactor, redrawOnZoom, UNIT } from '../web/js/graph/themes/plain/relations.js';
 
@@ -22,6 +28,13 @@ const STATUSES = ['confirmed', 'proposed', 'rejected', 'other', undefined, null]
 const LENGTHS = [0, 0.4, 1, 3, 12, 40, 200, 1000, 5000];
 const UNITS = [0.25, 0.5, 1, 2, 8];
 const MAX_D = 16000;
+
+const NO_TIMING = process.argv.slice(2).includes('--no-timing');
+const unknownArgs = process.argv.slice(2).filter((a) => a !== '--no-timing');
+if (unknownArgs.length) {
+  console.error(`unknown argument(s): ${unknownArgs.join(' ')}\nusage: node bench/relations.mjs [--no-timing]`);
+  process.exit(2);
+}
 
 let failures = 0;
 const fail = (msg) => {
@@ -119,7 +132,10 @@ for (const [name, scale, lo, hi] of [
   const k = zoomFactor(scale);
   const [ms, chars] = time(k, lo, hi);
   console.log(`2000 relations, ${name} (k=${k.toFixed(2)}, L ${lo}–${hi}): ${ms.toFixed(1)} ms, ${(chars / 1e6).toFixed(2)} MB of path data`);
-  if (ms > 100) fail(`${name}: ${ms.toFixed(1)} ms for 2000 relations`);
+  if (ms > 100) {
+    if (NO_TIMING) console.log(`  (over the 100 ms budget; not a failure with --no-timing)`);
+    else fail(`${name}: ${ms.toFixed(1)} ms for 2000 relations`);
+  }
 }
 console.log(`largest path data: ${worst} chars (bound ${MAX_D})`);
 console.log(failures ? `${failures} check(s) failed` : 'all relation geometry checks passed');

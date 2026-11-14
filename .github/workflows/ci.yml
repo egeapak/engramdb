@@ -303,6 +303,34 @@ jobs:
       - name: No bare print macro in engram-cli, no stdout write in the library crates
         run: python3 .github/scripts/check_print_macros.py
 
+  # The dashboard frontend is vanilla ES modules with no bundler and no build
+  # step, so no tool looked at the JavaScript before a browser did. Two cheap
+  # checks, no dependencies installed:
+  #   - every module under web/js and bench parses (see the script for why it
+  #     is not a plain `node --check <file>`);
+  #   - the Plain style's relation geometry (bench/relations.mjs): no NaN in
+  #     path data, the wide end at the source, chevron direction, bounded
+  #     path length. `--no-timing` prints its timings without failing on
+  #     them; shared-runner wall-clock thresholds are flaky.
+  # The headless browser checks are the separate `frontend-browser` job.
+  frontend:
+    name: Frontend (syntax, relation geometry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Every JavaScript module parses
+        run: bash .github/scripts/check_frontend_syntax.sh
+
+      - name: Relation geometry
+        working-directory: crates/engram-dashboard
+        run: node bench/relations.mjs --no-timing
+
   # Supply-chain gate on what a pull request itself changes: banned or
   # wildcard crates, licenses outside deny.toml's allow-list, and crates from
   # a registry or git source other than crates.io. All three are decided by
@@ -1016,6 +1044,7 @@ jobs:
       - fuzz-lockfile-parity
       - fuzz-check
       - formatter-output
+      - frontend
       - deny
       - check
       - check-cross
