@@ -62,6 +62,11 @@ permissions:
 # above the slowest run of that job in a 25-run sample (cold caches included;
 # medians are 3 to 10 times lower), so it cuts off a hang, not a slow day.
 
+# Toolchain: every job runs `rustup toolchain install` with no argument, which
+# installs exactly what rust-toolchain.toml pins (see that file for why). Do
+# not write `stable` here again; a job that names its own toolchain no longer
+# tests the compiler the release is built with.
+
 # Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
 # they need the full ONNX runtime plus downloaded embedding models, and
 # shared-runner variance makes any timing threshold flaky. They are local
@@ -236,8 +241,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        # No argument: installs the version, profile and components that
+        # rust-toolchain.toml names (rustfmt and clippy included).
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -301,7 +307,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler (macOS)
         if: runner.os == 'macOS'
@@ -382,7 +388,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -434,7 +440,7 @@ jobs:
       - name: Install Rust toolchain
         # Nothing is compiled here; the toolchain is only what `cargo nextest`
         # is dispatched through.
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install nextest
         uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
@@ -515,7 +521,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -574,7 +580,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -653,7 +659,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
@@ -711,7 +717,11 @@ jobs:
       - name: Install Rust toolchain
         # `llvm-tools-preview` ships `llvm-profdata`/`llvm-cov`, which
         # cargo-llvm-cov shells out to for instrumentation-based coverage.
-        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview
+        # `rustup component add` applies to the toolchain rust-toolchain.toml
+        # names, since that is the active one in this directory.
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld

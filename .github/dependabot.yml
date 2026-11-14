@@ -82,6 +82,16 @@ updates:
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
 
+  # rust-toolchain.toml pins the exact stable release CI and the release
+  # workflow build with. Without this entry the pin would only ever move by
+  # hand; with it a new compiler arrives as a PR that runs the whole suite.
+  - package-ecosystem: rust-toolchain
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(toolchain)"
+
   # Every `uses:` is pinned to a commit SHA with the version in a trailing
   # comment; Dependabot updates both. "/" covers .github/workflows; a composite
   # action's own `uses:` lines are only seen when its directory is listed.

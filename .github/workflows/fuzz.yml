@@ -33,7 +33,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install nightly toolchain
-        run: rustup toolchain install nightly --profile minimal
+        # Nightly builds the fuzz targets (`cargo +nightly fuzz`). The second
+        # line installs the stable version rust-toolchain.toml pins: a plain
+        # `cargo` in this checkout resolves to it (`cargo install cargo-fuzz`
+        # below, and the `rustc -vV` rust-cache keys on), so install it
+        # explicitly instead of relying on rustup's implicit download.
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
