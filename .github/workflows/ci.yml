@@ -159,6 +159,103 @@ jobs:
           print("OK: fuzz/Cargo.lock agrees with the root workspace on every shared crate")
           PY
 
+  # The fuzz targets are a separate workspace (`fuzz/`) that only fuzz.yml
+  # builds, on Mondays. A pull request that renames a function a target calls,
+  # or adds a target file without its `[[bin]]`, used to be found out a week
+  # later, by an issue. This type-checks them on the pull request: `cargo
+  # check` on the pinned stable toolchain, no nightly, no sanitizer, no run.
+  #
+  # The job always runs and decides in its first step whether the change can
+  # affect the targets. It cannot be skipped with `paths:` or a job-level
+  # `if:`: a skipped job reports `skipped`, and `CI result` fails on anything
+  # but `success`. When nothing relevant changed, the remaining steps are
+  # skipped and the job succeeds in seconds.
+  fuzz-check:
+    name: Fuzz targets type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff below needs the base commit.
+          fetch-depth: 0
+
+      - name: Did anything the fuzz targets build from change?
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # What the targets are built from: their own crate, the modules they
+          # call (scope and score math, the memory-file and registry parsers,
+          # the shared types), every manifest and lockfile, the toolchain pin,
+          # and this workflow. Add a path here when a new target reaches into
+          # a new module.
+          paths='^(fuzz/|src/scoring/|src/scope/|src/ops/harvest\.rs$|src/daemon/protocol\.rs$|src/lib\.rs$|crates/engram-storage/|crates/engram-types/|Cargo\.(toml|lock)$|crates/[^/]+/Cargo\.toml$|rust-toolchain\.toml$|\.github/workflows/ci\.yml$)'
+          run=true
+          if [ "$EVENT" = "pull_request" ]; then
+            range="origin/${BASE_REF}...HEAD"
+          elif [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            range="${BEFORE}..HEAD"
+          else
+            range=""
+          fi
+          if [ -n "$range" ]; then
+            # A diff that cannot be computed means "check", never "skip".
+            if files=$(git diff --name-only "$range"); then
+              if printf '%s\n' "$files" | grep -Eq "$paths"; then
+                echo "Changed files the fuzz targets depend on:"
+                printf '%s\n' "$files" | grep -E "$paths"
+              else
+                run=false
+                echo "Nothing the fuzz targets build from changed in $range; skipping the check."
+              fi
+            else
+              echo "::warning::could not diff $range; running the check"
+            fi
+          else
+            echo "No base commit to compare with; running the check."
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        if: steps.changed.outputs.run == 'true'
+        run: rustup toolchain install
+
+      - name: Install protobuf compiler and lld linker
+        if: steps.changed.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.changed.outputs.run == 'true'
+        with:
+          workspaces: "fuzz -> target"
+          key: fuzz-check
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Every [[bin]] has its target file, and every target file its [[bin]]
+        # `cargo fuzz build` builds every `[[bin]]`, so one missing on either
+        # side breaks the whole weekly build. `cargo check` reports a missing
+        # file; nothing reports a target file nobody registered.
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          declared=$(sed -n 's/^path = "fuzz_targets\/\(.*\)\.rs"$/\1/p' fuzz/Cargo.toml | sort)
+          present=$(find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -exec basename {} .rs \; | sort)
+          if [ "$declared" != "$present" ]; then
+            echo "::error file=fuzz/Cargo.toml::[[bin]] entries and fuzz/fuzz_targets/*.rs disagree"
+            diff <(echo "$declared") <(echo "$present") || true
+            exit 1
+          fi
+          echo "OK: $(echo "$present" | wc -l) targets, each registered."
+
+      - name: Type-check the fuzz targets
+        if: steps.changed.outputs.run == 'true'
+        run: cargo check --manifest-path fuzz/Cargo.toml --locked
+
   formatter-output:
     name: CLI output goes through the formatter
     runs-on: ubuntu-latest
@@ -944,6 +1041,7 @@ jobs:
     needs:
       - manifest-version
       - fuzz-lockfile-parity
+      - fuzz-check
       - formatter-output
       - deny
       - check
