@@ -8173,3 +8173,65 @@ async fn get_returns_multi_line_content_whole() {
     // Storage trims the trailing newline; everything else comes back.
     assert_eq!(val["content"].as_str(), Some(content.trim_end()), "{val}");
 }
+
+// ── Background compaction and the shutdown sequence ─────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn query_does_not_wait_for_compaction() {
+    let (_dir, server) = setup().await;
+    let (entered, release) = compaction_pause::arm();
+    let query = server.memory_query(Parameters(QueryInput {
+        query: Some("anything".to_string()),
+        ..query_input("filter")
+    }));
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), query)
+        .await
+        .expect("query must answer while compaction is paused");
+    parse_ok(&result);
+    // The compaction did start, and is still parked at the pause point.
+    tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
+        .await
+        .expect("the query must start a background compaction");
+    release.notify_one();
+    server.wait_for_compaction().await;
+}
+
+#[tokio::test]
+async fn compaction_runs_for_a_worktree_session() {
+    let tmp = TempDir::new().unwrap();
+    let (main, wt) = make_fake_worktree_mcp(tmp.path());
+    let registry: Arc<dyn RegistryBackend> = Arc::new(InMemoryRegistry::new());
+    let server = new_server_at(&wt, registry);
+    server.ensure_hierarchy().await.unwrap();
+    assert!(main.join(".engramdb").exists());
+
+    server.compact_if_needed().await;
+
+    // The throttle marker is stamped once the main store's fragmentation was
+    // read, i.e. the pass reached the main store from a worktree session.
+    let id = engramdb::storage::project_id::compute_project_id(&main);
+    let marker = engramdb::storage::paths::global_data_dir()
+        .unwrap()
+        .join(format!(".last_compaction-{id}"));
+    assert!(
+        marker.exists(),
+        "a worktree session must compact the main store ({})",
+        marker.display()
+    );
+}
+
+#[tokio::test]
+async fn a_session_shorter_than_startup_lets_startup_finish() {
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let startup = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    let stats = engramdb::telemetry::StatsCollector::new(Default::default());
+    finish_session(startup, &CompactionTask::default(), stats, None).await;
+    assert!(
+        done.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown must let deferred startup finish within its bound"
+    );
+}

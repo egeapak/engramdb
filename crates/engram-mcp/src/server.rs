@@ -1229,6 +1229,54 @@ fn embedding_notice_text(warning: &str) -> String {
     format!("IMPORTANT — ACTION NEEDED: {warning} Tell the user.")
 }
 
+/// The one background compaction a server runs at a time.
+#[derive(Default)]
+pub(crate) struct CompactionTask {
+    running: std::sync::atomic::AtomicBool,
+    handle: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl CompactionTask {
+    /// Await the running compaction for at most `limit`, then abort it. A
+    /// compaction cancelled this way is a dropped Lance transaction: commits
+    /// are atomic, and the next pass redoes it.
+    async fn wait(&self, limit: std::time::Duration) {
+        let handle = self.handle.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(mut handle) = handle {
+            if tokio::time::timeout(limit, &mut handle).await.is_err() {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+    }
+}
+
+/// A one-shot pause point at the start of `compact_if_needed`, for tests that
+/// prove a `query` does not wait for compaction.
+#[cfg(test)]
+pub(crate) mod compaction_pause {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    type Gate = (Arc<Notify>, Arc<Notify>);
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    /// Arm the pause for the next compaction: returns `(entered, release)`.
+    pub(crate) fn arm() -> Gate {
+        let gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *GATE.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    pub(super) async fn wait() {
+        let gate = GATE.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+    }
+}
+
 /// The EngramDB MCP server.
 #[derive(Clone)]
 pub struct EngramDbServer {
@@ -1282,6 +1330,9 @@ pub struct EngramDbServer {
     /// an entry at a path that is gone) and was registered. Delivered the
     /// same way as `embedding_notice`.
     registration_notice: Arc<StartupNotice>,
+    /// The background compaction a `query` starts (at most one at a time),
+    /// so `query` never waits for an `optimize()` and shutdown can await it.
+    compaction: Arc<CompactionTask>,
     /// Progress of the startup work deferred past the MCP handshake. Tool
     /// calls and resource reads wait on it; `initialize`, `server/discover`
     /// and the list calls do not. Servers built without deferral start
@@ -1335,6 +1386,7 @@ impl EngramDbServer {
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_notice: Arc::default(),
             registration_notice: Arc::default(),
+            compaction: Arc::default(),
             startup: StartupStatus::ready_receiver(),
             tool_router: Self::default_tool_router(),
         })
@@ -1383,6 +1435,7 @@ impl EngramDbServer {
             daemon: Arc::new(engramdb::daemon::DaemonCell::new()),
             embedding_notice: Arc::default(),
             registration_notice: Arc::default(),
+            compaction: Arc::default(),
             startup: StartupStatus::ready_receiver(),
             tool_router: Self::default_tool_router(),
         }
@@ -1493,13 +1546,58 @@ impl EngramDbServer {
     /// throttle has expired. It has to run per-call rather than only at
     /// startup, because an MCP session is long-lived and writes memories
     /// throughout — which is exactly what fragments the tables.
+    ///
+    /// Runs for a worktree session too: it opens `effective_dir` (the main
+    /// project), and the throttle marker is keyed by that project's id, so
+    /// several worktree sessions share one window.
     pub async fn compact_if_needed(&self) {
-        if self.dir != self.effective_dir {
-            return;
-        }
+        #[cfg(test)]
+        compaction_pause::wait().await;
         let config_path = self.effective_dir.join(".engramdb").join("config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
         engramdb::ops::auto_compact(&self.effective_dir, &config.maintenance, false).await;
+    }
+
+    /// Start [`Self::compact_if_needed`] in the background unless one is
+    /// already running. The handle is kept so shutdown (and tests) can await
+    /// it ([`Self::wait_for_compaction`]).
+    fn spawn_compaction(&self) {
+        use std::sync::atomic::Ordering;
+        if self.compaction.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let server = self.clone();
+        let task = Arc::clone(&self.compaction);
+        let handle = tokio::spawn(async move {
+            /// Clears the flag however the task ends (panic, abort).
+            struct Clear(Arc<CompactionTask>);
+            impl Drop for Clear {
+                fn drop(&mut self) {
+                    self.0.running.store(false, Ordering::SeqCst);
+                }
+            }
+            let _clear = Clear(task);
+            server.compact_if_needed().await;
+        });
+        *self
+            .compaction
+            .handle
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    }
+
+    /// The background-compaction slot, for the shutdown sequence (the
+    /// server itself is consumed by `serve`).
+    fn compaction_task(&self) -> Arc<CompactionTask> {
+        Arc::clone(&self.compaction)
+    }
+
+    /// Await the background compaction a `query` started, if any.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_compaction(&self) {
+        self.compaction
+            .wait(std::time::Duration::from_secs(60))
+            .await;
     }
 
     /// Returns `true` if the given project override refers to the global store.
@@ -2932,14 +3030,18 @@ impl EngramDbServer {
             body["hint"] = serde_json::Value::String(hint);
         }
         let r = trusted_payload(body)?;
-        // Compaction rides the *read* path, not the write path. Fragments are
-        // produced by writes but only ever paid for by reads, so a query is
-        // both where the cost lands and a point with nothing else in flight.
-        // Deliberately not on `create`: that tool returns while a background
+        // Compaction's trigger rides the *read* path, not the write path.
+        // Fragments are produced by writes but only ever paid for by reads,
+        // so a query is where the cost lands. It runs in the background: the
+        // answer no longer waits for an `optimize()`. Deliberately not
+        // triggered from `create`: that tool returns while a background
         // ingest task is still running (`embed_async: true`), and that task
         // stamps the embedding fingerprint on first embed — anything that
-        // awaits between the write and the tool's return reorders the two.
-        self.compact_if_needed().await;
+        // awaits between the write and the tool's return reorders the two
+        // (this does not await). A compaction overlapping a later write is an
+        // existing, supported state: the daemon's hook maintenance already
+        // compacts from another process.
+        self.spawn_compaction();
         _scope.mark_success();
         Ok(r)
     }
@@ -5505,33 +5607,78 @@ pub async fn run_stdio(
         _,
         _,
     >::new(stdin, stdout));
+    let compaction = server.compaction_task();
     let (service, startup) = serve_with_deferred_startup(server, transport, |server| async move {
         server.run_startup().await
     })
     .await?;
     // `serve` consumes the server; the running service owns the remaining
-    // `Arc<StatsCollector>` baked into it. Wait on the service, then drop
-    // both it and the local `stats` so the channel closes and the flush
-    // task can finalize before we await it.
-    //
-    // `waiting` takes ownership and consumes `service` on completion, so by
-    // the time it returns the rmcp service has already dropped its
-    // `Arc<StatsCollector>` clone. The startup task holds another clone (it
-    // runs on a clone of the server); stop it if the session ended before it
-    // finished. That leaves the local `stats` as the last Arc holder, so
-    // dropping it closes the channel.
+    // `Arc<StatsCollector>` baked into it. `waiting` takes ownership and
+    // consumes `service` on completion, so by the time it returns the rmcp
+    // service has already dropped its clone; `finish_session` handles the
+    // rest.
     service.waiting().await?;
-    startup.abort();
-    let _ = startup.await;
+    finish_session(startup, &compaction, stats, flush_handle).await;
+    Ok(())
+}
+
+/// How long the shutdown sequence lets unfinished deferred startup work run.
+///
+/// Startup can be inside a schema migration (`reindex_with` carries an
+/// unparseable file's row across the table clear in memory), and cancelling
+/// it at an arbitrary await could lose that row; a bounded wait is cheap.
+pub(crate) const SHUTDOWN_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long the shutdown sequence waits for background work tool calls
+/// started (today: the query-triggered compaction).
+pub(crate) const SHUTDOWN_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the shutdown sequence waits for the stats flush task.
+const SHUTDOWN_FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The shutdown sequence after the MCP session ended, in this order:
+///
+/// 1. **Startup** (≤ [`SHUTDOWN_STARTUP_WAIT`]): let unfinished deferred
+///    startup finish; abort it only past the bound.
+/// 2. **Drain** (≤ [`SHUTDOWN_DRAIN_WAIT`]): background work started by tool
+///    calls — the query-triggered compaction. This is the one place further
+///    drains (e.g. in-flight ingest tasks) belong.
+/// 3. **Stats flush** (≤ [`SHUTDOWN_FLUSH_WAIT`]): drop the last
+///    `Arc<StatsCollector>` so the channel closes, then await the flush task.
+///
+/// The startup task and the compaction task each hold a server clone (and so
+/// a stats `Arc`), which is why both end before step 3.
+pub(crate) async fn finish_session(
+    mut startup: tokio::task::JoinHandle<()>,
+    compaction: &CompactionTask,
+    stats: Arc<engramdb::telemetry::StatsCollector>,
+    flush_handle: Option<tokio::task::JoinHandle<()>>,
+) {
+    // 1. Startup.
+    if tokio::time::timeout(SHUTDOWN_STARTUP_WAIT, &mut startup)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            "EngramDB: startup work still running {SHUTDOWN_STARTUP_WAIT:?} after the session \
+             ended; stopping it"
+        );
+        startup.abort();
+        let _ = startup.await;
+    }
+
+    // 2. Drain: background work started by tool calls.
+    compaction.wait(SHUTDOWN_DRAIN_WAIT).await;
+
+    // 3. Stats flush.
     drop(stats);
     if let Some(h) = flush_handle {
         // Safety net: if some Arc clone unexpectedly outlives `stats` the
         // channel never closes and `h.await` would hang forever. Bound
         // the wait so a clean exit always happens; legitimate flushes
         // complete in milliseconds.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), h).await;
+        let _ = tokio::time::timeout(SHUTDOWN_FLUSH_WAIT, h).await;
     }
-    Ok(())
 }
 
 /// Serve `server` on `transport` while `startup` runs in a background task.

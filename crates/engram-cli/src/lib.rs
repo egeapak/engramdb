@@ -167,6 +167,14 @@ where
     }
 }
 
+/// Whether a command runs the throttled compaction pass: every command that
+/// works on a project store, from the main checkout or a linked worktree
+/// alike, except hooks (they sit on Claude Code's per-tool-call hot path) and
+/// the exempt commands that own their own store handling or none.
+fn should_auto_compact(is_exempt: bool, is_hook: bool) -> bool {
+    !is_exempt && !is_hook
+}
+
 /// Whether `args` (without `argv[0]`) invoke `engramdb hook …`: the first
 /// argument that is neither a flag nor the value of a value-taking **global**
 /// flag is `hook`.
@@ -463,12 +471,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         // actually runs.
         engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
             .await;
+    }
 
-        // Compaction rides a much shorter cadence than the full pass above,
-        // because query latency tracks LanceDB fragment count and a
-        // write-heavy session degrades every scan several-fold long before the
-        // 6-hour window expires. The common case is one file stat: the
-        // throttle is checked before the store is opened.
+    // Compaction rides a much shorter cadence than the full pass above,
+    // because query latency tracks LanceDB fragment count and a write-heavy
+    // session degrades every scan several-fold long before the 6-hour window
+    // expires. The common case is one file stat: the throttle is checked
+    // before the store is opened. Unlike the full pass it also runs from a
+    // linked worktree: `dir` is already the main project there, which is the
+    // store a worktree session writes to and fragments.
+    if should_auto_compact(is_exempt, is_hook) {
         engramdb::ops::auto_compact(&dir, &config.maintenance, cli.no_maintenance).await;
     }
 
@@ -1116,6 +1128,15 @@ mod tests {
         };
         assert!(matches!(registry_or_hook_fallback(err(), true), Ok(None)));
         assert!(registry_or_hook_fallback(err(), false).is_err());
+    }
+
+    #[test]
+    fn worktree_commands_compact_the_main_store() {
+        // The decision no longer looks at whether the cwd is a linked
+        // worktree: only exempt commands and hooks skip compaction.
+        assert!(should_auto_compact(false, false));
+        assert!(!should_auto_compact(true, false));
+        assert!(!should_auto_compact(false, true));
     }
 
     #[test]
