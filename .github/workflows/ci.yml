@@ -282,53 +282,26 @@ jobs:
       # are the four inside `impl Sink`, which are the sink, so they are
       # allowed by their exact shape and nothing else in the file is.
       #
-      # `#[cfg(test)]` bodies are skipped: `println!` in a test is debugging
-      # output, not product output.
-      - name: No bare println!/eprintln!/print!/eprint! in engram-cli
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
+      # `#[cfg(test)]` module bodies are skipped: `println!` in a test is
+      # debugging output, not product output.
+      #
+      # The scanner is .github/scripts/check_print_macros.py (run it locally
+      # the same way). It replaced an inline script with three holes: it did
+      # not see `std::println!`, it stopped reading a file at the first
+      # `mod tests {` (so code after a test module was never scanned), and it
+      # knew nothing about `writeln!(io::stdout(), ..)`. Its `--self-test`
+      # feeds it one fixture per hole and per allowed shape, and runs first so
+      # a scanner that has gone blind fails the job instead of passing it.
+      #
+      # It also scans the library crates (the core and engram-{mcp,storage,
+      # models,types,onnx,dashboard}) for writes to **stdout** only: the MCP
+      # server speaks JSON-RPC there and the hooks print a protocol document,
+      # so a stray `println!` in a library corrupts both.
+      - name: The scanner detects what it is meant to detect
+        run: python3 .github/scripts/check_print_macros.py --self-test
 
-          EXEMPT = {"hook.rs"}
-          PRINT = re.compile(r"(?<![\w:])(eprintln|println|eprint|print)!\(")
-          TEST_MOD = re.compile(r"^\s*mod tests\s*\{")
-          # `Sink::Stdout => println!("{}", args),` and its three siblings.
-          SINK_WRITE = re.compile(
-              r'^\s*Sink::(Stdout|Stderr) => (eprintln|println|eprint|print)!\("\{\}", args\),$'
-          )
-
-          offenders = []
-          for path in sorted(pathlib.Path("crates/engram-cli/src").rglob("*.rs")):
-              if path.name in EXEMPT:
-                  continue
-              lines = path.read_text(encoding="utf-8").split("\n")
-              # Everything from `mod tests {` on is test code. Match the real
-              # module opener, not the first `#[cfg(test)]` — hook.rs carries
-              # that attribute on plain helper fns hundreds of lines earlier.
-              cutoff = next(
-                  (i for i, line in enumerate(lines) if TEST_MOD.match(line)), len(lines)
-              )
-              for i, line in enumerate(lines[:cutoff]):
-                  # A comment naming a print macro is prose, not output — and
-                  # output.rs's own doc comments name them constantly now that
-                  # the file is scanned. Only whole-line comments are skipped,
-                  # so a real call with a trailing comment is still caught.
-                  if line.lstrip().startswith("//"):
-                      continue
-                  if PRINT.search(line) and not SINK_WRITE.match(line):
-                      offenders.append(f"{path}:{i + 1}: {line.strip()}")
-
-          if offenders:
-              for entry in offenders:
-                  print(entry)
-              print(
-                  "::error::bare print macros bypass OutputFormatter's Sink and are "
-                  "invisible to the tier-1 snapshots. Use outln! / errln! / outraw! / "
-                  "errraw! from crate::output (see docs/contributors/testing.md)."
-              )
-              sys.exit(1)
-          print("OK: all engram-cli output goes through OutputFormatter")
-          PY
+      - name: No bare print macro in engram-cli, no stdout write in the library crates
+        run: python3 .github/scripts/check_print_macros.py
 
   # Supply-chain gate on what a pull request itself changes: banned or
   # wildcard crates, licenses outside deny.toml's allow-list, and crates from
