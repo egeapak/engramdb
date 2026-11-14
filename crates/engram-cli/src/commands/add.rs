@@ -440,9 +440,15 @@ async fn run_editor_mode(
     formatter: &OutputFormatter,
     engine: &engramdb::retrieval::engine::RetrievalEngine,
 ) -> Result<()> {
-    // Create a temporary file with template
-    let temp_dir = env::temp_dir();
-    let temp_file = temp_dir.join(format!("engramdb-add-{}.txt", uuid::Uuid::new_v4()));
+    // The draft is private (0600, created with O_EXCL) and deleted when the
+    // guard drops, on every exit path: a failed editor or a parse error used
+    // to leave it behind in a world-readable temp directory.
+    let mut draft = tempfile::Builder::new()
+        .prefix("engramdb-add-")
+        .suffix(".txt")
+        .tempfile()
+        .context("Failed to create the draft file")?;
+    let temp_file = draft.path().to_path_buf();
 
     let template = format!(
         "# Type: {} (decision, convention, hazard, context, intent, relationship, debug, preference)
@@ -469,7 +475,13 @@ async fn run_editor_mode(
         params.content.as_deref().unwrap_or("")
     );
 
-    fs::write(&temp_file, template).context("Failed to write template file")?;
+    {
+        use std::io::Write as _;
+        draft
+            .write_all(template.as_bytes())
+            .and_then(|()| draft.flush())
+            .context("Failed to write template file")?;
+    }
 
     // Get editor from environment and split into command + args
     let editor_raw = env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
@@ -490,11 +502,9 @@ async fn run_editor_mode(
         bail!("Editor exited with non-zero status");
     }
 
-    // Read back the file
+    // Read back by path: an editor may have replaced the file by rename.
     let file_contents = fs::read_to_string(&temp_file).context("Failed to read edited file")?;
-
-    // Clean up temp file
-    let _ = fs::remove_file(&temp_file);
+    drop(draft);
 
     // Parse the file
     let parsed = parse_editor_template(&file_contents)?;

@@ -820,11 +820,12 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
         // `add -e` writes its template to `std::env::temp_dir()` — *not* under
         // any fixture directory, so no `[…]` path replacement above reaches it
-        // — under a per-run name, `engramdb-add-<uuid>.txt`. Must precede the
-        // UUID rule, which would otherwise consume the name's variable half
-        // and leave the machine's temp prefix behind.
+        // — under a per-run name, `engramdb-add-<random>.txt` (a `tempfile`
+        // suffix of letters and digits). Must precede the UUID rule, which
+        // would otherwise consume the name's variable half and leave the
+        // machine's temp prefix behind.
         (
-            Regex::new(r"\S*engramdb-add-[0-9a-f-]+\.txt").unwrap(),
+            Regex::new(r"\S*engramdb-add-[0-9A-Za-z-]+\.txt").unwrap(),
             "[ADD_TEMPLATE]",
         ),
         (
