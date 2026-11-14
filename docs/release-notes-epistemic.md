@@ -15,7 +15,8 @@ that never use the new fields round-trip byte-identical.
 On top of the class sit:
 
 - **Bi-temporal validity**: memories can be *invalidated* (window closed via
-  supersession, `resolve --action invalidate`, or compression) without being
+  supersession, the MCP `resolve` tool with `action: "invalidate"`
+  (CLI: `engramdb update <id> --invalidate`), or compression) without being
   deleted. Retrieval and `list` exclude them by default;
   `include_invalidated: true` shows history. GC purges them only after
   `[epistemic] invalidated_retention_days` (0 = keep forever); until then
@@ -29,7 +30,8 @@ On top of the class sit:
 - **New tools**: `verify` (re-confirm a memory, refreshing fact decay),
   `task_current` / `task_complete` (declare and close task scopes;
   completion demotes task-scoped memories to fast decay),
-  `resolve --action invalidate`, and four new Claude Code hook events
+  `resolve` with `action: "invalidate"`
+  (CLI: `engramdb update <id> --invalidate`), and four new Claude Code hook events
   (`UserPromptSubmit`, `PostToolUse`, `SessionEnd`, `PreCompact`).
 - **Smarter maintenance**: telemetry-driven promotion of re-confirmed
   task-scoped memories, and observation consolidation (near-duplicate

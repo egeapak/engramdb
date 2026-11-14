@@ -93,7 +93,7 @@ source_file = "..."
 - **`id`** — UUID v7 (time-sortable). Auto-assigned. Don't pass `id` on `create`.
 - **`created_at`** — set on create. Immutable.
 - **`updated_at`** — set on every `update`.
-- **`accessed_at`** — set on every query that returns this memory. Used by the daemon for stats.
+- **`accessed_at`** — deprecated. It is set when the memory is created and never updated. Usage is recorded separately; see `stats` with `memory_id`.
 - **`verified_at`** — set when someone (human or agent) confirmed this memory is still correct (the `verify` tool stamps it; `resolve action: keep` also re-affirms). Old `verified_at` is a signal that the memory might be stale. For fact-class memories, decay is anchored here (see below), so verifying refreshes their score.
 - **`expires_at`** — optional absolute deadline. After this time the memory is considered expired and filtered out by default (unless `include_expired: true`).
 

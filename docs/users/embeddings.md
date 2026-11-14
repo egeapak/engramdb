@@ -13,6 +13,7 @@ Every memory is embedded as one **metadata vector** (`"{title}. {summary}. tags:
 | `all-minilm-l12-fp32` | ONNX | 384 | fp32 build of the default model (~127 MB, 1.3× slower per query, 1.7× per batch). **Reproducible on any runtime** — pick this if you need guaranteed-stable vectors on a stock build. See [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `nomic-embed-text` | ONNX or Ollama | 768 | Better quality, longer context support, slower. |
 | `mxbai-embed-large` | ONNX or Ollama | 1024 | Best quality, biggest model, slowest. |
+| `mxbai-embed-large-q` / `bge-large-en-q` / `gte-large-en-q` | ONNX | 1024 | Quantized 1024-dimension models. Selectable, never a default: 4 to 13 times the size of the default model. With the Ollama backend, all three use Ollama's `mxbai-embed-large`. |
 
 ### Backends
 
@@ -67,7 +68,8 @@ After a successful reindex, the manifest fingerprint is updated to match.
 ## Swapping models — full procedure
 
 ```bash
-# 1. Stop any long-running daemon so it doesn't keep the old model loaded
+# 1. (Optional) Stop the daemon to free the old model's memory at once.
+#    Otherwise the daemon unloads it after the idle timeout.
 engramdb daemon stop
 
 # 2. Edit config.toml — pick the new provider and matching dimensions

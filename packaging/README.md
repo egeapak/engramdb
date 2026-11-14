@@ -111,8 +111,8 @@ the `"depends"` line as-is.
 
 ## Upgrades and the shared daemon
 
-The daemon caches provider bundles for its whole lifetime, so one running
-across an upgrade keeps serving the *previous* release's models. That is not
+A daemon that keeps running across an upgrade is the previous release's binary,
+and it resolves model names with that release's defaults. That is not
 cosmetic: the client fingerprints the embedding model it expects, so
 `reindex --embeddings-only` re-embeds via the old daemon, stamps the old model
 id, and `doctor` immediately reports a mismatch again — running the suggested

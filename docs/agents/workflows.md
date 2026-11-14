@@ -144,7 +144,7 @@ If a memory disagrees with what you just observed, **don't update or delete it**
 }
 ```
 
-The memory's status becomes `Challenged`. It stays in the store; the challenge penalty in scoring (`challenge_penalty`, default −0.10) suppresses it without hiding it.
+The memory's status becomes `Challenged`. It stays in the store; the challenge penalty in scoring (`challenge_penalty`: 0.15 for a fact, 0.20 for an observation, 0.05 for a decision by default) suppresses it without hiding it.
 
 Later (next session, or right then), use `resolve` to decide:
 
