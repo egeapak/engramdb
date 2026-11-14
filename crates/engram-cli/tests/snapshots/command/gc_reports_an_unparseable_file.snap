@@ -1,0 +1,8 @@
+---
+source: crates/engram-cli/src/testutil.rs
+expression: body
+---
+--- stdout ---
+No memories eligible for garbage collection.
+--- stderr ---
+Warning: 1 memory file does not parse (see `engramdb doctor`).

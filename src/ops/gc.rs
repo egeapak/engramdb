@@ -47,6 +47,10 @@ pub struct GcPlan {
     pub candidates: Vec<GcCandidate>,
     /// IDs found in index but missing from data store. Suggests reindex is needed.
     pub stale_entries: Vec<String>,
+    /// IDs whose memory file exists but does not parse (`doctor` names them).
+    /// Not stale entries: reindex would keep their rows, and gc never deletes
+    /// them.
+    pub unparseable: Vec<String>,
     /// The effective threshold the candidates were scored against.
     pub threshold: f64,
 }
@@ -79,6 +83,8 @@ pub struct GcResult {
     pub skipped: Vec<String>,
     /// IDs found in index but missing from data store. Suggests reindex is needed.
     pub stale_entries: Vec<String>,
+    /// IDs whose memory file exists but does not parse; see [`GcPlan::unparseable`].
+    pub unparseable: Vec<String>,
     /// Index optimize stats from the maintenance pass that runs after the
     /// deletion phase. `None` on a dry run (a preview must not mutate the
     /// store, and optimize commits new versions) and when the optimize pass
@@ -101,11 +107,23 @@ pub async fn plan_gc(
     let loaded = store.get_batch(&ids).await?;
     let loaded_ids: std::collections::HashSet<&str> =
         loaded.iter().map(|(id, _)| id.as_str()).collect();
-    let stale_entries: Vec<String> = ids
+    let not_loaded: Vec<String> = ids
         .iter()
         .filter(|id| !loaded_ids.contains(id.as_str()))
         .cloned()
         .collect();
+    // A row that did not load is stale only when its file is gone; a file
+    // that is there but does not parse is a different problem (doctor names
+    // it), and calling it a stale index entry sent the user to a reindex that
+    // keeps the row.
+    let on_disk = if not_loaded.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        store.batch_exists(&not_loaded).await?
+    };
+    let (unparseable, stale_entries): (Vec<String>, Vec<String>) = not_loaded
+        .into_iter()
+        .partition(|id| on_disk.contains(id.as_str()));
 
     // §2.4 retention: memories whose validity window closed longer ago than
     // `[epistemic] invalidated_retention_days` are purged regardless of
@@ -153,6 +171,7 @@ pub async fn plan_gc(
     Ok(GcPlan {
         candidates,
         stale_entries,
+        unparseable,
         threshold,
     })
 }
@@ -242,6 +261,7 @@ pub async fn execute_gc_plan(
         count,
         skipped,
         stale_entries: plan.stale_entries,
+        unparseable: plan.unparseable,
         maintenance: None,
     })
 }
@@ -327,6 +347,7 @@ pub async fn gc_memories(
             count,
             skipped: Vec::new(),
             stale_entries: plan.stale_entries,
+            unparseable: plan.unparseable,
             maintenance: None,
         });
     }
@@ -611,6 +632,49 @@ mod tests {
             !result.removed.contains(&id),
             "stale entries must not be counted as gc candidates"
         );
+    }
+
+    /// A file that is present but does not parse is not a stale index entry
+    /// (reindex keeps its row): it is reported on its own, and never deleted.
+    #[tokio::test]
+    async fn gc_separates_unparseable_files_from_stale_entries() {
+        let tmp = TempDir::new().unwrap();
+        let store = init_store(tmp.path()).await;
+        let cfg = EngramConfig::default();
+
+        let mut broken = low_criticality_memory("will not parse");
+        broken.supersedes = vec!["old-1".into()];
+        store.create(&broken).await.unwrap();
+        let path = tmp
+            .path()
+            .join(".engramdb/memories")
+            .join(format!("{}.md", broken.id));
+        let clean = std::fs::read_to_string(&path).unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted);
+        std::fs::write(&path, conflicted).unwrap();
+
+        let gone = low_criticality_memory("file deleted");
+        store.create(&gone).await.unwrap();
+        std::fs::remove_file(
+            tmp.path()
+                .join(".engramdb/memories")
+                .join(format!("{}.md", gone.id)),
+        )
+        .unwrap();
+
+        for dry_run in [true, false] {
+            let result = gc_memories(&store, &cfg, dry_run, Some(0.99))
+                .await
+                .unwrap();
+            assert_eq!(result.unparseable, vec![broken.id.clone()]);
+            assert_eq!(result.stale_entries, vec![gone.id.clone()]);
+            assert!(!result.removed.contains(&broken.id));
+        }
+        assert!(path.exists(), "gc never deletes an unparseable file");
     }
 
     /// TOCTOU guard: a candidate whose criticality is raised between the

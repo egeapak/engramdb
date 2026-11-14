@@ -3952,6 +3952,15 @@ impl EngramDbServer {
             response["warning"] =
                 serde_json::json!("Stale index entries found. Run reindex to fix.");
         }
+        if !result.unparseable.is_empty() {
+            // Present but unparseable: not stale (reindex keeps the row) and
+            // never deleted. `doctor` names the parse error.
+            response["unparseable"] = serde_json::json!(result.unparseable);
+            response["unparseable_warning"] = serde_json::json!(format!(
+                "{} memory file(s) do not parse (see doctor).",
+                result.unparseable.len()
+            ));
+        }
         if let Some(m) = &result.maintenance {
             // Post-deletion index maintenance (compaction + version pruning).
             response["index_bytes_reclaimed"] = serde_json::json!(m.bytes_removed);
