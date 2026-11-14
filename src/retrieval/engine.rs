@@ -711,7 +711,11 @@ impl RetrievalEngine {
         let links_config = self.config.links.clone();
         let telemetry = self.ingest_telemetry();
 
+        // Counted before the spawn, so a shutdown drain that starts right
+        // after this call already waits for it (`ingest_tracker`).
+        let guard = super::ingest_tracker::track();
         Some(tokio::spawn(async move {
+            let _guard = guard;
             let query = match embed_memory_with(
                 provider.as_ref(),
                 &store,
@@ -6582,6 +6586,40 @@ mod tests {
             .find(|e| e.id == id)
             .unwrap();
         assert!(row.has_embedding);
+    }
+
+    /// A detached ingest is counted from the moment `spawn_ingest` returns
+    /// until its task ends, so the MCP shutdown drain can wait for it.
+    #[tokio::test]
+    async fn spawn_ingest_is_counted_until_it_finishes() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(
+            MemoryType::Decision,
+            "counted",
+            "body",
+            crate::types::Provenance::human(),
+        );
+        store.create(&m).await.unwrap();
+        let provider = PausingEmbedding::new();
+        let dyn_provider: Arc<dyn EmbeddingProvider> = provider.clone();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(dyn_provider);
+        let before = super::super::pending_ingests();
+        let handle = engine.spawn_ingest(m.clone(), None).unwrap();
+        assert_eq!(super::super::pending_ingests(), before + 1);
+        provider.entered.notified().await;
+        assert_eq!(super::super::pending_ingests(), before + 1);
+        provider.release.notify_one();
+        assert_eq!(
+            super::super::drain_ingests(std::time::Duration::from_secs(30)).await,
+            0
+        );
+        handle.await.unwrap();
+        assert_eq!(super::super::pending_ingests(), before);
+        assert!(store.has_chunks_for(&m.id).await.unwrap());
     }
 
     /// A real text change in between still refuses the stale vectors.

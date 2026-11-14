@@ -8249,3 +8249,67 @@ async fn a_session_shorter_than_startup_lets_startup_finish() {
         "shutdown must let deferred startup finish within its bound"
     );
 }
+
+/// A `create` answered just before the session ends still gets its vectors:
+/// the shutdown sequence drains the detached ingest the call started instead
+/// of letting the process exit under it (a `claude -p` run closes stdin right
+/// after its last call).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_waits_for_a_pending_ingest() {
+    let (dir, server) = setup().await;
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let compaction = server.compaction_task();
+    let server_handle: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        let svc = server.serve(server_io).await?;
+        svc.waiting().await?;
+        let stats = engramdb::telemetry::StatsCollector::new(Default::default());
+        finish_session(tokio::spawn(async {}), &compaction, stats, None).await;
+        Ok(())
+    });
+    let client = rmcp::serve_client((), client_io).await.expect("handshake");
+    let created = client
+        .peer()
+        .call_tool(
+            CallToolRequestParams::new("create").with_arguments(
+                json!({
+                    "type": "decision",
+                    "summary": "Embedded before exit",
+                    "content": "The shutdown drain waits for the background embed.",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("tools/call create");
+    assert_ne!(created.is_error, Some(true), "create failed: {created:?}");
+    // An ingest still running when the session ends: shutdown must wait for
+    // it. (The real one above may already be done on a fast machine; this
+    // one finishes only after a delay, so the assertion is deterministic.)
+    let held = engramdb::retrieval::ingest_tracker::track();
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&finished);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(held);
+    });
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+    assert!(
+        finished.load(std::sync::atomic::Ordering::SeqCst),
+        "the serve future returned before the in-flight ingest finished"
+    );
+
+    let store = engramdb::storage::MemoryStore::open(dir.path())
+        .await
+        .unwrap();
+    let rows = store.list_for_filtering().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        store.has_chunks_for(&rows[0].id).await.unwrap(),
+        "the memory must have its vectors once the serve future returned"
+    );
+    assert_eq!(engramdb::retrieval::pending_ingests(), 0);
+}

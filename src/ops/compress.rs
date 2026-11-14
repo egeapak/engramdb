@@ -2033,6 +2033,75 @@ mod consolidation_tests {
         }
     }
 
+    /// `compress apply` with `embed_async` (the MCP path) creates the summary,
+    /// starts its embed in the background, then carries the sources' edges
+    /// onto it — an `update_with` racing that embed. The summary must keep
+    /// its vectors (the `updated_at` guard dropped them).
+    #[tokio::test]
+    async fn compress_apply_async_summary_keeps_its_vectors() {
+        use crate::types::{LinkKind, LinkOrigin};
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for summary in ["source a", "source b", "target c"] {
+            let m = Memory::new(MemoryType::Debug, summary, "body", Provenance::human());
+            ids.push(m.id.clone());
+            store.create(&m).await.unwrap();
+        }
+        crate::ops::links::link(
+            &store,
+            crate::ops::links::LinkParams {
+                src: ids[0].clone(),
+                kind: LinkKind::Supports,
+                dst: ids[2].clone(),
+                dst_store: None,
+                confidence: None,
+                origin: LinkOrigin::Human,
+                status: None,
+                note: None,
+            },
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let engine = crate::retrieval::engine::RetrievalEngine::new(
+            store.clone(),
+            crate::types::EngramConfig::default(),
+        )
+        .with_embedding_provider(std::sync::Arc::new(MarkerEmbedding));
+
+        let result = compress_apply(
+            &store,
+            CompressApplyParams {
+                source_ids: vec![ids[0].clone(), ids[1].clone()],
+                summary: "Summary".to_string(),
+                content: "Merged".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: true,
+            },
+            Some(&engine),
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::retrieval::drain_ingests(std::time::Duration::from_secs(60)).await,
+            0
+        );
+        let summary = store.get(&result.new_id).await.unwrap();
+        assert!(
+            summary.links.iter().any(|l| l.to == ids[2]),
+            "the edge was carried onto the summary"
+        );
+        assert!(
+            store.has_chunks_for(&result.new_id).await.unwrap(),
+            "the summary must keep its vectors"
+        );
+    }
+
     /// Stub NLI: any pair where either side contains "flaky" is a full
     /// contradiction; everything else is neutral.
     struct MarkerNli;

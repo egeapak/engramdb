@@ -5637,7 +5637,7 @@ pub async fn run_stdio(
 pub(crate) const SHUTDOWN_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// How long the shutdown sequence waits for background work tool calls
-/// started (today: the query-triggered compaction).
+/// started (the query-triggered compaction and in-flight ingests).
 pub(crate) const SHUTDOWN_DRAIN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long the shutdown sequence waits for the stats flush task.
@@ -5648,8 +5648,9 @@ const SHUTDOWN_FLUSH_WAIT: std::time::Duration = std::time::Duration::from_secs(
 /// 1. **Startup** (≤ [`SHUTDOWN_STARTUP_WAIT`]): let unfinished deferred
 ///    startup finish; abort it only past the bound.
 /// 2. **Drain** (≤ [`SHUTDOWN_DRAIN_WAIT`]): background work started by tool
-///    calls — the query-triggered compaction. This is the one place further
-///    drains (e.g. in-flight ingest tasks) belong.
+///    calls — the query-triggered compaction and the detached ingest tasks
+///    (`engramdb::retrieval::drain_ingests`), waited for together. This is the
+///    one place further drains belong.
 /// 3. **Stats flush** (≤ [`SHUTDOWN_FLUSH_WAIT`]): drop the last
 ///    `Arc<StatsCollector>` so the channel closes, then await the flush task.
 ///
@@ -5674,8 +5675,18 @@ pub(crate) async fn finish_session(
         let _ = startup.await;
     }
 
-    // 2. Drain: background work started by tool calls.
-    compaction.wait(SHUTDOWN_DRAIN_WAIT).await;
+    // 2. Drain: background work started by tool calls. The compaction and
+    // the detached ingests (`create`/`update` with `embed_async`) run
+    // concurrently, so both share the one bound.
+    let ((), left) = tokio::join!(
+        compaction.wait(SHUTDOWN_DRAIN_WAIT),
+        engramdb::retrieval::drain_ingests(SHUTDOWN_DRAIN_WAIT),
+    );
+    if left > 0 {
+        tracing::warn!(
+            "EngramDB: {left} memory embedding(s) still running {SHUTDOWN_DRAIN_WAIT:?} after the              session ended; those memories have no vectors yet — run              `engramdb reindex --embeddings-only`"
+        );
+    }
 
     // 3. Stats flush.
     drop(stats);
@@ -5966,6 +5977,16 @@ pub async fn run_sse(
     axum::serve(listener, router)
         .with_graceful_shutdown(async move { ct.cancelled().await })
         .await?;
+
+    // In-flight ingests (`create`/`update` embed in the background), bounded
+    // like the stdio shutdown's drain step.
+    let left = engramdb::retrieval::drain_ingests(SHUTDOWN_DRAIN_WAIT).await;
+    if left > 0 {
+        tracing::warn!(
+            "EngramDB: {left} memory embedding(s) still running at shutdown; those memories \
+             have no vectors yet — run `engramdb reindex --embeddings-only`"
+        );
+    }
 
     // Drop the collector — closing the channel triggers the flush task to
     // drain any buffered events and exit cleanly. Then await the task so
