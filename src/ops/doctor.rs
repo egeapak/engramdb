@@ -586,6 +586,12 @@ pub async fn doctor_environment(
         }
         if let Some(s) = store {
             project_checks.push(check_chunk_orphans(s).await);
+            if let Some(check) = check_memory_vectors(s).await {
+                project_checks.push(check);
+            }
+            if let Some(check) = check_store_data_dir(s) {
+                project_checks.push(check);
+            }
             if let Some(check) = check_memory_edges(s).await {
                 project_checks.push(check);
             }
@@ -972,7 +978,8 @@ pub struct HarvestHealth {
     /// Until one exists, `harvest search` cannot find that conversation and a
     /// miss is indistinguishable from the topic never coming up.
     pub pending_index: usize,
-    /// Ledger lines, and the live entries they fold down to.
+    /// Ledger lines, and the entries a compaction would keep: live sessions
+    /// plus the removal tombstones kept within the 365-day window.
     pub ledger_lines: usize,
     pub ledger_entries: usize,
     /// Cited conversations with no bytes left, and the memories citing them.
@@ -1040,7 +1047,7 @@ pub fn build_harvest_checks(health: &HarvestHealth) -> Vec<EnvironmentCheck> {
         name: "Harvest ledger".to_string(),
         passed: true,
         message: format!(
-            "{} line(s) for {} live entr{}{}",
+            "{} line(s), which compact to {} entr{} (sessions plus kept removal records){}",
             health.ledger_lines,
             health.ledger_entries,
             if health.ledger_entries == 1 {
@@ -2608,6 +2615,103 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
             status: None,
         },
     }
+}
+
+/// Live memories with no vectors are invisible to semantic search.
+///
+/// Reported only for a store that uses embeddings (a recorded fingerprint or
+/// any chunk row): a keyword-only store legitimately has none. A `Warn`, never
+/// a failure — a memory created a moment ago may still be embedding, and the
+/// MCP shutdown drain is a bound, not a guarantee. A non-forced
+/// `reindex --embeddings-only` embeds exactly these (no digest recorded ⇒
+/// rebuild); `doctor --fix` forces a re-embed, which repairs it too.
+async fn check_memory_vectors(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let uses_embeddings = matches!(store.embedding_fingerprint().await, Ok(Some(_)))
+        || matches!(store.has_any_chunks().await, Ok(true));
+    if !uses_embeddings {
+        return None;
+    }
+    let rows = match store.list_for_filtering().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Some(EnvironmentCheck {
+                name: "Memory vectors".to_string(),
+                passed: true,
+                message: format!("not checked: {e}"),
+                suggestion: None,
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            })
+        }
+    };
+    let live: Vec<_> = rows.iter().filter(|r| r.invalidated_at.is_none()).collect();
+    let missing: Vec<&str> = live
+        .iter()
+        .filter(|r| !r.has_embedding)
+        .map(|r| r.id.as_str())
+        .collect();
+    if missing.is_empty() {
+        return Some(EnvironmentCheck {
+            name: "Memory vectors".to_string(),
+            passed: true,
+            message: format!("all {} live memories have vectors", live.len()),
+            suggestion: None,
+            details: vec![],
+            status: None,
+        });
+    }
+    let mut details: Vec<String> = missing
+        .iter()
+        .take(5)
+        .map(|id| id.chars().take(8).collect())
+        .collect();
+    if missing.len() > 5 {
+        details.push(format!("… and {} more", missing.len() - 5));
+    }
+    Some(EnvironmentCheck {
+        name: "Memory vectors".to_string(),
+        passed: true,
+        message: format!(
+            "{} memor{} no vectors and {} invisible to semantic search",
+            missing.len(),
+            if missing.len() == 1 {
+                "y has"
+            } else {
+                "ies have"
+            },
+            if missing.len() == 1 { "is" } else { "are" },
+        ),
+        suggestion: Some("Run `engramdb reindex --embeddings-only`".to_string()),
+        details,
+        status: Some(CheckStatus::Warn),
+    })
+}
+
+/// A per-store data directory other accounts can read (it holds personal
+/// memories, conversation summaries and transcript copies). Writable opens
+/// tighten one the user owns; this reports what is still loose, read-only.
+fn check_store_data_dir(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let root = crate::storage::paths::global_data_dir().ok()?;
+    let dir = if store.is_global() {
+        root.join("global")
+    } else if store.is_group() {
+        root.join("groups").join(&store.project_id)
+    } else {
+        root.join("projects").join(&store.project_id)
+    };
+    let problem = crate::storage::paths::private_dir_problem(&dir)?;
+    Some(EnvironmentCheck {
+        name: "Store data directory".to_string(),
+        passed: true,
+        message: problem,
+        suggestion: Some(format!(
+            "Restrict it to your account: `chmod 700 {}` (any writable command does this for a \
+             directory you own)",
+            dir.display()
+        )),
+        details: vec![],
+        status: Some(CheckStatus::Warn),
+    })
 }
 
 /// Check for orphaned chunks (chunk memory_ids not in the memories table).
@@ -5277,6 +5381,69 @@ mod tests {
         let result = check_chunk_orphans(&store).await;
         assert_eq!(result.name, "Chunk index integrity");
         assert!(result.passed);
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_memories_without_vectors() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let embedded = Memory::new(MemoryType::Decision, "With", "vectors", Provenance::human());
+        let bare = Memory::new(
+            MemoryType::Decision,
+            "Without",
+            "vectors",
+            Provenance::human(),
+        );
+        store.create(&embedded).await.unwrap();
+        store.create(&bare).await.unwrap();
+        store
+            .upsert_chunks(&embedded.id, vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+
+        let check = check_memory_vectors(&store).await.expect("store embeds");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert!(check.passed, "a warning, never a failure");
+        assert!(
+            check.message.starts_with("1 memory has no vectors"),
+            "{}",
+            check.message
+        );
+        assert_eq!(check.details, vec![bare.id[..8].to_string()]);
+        assert!(check
+            .suggestion
+            .as_deref()
+            .unwrap()
+            .contains("reindex --embeddings-only"));
+    }
+
+    #[tokio::test]
+    async fn doctor_is_silent_about_vectors_in_a_store_that_never_embedded() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let mem = Memory::new(MemoryType::Decision, "Keyword", "only", Provenance::human());
+        store.create(&mem).await.unwrap();
+        assert!(check_memory_vectors(&store).await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn doctor_warns_about_a_store_data_dir_others_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        assert!(check_store_data_dir(&store).is_none(), "born 0700");
+        let dir = crate::storage::paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(&store.project_id);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let check = check_store_data_dir(&store).expect("loose dir reported");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert!(check.message.contains("accessible by other accounts"));
     }
 
     #[tokio::test]
