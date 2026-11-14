@@ -116,6 +116,16 @@ async fn update_memory_unrecorded(
         Some(strategy_str) => Some(parse_decay_strategy(strategy_str)?),
         None => None,
     };
+    // Out-of-range durations fail here too, before the lock, instead of
+    // panicking inside `Duration::seconds`.
+    let parsed_half_life = params
+        .decay_half_life
+        .map(|s| super::parsing::decay_seconds("decay_half_life", s))
+        .transpose()?;
+    let parsed_ttl = params
+        .decay_ttl
+        .map(|s| super::parsing::decay_seconds("decay_ttl", s))
+        .transpose()?;
     let wants_decay_update = parsed_decay_strategy.is_some()
         || params.decay_half_life.is_some()
         || params.decay_ttl.is_some()
@@ -245,14 +255,14 @@ async fn update_memory_unrecorded(
                 let mut decay = Decay::new(strategy);
 
                 // Merge numeric fields: prefer params, fall back to existing
-                if let Some(half_life_secs) = params.decay_half_life {
-                    decay.half_life = Some(Duration::seconds(half_life_secs as i64));
+                if let Some(half_life) = parsed_half_life {
+                    decay.half_life = Some(half_life);
                 } else if let Some(existing) = &existing_decay {
                     decay.half_life = existing.half_life;
                 }
 
-                if let Some(ttl_secs) = params.decay_ttl {
-                    decay.ttl = Some(Duration::seconds(ttl_secs as i64));
+                if let Some(ttl) = parsed_ttl {
+                    decay.ttl = Some(ttl);
                 } else if let Some(existing) = &existing_decay {
                     decay.ttl = existing.ttl;
                 }
@@ -278,11 +288,10 @@ async fn update_memory_unrecorded(
             // clears `expires_at`: the decay config is authoritative for
             // expiry whenever a decay field is updated.
             if wants_decay_update {
-                memory.expires_at = memory
-                    .decay
-                    .as_ref()
-                    .and_then(|d| d.ttl)
-                    .map(|ttl| memory.created_at + ttl);
+                memory.expires_at = match memory.decay.as_ref().and_then(|d| d.ttl) {
+                    Some(ttl) => Some(super::parsing::expiry_from(memory.created_at, ttl)?),
+                    None => None,
+                };
             }
 
             // Then handle tag additions (after replacement)
@@ -530,6 +539,25 @@ mod tests {
         assert!(memory.tags.contains(&"new3".to_string()));
         assert!(!memory.tags.contains(&"tag1".to_string()));
         assert!(!memory.tags.contains(&"tag2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_rejects_an_out_of_range_decay_ttl() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        let before = store.get(&id).await.unwrap();
+        for ttl in [99_999_999_999_999, u64::MAX] {
+            let mut p = empty_update_params();
+            p.decay_ttl = Some(ttl);
+            let err = update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_ttl must be at most"), "{err}");
+        }
+        let after = store.get(&id).await.unwrap();
+        assert_eq!(format!("{:?}", before.decay), format!("{:?}", after.decay));
+        assert_eq!(before.updated_at, after.updated_at);
     }
 
     #[tokio::test]

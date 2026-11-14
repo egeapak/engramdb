@@ -111,8 +111,10 @@ pub async fn plan_gc(
     // `[epistemic] invalidated_retention_days` are purged regardless of
     // score. `0` = keep forever.
     let retention_days = config.epistemic.invalidated_retention_days;
-    let retention_cutoff =
-        (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
+    // An out-of-range retention means "nothing is that old" (no cutoff).
+    let retention_cutoff = (retention_days > 0)
+        .then(|| super::parsing::days_before(now, retention_days))
+        .flatten();
 
     let mut candidates = Vec::new();
     for (_, memory) in &loaded {
@@ -173,8 +175,10 @@ pub async fn execute_gc_plan(
 
     // Recompute the retention cutoff for execution-time re-validation.
     let retention_days = config.epistemic.invalidated_retention_days;
-    let retention_cutoff =
-        (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
+    // An out-of-range retention means "nothing is that old" (no cutoff).
+    let retention_cutoff = (retention_days > 0)
+        .then(|| super::parsing::days_before(now, retention_days))
+        .flatten();
 
     // One lock, one batched re-read, one index delete, one chunk delete and
     // one manifest refresh for the whole sweep. `delete_if` per candidate was
@@ -773,6 +777,25 @@ mod invalidated_retention_tests {
             "the live low-score control should still be reaped: {:?}",
             result.removed
         );
+    }
+
+    /// A retention too large for `chrono` used to panic in
+    /// `Duration::days` (a release build aborts); it now means "nothing is
+    /// that old".
+    #[tokio::test]
+    async fn gc_survives_an_enormous_retention_days() {
+        let (_t, store) = setup().await;
+        let mut old = memory("gc-enormous", 0.9);
+        old.invalidated_at = Some(Utc::now() - Duration::days(10_000));
+        store.create(&old).await.unwrap();
+
+        let mut config = EngramConfig::default();
+        config.epistemic.invalidated_retention_days = u64::MAX;
+        for dry_run in [true, false] {
+            let result = gc_memories(&store, &config, dry_run, None).await.unwrap();
+            assert!(result.removed.is_empty(), "{:?}", result.removed);
+        }
+        assert!(store.get("gc-enormous").await.is_ok());
     }
 
     #[tokio::test]

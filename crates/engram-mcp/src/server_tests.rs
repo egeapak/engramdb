@@ -121,6 +121,20 @@ async fn create_basic() {
     assert_eq!(val["summary"], "Use Rust");
 }
 
+/// An out-of-range TTL is a tool error, not a panic that takes the server
+/// down (release builds abort on panic).
+#[tokio::test]
+async fn create_with_out_of_range_decay_ttl_is_an_error_result() {
+    let (_dir, server) = setup().await;
+    let mut input = create_input("decision", "Huge ttl", "content");
+    input.decay_ttl = Some(u64::MAX);
+    let result = server.memory_create(Parameters(input)).await;
+    let err = parse_err(&result).to_string();
+    assert!(err.contains("decay_ttl must be at most"), "{err}");
+    // The server still answers.
+    let _ = create_and_get_id(&server, "decision", "After", "Still alive").await;
+}
+
 #[tokio::test]
 async fn create_with_all_fields() {
     let (_dir, server) = setup().await;

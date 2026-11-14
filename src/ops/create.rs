@@ -211,7 +211,13 @@ async fn create_memory_unrecorded(
                         (cfg.observation_half_life_days, cfg.observation_decay_floor)
                     })
                     .unwrap_or((90, 0.2));
-                Some(Decay::exponential(Duration::days(half_life_days as i64)).with_floor(floor))
+                let half_life = super::parsing::config_days(half_life_days).unwrap_or_else(|| {
+                    tracing::warn!(
+                        "[epistemic] observation_half_life_days = {half_life_days} is out of range; using 90"
+                    );
+                    Duration::days(90)
+                });
+                Some(Decay::exponential(half_life).with_floor(floor))
             }
             _ => crate::types::default_decay(params.type_, epistemic),
         };
@@ -268,13 +274,16 @@ async fn create_memory_unrecorded(
 
         // Apply numeric fields
         if let Some(half_life_secs) = params.decay_half_life {
-            decay.half_life = Some(Duration::seconds(half_life_secs as i64));
+            decay.half_life = Some(super::parsing::decay_seconds(
+                "decay_half_life",
+                half_life_secs,
+            )?);
         } else if let Some(existing_decay) = &memory.decay {
             decay.half_life = existing_decay.half_life;
         }
 
         if let Some(ttl_secs) = params.decay_ttl {
-            decay.ttl = Some(Duration::seconds(ttl_secs as i64));
+            decay.ttl = Some(super::parsing::decay_seconds("decay_ttl", ttl_secs)?);
         } else if let Some(existing_decay) = &memory.decay {
             decay.ttl = existing_decay.ttl;
         }
@@ -291,7 +300,7 @@ async fn create_memory_unrecorded(
     // Compute expires_at from decay TTL if applicable
     if let Some(ref decay) = memory.decay {
         if let Some(ttl) = decay.ttl {
-            memory.expires_at = Some(memory.created_at + ttl);
+            memory.expires_at = Some(super::parsing::expiry_from(memory.created_at, ttl)?);
         }
     }
 
@@ -683,6 +692,38 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Invalid decay strategy"));
+    }
+
+    /// `Duration::seconds` panics above `i64::MAX / 1000` and
+    /// `u64::MAX as i64` is `-1`: both used to reach it unchecked.
+    #[tokio::test]
+    async fn create_rejects_an_out_of_range_decay_ttl() {
+        let (_temp, store) = setup_test_store().await;
+        for ttl in [99_999_999_999_999, u64::MAX] {
+            let mut params = minimal_create_params();
+            params.decay_ttl = Some(ttl);
+            let err = create_memory(&store, params, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_ttl must be at most"), "{err}");
+        }
+        assert!(store.list_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_an_out_of_range_decay_half_life() {
+        let (_temp, store) = setup_test_store().await;
+        for half_life in [99_999_999_999_999, u64::MAX] {
+            let mut params = minimal_create_params();
+            params.decay_half_life = Some(half_life);
+            let err = create_memory(&store, params, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_half_life must be at most"), "{err}");
+        }
+        assert!(store.list_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -1154,7 +1154,7 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
 
     // Due-ness uses the same `index_after_hours` the automatic pass does, so
     // the count doctor reports is exactly what that pass would pick up.
-    let after = chrono::Duration::hours(config.harvest.index_after_hours as i64);
+    let after = config.harvest.index_after();
     let pending_index =
         crate::ops::harvest_index::pending_sessions(&scope, after, chrono::Utc::now())
             .map(|v| v.len())
@@ -5684,7 +5684,7 @@ pub async fn doctor_epistemic(
         // §10.2 stale-observation (report-only, never flips).
         if memory.epistemic == Epistemic::Observation
             && review_days > 0
-            && now - anchor > chrono::Duration::days(review_days as i64)
+            && super::parsing::config_days(review_days).is_some_and(|d| now - anchor > d)
         {
             findings.push(EpistemicFinding {
                 id: memory.id.clone(),

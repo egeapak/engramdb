@@ -139,9 +139,78 @@ pub fn parse_detail_level(s: &str) -> Result<DetailLevel> {
     }
 }
 
+/// The longest decay duration a caller may ask for: 1,000 years, in seconds.
+///
+/// `chrono::Duration` cannot hold more than `i64::MAX` milliseconds, and the
+/// constructors panic above that (release builds abort). A cap far below that
+/// bound also keeps `created_at + ttl` inside chrono's date range.
+pub const MAX_DECAY_SECS: u64 = 1_000 * 365 * 86_400;
+
+/// A user-supplied decay duration (`decay_ttl` / `decay_half_life`), checked.
+///
+/// Refuses anything above [`MAX_DECAY_SECS`] instead of letting
+/// `Duration::seconds` panic (and `u64::MAX as i64` wrap to `-1`).
+pub(crate) fn decay_seconds(field: &str, secs: u64) -> Result<chrono::Duration> {
+    let too_big = || {
+        anyhow::anyhow!(
+            "{field} must be at most {MAX_DECAY_SECS} seconds (1000 years); omit it for no expiry"
+        )
+    };
+    if secs > MAX_DECAY_SECS {
+        return Err(too_big());
+    }
+    let secs = i64::try_from(secs).map_err(|_| too_big())?;
+    chrono::Duration::try_seconds(secs).ok_or_else(too_big)
+}
+
+/// `created_at + ttl`, or the same validation error as [`decay_seconds`] when
+/// the sum leaves chrono's date range.
+pub(crate) fn expiry_from(
+    created_at: chrono::DateTime<chrono::Utc>,
+    ttl: chrono::Duration,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    created_at.checked_add_signed(ttl).ok_or_else(|| {
+        anyhow::anyhow!(
+            "decay_ttl must be at most {MAX_DECAY_SECS} seconds (1000 years); omit it for no expiry"
+        )
+    })
+}
+
+/// A config-driven day count as a duration; `None` when it does not fit.
+pub(crate) fn config_days(days: u64) -> Option<chrono::Duration> {
+    chrono::Duration::try_days(i64::try_from(days).ok()?)
+}
+
+/// `now - days`, or `None` ("nothing is that old") when out of range.
+pub(crate) fn days_before(
+    now: chrono::DateTime<chrono::Utc>,
+    days: u64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    now.checked_sub_signed(config_days(days)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decay_seconds_bounds() {
+        assert_eq!(
+            decay_seconds("decay_ttl", 3600).unwrap(),
+            chrono::Duration::seconds(3600)
+        );
+        assert_eq!(
+            decay_seconds("decay_ttl", MAX_DECAY_SECS).unwrap(),
+            chrono::Duration::seconds(MAX_DECAY_SECS as i64)
+        );
+        for bad in [MAX_DECAY_SECS + 1, 99_999_999_999_999, u64::MAX] {
+            let err = decay_seconds("decay_ttl", bad).unwrap_err().to_string();
+            assert!(err.contains("decay_ttl must be at most"), "{err}");
+        }
+        assert!(config_days(u64::MAX).is_none());
+        assert!(days_before(chrono::Utc::now(), u64::MAX).is_none());
+        assert!(days_before(chrono::Utc::now(), 30).is_some());
+    }
 
     #[test]
     fn test_parse_memory_type_valid() {
