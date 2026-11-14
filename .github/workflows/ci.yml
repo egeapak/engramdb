@@ -17,6 +17,13 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  # Every `cargo nextest` in this workflow (`cargo llvm-cov nextest` included)
+  # runs the `ci` profile from .config/nextest.toml: no fail-fast, a test that
+  # runs longer than 5 minutes is terminated and reported by name, and a JUnit
+  # report is written to target/nextest/ci/junit.xml. Set here, not as a
+  # `--profile ci` flag on each command, so a new nextest step cannot forget
+  # it (and `cargo llvm-cov` has a `--profile` of its own).
+  NEXTEST_PROFILE: ci
 
 # A newer push to the same PR makes the older run's result worthless; cancel
 # it instead of letting it hold ~12 runners. Pushes to master are never
@@ -50,6 +57,11 @@ permissions:
 # 41399668398, before this policy, restored nothing: by then PR saves had
 # evicted master's `test` entry, so it compiled all 584 crates in 9 min.)
 
+# Every job has a `timeout-minutes`. Without one a hung test or a stalled
+# download holds its runner for GitHub's 6-hour default. Each value is well
+# above the slowest run of that job in a 25-run sample (cold caches included;
+# medians are 3 to 10 times lower), so it cuts off a hang, not a slow day.
+
 # Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
 # they need the full ONNX runtime plus downloaded embedding models, and
 # shared-runner variance makes any timing threshold flaky. They are local
@@ -64,6 +76,7 @@ jobs:
   manifest-version:
     name: Manifest version parity
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: Check plugin.json == marketplace.json version
@@ -86,6 +99,7 @@ jobs:
   fuzz-lockfile-parity:
     name: Fuzz lockfile parity
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       # `fuzz/` is its own workspace, so nothing in a normal build reads its
@@ -143,6 +157,7 @@ jobs:
   formatter-output:
     name: CLI output goes through the formatter
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       # `OutputFormatter` writes through an injectable `Sink` (real streams in
@@ -216,6 +231,7 @@ jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -276,6 +292,7 @@ jobs:
   check-cross:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -328,6 +345,17 @@ jobs:
           cargo nextest run --workspace --all-features --locked
           -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-cross-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   # Build once, run sharded. The suite is ~26 CPU-minutes of test time that
   # nextest already spreads across all 4 cores of one runner (~6.8 min wall,
   # measured), so it is CPU-bound and splits almost linearly across runners.
@@ -349,6 +377,7 @@ jobs:
   test-build:
     name: Test (build)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -394,6 +423,7 @@ jobs:
     name: Test (shard ${{ matrix.shard }}/3)
     needs: test-build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -450,6 +480,17 @@ jobs:
           --workspace-remap "${{ github.workspace }}"
           --partition count:${{ matrix.shard }}/3
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-all-features-shard-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   # `ops::compress::dot_unit` is `fearless_simd`, whose `dispatch!` normalises
   # *up* to the best SIMD level the CPU supports and offers no runtime way down.
   # Every runner here has AVX2 or better, so without this job the SSE2 and
@@ -464,6 +505,7 @@ jobs:
   simd-levels:
     name: SIMD kernel at every dispatch level
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -505,6 +547,17 @@ jobs:
           cargo nextest run -p engramdb --lib --locked \
             -E 'test(ops::compress::tests::dot_unit) + test(ops::compress::tests::similar_pairs)'
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-simd-${{ matrix.level }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   # `--all-features` necessarily turns `bundled-onnxruntime` back on, so the job
   # above links ONNX Runtime statically and never exercises what users actually
   # ship: default features, where the runtime is `dlopen`ed at run time. This job
@@ -521,6 +574,7 @@ jobs:
   test-load-dynamic-build:
     name: Test (default features, runtime-loaded ONNX) (build)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -595,6 +649,7 @@ jobs:
     name: Test (default features, runtime-loaded ONNX) (shard ${{ matrix.shard }}/3)
     needs: test-load-dynamic-build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -645,9 +700,21 @@ jobs:
           --workspace-remap "${{ github.workspace }}"
           --partition count:${{ matrix.shard }}/3
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-default-features-shard-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       ONNXRUNTIME_VERSION: "1.24.2"
     steps:
@@ -717,6 +784,17 @@ jobs:
         # multiple formats from the one profdata set below.
         run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-coverage
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Report the ONNX model cache
         run: |
           du -sh ~/.cache/engramdb/models/models--*/ 2>/dev/null | sort -h || true
@@ -780,6 +858,7 @@ jobs:
       - test-load-dynamic
       - coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Every job succeeded
         env:

@@ -181,6 +181,7 @@ jobs:
       always() && github.event_name == 'schedule' &&
       (needs.build.result != 'success' || needs.fuzz.result != 'success')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       issues: write

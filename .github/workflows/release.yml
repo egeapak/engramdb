@@ -35,6 +35,7 @@ jobs:
   # Catches a tag/manifest/binary drift before any binary is built or published.
   version-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: Assert tag matches manifest and workspace versions
@@ -62,6 +63,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       # Mirror ci.yml: drop debuginfo so the ~8 heavy test binaries stay
       # within the runner's disk, and skip dead-weight incremental state.
@@ -71,6 +73,9 @@ jobs:
       # Must match ci.yml's pin: the runtime this job installs is the one the
       # model-loading tests dlopen.
       ONNXRUNTIME_VERSION: "1.24.2"
+      # Same nextest profile as ci.yml: slow-test termination and a JUnit
+      # report (see .config/nextest.toml).
+      NEXTEST_PROFILE: ci
     steps:
       - uses: actions/checkout@v7
 
@@ -110,9 +115,21 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-release-test
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   build-arm:
     needs: [version-check, test]
     runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -168,6 +185,7 @@ jobs:
   build-intel:
     needs: [version-check, test]
     runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -213,6 +231,7 @@ jobs:
   build-linux:
     needs: [version-check, test]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -247,6 +266,7 @@ jobs:
   build-windows:
     needs: [version-check, test]
     runs-on: windows-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -284,6 +304,7 @@ jobs:
   release:
     needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@v8
         with:

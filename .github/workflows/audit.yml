@@ -20,6 +20,7 @@ jobs:
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Advisory-only for now: the license allow-list in deny.toml was written
     # from the known ecosystem (Rust/Arrow/DataFusion/ONNX), not confirmed by
     # a full `cargo deny` pass over the resolved dependency tree, so an
