@@ -547,6 +547,23 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # nextest does not run doctests, so no job ever compiled an example in
+      # a doc comment: one that no longer matches the API it documents stayed
+      # wrong. Here because the dependencies are already built in this
+      # profile. The shards wait for this job, so this step's time is added to
+      # every run; if that turns out to be minutes, move it to its own job.
+      #
+      # NOT BLOCKING YET (`continue-on-error`): doctests have never run in CI
+      # or in the sandbox this step was written in, so whether today's tree
+      # passes is unknown, and a required job must not be shipped red. A
+      # failure shows as an annotation on the run. Remove `continue-on-error`
+      # after the first green run of this step; if it is slow because each
+      # example links the LanceDB stack, mark the heavy ones `no_run` (they
+      # still compile) rather than dropping the step.
+      - name: Doctests (not blocking yet)
+        continue-on-error: true
+        run: cargo test --doc --workspace --all-features --locked
+
   test:
     name: Test (shard ${{ matrix.shard }}/3)
     needs: test-build
@@ -1085,7 +1102,27 @@ jobs:
         # Mirror the `test` job's invocation so coverage reflects the real
         # suite. `--no-report` defers report generation so we can emit
         # multiple formats from the one profdata set below.
+        env:
+          # insta appends the path of every snapshot file an assertion
+          # touches (the mechanism behind `cargo insta test --unreferenced`).
+          # Read by the "unreferenced snapshots" step below. Set on this job
+          # because it is the only one that runs the whole suite unsharded.
+          INSTA_SNAPSHOT_REFERENCES_FILE: ${{ runner.temp }}/insta-snapshot-references.txt
         run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
+
+      # A snapshot whose test was renamed or deleted still looks like a pinned
+      # contract and pins nothing. See the script's header.
+      #
+      # NOT BLOCKING YET (`continue-on-error`): this comparison has never run,
+      # so the tree may hold dead snapshots today, and it is not yet confirmed
+      # that the references file is written under `cargo llvm-cov nextest`.
+      # A failure shows as annotations naming each file. After the first green
+      # run of this step, remove `continue-on-error`.
+      - name: Every committed snapshot was asserted by a test (not blocking yet)
+        continue-on-error: true
+        env:
+          REFS: ${{ runner.temp }}/insta-snapshot-references.txt
+        run: bash .github/scripts/check_unreferenced_snapshots.sh "$REFS"
 
       - name: Upload the JUnit report
         # `if: always()`: the report matters most when a test failed or was
@@ -1115,6 +1152,15 @@ jobs:
       - name: Generate coverage reports
         # Exclude integration-test harness files and the test-isolation crate
         # from the denominator so the percentage tracks production code.
+        #
+        # No `--fail-under-lines` floor, deliberately, for now. The lcov
+        # artifacts of recent runs list only the core crate's files (52 files
+        # under src/, none under crates/), about 94.5 % of their lines. A
+        # floor on that figure would guard 52 of about 190 source files and
+        # read as if it guarded all of them. First make the report cover the workspace
+        # (confirm what these two `report` calls need for that), read the
+        # real figure from a master run, then add a floor a couple of points
+        # under it.
         env:
           IGNORE: '(/tests?/|test_support|engram-test-support|/benches/|/examples/|/fuzz/)'
         run: |
