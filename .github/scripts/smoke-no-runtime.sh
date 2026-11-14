@@ -133,7 +133,8 @@ cd "$work/project"
 
 # 1. Starts at all (no load-time dependency on the runtime), right version.
 run "0" "--version" --version
-version_line=$(head -n 1 "$out")
+# `tr`: a Windows binary ends its lines with CR LF.
+version_line=$(head -n 1 "$out" | tr -d '\r')
 echo "    $version_line"
 if [ -n "$expected_version" ] && [ "$version_line" != "engramdb $expected_version" ]; then
   fail "--version printed '$version_line', expected 'engramdb $expected_version'"

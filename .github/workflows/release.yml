@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run: builds, tests and smoke-runs all four targets from any ref and
+  # publishes nothing (the `release` job runs only for a tag). Use it to try a
+  # change to this file before the tag that depends on it.
+  workflow_dispatch:
 
 # Read-only by default. Only the `release` job, which publishes, gets a write
 # token (see its `permissions`). The test and build jobs run a build script
@@ -46,11 +50,23 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      # The workspace version, which is what `engramdb --version` must print.
+      # For a tag it was just checked equal to the tag.
+      version: ${{ steps.versions.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Assert tag matches manifest and workspace versions
+        id: versions
         run: |
-          tag_ver="${GITHUB_REF_NAME#v}"
+          # A dry run (workflow_dispatch) has no tag: the three files must
+          # still agree with each other, so compare them to Cargo.toml.
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag_ver="${GITHUB_REF_NAME#v}"
+          else
+            tag_ver=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+            echo "::notice::dry run on $GITHUB_REF_NAME: no tag to compare, using Cargo.toml's $tag_ver"
+          fi
           plugin_ver=$(jq -r '.version' .claude-plugin/plugin.json)
           market_ver=$(jq -r '.plugins[] | select(.name == "engram") | .version' .claude-plugin/marketplace.json)
           # [workspace.package] version is the single source of truth every
@@ -65,11 +81,16 @@ jobs:
           [ "$plugin_ver" = "$tag_ver" ] || { echo "::error::plugin.json ($plugin_ver) != tag ($tag_ver)"; fail=1; }
           [ "$market_ver" = "$tag_ver" ] || { echo "::error::marketplace.json ($market_ver) != tag ($tag_ver)"; fail=1; }
           [ "$cargo_ver" = "$tag_ver" ] || { echo "::error::Cargo.toml [workspace.package] version ($cargo_ver) != tag ($tag_ver)"; fail=1; }
+          [ -n "$cargo_ver" ] || { echo "::error::could not read [workspace.package] version from Cargo.toml"; fail=1; }
+          echo "version=$cargo_ver" >> "$GITHUB_OUTPUT"
           exit $fail
 
   # Release binaries must come from a commit the test suite passed on: a tag
   # can point at any commit (including one that never went through a PR), so
-  # run the same suite CI runs (see ci.yml `test`) before any build starts.
+  # run the same suites CI runs before any build starts: `--all-features`
+  # (ci.yml `test`) and then default features (ci.yml `test-load-dynamic`),
+  # which is the feature set the binaries below are built with. The second
+  # run costs about one more build of the test binaries per release.
   #
   # Toolchain: every job runs `rustup toolchain install` with no argument, so
   # the binaries are built by the compiler rust-toolchain.toml pins, the same
@@ -120,6 +141,16 @@ jobs:
         # The version and its SHA-256 live in the action, once.
         uses: ./.github/actions/install-onnxruntime
 
+      - name: Restore the ONNX model cache
+        # Same key as ci.yml, whose `coverage` job saves it on master; a cache
+        # saved on the default branch is readable from a tag. Restore-only.
+        # Anything it lacks is downloaded at run time, as before.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked
 
@@ -130,6 +161,21 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-release-test
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Run tests (default features, what ships)
+        # `--all-features` links a static ONNX Runtime next to the dlopen
+        # path; the release binaries have only the dlopen path. This run uses
+        # the runtime installed above, found through the built-in search path.
+        run: cargo nextest run --workspace --locked
+
+      - name: Upload the JUnit report (default features)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-release-test-default-features
           path: target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: warn
@@ -168,6 +214,34 @@ jobs:
         # Default features select `load-dynamic`: no ONNX Runtime is needed to
         # build, and none is shipped. The user supplies one at run time.
         run: cargo build --release --bin engramdb --locked
+
+      - name: Binary must not record a load-time dependency on ONNX Runtime
+        # Same property ci.yml asserts on the debug binary, now on the file
+        # that ships: if the runtime becomes a load-time dependency, the
+        # loader resolves it before `main()` and a user without it cannot even
+        # run `engramdb doctor`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          otool -L target/release/engramdb > deps.txt
+          # Guard the guard: an empty or failed listing must not pass.
+          grep -q 'libSystem' deps.txt || { echo "::error::otool printed no libSystem entry"; cat deps.txt; exit 1; }
+          if grep -qi onnxruntime deps.txt; then
+            echo "::error::the release binary links ONNX Runtime at load time:"
+            grep -i onnxruntime deps.txt
+            exit 1
+          fi
+          echo "OK: no load-time ONNX Runtime dependency recorded."
+
+      - name: Run the built binary
+        # The binary that is about to be published has to start, report its
+        # version, and get through every model-loading command without being
+        # killed (this runner has no ONNX Runtime, and this profile is
+        # `panic = "abort"`). See the script's header.
+        shell: bash
+        env:
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: bash .github/scripts/smoke-no-runtime.sh target/release/engramdb "$VERSION"
 
       - name: Package binary
         run: |
@@ -223,6 +297,39 @@ jobs:
         # casing it used to need.
         run: cargo build --release --bin engramdb --locked --target x86_64-apple-darwin
 
+      - name: Binary must not record a load-time dependency on ONNX Runtime
+        # Same property ci.yml asserts on the debug binary, now on the file
+        # that ships: if the runtime becomes a load-time dependency, the
+        # loader resolves it before `main()` and a user without it cannot even
+        # run `engramdb doctor`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          otool -L target/x86_64-apple-darwin/release/engramdb > deps.txt
+          # Guard the guard: an empty or failed listing must not pass.
+          grep -q 'libSystem' deps.txt || { echo "::error::otool printed no libSystem entry"; cat deps.txt; exit 1; }
+          if grep -qi onnxruntime deps.txt; then
+            echo "::error::the release binary links ONNX Runtime at load time:"
+            grep -i onnxruntime deps.txt
+            exit 1
+          fi
+          echo "OK: no load-time ONNX Runtime dependency recorded."
+
+      - name: Install Rosetta
+        # This runner is arm64 and the binary is x86_64. The smoke run below
+        # is the assertion; this only makes it possible.
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Run the built binary
+        # The binary that is about to be published has to start, report its
+        # version, and get through every model-loading command without being
+        # killed (this runner has no ONNX Runtime, and this profile is
+        # `panic = "abort"`). See the script's header.
+        shell: bash
+        env:
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: bash .github/scripts/smoke-no-runtime.sh target/x86_64-apple-darwin/release/engramdb "$VERSION"
+
       - name: Package binary
         run: |
           cd target/x86_64-apple-darwin/release
@@ -256,6 +363,34 @@ jobs:
         # run time from the user's system, not linked in and not shipped.
         run: cargo build --release --bin engramdb --locked
 
+      - name: Binary must not record a load-time dependency on ONNX Runtime
+        # Same property ci.yml asserts on the debug binary, now on the file
+        # that ships: if the runtime becomes a load-time dependency, the
+        # loader resolves it before `main()` and a user without it cannot even
+        # run `engramdb doctor`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd target/release/engramdb > deps.txt
+          # Guard the guard: an empty or failed listing must not pass.
+          grep -q 'libc\.so' deps.txt || { echo "::error::ldd printed no libc entry"; cat deps.txt; exit 1; }
+          if grep -qi onnxruntime deps.txt; then
+            echo "::error::the release binary links ONNX Runtime at load time:"
+            grep -i onnxruntime deps.txt
+            exit 1
+          fi
+          echo "OK: no load-time ONNX Runtime dependency recorded."
+
+      - name: Run the built binary
+        # The binary that is about to be published has to start, report its
+        # version, and get through every model-loading command without being
+        # killed (this runner has no ONNX Runtime, and this profile is
+        # `panic = "abort"`). See the script's header.
+        shell: bash
+        env:
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: bash .github/scripts/smoke-no-runtime.sh target/release/engramdb "$VERSION"
+
       - name: Package binary
         run: |
           cd target/release
@@ -284,13 +419,46 @@ jobs:
         run: rustup toolchain install
 
       - name: Build release binary
-        # The shared embedding daemon (Unix-domain-socket only) compiles out on
-        # Windows via `#[cfg(unix)]`; model inference runs in-process. Default
-        # features select `load-dynamic`, so `onnxruntime.dll` is resolved from
-        # the user's system at run time. The release profile keeps the main
+        # The shared embedding daemon runs on Windows too, over a named pipe
+        # (`#[cfg(windows)]` in src/daemon/transport.rs). Default features
+        # select `load-dynamic`, so `onnxruntime.dll` is resolved from the
+        # user's system at run time. The release profile keeps the main
         # thread under Windows' 1 MiB default stack, so no `/STACK` linker flag
         # is needed.
         run: cargo build --release --bin engramdb --locked
+
+      - name: Binary must not record a load-time dependency on ONNX Runtime
+        # Same property ci.yml asserts on the debug binary, now on the file
+        # that ships: if the runtime becomes a load-time dependency, the
+        # loader resolves it before `main()` and a user without it cannot even
+        # run `engramdb doctor`.
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `llvm-readobj` from the toolchain's own llvm-tools: `dumpbin` needs
+          # a Visual Studio environment.
+          rustup component add llvm-tools
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          "$(rustc --print sysroot)/lib/rustlib/$host/bin/llvm-readobj.exe" \
+            --coff-imports target/release/engramdb.exe > deps.txt
+          # Guard the guard: an empty or failed listing must not pass.
+          grep -qi 'kernel32' deps.txt || { echo "::error::llvm-readobj printed no KERNEL32 import"; head -n 40 deps.txt; exit 1; }
+          if grep -qi onnxruntime deps.txt; then
+            echo "::error::the release binary links ONNX Runtime at load time:"
+            grep -i onnxruntime deps.txt
+            exit 1
+          fi
+          echo "OK: no load-time ONNX Runtime dependency recorded."
+
+      - name: Run the built binary
+        # The binary that is about to be published has to start, report its
+        # version, and get through every model-loading command without being
+        # killed (this runner has no ONNX Runtime, and this profile is
+        # `panic = "abort"`). See the script's header.
+        shell: bash
+        env:
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: bash .github/scripts/smoke-no-runtime.sh target/release/engramdb.exe "$VERSION"
 
       - name: Package binary
         shell: pwsh
@@ -299,25 +467,67 @@ jobs:
           $hash = (Get-FileHash engramdb-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash.ToLower()
           "$hash  engramdb-x86_64-pc-windows-msvc.zip" | Out-File -Encoding ascii engramdb-x86_64-pc-windows-msvc.zip.sha256
 
+      - name: Generate the Scoop manifest
+        # packaging/scoop/engramdb.json cannot carry the real hash: the hash
+        # is of an archive built from the commit that contains the file. So
+        # the repository file is a template, and the manifest that works is
+        # generated here, from the archive just built, and published as a
+        # release asset. Built in this job because it has both the checkout
+        # and the archive; the `release` job checks nothing out.
+        shell: bash
+        env:
+          VERSION: ${{ needs.version-check.outputs.version }}
+        run: |
+          set -euo pipefail
+          hash=$(cut -d' ' -f1 engramdb-x86_64-pc-windows-msvc.zip.sha256 | tr -d '\r\n')
+          if ! [[ "$hash" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::unexpected sha256 file content: '$hash'"; exit 1
+          fi
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/engramdb-x86_64-pc-windows-msvc.zip"
+          jq --arg version "$VERSION" --arg url "$url" --arg hash "$hash" \
+            '.version = $version
+             | .architecture."64bit".url = $url
+             | .architecture."64bit".hash = $hash' \
+            packaging/scoop/engramdb.json > engramdb.json
+          jq -e '.version != "" and (.architecture."64bit".hash | test("^0+$") | not)' engramdb.json > /dev/null
+          cat engramdb.json
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engramdb-x86_64-pc-windows-msvc
           path: |
             engramdb-x86_64-pc-windows-msvc.zip
             engramdb-x86_64-pc-windows-msvc.zip.sha256
+            engramdb.json
 
   release:
     needs: [build-arm, build-intel, build-linux, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Only for a tag: a workflow_dispatch dry run stops after the builds.
+    if: github.ref_type == 'tag'
     # The only job with a write token: it creates the release and uploads the
-    # archives. It checks out nothing and builds nothing.
+    # archives. It checks out nothing and builds nothing. `id-token` and
+    # `attestations` are what signing the build provenance needs.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           merge-multiple: true
+
+      - name: Attest build provenance
+        # A signed statement, stored by GitHub, that these exact archives were
+        # built by this workflow run from this commit. Anyone can check a
+        # download with `gh attestation verify <file> --repo <owner>/<repo>`.
+        # Done here so the build jobs stay read-only.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            engramdb-*.tar.gz
+            engramdb-*.zip
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
@@ -350,3 +560,4 @@ jobs:
             engramdb-*.tar.gz.sha256
             engramdb-*.zip
             engramdb-*.zip.sha256
+            engramdb.json
