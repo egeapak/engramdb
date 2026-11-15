@@ -208,6 +208,23 @@ pub async fn discover_projects_in(
     opts: &DiscoverOptions,
     on_dir: impl Fn(&Path) + Send + Sync,
 ) -> Result<DiscoveryReport> {
+    // The global/group stores live under the global data dir in the same
+    // `.engramdb/` layout. They are engramdb's own storage, not user projects,
+    // and are never registry entries — without this guard, scanning a home
+    // directory would offer to "register" them.
+    let internal_root = paths::global_data_dir().ok();
+    discover_with_internal_root(root, reg, opts, on_dir, internal_root).await
+}
+
+/// [`discover_projects_in`] with the internal-store root passed in, so a test
+/// can place it inside the scanned tree without setting `ENGRAMDB_DATA_DIR`.
+async fn discover_with_internal_root(
+    root: &Path,
+    reg: &Registry,
+    opts: &DiscoverOptions,
+    on_dir: impl Fn(&Path) + Send + Sync,
+    internal_root: Option<PathBuf>,
+) -> Result<DiscoveryReport> {
     if !root.is_dir() {
         bail!("{} is not a directory", root.display());
     }
@@ -252,11 +269,7 @@ pub async fn discover_projects_in(
         }
     }
 
-    // The global/group stores live under the global data dir in the same
-    // `.engramdb/` layout. They are engramdb's own storage, not user projects,
-    // and are never registry entries — without this guard, scanning a home
-    // directory would offer to "register" them.
-    let internal_root = paths::global_data_dir().ok().map(|p| canonical(&p));
+    let internal_root = internal_root.map(|p| canonical(&p));
 
     let mut report = DiscoveryReport::default();
 
@@ -802,8 +815,10 @@ mod tests {
     #[tokio::test]
     async fn the_internal_store_is_skipped_when_reached_as_a_child() {
         let tmp = TempDir::new().unwrap();
-        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path().join("data"));
-        let internal = paths::global_data_dir().unwrap();
+        // The internal root is passed in rather than set through
+        // ENGRAMDB_DATA_DIR, which would leak into later tests of a
+        // `cargo test` process.
+        let internal = tmp.path().join("data");
         std::fs::create_dir_all(internal.join("projects").join("global").join(".engramdb"))
             .unwrap();
         // A real project alongside it, so an empty result cannot pass by
@@ -814,7 +829,15 @@ mod tests {
             include_hidden: true,
             ..Default::default()
         };
-        let report = scan_with(tmp.path(), &Registry::default(), &opts).await;
+        let report = discover_with_internal_root(
+            tmp.path(),
+            &Registry::default(),
+            &opts,
+            |_| {},
+            Some(internal.clone()),
+        )
+        .await
+        .unwrap();
 
         assert!(
             report

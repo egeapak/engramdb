@@ -2466,10 +2466,10 @@ mod tests {
         // another way — `projects delete --cascade`, an archive written under
         // the pre-`projects link` id, eviction on another machine — never
         // reached `clear_archive_refs` and made its entry immortal.
+        // The armed data dir, and a project id no other test uses (the id of
+        // a fresh temp dir), so no test needs to move ENGRAMDB_DATA_DIR.
         let tmp = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
-        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        let proj = crate::project_id::compute_project_id(tmp.path());
 
         let dir = tmp.path();
         let mut ghost = LedgerLine::touching("ghost");
@@ -2479,17 +2479,12 @@ mod tests {
         append(dir, &[ghost]).unwrap();
 
         // No archive directory at all: every claim is dangling.
-        let cleared = reconcile_archive_refs(dir, "proj").unwrap();
+        let cleared = reconcile_archive_refs(dir, &proj).unwrap();
         assert_eq!(cleared, vec!["ghost"], "the dangling ref was not noticed");
         assert!(
             !read_harvested(dir).contains_key("ghost"),
             "an entry naming a file that does not exist outlived the age window"
         );
-
-        match prev {
-            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
-        }
     }
 
     #[test]
@@ -2497,26 +2492,19 @@ mod tests {
         // Negative control: the whole point of the exemption is that a live
         // archive keeps its only index into itself.
         let tmp = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
-        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        let proj = crate::project_id::compute_project_id(tmp.path());
 
         let src = TempDir::new().unwrap();
         let transcript = src.path().join("live.jsonl");
         std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
-        let archive = crate::transcript_archive::archive_transcript("proj", "live", &transcript)
+        let archive = crate::transcript_archive::archive_transcript(&proj, "live", &transcript)
             .expect("archive written");
         set_archive(tmp.path(), "live", archive).unwrap();
 
-        assert!(reconcile_archive_refs(tmp.path(), "proj")
+        assert!(reconcile_archive_refs(tmp.path(), &proj)
             .unwrap()
             .is_empty());
         assert!(read_harvested(tmp.path())["live"].archive.is_some());
-
-        match prev {
-            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
-        }
     }
 
     #[test]

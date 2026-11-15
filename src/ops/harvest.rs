@@ -2367,8 +2367,10 @@ mod tests {
         // took away is exempt from the age window forever.
         use crate::storage::InMemoryRegistry;
 
-        let data = tempfile::TempDir::new().unwrap();
-        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        // The armed data dir is enough: the project is a fresh temp dir, so
+        // its id is unique and `<data>/projects/<id>/transcripts/gone.jsonl.zst`
+        // cannot exist. (Setting ENGRAMDB_DATA_DIR here leaked into every
+        // later test of a `cargo test` process.)
         let project = tempfile::TempDir::new().unwrap();
         let dir = project.path();
         let registry = InMemoryRegistry::new();

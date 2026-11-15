@@ -511,21 +511,21 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Point the global data dir at a temp dir for one test.
+    /// A project id no other test in this process uses: 16 hex characters
+    /// from the pid and a counter (the format `archive_path` accepts).
     ///
-    /// The `#[ctor]` test arm already redirects `ENGRAMDB_DATA_DIR` per
-    /// process; this narrows it further per test. Safe under nextest's
-    /// process-per-test model.
-    fn with_data_dir<T>(f: impl FnOnce(&Path) -> T) -> T {
-        let tmp = TempDir::new().unwrap();
-        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
-        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path());
-        let out = f(tmp.path());
-        match prev {
-            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
-        }
-        out
+    /// Every test runs against the armed per-process data dir and keys its
+    /// copies by a fresh id, rather than moving `ENGRAMDB_DATA_DIR` per test,
+    /// which raced every other test of a `cargo test` process.
+    pub(super) fn unique_project_id() -> String {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("{:08x}{n:08x}", std::process::id())
+    }
+
+    /// Run `f` with a project id of its own (see [`unique_project_id`]).
+    fn with_project<T>(f: impl FnOnce(&str) -> T) -> T {
+        f(&unique_project_id())
     }
 
     /// No memory cites anything — the state of a store that has never
@@ -554,12 +554,12 @@ mod tests {
 
     #[test]
     fn archive_roundtrips_and_preserves_bytes() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let transcript = write_transcript(src.path(), "s1.jsonl", 500);
             let original = std::fs::read(&transcript).unwrap();
 
-            let archived = archive_transcript("proj", "s1", &transcript).unwrap();
+            let archived = archive_transcript(proj, "s1", &transcript).unwrap();
             assert_eq!(archived.original_bytes, original.len() as u64);
             assert!(archived.bytes > 0);
             assert!(
@@ -568,7 +568,7 @@ mod tests {
             );
 
             let out = src.path().join("restored.jsonl");
-            let sha = export_archive("proj", "s1", &out).unwrap();
+            let sha = export_archive(proj, "s1", &out).unwrap();
             assert_eq!(sha, archived.sha256, "export must round-trip byte-for-byte");
             assert_eq!(std::fs::read(&out).unwrap(), original);
         });
@@ -576,22 +576,22 @@ mod tests {
 
     #[test]
     fn re_archiving_overwrites_rather_than_duplicating() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let transcript = write_transcript(src.path(), "s1.jsonl", 10);
-            archive_transcript("proj", "s1", &transcript).unwrap();
-            archive_transcript("proj", "s1", &transcript).unwrap();
-            assert_eq!(list_archives("proj").unwrap().len(), 1);
+            archive_transcript(proj, "s1", &transcript).unwrap();
+            archive_transcript(proj, "s1", &transcript).unwrap();
+            assert_eq!(list_archives(proj).unwrap().len(), 1);
         });
     }
 
     #[test]
     fn no_tmp_file_survives_a_successful_archive() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let transcript = write_transcript(src.path(), "s1.jsonl", 10);
-            archive_transcript("proj", "s1", &transcript).unwrap();
-            let dir = paths::transcript_archive_dir("proj").unwrap();
+            archive_transcript(proj, "s1", &transcript).unwrap();
+            let dir = paths::transcript_archive_dir(proj).unwrap();
             // Assert on the whole directory rather than on a temp *name*
             // (`.<session>.<random>.tmp` today, `.tmp<pid>` before): a match
             // on the wrong pattern silently matches nothing and the test can
@@ -612,26 +612,26 @@ mod tests {
 
     #[test]
     fn prune_by_size_evicts_oldest_first() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             for (i, name) in ["a", "b", "c"].iter().enumerate() {
                 let t = write_transcript(src.path(), &format!("{name}.jsonl"), 200);
-                archive_transcript("proj", name, &t).unwrap();
+                archive_transcript(proj, name, &t).unwrap();
                 // Space the mtimes so ordering is deterministic.
-                let path = archive_path("proj", name).unwrap();
+                let path = archive_path(proj, name).unwrap();
                 let when = std::time::SystemTime::now()
                     - std::time::Duration::from_secs(300 - i as u64 * 60);
                 let f = std::fs::File::options().write(true).open(&path).unwrap();
                 f.set_modified(when).unwrap();
             }
-            let total = total_bytes("proj").unwrap();
+            let total = total_bytes(proj).unwrap();
 
             // Budget that fits roughly one archive: the two oldest must go.
-            let outcome = prune_archives("proj", None, total / 3, false, &no_pins()).unwrap();
+            let outcome = prune_archives(proj, None, total / 3, false, &no_pins()).unwrap();
             assert!(!outcome.removed.is_empty());
             assert_eq!(outcome.removed[0], "a", "oldest must be evicted first");
             assert!(outcome.bytes_remaining <= total / 3);
-            assert!(list_archives("proj")
+            assert!(list_archives(proj)
                 .unwrap()
                 .iter()
                 .any(|x| x.session_id == "c"));
@@ -640,11 +640,11 @@ mod tests {
 
     #[test]
     fn prune_by_age_drops_stale_archives() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let t = write_transcript(src.path(), "old.jsonl", 20);
-            archive_transcript("proj", "old", &t).unwrap();
-            let path = archive_path("proj", "old").unwrap();
+            archive_transcript(proj, "old", &t).unwrap();
+            let path = archive_path(proj, "old").unwrap();
             let f = std::fs::File::options().write(true).open(&path).unwrap();
             f.set_modified(
                 std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 40),
@@ -652,11 +652,11 @@ mod tests {
             .unwrap();
 
             let t2 = write_transcript(src.path(), "new.jsonl", 20);
-            archive_transcript("proj", "new", &t2).unwrap();
+            archive_transcript(proj, "new", &t2).unwrap();
 
-            let outcome = prune_archives("proj", Some(30), 0, false, &no_pins()).unwrap();
+            let outcome = prune_archives(proj, Some(30), 0, false, &no_pins()).unwrap();
             assert_eq!(outcome.removed, vec!["old"]);
-            let left = list_archives("proj").unwrap();
+            let left = list_archives(proj).unwrap();
             assert_eq!(left.len(), 1);
             assert_eq!(left[0].session_id, "new");
         });
@@ -664,15 +664,15 @@ mod tests {
 
     #[test]
     fn dry_run_reports_without_deleting() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let t = write_transcript(src.path(), "s.jsonl", 50);
-            archive_transcript("proj", "s", &t).unwrap();
+            archive_transcript(proj, "s", &t).unwrap();
 
-            let outcome = prune_archives("proj", None, 1, true, &no_pins()).unwrap();
+            let outcome = prune_archives(proj, None, 1, true, &no_pins()).unwrap();
             assert_eq!(outcome.removed, vec!["s"]);
             assert!(outcome.bytes_freed > 0);
-            assert_eq!(list_archives("proj").unwrap().len(), 1, "dry run deleted");
+            assert_eq!(list_archives(proj).unwrap().len(), 1, "dry run deleted");
         });
     }
 
@@ -681,23 +681,23 @@ mod tests {
     /// window, and there the file goes.
     #[test]
     fn age_eviction_spares_a_pinned_copy() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let t = write_transcript(src.path(), "old.jsonl", 20);
-            archive_transcript("proj", "old", &t).unwrap();
-            let path = archive_path("proj", "old").unwrap();
+            archive_transcript(proj, "old", &t).unwrap();
+            let path = archive_path(proj, "old").unwrap();
             let f = std::fs::File::options().write(true).open(&path).unwrap();
             f.set_modified(
                 std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 40),
             )
             .unwrap();
 
-            let outcome = prune_archives("proj", Some(30), 0, false, &pins(&["old"])).unwrap();
+            let outcome = prune_archives(proj, Some(30), 0, false, &pins(&["old"])).unwrap();
             assert!(
                 outcome.removed.is_empty(),
                 "a cited conversation was evicted by the age window"
             );
-            assert_eq!(list_archives("proj").unwrap().len(), 1);
+            assert_eq!(list_archives(proj).unwrap().len(), 1);
             assert_eq!(outcome.pinned_count, 1);
             assert!(outcome.pinned_bytes > 0);
         });
@@ -709,22 +709,22 @@ mod tests {
     /// would never be met.
     #[test]
     fn size_eviction_skips_pins_and_budgets_only_unpinned() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             for (i, name) in ["a", "b", "c"].iter().enumerate() {
                 let t = write_transcript(src.path(), &format!("{name}.jsonl"), 200);
-                archive_transcript("proj", name, &t).unwrap();
-                let path = archive_path("proj", name).unwrap();
+                archive_transcript(proj, name, &t).unwrap();
+                let path = archive_path(proj, name).unwrap();
                 let when = std::time::SystemTime::now()
                     - std::time::Duration::from_secs(300 - i as u64 * 60);
                 let f = std::fs::File::options().write(true).open(&path).unwrap();
                 f.set_modified(when).unwrap();
             }
-            let total = total_bytes("proj").unwrap();
+            let total = total_bytes(proj).unwrap();
 
             // "a" is the oldest and would go first unpinned; pinned, the walk
             // must move on to "b".
-            let outcome = prune_archives("proj", None, total / 3, false, &pins(&["a"])).unwrap();
+            let outcome = prune_archives(proj, None, total / 3, false, &pins(&["a"])).unwrap();
             assert!(
                 !outcome.removed.contains(&"a".to_string()),
                 "a cited conversation was evicted to meet the budget"
@@ -733,7 +733,7 @@ mod tests {
                 outcome.removed.contains(&"b".to_string()),
                 "the walk stopped at the pin instead of stepping over it"
             );
-            let left: Vec<String> = list_archives("proj")
+            let left: Vec<String> = list_archives(proj)
                 .unwrap()
                 .into_iter()
                 .map(|a| a.session_id)
@@ -759,30 +759,30 @@ mod tests {
     /// over-budget state is reported instead of enforced.
     #[test]
     fn an_all_pinned_store_evicts_nothing_and_reports_the_overrun() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             for name in ["a", "b"] {
                 let t = write_transcript(src.path(), &format!("{name}.jsonl"), 200);
-                archive_transcript("proj", name, &t).unwrap();
+                archive_transcript(proj, name, &t).unwrap();
             }
-            let total = total_bytes("proj").unwrap();
+            let total = total_bytes(proj).unwrap();
 
-            let outcome = prune_archives("proj", None, 1, false, &pins(&["a", "b"])).unwrap();
+            let outcome = prune_archives(proj, None, 1, false, &pins(&["a", "b"])).unwrap();
             assert!(outcome.removed.is_empty());
             assert_eq!(outcome.bytes_freed, 0);
             assert_eq!(outcome.pinned_count, 2);
             assert_eq!(outcome.pinned_bytes, total);
             assert_eq!(outcome.bytes_remaining, total);
-            assert_eq!(list_archives("proj").unwrap().len(), 2);
+            assert_eq!(list_archives(proj).unwrap().len(), 2);
         });
     }
 
     #[test]
     fn missing_archive_dir_lists_empty() {
-        with_data_dir(|_| {
-            assert!(list_archives("never-used").unwrap().is_empty());
-            assert_eq!(total_bytes("never-used").unwrap(), 0);
-            assert!(!remove_archive("never-used", "nope").unwrap());
+        with_project(|proj| {
+            assert!(list_archives(proj).unwrap().is_empty());
+            assert_eq!(total_bytes(proj).unwrap(), 0);
+            assert!(!remove_archive(proj, "nope").unwrap());
         });
     }
 
@@ -790,7 +790,7 @@ mod tests {
     /// pid-derived temp name was shared by two archives of the same session.
     #[test]
     fn two_archives_of_one_session_in_one_process_do_not_collide() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let transcript = write_transcript(src.path(), "s1.jsonl", 20_000);
             let expected = std::fs::read(&transcript).unwrap();
@@ -798,19 +798,19 @@ mod tests {
             std::thread::scope(|scope| {
                 for _ in 0..16 {
                     scope.spawn(|| {
-                        archive_transcript("proj", "s1", &transcript).unwrap();
+                        archive_transcript(proj, "s1", &transcript).unwrap();
                     });
                 }
             });
 
             let out = src.path().join("restored.jsonl");
-            export_archive("proj", "s1", &out).unwrap();
+            export_archive(proj, "s1", &out).unwrap();
             assert_eq!(
                 std::fs::read(&out).unwrap(),
                 expected,
                 "concurrent archives interleaved"
             );
-            let dir = paths::transcript_archive_dir("proj").unwrap();
+            let dir = paths::transcript_archive_dir(proj).unwrap();
             let names: Vec<String> = std::fs::read_dir(&dir)
                 .unwrap()
                 .flatten()
@@ -824,7 +824,7 @@ mod tests {
     /// `dest`: a transcript that parses as a valid-but-short session.
     #[test]
     fn a_failed_export_leaves_no_file() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             // Incompressible enough to span several zstd blocks.
             let transcript = src.path().join("big.jsonl");
@@ -837,10 +837,10 @@ mod tests {
                 ));
             }
             std::fs::write(&transcript, &body).unwrap();
-            archive_transcript("proj", "s1", &transcript).unwrap();
+            archive_transcript(proj, "s1", &transcript).unwrap();
 
             // Truncate the stored archive in the middle.
-            let stored = archive_path("proj", "s1").unwrap();
+            let stored = archive_path(proj, "s1").unwrap();
             let bytes = std::fs::read(&stored).unwrap();
             assert!(
                 bytes.len() > 128 * 1024,
@@ -851,7 +851,7 @@ mod tests {
 
             let out_dir = TempDir::new().unwrap();
             let out = out_dir.path().join("restored.jsonl");
-            assert!(export_archive("proj", "s1", &out).is_err());
+            assert!(export_archive(proj, "s1", &out).is_err());
             let left: Vec<String> = std::fs::read_dir(out_dir.path())
                 .unwrap()
                 .flatten()
@@ -869,27 +869,27 @@ mod tests {
     /// orphaned on disk.
     #[test]
     fn a_failed_unlink_is_not_reported_as_removed() {
-        with_data_dir(|_| {
+        with_project(|proj| {
             let src = TempDir::new().unwrap();
             let transcript = write_transcript(src.path(), "ok.jsonl", 10);
-            archive_transcript("proj", "ok", &transcript).unwrap();
+            archive_transcript(proj, "ok", &transcript).unwrap();
             // Something `remove_file` cannot unlink whoever runs the test (a
             // read-only directory would not stop root): a directory under an
             // archive's name.
-            let stuck = archive_path("proj", "stuck").unwrap();
+            let stuck = archive_path(proj, "stuck").unwrap();
             std::fs::create_dir_all(stuck.join("child")).unwrap();
             let stuck_bytes = std::fs::metadata(&stuck).unwrap().len();
             std::thread::sleep(std::time::Duration::from_millis(20));
 
             // Retention 0 days: everything is too old.
-            let outcome = prune_archives("proj", Some(0), 0, false, &no_pins()).unwrap();
+            let outcome = prune_archives(proj, Some(0), 0, false, &no_pins()).unwrap();
 
             assert_eq!(outcome.removed, vec!["ok"]);
             assert_eq!(outcome.failed.len(), 1, "{:?}", outcome.failed);
             assert_eq!(outcome.failed[0].0, "stuck");
             assert_eq!(outcome.bytes_remaining, stuck_bytes);
             assert!(stuck.exists());
-            assert!(!archive_path("proj", "ok").unwrap().exists());
+            assert!(!archive_path(proj, "ok").unwrap().exists());
         });
     }
 }
@@ -917,8 +917,7 @@ mod hardening_tests {
     fn export_refuses_a_compression_bomb() {
         use std::io::Write;
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path());
-        let project = "0123456789abcdef";
+        let project = &super::tests::unique_project_id();
 
         // 64 MiB of zeros compresses to a few KB.
         let dest = archive_path(project, "bomb").unwrap();
@@ -948,12 +947,12 @@ mod hardening_tests {
     fn the_temp_archive_is_owner_only_while_it_is_being_written() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::TempDir::new().unwrap();
-        std::env::set_var("ENGRAMDB_DATA_DIR", tmp.path());
+        let project = &super::tests::unique_project_id();
         let src = tmp.path().join("t.jsonl");
         std::fs::write(&src, b"{}\n").unwrap();
 
-        archive_transcript("0123456789abcdef", "s1", &src).unwrap();
-        let mode = std::fs::metadata(archive_path("0123456789abcdef", "s1").unwrap())
+        archive_transcript(project, "s1", &src).unwrap();
+        let mode = std::fs::metadata(archive_path(project, "s1").unwrap())
             .unwrap()
             .permissions()
             .mode()
