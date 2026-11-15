@@ -408,6 +408,7 @@ pub fn conflict_hidden_block(text: &str) -> String {
 ///   through `MemoryStore::create`, which takes the value as given; the
 ///   file parser reads `NaN` as absent, so only a row written before that
 ///   fix holds one);
+/// - invalidated memories of one type only (`decision`);
 /// - top scopes named `-` and `a,b`, and scope-less memories;
 /// - relations of kind `constructor`, rejected and dangling ones, one with
 ///   an invalidated end, and [`FAULT_PROPOSED`] proposed ones (the
@@ -435,7 +436,13 @@ pub async fn build_fault(out: &Path) -> anyhow::Result<String> {
         .map(|i| {
             let scope = SCOPES[i % SCOPES.len()];
             let mut m = Memory::new(
-                TYPES[i % TYPES.len()],
+                // Invalidated ones are all decisions, so a type filter can
+                // name a type the Invalidated status holds none of.
+                if i >= FAULT_LIVE {
+                    MemoryType::Decision
+                } else {
+                    TYPES[i % TYPES.len()]
+                },
                 format!(
                     "Fault memory {i} in {}",
                     if scope.is_empty() { "no scope" } else { scope }

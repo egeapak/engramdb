@@ -146,6 +146,19 @@ async function readOnly(browser, url) {
   const rows1 = (await t.p.$$('#main table tbody tr')).length;
   const errBox = await t.p.$('#main .error-box');
   ok('memories: Load more appends rows past the NaN row', hasMore && rows1 > rows0 && !errBox, { rows0, rows1, hasMore });
+  // E6: Type = Hazard, then Status = Invalidated (which holds none): the
+  // select still names the type, and "All types" clears it.
+  await go(t, 'memories?kind=hazard', '#main table tbody tr');
+  await t.p.selectOption('select[aria-label="Status"]', 'invalidated');
+  await t.p.waitForTimeout(600);
+  const kindShown = await t.p.evaluate(() => {
+    const s = document.querySelector('select[aria-label="Type"]');
+    return s.options[s.selectedIndex].textContent;
+  });
+  await t.p.selectOption('select[aria-label="Type"]', '');
+  await t.p.waitForTimeout(600);
+  const invalidatedRows = await t.p.evaluate(() => [...document.querySelectorAll('#main table tbody tr')].filter((r) => !r.querySelector('td.empty')).length);
+  ok('memories: a type filter the status hides still shows, and All types clears it', kindShown === 'Hazard (0)' && invalidatedRows > 0 && !(await t.p.evaluate(() => location.hash)).includes('kind='), { kindShown, invalidatedRows });
   await go(t, 'doctor', '#main .doc-checks, #main h1');
   ok('health renders', (await text(t, '#main')).length > 0);
   await go(t, 'relations', '#main h1');

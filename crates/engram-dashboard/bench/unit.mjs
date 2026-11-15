@@ -14,6 +14,7 @@ import { stepIndex } from '../web/js/graph/walk.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
 import { moreLink } from '../web/js/views/overview.js';
+import { typeOptions, nextTopScope } from '../web/js/views/memories.js';
 
 let failed = 0;
 let ran = 0;
@@ -126,6 +127,20 @@ export function ok(name, cond, detail) {
   eq('moreLink stale', moreLink('stale'), ['memories', 'sort=last_read&dir=asc']);
   eq('moreLink never_read', moreLink('never_read'), ['memories', 'sort=last_read&dir=asc']);
   eq('moreLink unknown', moreLink('future_reason'), null);
+}
+
+// ---------------------------------------------------------------------------
+// views/memories.js (E6)
+// ---------------------------------------------------------------------------
+{
+  const types = [{ name: 'decision', count: 3 }];
+  eq('typeOptions: a kept type absent from the facets is listed at 0', typeOptions(types, 'hazard'), [...types, { name: 'hazard', count: 0 }]);
+  eq('typeOptions: a type in the facets is not repeated', typeOptions(types, 'decision'), types);
+  eq('typeOptions: no type filter', typeOptions(types, ''), types);
+  // facets [a, c, d], top_scope=a,b; pressing c: d is still off.
+  eq('nextTopScope: membership, not size', nextTopScope(new Set(['a', 'b', 'c']), ['a', 'c', 'd']), 'a,b,c');
+  eq('nextTopScope: every facet on clears', nextTopScope(new Set(['a', 'b', 'c', 'd']), ['a', 'c', 'd']), '');
+  eq('nextTopScope: none on', nextTopScope(new Set(), ['a']), '\u2205');
 }
 
 if (failed) {
