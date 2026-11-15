@@ -12,4 +12,4 @@ Caused by:
     0: error sending request for url (http://localhost:11434/api/embed)
     1: client error (Connect)
     2: tcp connect error
-    3: Connection refused (os error 111)
+    3: Connection refused (os error [ERRNO])

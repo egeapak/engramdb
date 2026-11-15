@@ -13,7 +13,7 @@ exit: 0
     {
       "already_harvested": false,
       "assistant_turns": 1,
-      "bytes": 191,
+      "bytes": [BYTES],
       "cwd": "[PROJECT]",
       "ended_at": "[TIMESTAMP]",
       "session_id": "session-gamma",
@@ -23,7 +23,7 @@ exit: 0
     {
       "already_harvested": false,
       "assistant_turns": 0,
-      "bytes": 177,
+      "bytes": [BYTES],
       "cwd": "[PROJECT]",
       "ended_at": "[TIMESTAMP]",
       "first_prompt": "What is the default digest budget?",
@@ -35,7 +35,7 @@ exit: 0
     {
       "already_harvested": false,
       "assistant_turns": 2,
-      "bytes": 892,
+      "bytes": [BYTES],
       "cwd": "[PROJECT]",
       "ended_at": "[TIMESTAMP]",
       "first_prompt": "Why does the daemon reap while a session is still open?",
