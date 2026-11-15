@@ -143,6 +143,6 @@ engramdb setup --global  # global
 
 **Plugin not loading:** Ensure `engramdb` is on your PATH. Run `engramdb doctor` to check.
 
-**Duplicate hooks:** If you previously used `engramdb setup` to write hooks to `settings.json` and then installed the plugin, remove the `hooks` and `mcpServers` engramdb entries from `~/.claude/settings.json` to avoid duplicates.
+**Duplicate hooks:** If you previously used `engramdb setup` to write hooks to `settings.json` and then installed the plugin, remove the engramdb `hooks` entries from `~/.claude/settings.json` and the `engramdb` server from `~/.claude.json` (project scope: `<project>/.claude/settings.json` and `<project>/.mcp.json`) to avoid duplicates.
 
 **Stale permissions:** After updating the plugin, run `engramdb setup --global` to refresh permission entries.

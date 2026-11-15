@@ -116,7 +116,7 @@ That's intended. Each MCP `serve` session sends a heartbeat that keeps the daemo
 Run `engramdb setup --global` to write `mcp__*` permissions to `~/.claude/settings.json`.
 
 **Duplicate hook output.**
-The plugin and `engramdb setup` both wrote hooks. Remove the manual entries from `~/.claude/settings.json` (`hooks` + `mcpServers`) — the plugin manages them.
+The plugin and `engramdb setup` both wrote hooks. Remove the manual hook entries from `~/.claude/settings.json` and the `engramdb` entry from `~/.claude.json` (project scope: `<project>/.claude/settings.json` and `<project>/.mcp.json`). The plugin manages both.
 
 **Hooks fire but produce no output.**
 - Check that the project has memories: `engramdb list`.

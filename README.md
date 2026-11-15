@@ -55,13 +55,13 @@ The recommended way is via the plugin:
 /plugin install engram@engramdb
 ```
 
-Or set up manually with hooks and MCP in settings.json:
+Or let `engramdb setup` write the hooks (to `~/.claude/settings.json`) and the MCP entry (to `~/.claude.json`):
 
 ```bash
 engramdb setup --global
 ```
 
-For project-scoped setup (writes to `<project>/.claude/`):
+For project scope (writes `<project>/.claude/settings.json` and `<project>/.mcp.json`):
 
 ```bash
 engramdb setup

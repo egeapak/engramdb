@@ -491,12 +491,12 @@ engramdb setup [--global] [--no-plugin] [--dry-run]
 
 | Flag | Effect |
 |------|--------|
-| (none) | Writes to `<project>/.claude/`. |
-| `--global` | Writes to `~/.claude/`. |
-| `--no-plugin` | Global only. Forces direct `settings.json` writes instead of using the marketplace plugin. |
-| `--dry-run` | Prints the diff without writing. |
+| (none) | Writes `<project>/.claude/settings.json` (hooks, permissions), `<project>/.mcp.json` (MCP entry), and `ENGRAM.md` + `CLAUDE.md` in `<project>/.claude/`. |
+| `--global` | Writes `~/.claude/settings.json`, `~/.claude.json` (MCP entry), and `ENGRAM.md` + `CLAUDE.md` in `~/.claude/`. First tries `claude plugin add engramdb`; when that fails, writes the hooks and the MCP entry itself. |
+| `--no-plugin` | Global only. Does not try the plugin; writes the hooks and the MCP entry directly. |
+| `--dry-run` | Prints what would change, and writes nothing. |
 
-See [claude-code.md](./claude-code.md).
+When the plugin is already installed, `setup` writes only the plugin's permission entries, `ENGRAM.md` and `CLAUDE.md`. `setup` does not create a store; run `engramdb init` for that. Details: [claude-code.md](./claude-code.md#option-b-engramdb-setup-no-plugin).
 
 ## `hook` — Claude Code hook handlers
 

@@ -34,36 +34,52 @@ To register MCP-tool permissions in your `settings.json` (otherwise Claude will 
 engramdb setup --global
 ```
 
-When the plugin is detected, `setup --global` writes the correct `mcp__plugin_engram_memory__*` permission entries instead of duplicating hooks.
+When the plugin is installed, `setup` writes only the `mcp__plugin_engram_memory__*` permission entries (plus `ENGRAM.md` and the `@ENGRAM.md` line, see below). It does not write hooks or an MCP entry, so nothing is duplicated. `setup` reads `~/.claude/plugins/installed_plugins.json` to decide whether the plugin is installed.
 
 The plugin manifest is at `.claude-plugin/plugin.json` — inspect it to see exactly what gets wired.
 
 ## Option B: `engramdb setup` (no plugin)
 
-`engramdb setup` writes the same hooks and MCP entry directly into `settings.json`, without any plugin machinery.
+`engramdb setup` writes the hooks and the MCP server entry itself, without the plugin. Hooks and permissions go to `settings.json`. The MCP server entry goes to the file Claude Code reads MCP servers from, which is a different file:
+
+| Scope | Hooks and permissions | MCP server entry | `ENGRAM.md` and `CLAUDE.md` |
+|-------|-----------------------|------------------|-----------------------------|
+| project (`engramdb setup`) | `<project>/.claude/settings.json` | `<project>/.mcp.json` | `<project>/.claude/` |
+| user (`engramdb setup --global`) | `~/.claude/settings.json` | `~/.claude.json` | `~/.claude/` |
 
 ```bash
-# Project-scoped: writes to <project>/.claude/settings.json
+# Project scope: writes <project>/.claude/settings.json and <project>/.mcp.json
 engramdb setup
 
-# Global: writes to ~/.claude/settings.json
+# User scope: writes ~/.claude/settings.json and ~/.claude.json
 engramdb setup --global
 
-# Show the diff without applying:
+# Print what would change, and write nothing:
 engramdb setup --global --dry-run
 
-# Skip the plugin path entirely in global mode and write hooks directly:
+# User scope without the plugin attempt (see below):
 engramdb setup --global --no-plugin
 ```
 
-Both modes also:
-- create or update `ENGRAM.md` in the target directory (it's the directive file the agent reads),
-- add `@ENGRAM.md` to the relevant `CLAUDE.md` so Claude Code loads it,
-- write project-local `.engramdb/` if missing.
+`setup --global` without `--no-plugin` first tries to install the plugin by running `claude plugin add engramdb`. That command is not the documented plugin install (Option A uses `/plugin install engram@engramdb` inside a session), so expect it to fail. When the `claude` command is missing or the install fails, `setup` prints why and writes the hooks to `~/.claude/settings.json` and the MCP entry to `~/.claude.json` itself. `--no-plugin` skips the attempt. Project scope never tries the plugin.
+
+Both scopes also:
+- create or update `ENGRAM.md` (the directive file the agent reads) in the `.claude/` directory of the table above,
+- add `@ENGRAM.md` to the `CLAUDE.md` in the same directory, so Claude Code loads it,
+- add the `mcp__engramdb__*` permission entries for every MCP tool except `projects_link` and `projects_unlink`. Those two change which projects share past conversations, so Claude Code asks before an agent runs them. An approval for them written by an earlier `setup` is removed.
+
+`setup` does not create a store. Run `engramdb init` in each project. In a directory without a store the hooks do nothing.
+
+### How `setup` writes the files
+
+- Everything else in each file is kept. Each write merges into the file as it is on disk.
+- If another program (Claude Code itself) changed the file after `setup` read it, `setup` redoes the merge once from the new contents. A second change in that window is an error, and nothing is written. Claude Code takes no lock that `setup` can share, so this narrows the race but cannot remove it.
+- A file that is a symlink is written through the link: its target is changed and the link stays. A dangling link is an error.
+- A file keeps its permissions. `~/.claude.json` holds other tools' tokens, so a `0600` file stays `0600`. A new `.claude.json` is created `0600`; other new files are `0644`.
 
 ## What gets written
 
-Snapshot of the relevant `settings.json` shape after `setup --global`:
+`~/.claude/settings.json` after `setup --global --no-plugin`:
 
 ```jsonc
 {
@@ -99,17 +115,31 @@ Snapshot of the relevant `settings.json` shape after `setup --global`:
       { "hooks": [{ "type": "command", "command": "engramdb hook pre-compact --dir ." }] }
     ]
   },
+  "permissions": {
+    "allow": [
+      "mcp__engramdb__query",
+      "mcp__engramdb__create"
+      // … one entry per MCP tool
+    ]
+  }
+}
+```
+
+`~/.claude.json` (only the part `setup` adds):
+
+```jsonc
+{
   "mcpServers": {
     "engramdb": { "command": "engramdb", "args": ["serve", "--dir", "."] }
   }
 }
 ```
 
-If you already had an `engramdb` `mcpServers` entry, `setup` updates it in place. If you've **also** installed the plugin, `setup` detects that and skips writing the hooks/mcpServers to avoid duplicates — it only manages permissions.
+If the MCP file already has an `engramdb` entry, `setup` leaves it as it is, even if you changed it. An `engramdb` entry under `mcpServers` in `settings.json` (written by earlier versions; Claude Code never reads it there) is removed if it is unchanged. An existing `PostToolUse` entry for `engramdb hook post-tool-use` whose matcher lacks `Bash` gets `|Bash` added. If the plugin is installed, `setup` writes no hooks and no MCP entry; it only manages permissions.
 
 ## How the hooks behave
 
-All context-injecting hooks group memories by epistemic class under `## Facts` / `## Observations` / `## Decisions` headers, ordered to fit the situation (session start: facts first; file edits: decisions first — override with `[hooks].class_order`). Decisions carry their rationale ("— because {premise}; revisit if {globs} changes"), observations their observed/verified dates. Every entry ends with the memory's `id` and its `source`, so the agent can pass the id straight to `get`, `challenge` or `update`. Under each entry is a preview of the memory's body (`[hooks].preview_chars`, default 160 characters; the top entry gets 400), and a preview cut at the limit says so and names the `get` call that returns the rest. All injected text is flattened to one line per field and defanged, because memory files are committed and anyone with repo access writes them. Task-scoped memories (`generality = task`) are hidden unless the session has declared the matching task (see below).
+All context-injecting hooks group memories by epistemic class under `## Facts` / `## Observations` / `## Decisions` headers, ordered to fit the situation (session start: facts first; file edits: decisions first — override with `[hooks].class_order`). Decisions carry their rationale ("— because {premise}; revisit if {globs} changes"), observations their observed/verified dates. Every entry ends with the memory's `id` and its `source`, so the agent can pass the id straight to `get`, `challenge` or `update`. Under each entry is a preview of the memory's body (`[hooks].preview_chars`, default 1000 characters; the top entry gets 2.5 times that), and a preview cut at the limit says so and names the `get` call that returns the rest. All injected text is flattened to one line per field and defanged, because memory files are committed and anyone with repo access writes them. Task-scoped memories (`generality = task`) are hidden unless the session has declared the matching task (see below).
 
 ### `SessionStart`
 
@@ -196,8 +226,9 @@ the copy landed and its size. The ledger is an append-only JSONL log at
 
 under the root project — one line per state change, holding session ids,
 review decisions, timestamps and the pointer to the copy. **No conversation
-content is in it**; unlike the copy it is repo-adjacent and meant to be
-committed. A session the hook collects is recorded as `unreviewed`, which is
+content is in it.** It lives under `.engramdb/state/`, which is local to this
+machine: `engramdb init` adds `state/` to `.engramdb/.gitignore`. Only
+`.engramdb/memories/` (and `config.toml`) are meant to be committed. A session the hook collects is recorded as `unreviewed`, which is
 what later lets `/engram:harvest` offer it.
 
 Last, the run does a retention sweep over the copies. The bounds, all under
@@ -275,7 +306,8 @@ To disable engramdb for a session without uninstalling:
 /plugin disable engram@engramdb
 
 # Manual setup
-# Edit ~/.claude/settings.json and remove the engramdb hooks + mcpServers entries
+# Remove the engramdb hooks from ~/.claude/settings.json (or <project>/.claude/settings.json)
+# and the engramdb entry from ~/.claude.json (or <project>/.mcp.json)
 ```
 
-Per-project disable: delete `<project>/.engramdb/` and the project's hooks won't trigger for that directory.
+There is no per-project off switch for hooks installed at user scope. The hooks do nothing in a directory that has no store, so a project in which you never ran `engramdb init` is already off. Do not delete `.engramdb/` to turn EngramDB off: `.engramdb/memories/` holds the project's shared memories. To stop only the transcript copy, set `archive = false` under `[harvest]`.
