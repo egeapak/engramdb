@@ -92,7 +92,7 @@ function proposalItem(it, ctx) {
       other,
       ` · ${e.origin} ${score(e.confidence)} · ${ago(it.at)}`,
     ),
-    h('details', { class: 'review-disclosure' }, h('summary', null, 'Review'), reviewControls(edge, ctx, { onDone: () => setTimeout(() => ctx.refresh(), 600) })),
+    h('details', { class: 'review-disclosure' }, h('summary', null, 'Review'), reviewControls(edge, ctx, { onDone: () => ctx.refreshSoon(600, { focusId: 'attention-title' }) })),
   );
 }
 
@@ -217,7 +217,7 @@ export async function renderOverview(main, ctx) {
             )
           : h('p', { class: 'muted' }, 'No memories yet. Agents add them with the create tool, or run engramdb add.'),
       ),
-      h('div', null, secHead('Needs attention', h('span', { class: 'faint num' }, plural(Math.max(attentionTotal, st.attention.length), 'item'))), attention(st.attention, totals, ctx)),
+      h('div', null, secHead({ text: 'Needs attention', id: 'attention-title' }, h('span', { class: 'faint num' }, plural(Math.max(attentionTotal, st.attention.length), 'item'))), attention(st.attention, totals, ctx)),
     ),
     secHead('Projects on this machine', h('a', { href: ctx.href('projects') }, 'All stores →')),
     projectCards(ctx.state.catalog.projects.filter((q) => q.kind === 'project' && !q.parent_id).slice(0, 8), ctx),

@@ -13,8 +13,10 @@ export function errorBox(e) {
   return h('div', { class: 'error-box', role: 'alert' }, h('b', null, title), h('p', null, (e && e.message) || String(e)));
 }
 
+/** A section heading; `title` is its text, or `{ text, id }` for one a refresh can return focus to. */
 export function secHead(title, ...aside) {
-  return h('div', { class: 'sec-head' }, h('h2', null, title), aside.length ? h('div', { class: 'sec-aside' }, aside) : null);
+  const t = title !== null && typeof title === 'object' && !title.nodeType && 'text' in title ? title : { text: title };
+  return h('div', { class: 'sec-head' }, h('h2', t.id ? { id: t.id, tabindex: '-1' } : null, t.text), aside.length ? h('div', { class: 'sec-aside' }, aside) : null);
 }
 
 export function projHead(eyebrow, title, metaLines) {

@@ -170,10 +170,79 @@ async function readOnly(browser, url) {
 // ---------------------------------------------------------------------------
 // Write-enabled checks (they review proposed relations)
 // ---------------------------------------------------------------------------
+/**
+ * On the Overview, review a proposed relation through its controls: the
+ * item named `key` (its summary and sub line), else the first one that
+ * offers `label`. Clicks `label`, then the confirm step. Returns the key.
+ */
+const review = (p, label, key) =>
+  p.evaluate(
+    async ([label, key]) => {
+      const keyOf = (d) => {
+        const li = d.closest('li');
+        return li.querySelector('.ttl').textContent + '|' + li.querySelector('.sub').textContent.replace(/ · [^·]*$/, '');
+      };
+      const ds = [...document.querySelectorAll('details.review-disclosure')].filter((d) => [...d.querySelectorAll('button')].some((b) => b.textContent === label));
+      const d = key ? ds.find((x) => keyOf(x) === key) : ds[0];
+      if (!d) return null;
+      d.open = true;
+      const k = keyOf(d);
+      [...d.querySelectorAll('button')].find((b) => b.textContent === label).click();
+      await new Promise((r) => setTimeout(r, 50));
+      [...d.querySelectorAll('button')].find((b) => /^Yes, /.test(b.textContent)).click();
+      return k;
+    },
+    [label, key || null],
+  );
+
 async function writable(browser, url) {
   const t = await open(browser, url);
   await go(t, '', '.stats');
   ok('write-enabled overview renders', (await text(t, '.stats')).includes('Memories'));
+
+  // E7: after a review the Overview refreshes and focus lands on the
+  // "Needs attention" heading, not <body>.
+  const k1 = await review(t.p, 'Confirm');
+  await t.p.waitForTimeout(1100);
+  const focus = await t.p.evaluate(() => ({ id: document.activeElement.id, tag: document.activeElement.tagName }));
+  ok('overview: a review refresh returns focus to the section heading', k1 && focus.id === 'attention-title', { reviewed: k1, focus });
+
+  // E7: leaving within the 600 ms causes no second render of the Overview.
+  let stats = 0;
+  const onReq = (r) => /\/api\/projects\/[^/]+\/stats$/.test(new URL(r.url()).pathname) && stats++;
+  const k2 = await review(t.p, 'Confirm');
+  t.p.on('request', onReq);
+  await t.p.waitForTimeout(150);
+  await t.p.evaluate((h) => (location.hash = h), `#/p/${t.pid}/memories`);
+  await t.p.waitForTimeout(1000);
+  t.p.off('request', onReq);
+  ok('overview: a review refresh does not run after the user left', k2 && stats === 0 && (await t.p.evaluate(() => location.hash)).includes('/memories'), { reviewed: k2, statsRequests: stats });
+
+  // E12: two pages on one proposed relation; A rejects it, then B's
+  // confirm finds it already reviewed: a final sentence, no Back, a reload.
+  const a = await open(browser, url);
+  const b = await open(browser, url);
+  await go(a, '', '.stats');
+  await go(b, '', '.stats');
+  const key = await review(a.p, 'Reject');
+  await a.p.waitForTimeout(400);
+  const again = await review(b.p, 'Confirm', key);
+  await b.p.waitForTimeout(300);
+  const seen = await b.p.evaluate(() => ({
+    said: [...document.querySelectorAll('details.review-disclosure')].map((d) => d.textContent).find((x) => /Already reviewed elsewhere|no longer exists/.test(x)) || null,
+    back: [...document.querySelectorAll('details.review-disclosure button')].some((x) => x.textContent === 'Back'),
+  }));
+  await b.p.waitForTimeout(900);
+  const still = await b.p.evaluate((key) => [...document.querySelectorAll('details.review-disclosure')].some((d) => {
+    const li = d.closest('li');
+    return li.querySelector('.ttl').textContent + '|' + li.querySelector('.sub').textContent.replace(/ · [^·]*$/, '') === key;
+  }), key);
+  ok('review: a relation reviewed elsewhere ends in a final state and the list reloads', key && again === key && seen.said && !seen.back && !still, { key, seen, stillListed: still });
+  // (B's refused confirm is a 409 the browser logs as a failed resource: expected here.)
+  const other = [...a.errors, ...b.errors].filter((e) => !/status of 409 .*\/edges\/confirm$/.test(e));
+  ok('second pages: no console or page error', other.length === 0, other.slice(0, 5));
+  await a.ctx.close();
+  await b.ctx.close();
   ok('write-enabled pages: no console or page error', t.errors.length === 0, t.errors.slice(0, 5));
   await t.ctx.close();
 }

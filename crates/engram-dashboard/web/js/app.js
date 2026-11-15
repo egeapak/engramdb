@@ -200,14 +200,24 @@ async function route() {
       location.hash = hash;
     },
     // `{ scroll: false }`: the view places the scroll itself.
+    // `{ focusId }`: once rendered, focus that element (a section heading),
+    // since the refresh replaced whatever held focus.
     refresh: (opts) => {
       const y = window.scrollY;
       keepFocus = true;
       route().then(() => {
         if (!(opts && opts.scroll === false)) window.scrollTo(0, y);
+        const el = opts && opts.focusId ? document.getElementById(opts.focusId) : null;
+        if (el) {
+          if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+          el.focus({ preventScroll: true });
+        }
       });
     },
   };
+  // A refresh `ms` from now, unless the user has moved on to another view
+  // meanwhile (it would render that view a second time).
+  ctx.refreshSoon = (ms, opts) => setTimeout(() => !ctx.isStale() && ctx.refresh(opts), ms);
   try {
     if (r.view === 'projects') await renderProjects(main, ctx);
     else if (!r.id) mount(main, h('p', { class: 'muted' }, 'No EngramDB projects are registered on this machine yet. Run `engramdb init` in a project.'));

@@ -83,7 +83,7 @@ function review(d, ctx) {
   const proposed = [...d.edges.outbound, ...d.edges.inbound].filter((e) => e.status === 'proposed' && e.kind !== 'supersedes');
   if (!proposed.length) return null;
   return [
-    secHead('Review', h('span', { class: 'faint num' }, plural(proposed.length, 'proposed relation'))),
+    secHead({ text: 'Review', id: 'review-title' }, h('span', { class: 'faint num' }, plural(proposed.length, 'proposed relation'))),
     h(
       'ul',
       { class: ['att', 'plain', 'review-list'] },
@@ -103,7 +103,7 @@ function review(d, ctx) {
           null,
           h('div', { class: 'ttl' }, currentStyle().edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
           h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${score(e.confidence)} · ${ago(e.created_at)}`),
-          reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => !ctx.isStale() && ctx.refresh(), 600) }),
+          reviewControls(edge, ctx, { viewer: m.id, onDone: () => ctx.refreshSoon(600, { focusId: 'review-title' }) }),
         );
       }),
     ),

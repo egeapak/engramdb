@@ -4439,3 +4439,53 @@ async fn a_scope_named_dash_or_with_a_comma_filters_alone() {
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+/// A review's delayed refresh must not run once the user has moved on: it
+/// would render the view they left over the one they went to (a second
+/// fetch; on the graph, a second layout). Every `setTimeout(...)` call in a
+/// view that refreshes checks `isStale` inside it (or goes through
+/// `ctx.refreshSoon`, which does).
+#[test]
+fn views_never_refresh_from_a_bare_timer() {
+    let mut problems = Vec::new();
+    let mut scanned = 0;
+    for a in crate::assets::embedded() {
+        if !(a.path.starts_with("js/views/") && a.path.ends_with(".js")) {
+            continue;
+        }
+        scanned += 1;
+        let src = std::str::from_utf8(a.bytes).unwrap();
+        let mut from = 0;
+        while let Some(at) = src[from..].find("setTimeout(") {
+            let start = from + at + "setTimeout".len();
+            // The call's own parentheses, balanced.
+            let mut depth = 0usize;
+            let mut end = src.len();
+            for (i, c) in src[start..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let call = &src[start..end];
+            if call.contains("ctx.refresh(") && !call.contains("isStale") {
+                let line = src[..start].matches('\n').count() + 1;
+                problems.push(format!("{}:{line}: {}", a.path, call.trim()));
+            }
+            from = start;
+        }
+    }
+    assert!(scanned >= 8, "only {scanned} view modules scanned");
+    assert!(
+        problems.is_empty(),
+        "a timer refreshes without checking isStale (use ctx.refreshSoon):\n  {}",
+        problems.join("\n  ")
+    );
+}
