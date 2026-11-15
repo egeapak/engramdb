@@ -53,7 +53,7 @@ Options:
           Audience for a group/global share: project and/or group ids that may see this memory (comma-separated). Omit for whole-group visibility. Only meaningful with --group or --global
 
       --supersedes <SUPERSEDES>
-          IDs of memories this one supersedes (comma-separated)
+          IDs of memories this one supersedes (comma-separated; full id or unique prefix — an id that matches nothing fails the command)
 
       --epistemic <EPISTEMIC>
           Epistemic class: fact, observation, or decision (defaults from type)

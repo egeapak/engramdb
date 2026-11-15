@@ -104,7 +104,7 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l confidence -d 
 complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l details -d 'Extended details' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l visibility -d 'Visibility (shared or personal)' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l audience -d 'Audience for a group/global share: project and/or group ids that may see this memory (comma-separated). Omit for whole-group visibility. Only meaningful with --group or --global' -r
-complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l supersedes -d 'IDs of memories this one supersedes (comma-separated)' -r
+complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l supersedes -d 'IDs of memories this one supersedes (comma-separated; full id or unique prefix — an id that matches nothing fails the command)' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l epistemic -d 'Epistemic class: fact, observation, or decision (defaults from type)' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l premise -d 'Premise this memory depends on (e.g. "while we pin ort rc.12")' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand add" -l invalidated-by -d 'Paths/globs whose change invalidates this memory (repeatable)' -r
@@ -220,7 +220,7 @@ complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l details -d 
 complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l details-file -d 'Read details from file' -r -F
 complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l visibility -d 'New visibility' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l status -d 'New status' -r
-complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l supersedes -d 'IDs of memories this one supersedes (comma-separated)' -r
+complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l supersedes -d 'IDs of memories this one supersedes (comma-separated; full id or unique prefix — an id that matches nothing fails the command)' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l audience -d 'Set the per-memory audience (project/group ids) for a group/global share (comma-separated). Only meaningful on a group/global memory' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l epistemic -d 'Epistemic class: fact, observation, or decision (defaults from type)' -r
 complete -c engramdb -n "__fish_engramdb_using_subcommand update" -l premise -d 'Premise this memory depends on (e.g. "while we pin ort rc.12")' -r

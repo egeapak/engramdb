@@ -91,7 +91,7 @@ _arguments "${_arguments_options[@]}" : \
 '--details=[Extended details]:DETAILS:_default' \
 '--visibility=[Visibility (shared or personal)]:VISIBILITY:_default' \
 '*--audience=[Audience for a group/global share\: project and/or group ids that may see this memory (comma-separated). Omit for whole-group visibility. Only meaningful with --group or --global]:AUDIENCE:_default' \
-'--supersedes=[IDs of memories this one supersedes (comma-separated)]:SUPERSEDES:_default' \
+'--supersedes=[IDs of memories this one supersedes (comma-separated; full id or unique prefix — an id that matches nothing fails the command)]:SUPERSEDES:_default' \
 '--epistemic=[Epistemic class\: fact, observation, or decision (defaults from type)]:EPISTEMIC:_default' \
 '--premise=[Premise this memory depends on (e.g. "while we pin ort rc.12")]:PREMISE:_default' \
 '*--invalidated-by=[Paths/globs whose change invalidates this memory (repeatable)]:INVALIDATED_BY:_default' \
@@ -254,7 +254,7 @@ _arguments "${_arguments_options[@]}" : \
 '--details-file=[Read details from file]:DETAILS_FILE:_files' \
 '--visibility=[New visibility]:VISIBILITY:_default' \
 '--status=[New status]:STATUS:_default' \
-'--supersedes=[IDs of memories this one supersedes (comma-separated)]:SUPERSEDES:_default' \
+'--supersedes=[IDs of memories this one supersedes (comma-separated; full id or unique prefix — an id that matches nothing fails the command)]:SUPERSEDES:_default' \
 '*--audience=[Set the per-memory audience (project/group ids) for a group/global share (comma-separated). Only meaningful on a group/global memory]:AUDIENCE:_default' \
 '--epistemic=[Epistemic class\: fact, observation, or decision (defaults from type)]:EPISTEMIC:_default' \
 '--premise=[Premise this memory depends on (e.g. "while we pin ort rc.12")]:PREMISE:_default' \

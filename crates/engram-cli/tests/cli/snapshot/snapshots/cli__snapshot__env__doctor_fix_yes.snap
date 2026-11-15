@@ -38,6 +38,11 @@ exit: 1
           "passed": true
         },
         {
+          "message": "all 0 live memories have vectors",
+          "name": "Memory vectors",
+          "passed": true
+        },
+        {
           "message": ".engramdb/config.toml valid",
           "name": "Config file",
           "passed": true

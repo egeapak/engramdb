@@ -60,7 +60,7 @@ Options:
           New status
 
       --supersedes <SUPERSEDES>
-          IDs of memories this one supersedes (comma-separated)
+          IDs of memories this one supersedes (comma-separated; full id or unique prefix — an id that matches nothing fails the command)
 
       --audience <AUDIENCE>
           Set the per-memory audience (project/group ids) for a group/global share (comma-separated). Only meaningful on a group/global memory
