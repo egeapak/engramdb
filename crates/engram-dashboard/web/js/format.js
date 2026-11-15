@@ -77,3 +77,13 @@ export function label(word) {
   const s = String(word || '').replace(/_/g, ' ');
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
+
+/**
+ * A score (criticality, confidence) with two decimals; anything that is not
+ * a finite number (`null` is how JSON carries a NaN) reads as 0.00, as the
+ * server sends it.
+ */
+export function score(v) {
+  const n = v === null || v === undefined || v === '' ? NaN : Number(v);
+  return Number.isFinite(n) ? n.toFixed(2) : '0.00';
+}

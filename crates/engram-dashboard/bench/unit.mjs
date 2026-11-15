@@ -10,7 +10,7 @@
 
 import { filtered, merge } from '../web/js/graph/tally.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
-import { fmt, plural, shortId, label } from '../web/js/format.js';
+import { fmt, plural, shortId, label, score } from '../web/js/format.js';
 
 let failed = 0;
 let ran = 0;
@@ -74,6 +74,9 @@ export function ok(name, cond, detail) {
   eq('plural many', plural(3, 'memory', 'memories'), '3 memories');
   eq('shortId of a uuid', shortId('0193a6f0-1234-7000-8000-00000000abcd'), '0193a6f0…abcd');
   eq('label', label('needs_review'), 'Needs review');
+  for (const v of [null, undefined, NaN, Infinity, 'x', '']) eq(`score(${String(v)})`, score(v), '0.00');
+  eq('score(0.5)', score(0.5), '0.50');
+  eq('score(1.234)', score(1.234), '1.23');
 }
 
 if (failed) {

@@ -65,7 +65,9 @@ use engramdb::ops::links::{GraphEdge, GraphFilter, LinkKind, LinkOrigin, LinkSta
 use engramdb::storage::lance_index::IndexFilterable;
 use serde::{Deserialize, Serialize};
 
-use crate::api::{color_slots, hex_json, ok, open, query, top_scope_of, unhex_json, ApiResult};
+use crate::api::{
+    color_slots, finite, hex_json, ok, open, query, top_scope_of, unhex_json, ApiResult,
+};
 use crate::graph::{flag, foreign_states, sub_scope_of, Tally};
 use crate::{ApiError, AppState};
 
@@ -563,7 +565,7 @@ pub(crate) async fn project_relations(
                 symmetric: e.symmetric,
                 status: e.status.clone(),
                 origin: e.origin.clone(),
-                confidence: e.confidence,
+                confidence: finite(e.confidence),
                 at: e.created_at,
                 note: e.note.clone(),
                 state,

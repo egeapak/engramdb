@@ -26,7 +26,7 @@
 
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
-import { ago, fmt, label, plural, shortId } from '../format.js';
+import { ago, fmt, label, plural, shortId, score } from '../format.js';
 import { badge, scopeName } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { currentStyle } from '../graph/themes/index.js';
@@ -423,7 +423,7 @@ export async function renderRelations(main, ctx) {
         { class: 'rel-meta' },
         h('span', { class: ['ep', 'st-' + r.status] }, label(r.status)),
         r.state !== 'live' ? h('span', { class: 'faint' }, FAR_END[r.state] || r.state) : null,
-        h('span', { class: 'faint' }, `${r.origin} · ${Number(r.confidence).toFixed(2)} · ${ago(r.at)}`),
+        h('span', { class: 'faint' }, `${r.origin} · ${score(r.confidence)} · ${ago(r.at)}`),
         h('a', { class: 'btn sm', href: ctx.href('graph', p.id, gq.toString()) }, 'Show in graph'),
       ),
       r.note ? h('p', { class: 'rel-note clamp' }, r.note) : null,

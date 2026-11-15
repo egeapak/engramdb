@@ -66,7 +66,7 @@
 
 import { h, mount, afterPaint } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, plural, shortId, label } from '../format.js';
+import { fmt, ago, plural, shortId, label, score } from '../format.js';
 import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { LAYOUTS } from '../graph/layouts.js';
@@ -1395,7 +1395,7 @@ export async function renderGraph(main, ctx) {
           h('dt', null, 'Status'),
           h('dd', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status))),
           h('dt', null, 'Origin'),
-          h('dd', null, `${e.origin} · ${Number(e.confidence).toFixed(2)}`),
+          h('dd', null, `${e.origin} · ${score(e.confidence)}`),
           h('dt', null, 'Since'),
           h('dd', null, ago(e.created_at)),
           e.note ? [h('dt', null, 'Note'), h('dd', { class: 'clamp' }, e.note)] : null,
@@ -1493,7 +1493,7 @@ export async function renderGraph(main, ctx) {
       h('td', { class: 't' }, edgeEnd(e, 'dst')),
       h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${FAR_END[e.state] || e.state}`) : null),
       h('td', null, e.origin),
-      h('td', { class: 'n' }, Number(e.confidence).toFixed(2)),
+      h('td', { class: 'n' }, score(e.confidence)),
       h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show in graph')),
     );
   /** Rows built per idle slice when the table is built after a paint (each row draws a relation sample). */

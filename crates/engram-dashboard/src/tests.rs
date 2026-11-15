@@ -4067,3 +4067,65 @@ async fn a_hung_probe_is_single_flight_and_not_retried_at_once() {
     assert_eq!(other, Ok(7));
     release.wait();
 }
+
+// ---------------------------------------------------------------------------
+// Counts and values a page must be able to trust
+// ---------------------------------------------------------------------------
+
+/// Every id of a `/memories` walk by `next_cursor`, page size 1; panics on
+/// a non-200 answer or a criticality that is not a JSON number.
+async fn walk_memories(app: &axum::Router, id: &str, extra: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..100 {
+        let uri = format!(
+            "/api/projects/{id}/memories?limit=1{extra}{}",
+            cursor.as_ref().map_or(String::new(), |c| format!("&cursor={c}"))
+        );
+        let (s, p) = get_json(app, &uri).await;
+        assert_eq!(s, StatusCode::OK, "{uri}: {p}");
+        for m in p["items"].as_array().unwrap() {
+            assert!(m["criticality"].is_number(), "criticality not a number: {m}");
+            ids.push(m["id"].as_str().unwrap().to_string());
+        }
+        match p["next_cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => return ids,
+        }
+    }
+    panic!("the walk never ended: {ids:?}");
+}
+
+/// An index row can hold a `NaN` or `inf` criticality (one written before
+/// the parser read non-finite scores as absent). serde_json writes those as
+/// `null`: the page's `toFixed` threw on it, and the keyset cursor built
+/// from it could not be read back, so page 2 was a 400.
+#[tokio::test]
+async fn a_non_finite_criticality_never_breaks_the_list_or_its_cursor() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // `MemoryStore::create` writes the row from the value as given.
+    let mut nan = memory(MemoryType::Decision, "Not a number", &["storage"], &[]);
+    nan.criticality = f64::NAN;
+    let mut inf = memory(MemoryType::Hazard, "Infinitely critical", &["storage"], &[]);
+    inf.criticality = f64::INFINITY;
+    for m in [&nan, &inf] {
+        store.create(m).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    for sort in ["", "&sort=criticality&dir=asc", "&sort=criticality&dir=desc"] {
+        let ids = walk_memories(&app, &fx.id, sort).await;
+        let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "an id repeated: {ids:?}");
+        for m in [&nan, &inf] {
+            assert!(ids.contains(&m.id), "{} missing from {sort:?}", m.summary);
+        }
+    }
+    let (s, g) = get_json(&app, &format!("/api/projects/{}/graph", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{g}");
+    for n in g["nodes"].as_array().unwrap() {
+        assert!(n["criticality"].is_number(), "{n}");
+    }
+    let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    assert!(st["avg_criticality"].is_number(), "{}", st["avg_criticality"]);
+}

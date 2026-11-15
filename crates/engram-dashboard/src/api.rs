@@ -253,7 +253,7 @@ fn row(
         epistemic: e.epistemic.as_str(),
         status: status_str(e.status),
         visibility: wire(&e.visibility).to_lowercase(),
-        criticality: e.criticality,
+        criticality: finite(e.criticality),
         top_scope,
         logical: e.logical.clone(),
         physical: e.physical.clone(),
@@ -263,6 +263,21 @@ fn row(
         invalidated_at: e.invalidated_at,
         expires_at: e.expires_at,
         usage: usage.map(UsageCols::from).unwrap_or_default(),
+    }
+}
+
+/// A score as the API sends it: a non-finite one (`NaN`, `inf`) is `0.0`.
+///
+/// The parser reads a non-finite score in a file as absent, but an index
+/// row written before that keeps its `NaN` until the next reindex.
+/// serde_json writes a non-finite `f64` as `null`, which the page cannot
+/// format and a keyset cursor cannot read back, so every score leaves here
+/// finite. No clamp: an out-of-range finite value renders and pages fine.
+pub(crate) fn finite(v: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
     }
 }
 
@@ -448,7 +463,7 @@ async fn list_memories(
     let micros = |t: DateTime<Utc>| SortKey::Num(t.timestamp_micros() as f64);
     let key = |e: &IndexFilterable| -> Option<SortKey> {
         Some(match sort {
-            "criticality" => SortKey::Num(e.criticality),
+            "criticality" => SortKey::Num(finite(e.criticality)),
             "created" => micros(e.created_at),
             "updated" => micros(e.updated_at),
             "summary" => SortKey::text(e.summary.to_lowercase()),
@@ -859,7 +874,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
                     dst_store: e.dst_store.clone(),
                     dst_summary: dst.map(|d| d.summary.clone()),
                     origin: e.origin.clone(),
-                    confidence: e.confidence,
+                    confidence: finite(e.confidence),
                 }),
             });
         }
@@ -972,7 +987,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         by_scope: scope_counts(by_scope, &slots),
         oldest: stats.oldest,
         newest: stats.newest,
-        avg_criticality: stats.avg_criticality,
+        avg_criticality: finite(stats.avg_criticality),
         usage: totals,
         edges: edge_totals,
         series,

@@ -3,7 +3,7 @@
 
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, plural, shortId } from '../format.js';
+import { fmt, ago, plural, shortId, score } from '../format.js';
 import { badge, warnGlyph, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { smallMultiples } from '../chart.js';
 import { projHead, secHead, alertBanner, schemaNote } from './common.js';
@@ -68,7 +68,7 @@ function proposalItem(it, ctx) {
       { class: 'sub' },
       `${kindLabel(e.kind).toLowerCase()} `,
       other,
-      ` · ${e.origin} ${Number(e.confidence).toFixed(2)} · ${ago(it.at)}`,
+      ` · ${e.origin} ${score(e.confidence)} · ${ago(it.at)}`,
     ),
     h('details', { class: 'review-disclosure' }, h('summary', null, 'Review'), reviewControls(edge, ctx, { onDone: () => setTimeout(() => ctx.refresh(), 600) })),
   );

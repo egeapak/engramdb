@@ -121,7 +121,18 @@ async function readOnly(browser, url) {
   await go(t, '', '.stats');
   ok('overview renders', (await text(t, '.stats')).includes('Memories'));
   await go(t, 'memories', '#main table tbody tr');
-  ok('memories renders rows', (await t.p.$$('#main table tbody tr')).length > 0);
+  const rows0 = (await t.p.$$('#main table tbody tr')).length;
+  ok('memories renders rows', rows0 > 0);
+  // E1: the store's NaN-criticality row breaks neither a page nor its cursor.
+  const more = await t.p.evaluateHandle(() => [...document.querySelectorAll('#main button')].find((b) => /^Load \d+ more$/.test(b.textContent)) || null);
+  const hasMore = await more.evaluate((b) => !!b);
+  if (hasMore) {
+    await more.evaluate((b) => b.click());
+    await t.p.waitForTimeout(500);
+  }
+  const rows1 = (await t.p.$$('#main table tbody tr')).length;
+  const errBox = await t.p.$('#main .error-box');
+  ok('memories: Load more appends rows past the NaN row', hasMore && rows1 > rows0 && !errBox, { rows0, rows1, hasMore });
   await go(t, 'doctor', '#main .doc-checks, #main h1');
   ok('health renders', (await text(t, '#main')).length > 0);
   await go(t, 'relations', '#main h1');

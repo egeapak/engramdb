@@ -2,7 +2,7 @@
 
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, daysSince, shortId } from '../format.js';
+import { fmt, ago, daysSince, shortId, score } from '../format.js';
 import { badge, kindIcon, scopeName, TYPE_LABEL } from '../scopes.js';
 import { projHead, statusPill, errorBox } from './common.js';
 
@@ -169,7 +169,7 @@ export async function renderMemories(main, ctx) {
       h('td', { class: 'n' }, fmt(m.usage.fetched)),
       h('td', { class: 'n' }, fmt(m.usage.updated)),
       h('td', { class: 'n' }, stale && daysSince(m.created_at) > 30 ? h('span', { class: 'stale-tag' }, ago(last)) : ago(last)),
-      h('td', { class: 'n' }, m.criticality.toFixed(2)),
+      h('td', { class: 'n' }, score(m.criticality)),
     );
   };
 

@@ -70,7 +70,9 @@ use engramdb::storage::lance_index::IndexFilterable;
 use engramdb::types::Status;
 use serde::Serialize;
 
-use crate::api::{color_slots, ok, open, query, status_str, top_scope_of, wire, ApiResult};
+use crate::api::{
+    color_slots, finite, ok, open, query, status_str, top_scope_of, wire, ApiResult,
+};
 use crate::layout::{
     cache::Flight, overview::OverviewInput, Cached, EdgeFacts, ForceInput, Groups, LayoutInput,
     LayoutRequest, NodeFacts,
@@ -538,7 +540,7 @@ fn rank(rows: &mut [(&IndexFilterable, usize, u64)]) {
     rows.sort_by(|a, b| {
         b.1.cmp(&a.1)
             .then(b.2.cmp(&a.2))
-            .then(b.0.criticality.total_cmp(&a.0.criticality))
+            .then(finite(b.0.criticality).total_cmp(&finite(a.0.criticality)))
             .then_with(|| a.0.id.cmp(&b.0.id))
     });
 }
@@ -853,7 +855,7 @@ pub(crate) async fn project_graph(
             dst_store: e.dst_store.clone(),
             kind: e.kind.clone(),
             symmetric: e.symmetric,
-            confidence: e.confidence,
+            confidence: finite(e.confidence),
             origin: e.origin.clone(),
             status: e.status.clone(),
             created_at: e.created_at,
@@ -882,7 +884,7 @@ pub(crate) async fn project_graph(
                 challenged: e.status == Status::Challenged,
                 invalidated: e.invalidated_at.is_some_and(|t| t <= now),
                 visibility: wire(&e.visibility).to_lowercase(),
-                criticality: e.criticality,
+                criticality: finite(e.criticality),
                 color_slot: top_scope.as_ref().and_then(|l| slots.get(l).copied()),
                 top_scope,
                 scope: e.logical.first().cloned(),
