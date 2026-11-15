@@ -46,6 +46,10 @@ export function ok(name, cond, detail) {
   eq('filtered: proposed off', filtered(t, { ...all, proposed: false }).count, 4);
   eq('filtered: a kind no chip names is left out', filtered({ kinds: { future: { confirmed: 2 } } }, all).count, 0);
   eq('filtered: no tally', filtered(undefined, all).count, 0);
+  // E14: `counts.hidden_kinds` (kind → status → n) under the chips.
+  const hiddenKinds = { kinds: { supports: { confirmed: 2, rejected: 3 }, related_to: { proposed: 1 } } };
+  eq('filtered: hidden relations with Rejected off', filtered(hiddenKinds, { ...all, rejected: false }).count, 3);
+  eq('filtered: hidden relations with everything on', filtered(hiddenKinds, all).count, 6);
   const a = { count: 1, kinds: { supports: { confirmed: 1 } } };
   merge(a, { count: 2, kinds: { supports: { confirmed: 1, proposed: 1 } } });
   eq('merge adds counts per kind and status', a, { count: 3, kinds: { supports: { confirmed: 2, proposed: 1 } } });

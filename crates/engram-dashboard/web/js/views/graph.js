@@ -1445,6 +1445,8 @@ export async function renderGraph(main, ctx) {
     const ks = visible();
     const shown = ks.map((k) => g.edges[k]);
     const proposed = shown.filter((e) => e.status === 'proposed');
+    // Relations to undrawn memories, under the same chips as the drawn ones.
+    const notDrawn = filtered({ kinds: (g.counts && g.counts.hidden_kinds) || {} }, f).count;
     mount(
       card,
       h('div', { class: 'eyebrow' }, 'Details'),
@@ -1463,7 +1465,7 @@ export async function renderGraph(main, ctx) {
         h('dt', null, 'Proposed'),
         h('dd', null, `${fmt(proposed.length)}${proposed.some((e) => e.kind === 'contradicts') ? ` (${fmt(proposed.filter((e) => e.kind === 'contradicts').length)} contradictions)` : ''}`),
         tagByName.size ? [h('dt', null, 'To other scopes'), h('dd', null, `${plural(g.stub_scopes.reduce((n, sc) => n + filtered(sc, f).count, 0), 'relation')} (tags around the graph)`)] : null,
-        g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'relation')} to memories not drawn here (past the memory limit)`)] : null,
+        notDrawn ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(notDrawn, 'relation')} to memories not drawn here (past the memory limit)`)] : null,
       ),
     );
   }

@@ -244,6 +244,9 @@ struct Counts {
     /// other is one the filters admit; neither a relation with both ends
     /// outside `top_scope=` nor one counted in `stub_scopes` (drawn end or not).
     hidden: usize,
+    /// `hidden` by kind and status (the shape of a tally's `kinds`), so the
+    /// page counts them under its display filters; sums to `hidden`.
+    hidden_kinds: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
 #[derive(Serialize)]
@@ -801,6 +804,12 @@ pub(crate) async fn project_graph(
                     || !rows.contains_key(e.dst.as_str()));
             if !keep && touches_view(e) {
                 counts.hidden += 1;
+                *counts
+                    .hidden_kinds
+                    .entry(e.kind.as_str().to_string())
+                    .or_default()
+                    .entry(e.status.as_str().to_string())
+                    .or_insert(0) += 1;
             }
             keep
         })

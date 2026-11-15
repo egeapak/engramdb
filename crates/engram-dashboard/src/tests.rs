@@ -4246,3 +4246,57 @@ async fn the_overview_relation_total_is_what_the_relations_tab_lists() {
     );
     assert!(st["edges"]["total"].as_u64().unwrap() > 0);
 }
+
+/// "Not drawn here" counted every undrawn-end relation, rejected ones too,
+/// whatever the chips showed. The count now comes by kind and status.
+#[tokio::test]
+async fn hidden_relations_are_counted_by_kind_and_status() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    ops_links::link(
+        &store,
+        LinkParams {
+            src: fx.ids[1].clone(),
+            kind: LinkKind::RelatedTo,
+            dst: fx.ids[0].clone(),
+            dst_store: None,
+            confidence: Some(0.6),
+            origin: LinkOrigin::Human,
+            status: Some(LinkStatus::Rejected),
+            note: None,
+        },
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let (s, g) = get_json(
+        &app,
+        &format!(
+            "/api/projects/{}/graph?limit=1&include_rejected=true",
+            fx.id
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{g}");
+    let counts = &g["counts"];
+    let hidden = counts["hidden"].as_u64().unwrap();
+    let by: &serde_json::Map<String, serde_json::Value> =
+        counts["hidden_kinds"].as_object().unwrap();
+    let mut sum = 0;
+    let mut statuses = std::collections::BTreeSet::new();
+    for per in by.values() {
+        for (st, n) in per.as_object().unwrap() {
+            sum += n.as_u64().unwrap();
+            statuses.insert(st.clone());
+        }
+    }
+    assert!(hidden > 0, "{counts}");
+    assert_eq!(sum, hidden, "{counts}");
+    assert!(statuses.contains("rejected"), "{counts}");
+    assert!(
+        statuses.contains("confirmed") || statuses.contains("proposed"),
+        "{counts}"
+    );
+}
