@@ -806,19 +806,59 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A gate a [`FakeLoader`] load waits on while armed, so a test decides
+    /// when a load returns instead of racing a wall-clock delay.
+    #[derive(Default)]
+    pub(crate) struct LoadGate {
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+        /// Loads currently blocked on the gate.
+        pub waiting: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LoadGate {
+        /// Let every blocked (and every later) load through.
+        pub(crate) fn open(&self) {
+            *lock(&self.open) = true;
+            self.opened.notify_all();
+        }
+
+        fn pass(&self) {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.waiting.fetch_add(1, SeqCst);
+            let mut open = lock(&self.open);
+            while !*open {
+                open = self
+                    .opened
+                    .wait(open)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            self.waiting.fetch_sub(1, SeqCst);
+        }
+    }
+
     /// Records every load; loads fail while `fail` is set, and pools come
     /// up with at most `max_sessions` sessions when it is non-zero. Each load
-    /// sleeps `delay_ms`, so a test can overlap requests with a load. NLI is
-    /// never loadable (tests don't need it).
+    /// sleeps `delay_ms`, so a test can overlap requests with a load, and
+    /// waits on `gate` while one is armed, so a test can hold a load until it
+    /// says so. NLI is never loadable (tests don't need it).
     #[derive(Default)]
     pub(crate) struct FakeLoader {
         pub loads: Mutex<Vec<(ModelKey, usize)>>,
         pub fail: std::sync::atomic::AtomicBool,
         pub max_sessions: std::sync::atomic::AtomicUsize,
         pub delay_ms: std::sync::atomic::AtomicU64,
+        pub gate: Mutex<Option<Arc<LoadGate>>>,
     }
 
     impl FakeLoader {
+        /// Arm a gate: every load from now on blocks until it is opened.
+        pub(crate) fn arm_gate(&self) -> Arc<LoadGate> {
+            let gate = Arc::new(LoadGate::default());
+            *lock(&self.gate) = Some(Arc::clone(&gate));
+            gate
+        }
+
         pub(crate) fn loads_of(&self, pred: impl Fn(&ModelKey) -> bool) -> Vec<usize> {
             lock(&self.loads)
                 .iter()
@@ -835,6 +875,10 @@ pub(crate) mod test_support {
             let delay = self.delay_ms.load(SeqCst);
             if delay > 0 {
                 std::thread::sleep(Duration::from_millis(delay));
+            }
+            let gate = lock(&self.gate).clone();
+            if let Some(gate) = gate {
+                gate.pass();
             }
             if self.fail.load(SeqCst) {
                 return None;
@@ -1283,6 +1327,91 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(loader.loads_of(is_embedding), vec![1, 4], "no retry storm");
+    }
+
+    fn same_model(a: &Arc<dyn EmbeddingProvider>, b: &Arc<dyn EmbeddingProvider>) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
+    }
+
+    fn embedding_slot(cache: &ProviderCache) -> Arc<Slot> {
+        cache.slot(&model_demands(&embed_only(1), None, 1, 8)[0].0)
+    }
+
+    /// A grow whose demand expires while its pool is being built is
+    /// discarded when the load returns: the original pool keeps serving, and
+    /// the pool built for nothing is freed and counted released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_grow_overtaken_by_a_shrinking_demand_is_discarded() {
+        let (loader, cache) = fake_cache(8);
+        let original = cache
+            .get(&embed_only(1), None)
+            .await
+            .embedding
+            .expect("embedding");
+        let gate = loader.arm_gate();
+
+        // A demand of 4 is served by the current pool and starts a rebuild,
+        // which the gate holds inside the loader.
+        assert_eq!(embed_id(&cache, 4).await, "test/fake-x1");
+        eventually(|| gate.waiting.load(Ordering::SeqCst) == 1).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![1, 4]);
+
+        // The demand of 4 expires before the load returns; the 1 stays.
+        {
+            let slot = embedding_slot(&cache);
+            let mut st = lock(&slot.state);
+            let old = Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("an instant two minutes in the past");
+            for (want, at) in st.demands.iter_mut() {
+                if *want != 1 {
+                    *at = old;
+                }
+            }
+        }
+        assert_eq!(cache.evict_idle(Duration::from_secs(60)).await, 0);
+        gate.open();
+
+        eventually(|| cache.take_released() == 1).await;
+        assert!(!lock(&embedding_slot(&cache).state).resizing);
+        assert_eq!(embedding_pool(&cache), Some(1), "the original pool stays");
+        let now = cache
+            .get(&embed_only(1), None)
+            .await
+            .embedding
+            .expect("embedding");
+        assert!(
+            same_model(&now, &original),
+            "the original handle must still be the one served"
+        );
+        assert_eq!(loader.loads_of(is_embedding), vec![1, 4], "no further load");
+    }
+
+    /// A pool replaced by a grow is not counted released while a request
+    /// still holds it — the daemon would trim before the memory is free —
+    /// and is counted once the request lets go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replaced_pool_is_not_counted_released_while_a_request_holds_it() {
+        let (_loader, cache) = fake_cache(8);
+        let held = cache
+            .get(&embed_only(1), None)
+            .await
+            .embedding
+            .expect("embedding");
+        assert_eq!(held.model_id(), "test/fake-x1");
+
+        let _ = embed_id(&cache, 4).await;
+        eventually(|| embedding_pool(&cache) == Some(4)).await;
+        eventually(|| !lock(&embedding_slot(&cache).state).resizing).await;
+        // The old pool was handed to `retire`; give its blocking drop time
+        // to run, then check it is still alive in `held`.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(cache.take_released(), 0, "still held by a request");
+        assert_eq!(embed_id(&cache, 4).await, "test/fake-x4");
+
+        drop(held);
+        assert_eq!(cache.take_released(), 1);
+        assert_eq!(cache.take_released(), 0, "counted once");
     }
 
     /// A pool that comes up short reports its real size and is not rebuilt
