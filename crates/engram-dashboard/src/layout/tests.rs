@@ -1167,3 +1167,106 @@ fn the_overview_holds_its_contract_at_5000_scopes() {
         );
     }
 }
+
+/// The `LAYOUT_VERSION` the [`PINNED`] digests were recorded at.
+const PINNED_AT: u32 = 4;
+
+/// (case, SHA-256 of the rendered layout text with its cache key blanked).
+/// Any change here means the layout's output changed: bump `LAYOUT_VERSION`
+/// and update the digests and [`PINNED_AT`] together. The cache key is
+/// blanked because it is salted with the crate version, which a release
+/// changes without changing a single position.
+const PINNED: &[(&str, &str)] = &[
+    (
+        "force-top/top",
+        "80f03c38e6661e92fdaf2e3cad4e7dd5ca088acd08be41fd898e0919929a4bb6",
+    ),
+    (
+        "force-top/sub",
+        "a46d0c79c3c2c9bf981260aa3e4219950d4ea618f38252a1560036242aabf342",
+    ),
+    (
+        "force-sub/top",
+        "be2bc08835391e0fc5825e7139996237b76d081b31e39dd4abab67601101342e",
+    ),
+    (
+        "force-sub/sub",
+        "558a12b1e42e49f57059f252300d26ddfd1d10892660991d95380b9daffd7344",
+    ),
+    (
+        "overview",
+        "455867bdfa66dfb326496c8332723a02d9f957e5ec093fc16090d51ef89f4f42",
+    ),
+    (
+        "grid/sample-60",
+        "2230ef78b6f0f65f29f404878563f37f39dd1a3f69d7718d0bd2f5f18ed21857",
+    ),
+];
+
+/// Every pinned case's rendered text: the three fixtures (each scope-force
+/// one under both groupings, at the fixture's own width), and a generated
+/// graph through `grid`.
+fn pinned_cases() -> Vec<(String, String)> {
+    let mut cases = Vec::new();
+    for (name, text) in FIXTURES {
+        let fx: Value = serde_json::from_str(text).unwrap();
+        match fx["layout"].as_str().unwrap() {
+            "scope-force" => {
+                let input = fixture_force(&fx);
+                for (g, groups) in [("top", Groups::Top), ("sub", Groups::Sub)] {
+                    let li = LayoutInput::Force(input.clone());
+                    let key = li.digest();
+                    let text = li.render(&li.run(&key).unwrap(), &key, groups, None);
+                    cases.push((format!("{name}/{g}"), text.unwrap().replace(&key, "KEY")));
+                }
+            }
+            "scope-overview" => {
+                let li = LayoutInput::Overview(fixture_overview(&fx));
+                let key = li.digest();
+                let text = li.render(&li.run(&key).unwrap(), &key, Groups::Top, None);
+                cases.push((name.to_string(), text.unwrap().replace(&key, "KEY")));
+            }
+            other => panic!("{name}: unknown layout {other}"),
+        }
+    }
+    let li = LayoutInput::Grid(sample(60));
+    let key = li.digest();
+    let text = li.render(&li.run(&key).unwrap(), &key, Groups::Top, None);
+    cases.push(("grid/sample-60".into(), text.unwrap().replace(&key, "KEY")));
+    cases
+}
+
+#[test]
+fn the_fixture_layouts_match_their_pinned_digests() {
+    assert_eq!(
+        PINNED_AT, LAYOUT_VERSION,
+        "LAYOUT_VERSION changed: re-record PINNED and set PINNED_AT to it"
+    );
+    let actual: Vec<(String, String)> = pinned_cases()
+        .into_iter()
+        .map(|(name, text)| {
+            let digest = Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            (name, digest)
+        })
+        .collect();
+    let table: String = actual
+        .iter()
+        .map(|(n, d)| format!("    (\"{n}\", \"{d}\"),\n"))
+        .collect();
+    assert_eq!(
+        actual.len(),
+        PINNED.len(),
+        "PINNED does not list every case; the current digests are:\n{table}"
+    );
+    for ((name, digest), (pinned_name, pinned)) in actual.iter().zip(PINNED) {
+        assert_eq!(name, pinned_name, "PINNED is out of order:\n{table}");
+        assert_eq!(
+            digest, pinned,
+            "layout output changed for {name}: bump LAYOUT_VERSION and update PINNED \
+             (current digests:\n{table})"
+        );
+    }
+}
