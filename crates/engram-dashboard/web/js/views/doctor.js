@@ -5,7 +5,17 @@ import { api } from '../api.js';
 import { fmt, shortId } from '../format.js';
 import { projHead, secHead, schemaNote, errorBox, unavailable } from './common.js';
 
-function check(state, title, detail, ids) {
+/** "a1b2c3d4…ef01: merge conflict in the hidden block" per file, at most 40. */
+function unparsedList(files) {
+  return h(
+    'div',
+    { class: 'ids mono' },
+    files.slice(0, 40).map((f) => h('div', null, `${shortId(f.id)}: ${f.error}`)),
+    files.length > 40 ? h('div', null, `… and ${fmt(files.length - 40)} more`) : null,
+  );
+}
+
+function check(state, title, detail, ids, extra) {
   const mark = state === 'ok' ? '✓' : state === 'bad' ? '✕' : '–';
   const said = state === 'ok' ? 'Passed: ' : state === 'bad' ? 'Failed: ' : 'Not checked: ';
   return h(
@@ -14,7 +24,7 @@ function check(state, title, detail, ids) {
     h('span', { class: state, 'aria-hidden': 'true' }, mark),
     h('div', null, h('b', null, h('span', { class: 'sr-only' }, said), title), detail ? h('div', { class: 'muted' }, detail) : null),
     h('span', { class: 'mono faint' }, ids ? fmt(ids.length) : ''),
-    ids && ids.length
+    !extra && ids && ids.length
       ? h(
           'div',
           { class: 'ids mono' },
@@ -24,6 +34,7 @@ function check(state, title, detail, ids) {
           ids.length > 40 ? ` … and ${fmt(ids.length - 40)} more` : '',
         )
       : null,
+    extra || null,
   );
 }
 
@@ -38,9 +49,17 @@ export async function renderDoctor(main, ctx) {
   if (ctx.isStale()) return;
   const r = d.result;
   const drift = r.drifted_entries;
+  // Files the parser refuses (most often a merge conflict in the hidden
+  // block): `doctor --fix` cannot repair them, so the advice differs.
+  const unparsed = r.unparseable || [];
+  const advice = unparsed.length
+    ? `Needs a hand fix: ${unparsed.length === 1 ? '1 file does' : `${fmt(unparsed.length)} files do`} not parse`
+    : r.healthy
+      ? 'Healthy'
+      : 'Needs repair: run `engramdb doctor --fix`';
   mount(
     main,
-    projHead('Health', p.name, [`${fmt(r.indexed)} indexed · ${fmt(r.on_disk)} files on disk`, r.healthy ? 'Healthy' : 'Needs repair: run `engramdb doctor --fix`']),
+    projHead('Health', p.name, [`${fmt(r.indexed)} indexed · ${fmt(r.on_disk)} files on disk`, advice]),
     schemaNote(d.schema, d.staleness),
     d.checkout_conflict ? h('div', { class: 'note' }, `Another checkout shares this project id (${d.checkout_conflict}); drift is not checked here.`) : null,
     secHead('Index against files'),
@@ -53,7 +72,11 @@ export async function renderDoctor(main, ctx) {
         ? check('na', 'Content drift', 'Not checked: no digests to compare, or a shared project id.', null)
         : check(drift.length ? 'bad' : 'ok', 'Content drift', 'Files edited (or restored by git) without the index noticing.', drift),
       check(r.undetermined.length ? 'bad' : 'ok', 'Readable files', 'Files that could not be read or hashed.', r.undetermined),
+      check(unparsed.length ? 'bad' : 'ok', 'Files that parse', 'Memory files the parser refuses, by id (the id is in the file name) and reason.', unparsed.length ? unparsed : null, unparsed.length ? unparsedList(unparsed) : null),
     ),
     h('p', { class: 'faint' }, 'The dashboard never repairs. `engramdb doctor --fix` in the project does.'),
+    unparsed.length
+      ? h('p', { class: 'faint' }, '`doctor --fix` cannot repair a file that does not parse (most often a merge conflict in its hidden block). Fix the file, then run `engramdb reindex`.')
+      : null,
   );
 }

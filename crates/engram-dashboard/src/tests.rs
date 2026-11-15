@@ -4489,3 +4489,39 @@ fn views_never_refresh_from_a_bare_timer() {
         problems.join("\n  ")
     );
 }
+
+/// The Health page lists the files the parser refuses from
+/// `result.unparseable` (id + reason): this pins the contract it reads.
+#[tokio::test]
+async fn doctor_names_unparseable_files() {
+    let fx = fixture().await;
+    let id = &fx.ids[1];
+    let mdir = paths::memories_dir(&fx.dir);
+    let file = std::fs::read_dir(&mdir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains(id.as_str())))
+        .expect("the memory's file");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let start = text.find("<!-- engramdb").expect("a hidden block");
+    let block = &text[start..];
+    std::fs::write(
+        &file,
+        format!(
+            "{}<<<<<<< HEAD\n{block}=======\n{block}>>>>>>> topic\n",
+            &text[..start]
+        ),
+    )
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let (s, d) = get_json(&app, &format!("/api/projects/{}/doctor", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{d}");
+    let bad = d["result"]["unparseable"].as_array().unwrap();
+    assert_eq!(bad.len(), 1, "{d}");
+    assert_eq!(bad[0]["id"], id.as_str());
+    assert!(
+        bad[0]["error"].as_str().unwrap().contains("merge conflict"),
+        "{}",
+        bad[0]
+    );
+}

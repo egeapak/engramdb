@@ -161,6 +161,9 @@ async function readOnly(browser, url) {
   ok('memories: a type filter the status hides still shows, and All types clears it', kindShown === 'Hazard (0)' && invalidatedRows > 0 && !(await t.p.evaluate(() => location.hash)).includes('kind='), { kindShown, invalidatedRows });
   await go(t, 'doctor', '#main .doc-checks, #main h1');
   ok('health renders', (await text(t, '#main')).length > 0);
+  // E11: the merge-conflicted file is listed, with the hand-fix advice.
+  const health = await text(t, '#main');
+  ok('health: lists the file that does not parse and says it needs a hand fix', health.includes('0bfa0170…007d') && health.includes('merge conflict') && health.includes('Needs a hand fix') && health.includes('cannot repair a file that does not parse'), health.slice(0, 600));
   await go(t, 'relations', '#main h1');
   ok('relations renders', (await text(t, '#main')).includes('relation'));
   // E9: a malformed escape in the hash is a not-found view, not a stuck page.
