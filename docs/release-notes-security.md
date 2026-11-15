@@ -2,6 +2,10 @@
 
 > Draft for the release that moves `[security]` to the global config and
 > hardens what a cloned repository can make EngramDB do.
+>
+> This page is part of a larger set of changes. Every user-visible change in
+> that set, these included, is listed in
+> [release-notes-review-fixes.md](./release-notes-review-fixes.md).
 
 ## Breaking: `[security]` is read only from the global config file
 
