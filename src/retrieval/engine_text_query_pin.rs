@@ -8,6 +8,11 @@
 //! `retrieval_quality`, `dropped_below_threshold`, and whether each returned
 //! memory carries content and details — and compared byte for byte.
 //!
+//! The keyword engine's sections are still the ones captured before that
+//! work. The semantic and rerank sections were regenerated once when the
+//! test embedding moved to exact (1/8-grid) components, so the pin holds on
+//! every CPU (see [`HashEmbedding`]).
+//!
 //! Scores are independent of the clock: every timestamp is fixed in the past,
 //! and each decay shape is one whose factor is constant at that age (a step
 //! not yet reached, a linear or exponential decay already at its floor).
@@ -40,6 +45,13 @@ fn fnv(bytes: &[u8]) -> u64 {
 
 /// Deterministic vectors from a hash of the text, with a keyword component so
 /// semantic neighbours are not pure noise.
+///
+/// Every component is a multiple of 1/8, so every product and partial sum
+/// in an L2 distance is a multiple of 1/64 far below 2^24 of them: exact in
+/// `f32`. LanceDB picks its distance kernel by CPU (AVX-512, AVX2, …), and
+/// those kernels add in different orders; with inexact components the
+/// `semantic` score moved in its last bits between the machine that wrote
+/// the golden and a CI runner.
 struct HashEmbedding;
 
 #[async_trait::async_trait]
@@ -49,7 +61,7 @@ impl EmbeddingProvider for HashEmbedding {
         let mut v: Vec<f32> = (0..DIMS)
             .map(|i| {
                 let h = fnv(format!("{i}:{lower}").as_bytes());
-                ((h % 1000) as f32 / 1000.0) - 0.5
+                ((h % 9) as f32 - 4.0) / 8.0
             })
             .collect();
         for (i, w) in WORDS.iter().enumerate() {
