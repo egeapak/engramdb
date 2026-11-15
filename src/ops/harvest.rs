@@ -154,12 +154,15 @@ pub async fn session_scope(dir: &Path, registry: &dyn RegistryBackend) -> Result
 
     // The invoking directory may not be registered yet (first run in a fresh
     // worktree). Include it regardless so its own sessions are harvestable.
-    let dir_owned = dir.to_path_buf();
-    if !paths.contains(&dir_owned) {
-        paths.push(dir_owned);
-    }
+    paths.push(dir.to_path_buf());
+    // One entry per directory, compared through `canonicalize` and never
+    // textually: the registry holds the canonical path, while `dir` is what
+    // the caller typed (`.`, a symlink, `/var` for macOS's `/private/var`).
+    // The first spelling wins, so a registered path keeps the registry's.
+    // A path that no longer exists keys on its own spelling.
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|p| seen.insert(p.canonicalize().unwrap_or_else(|_| p.clone())));
     paths.sort();
-    paths.dedup();
 
     // Adopt across the *whole* hierarchy, not just the invoking directory: the
     // sub-project whose ledger was left behind is usually not the one the
@@ -2397,6 +2400,28 @@ mod tests {
             harvest_state::read_harvested(dir)["gone"].archive.is_none(),
             "a reference to an archive that was never written survived"
         );
+    }
+
+    /// The invoking directory and its registered entry are one directory
+    /// however they are spelled. Compared textually, a symlinked checkout
+    /// (or macOS's `/var` for `/private/var`) was listed twice in `scope`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_scope_lists_a_directory_once_whatever_its_spelling() {
+        use crate::storage::InMemoryRegistry;
+        let base = tempfile::TempDir::new().unwrap();
+        let real = base.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let real = real.canonicalize().unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let registry = InMemoryRegistry::new();
+        let id = crate::storage::project_id::compute_project_id(&real);
+        registry.update(&real, &id).await.unwrap();
+
+        let scope = session_scope(&link, &registry).await.unwrap();
+        assert_eq!(scope.paths, vec![real]);
     }
 
     #[test]
