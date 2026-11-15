@@ -482,7 +482,11 @@ pub async fn build_fault(out: &Path) -> anyhow::Result<String> {
     // the challenged ones (each pair once).
     for k in 0..FAULT_PROPOSED {
         let (s, t) = (20 + 2 * k, 21 + 2 * k);
-        let kind = if k % 3 == 0 { "contradicts" } else { "related_to" };
+        let kind = if k % 3 == 0 {
+            "contradicts"
+        } else {
+            "related_to"
+        };
         let to = mems[t].id.clone();
         mems[s].links.push(link(&to, kind, LinkStatus::Proposed));
     }
@@ -490,8 +494,12 @@ pub async fn build_fault(out: &Path) -> anyhow::Result<String> {
     // `Object.prototype` member; rejected ones; one to an invalidated
     // memory; one to a memory that does not exist.
     let (a, b) = (mems[90].id.clone(), mems[91].id.clone());
-    mems[92].links.push(link(&a, "constructor", LinkStatus::Confirmed));
-    mems[93].links.push(link(&b, "__proto__", LinkStatus::Confirmed));
+    mems[92]
+        .links
+        .push(link(&a, "constructor", LinkStatus::Confirmed));
+    mems[93]
+        .links
+        .push(link(&b, "__proto__", LinkStatus::Confirmed));
     for k in 0..4 {
         let to = mems[100 + k].id.clone();
         mems[110 + k]
@@ -499,7 +507,9 @@ pub async fn build_fault(out: &Path) -> anyhow::Result<String> {
             .push(link(&to, "supports", LinkStatus::Rejected));
     }
     let inv = mems[FAULT_LIVE + 1].id.clone();
-    mems[120].links.push(link(&inv, "supports", LinkStatus::Confirmed));
+    mems[120]
+        .links
+        .push(link(&inv, "supports", LinkStatus::Confirmed));
     mems[121]
         .links
         .push(link(&fault_id(9_999), "related_to", LinkStatus::Confirmed));
