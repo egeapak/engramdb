@@ -121,13 +121,40 @@ roving focus, Enter selects (card heading), a panel row is announced,
 Escape clears; hovering 30 memories at their centres hits each one (the
 tooltip names it, the cursor is a pointer); a click opens the panel; a
 relation pinned from the table is centred and the pointer there hits it;
-a display filter moves no memory; a zoom gesture settles; a light / dark
-switch repaints the canvas; no console error or CSP violation; and the
-canvas lists the same memories, with the same words, as the SVG surface.
+a display filter moves no memory; a zoom gesture settles; a 16 px
+narrower window (a scrollbar) keeps a zoomed and panned view's centre and
+scale, and a view at Fit re-fits (`resize_view`); a light / dark switch
+repaints the canvas; no console error or CSP violation; and the canvas
+lists the same memories, with the same words, as the SVG surface.
+
+## `pages.mjs`: the other pages
+
+Pass / fail, exit 1 on any failure. It starts two dashboards of its own on
+the `sfault` fixture (`dashboard_bench_store <dir> sfault`, which also
+writes `sfault-away`), one read-only and one with `--allow-writes`:
+
+```bash
+target/debug/examples/dashboard_bench_store /tmp/dash-bench sfault
+node bench/browser/pages.mjs --stores /tmp/dash-bench --bin target/debug/engramdb \
+  [--assets web] [--chrome <path>] [--json out.json]
+```
+
+Read-only: the Overview's tiles count the store (challenged, memories in
+use, "and N more"), its chart says its days are UTC; the Memories table
+pages past a NaN criticality and keeps a type filter the status hides;
+Health lists the merge-conflicted file; *Show in graph* selects its memory
+on either side of the overview threshold; a malformed link says it is not
+valid; a project that was unavailable comes back with *Try again*. With
+writes: a review refresh returns focus to its heading and does not run
+after the user left, and a relation reviewed in another page ends as
+*Already reviewed elsewhere*. Every page: no console or page error. The
+write checks consume proposed relations, so generate `sfault` again before
+a second run.
 
 ## In CI
 
-`ci.yml`'s `frontend-browser` job runs `checks.mjs` on every pull request:
+`ci.yml`'s `frontend-browser` job runs `checks.mjs`, then `pages.mjs` on
+the `sfault` store it also generates, on every pull request:
 
 ```bash
 (cd bench/browser && npm ci --ignore-scripts)
