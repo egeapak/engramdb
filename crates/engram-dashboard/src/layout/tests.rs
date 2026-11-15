@@ -1119,3 +1119,54 @@ fn a_core_that_does_not_fit_the_graph_is_not_rendered() {
         .unwrap_err();
     assert!(err.contains("does not fit"), "{err}");
 }
+
+#[test]
+fn the_overview_holds_its_contract_at_5000_scopes() {
+    // E16: nothing caps a store's top-scope count. Past PACK_MAX the discs
+    // sit on a spiral (where large ones may touch, so no overlap check
+    // here), and the m × m affinity matrix is not built.
+    let m = 5000;
+    let input = overview::OverviewInput {
+        nodes: (0..m)
+            .map(|i| overview::OverviewNode {
+                id: format!("scope-{i}"),
+                count: (1 + 5000 / (i + 1)) as f64,
+                full_len: 14,
+                short_len: 7,
+            })
+            .collect(),
+        edges: (1..m)
+            .map(|i| overview::OverviewEdge {
+                s: i - 1,
+                t: i,
+                n: (i % 9 + 1) as f64,
+            })
+            .collect(),
+        aspect: 0.6,
+        width: 1240.0,
+    };
+    let out = overview::layout(&input);
+    let b = &out.bounds;
+    assert_eq!(out.pos.len(), 2 * m);
+    assert_eq!(out.r.len(), m);
+    assert_eq!(out.labels.len(), m, "a label per scope");
+    assert_eq!(out.routes.len(), input.edges.len());
+    assert!([b.x, b.y, b.w, b.h].iter().all(|v| v.is_finite()));
+    assert!(out.routes.iter().flatten().flatten().all(|v| v.is_finite()));
+    assert!(out
+        .labels
+        .iter()
+        .all(|l| l.x.is_finite() && l.y.is_finite()));
+    for i in 0..m {
+        let (x, y, r) = (out.pos[2 * i], out.pos[2 * i + 1], out.r[i]);
+        assert!(x.is_finite() && y.is_finite() && r > 0.0, "disc {i}");
+        assert!(
+            x - r >= b.x - 1e-6 && x + r <= b.x + b.w + 1e-6,
+            "disc {i} outside"
+        );
+        assert!(
+            y - r >= b.y - 1e-6 && y + r <= b.y + b.h + 1e-6,
+            "disc {i} outside"
+        );
+    }
+}
