@@ -1,6 +1,6 @@
 # Configuration
 
-EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, the three `[retrieval.scoring]` weight sub-tables (`with_query`, `scope_only`, `degraded`) and their `relevance` weights, all of `[thresholds]` (`needs_review` / `gc` / `compress`), all of `[search]`, `[scope_proximity]`, `[logical_bonus]`, `[trust_weights]`, `[nli]`, and `[rerank]`. The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override.
+EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, `[thresholds]`' `gc` and `compress`, `[search]`'s `threshold`, all of `[trust_weights]`, `[nli]` and `[rerank]`, and `relevance` in a weight sub-table you write (`[retrieval.scoring.with_query]` and its siblings). The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override.
 
 Two sections are the exception: `[daemon]` and `[security]` are read only from the **global** config file, `<global config dir>/config.toml` (Linux: `~/.config/engramdb/config.toml`; macOS: `~/Library/Application Support/engramdb/config.toml`; `$ENGRAMDB_CONFIG_DIR/config.toml` when that variable is set). The daemon is one process shared by every project, so its settings cannot come from a project. `[security]` decides what a project's agent may do outside that project, and a project config is committed with the repository, so a cloned repository must not be able to grant itself anything. The global file holds only these two sections; a missing file means the defaults. A project config that still has a `[daemon]` or `[security]` section loads, but EngramDB ignores the keys, warns once naming each one, and `engramdb doctor` reports them. A `[security]` key set to `true` in a project config grants nothing. See [daemon.md](./daemon.md#configuration) and [`[security]`](#security) below.
 
@@ -81,8 +81,7 @@ observation = 0.7
 decision = 1.0
 
 [search]
-semantic_weight = 3.0          # weight on semantic similarity vs keyword
-threshold = 0.2                # minimum keyword-search score
+threshold = 0.2                # minimum keyword-search score in filter mode
 
 [embeddings]
 backend = "auto"               # "auto" | "onnx" | "ollama"
@@ -97,17 +96,6 @@ metadata_vector = true         # embed "{title}. {summary}. tags: ..." as an ext
 #                               # The daemon shares one pool per embedding model between projects, sized to the largest
 #                               # pool_size an open project asks for, rounded up to a power of two (3 -> 4) and capped at cores.
 
-[scope_proximity]
-exact_file = 1.0
-same_directory = 0.85
-same_module = 0.6
-project_root = 0.4
-
-[logical_bonus]
-exact = 0.3
-parent = 0.2
-sibling = 0.15
-
 [trust_weights]
 human = 1.0
 agent = 0.85
@@ -115,9 +103,10 @@ inferred = 0.6
 imported = 0.7
 
 [thresholds]
-needs_review = 0.3             # composite score below this → mark needs-review
 gc = 0.05                      # score below this → eligible for gc
 compress = 0.4                 # criticality below this → eligible for compression
+                               # (default of `engramdb compress --threshold` and of
+                               # the MCP `compress_candidates` tool's `threshold`)
 
 [review]
 recency_days = 90              # active memories not updated in > N days are suggested
@@ -233,6 +222,10 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 ```
 
 ## Notes on selected sections
+
+- **Retired keys.** `[scope_proximity]` (all four keys), `[logical_bonus]` (all three keys), `[thresholds].needs_review` and `[search].semantic_weight` change nothing. No code ever read them. EngramDB still accepts them so that old config files load, also when a section sets only some of its keys. When your config sets one, EngramDB warns once per file, naming each key, and `engramdb doctor` reports them as a warning under "Config file". Delete them from your config to stop the warning. To tune scope scoring, use `[retrieval.scoring]` `depth_decay_base`, `depth_decay_floor` and `scope_multiplier_floor`.
+
+- **`[thresholds]`** — `gc` is the default of `engramdb gc --threshold`. `compress` is the default criticality threshold of `engramdb compress` and of the MCP `compress_candidates` tool; an explicit `--threshold` / `threshold` wins. Before this release `compress` was read by nothing and the threshold was always 0.4, which is still the default.
 
 - **`[retrieval.scoring]`** — composite formula: `score = base * scope_multiplier * trust_multiplier * situation_multiplier - challenge_penalty`, clamped to `[0, 1]`. `base` comes from whichever weight set applies (`with_query` / `with_keyword` / `scope_only` / `degraded`). The scope multiplier is the depth-decayed `path` match plus a logical bonus (≤ 0.3) when a `path` is supplied; with only `logical` context it is `scope_multiplier_floor + bonus` for related memories (bare floor for unscoped memories, 0 for unrelated ones); 1.0 (neutral) when no scope context is given. The situation multiplier is 1.0 (neutral) when the query carries no situation.
 - **`challenge_penalty`** — per-epistemic-class by default: a contradicted observation is cheap to re-measure (0.20, suppressed hardest), a contradicted fact is probably stale (0.15), a contested decision must remain visible together with its dispute (0.05, mildest). The legacy scalar form (`challenge_penalty = 0.10`) still parses and applies flat to every class. All values must be in `[0, 1]`.

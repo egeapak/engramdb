@@ -391,7 +391,7 @@ When hooks have run in the project, the result also has a `hooks` object: `since
 **Effective config values and store vocabulary** — call this once at the start of a session to learn the limits and thresholds that govern the other tools, and to get a feel for what is already in memory. Returns:
 
 - `limits` — `summary_max_chars` (hard cap `create` enforces), `content_soft_token_target`, and `embedding_chunk_tokens` (per-chunk embedding window; content past one window is chunked and still embedded, not truncated).
-- `retrieval` — `default_max_results`, `relevance_threshold` (min score a `query` result clears), `search_threshold`, `search_semantic_weight`, `include_expired`.
+- `retrieval` — `default_max_results`, `relevance_threshold` (min score a `query` result clears), `search_threshold`, `include_expired`.
 - `features` — `rerank_enabled` / `rerank_top_n`, `contradiction_detection_enabled` (whether `challenge`'s NLI is on), and the `title_strategy` used when `create` gets no title.
 - `embedding` — `provider` and vector `dimensions`.
 - `top_tags` — the most-used unique tags with counts, most-used first.

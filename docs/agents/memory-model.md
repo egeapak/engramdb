@@ -113,8 +113,8 @@ These are the two scoring axes that connect a memory to the code it's about.
 
 Scoring contribution:
 
-- Physical: exponential depth decay. `exact_file: 1.0, same_directory: 0.85, same_module: 0.6, project_root: 0.4` (defaults from config).
-- Logical bonus: `exact: 0.3, parent: 0.2, sibling: 0.15`. Stacks on top, capped at 1.0.
+- Physical: the score falls with directory distance. It is `depth_decay_base ^ depth` (default base 0.82), never below `depth_decay_floor` (default 0.3). An exact file match scores 1.0.
+- Logical bonus: 0.30 for the same scope, 0.20 for a parent or child, 0.15 for a sibling, less for more distant relatives, 0 for unrelated scopes. It is added to the physical score, and the sum is capped at 1.0. These numbers are fixed; no config key sets them.
 
 Set `physical` and `logical` accurately — they're how PreToolUse hooks find relevant memories when an agent touches a file.
 
@@ -154,7 +154,7 @@ You don't set `source` directly when calling `create` via MCP — the server set
 ### `status`
 
 - **`active`** — normal.
-- **`needsreview`** — composite score fell below `[thresholds].needs_review` (default 0.3) or someone explicitly set it. Surfaced by `review --stale-only`.
+- **`needsreview`** — set by `doctor` with `fix` when a watched path changed or a `derived_from` source is gone, or set explicitly. `verify` clears it. Surfaced by `review --stale-only`.
 - **`challenged`** — someone called `challenge`. Surfaced by `review --challenged-only`. Suppressed in scoring by `challenge_penalty`.
 
 You generally don't set status directly. Use `challenge` (sets `challenged`) and `resolve` (sets `active`).

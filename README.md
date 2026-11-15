@@ -208,8 +208,8 @@ Each section is optional, but a section you *do* write must be complete: once a
 section header appears, every field in it that has no built-in default is
 required. In particular, an `[embeddings]` table must set `provider`,
 `dimensions`, and `max_tokens` (no defaults — this keeps a partial embeddings
-config from silently mismatching the index), and any `[retrieval.scoring]` or
-`[thresholds]` table must set all of its fields. The example below parses as-is;
+config from silently mismatching the index), a `[thresholds]` table must set
+`gc` and `compress`, and a `[search]` table must set `threshold`. The example below parses as-is;
 see [`docs/users/configuration.md`](docs/users/configuration.md) for the
 complete, copy-pasteable schema with every field and its default.
 
