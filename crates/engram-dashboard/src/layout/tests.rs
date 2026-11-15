@@ -1025,3 +1025,97 @@ fn grid_keeps_its_contract_and_is_deterministic() {
         assert_eq!(v["chains"].as_array().unwrap().len(), out.lines.len());
     }
 }
+
+#[test]
+fn a_cache_file_with_a_damaged_payload_is_recomputed() {
+    let dir = temp_cache_dir();
+    let input = LayoutInput::Force(sample(20));
+    let key = input.digest();
+    let c = cache::LayoutCache::new(Some(dir.clone()), true);
+    let first = c.fill(&key, || input.run(&key)).unwrap();
+    let file = dir.join(format!("{key}.bin"));
+    let good = std::fs::read(&file).unwrap();
+    // One low mantissa bit of the first position: still a finite number,
+    // the same length, the same header; only the checksum can tell.
+    let mut bad = good.clone();
+    bad[4 + 4 + 64 + 1 + 8] ^= 1;
+    std::fs::write(&file, &bad).unwrap();
+    let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
+    let mut ran = false;
+    let again = c2
+        .fill(&key, || {
+            ran = true;
+            input.run(&key)
+        })
+        .unwrap();
+    assert!(ran, "a damaged file is a miss");
+    assert_eq!(*again, *first);
+    assert_eq!(std::fs::read(&file).unwrap(), good, "the file is rewritten");
+    // forget() drops it from memory and disk.
+    c2.forget(&key);
+    assert!(c2.get_mem(&key).is_none());
+    assert!(!file.exists());
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_non_finite_core_never_reads_back() {
+    let core = scope_force::layout_core(&sample(20));
+    let ok = Cached::Force(Box::new(core.clone()));
+    assert_eq!(Cached::from_bytes(&ok.to_bytes()), Some(ok));
+    for damage in [
+        |c: &mut ForceCore| c.x[0] = f64::NAN,
+        |c: &mut ForceCore| c.r[1] = f64::INFINITY,
+        |c: &mut ForceCore| c.name_size = f64::NAN,
+        |c: &mut ForceCore| c.max[0] = f64::NEG_INFINITY,
+        |c: &mut ForceCore| c.labels[0].w = f64::NAN,
+    ] {
+        let mut bad = core.clone();
+        damage(&mut bad);
+        assert!(!bad.is_finite());
+        assert_eq!(
+            Cached::from_bytes(&Cached::Force(Box::new(bad)).to_bytes()),
+            None
+        );
+    }
+    // An empty graph's bounds stay at their ±infinity start: still a layout.
+    let empty = scope_force::layout_core(&sample(0));
+    assert!(empty.x.is_empty() && empty.is_finite());
+}
+
+#[test]
+fn a_pre_checksum_cache_file_is_replaced() {
+    let dir = temp_cache_dir();
+    let input = LayoutInput::Force(sample(20));
+    let key = input.digest();
+    let c = cache::LayoutCache::new(Some(dir.clone()), true);
+    let v = c.fill(&key, || input.run(&key)).unwrap();
+    let file = dir.join(format!("{key}.bin"));
+    // The same layout in the format before the checksum.
+    let mut old = b"EDLC".to_vec();
+    old.extend_from_slice(&LAYOUT_VERSION.to_le_bytes());
+    old.extend_from_slice(key.as_bytes());
+    old.extend_from_slice(&v.to_bytes());
+    std::fs::write(&file, &old).unwrap();
+    let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
+    let mut ran = false;
+    c2.fill(&key, || {
+        ran = true;
+        input.run(&key)
+    })
+    .unwrap();
+    assert!(ran, "an EDLC file is foreign");
+    assert!(std::fs::read(&file).unwrap().starts_with(b"EDL2"));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_core_that_does_not_fit_the_graph_is_not_rendered() {
+    let small = scope_force::layout_core(&sample(20));
+    let input = LayoutInput::Force(sample(21));
+    let key = input.digest();
+    let err = input
+        .render(&Cached::Force(Box::new(small)), &key, Groups::Top, None)
+        .unwrap_err();
+    assert!(err.contains("does not fit"), "{err}");
+}

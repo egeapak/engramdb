@@ -408,6 +408,27 @@ fn anchor_byte(a: labels::Anchor) -> u8 {
 }
 
 impl ForceCore {
+    /// Every number the page draws from is finite. Asked of a fresh layout
+    /// ([`LayoutInput::run`]) and of one read back from a cache file
+    /// ([`ForceCore::read`]), so a damaged file is a miss, never a layout.
+    /// The bounds of an empty graph start at ±infinity and stay there (no
+    /// memory grows them), so they are asked only of a non-empty one.
+    pub(crate) fn is_finite(&self) -> bool {
+        let fin = |v: &f64| v.is_finite();
+        self.pos.iter().all(fin)
+            && self.routes.iter().flatten().all(fin)
+            && self.labels.iter().all(|l| [l.x, l.y, l.w].iter().all(fin))
+            && self.region_r.is_finite()
+            && self.x.iter().chain(&self.y).chain(&self.r).all(fin)
+            && self
+                .names
+                .iter()
+                .all(|s| [s.x, s.y, s.size, s.w].iter().all(fin))
+            && self.name_size.is_finite()
+            && self.extent.is_finite()
+            && (self.x.is_empty() || self.min.iter().chain(&self.max).all(fin))
+    }
+
     fn write(&self, o: &mut Out) {
         o.f64s(&self.pos);
         o.u64(self.routes.len() as u64);
@@ -534,7 +555,7 @@ impl ForceCore {
             && core.r.len() == n
             && core.labels.len() == n
             && core.names.len() == core.tops.iter().filter(|t| !t.key.is_empty()).count();
-        consistent.then_some(core)
+        (consistent && core.is_finite()).then_some(core)
     }
 }
 
@@ -896,14 +917,7 @@ impl LayoutInput {
         match self {
             LayoutInput::Force(input) => {
                 let core = scope_force::layout_core(input);
-                let finite = core.pos.iter().all(|v| v.is_finite())
-                    && core.routes.iter().flatten().all(|v| v.is_finite())
-                    && core
-                        .labels
-                        .iter()
-                        .all(|l| l.x.is_finite() && l.y.is_finite())
-                    && core.region_r.is_finite();
-                if !finite {
+                if !core.is_finite() {
                     return Err("scope-force produced a position that is not a number".into());
                 }
                 Ok(Cached::Force(Box::new(core)))
@@ -953,8 +967,11 @@ impl LayoutInput {
     /// The encoded layout for the page, as JSON text, from what the cache
     /// holds: scope-force finished for this input's width (with `dirs`, an
     /// opened scope's far-scope directions). An error when `cached` is the
-    /// other kind (a digest collision in name only; never expected) or the
-    /// finished names are not finite.
+    /// other kind (a digest collision in name only; never expected), a
+    /// scope-force core that does not fit this input (one memory position
+    /// per node, one route per relation), or the finished names are not
+    /// finite. The caller forgets the key on an error, so the next request
+    /// computes it again.
     pub fn render(
         &self,
         cached: &Cached,
@@ -964,6 +981,9 @@ impl LayoutInput {
     ) -> Result<String, String> {
         match (self, cached) {
             (LayoutInput::Force(input), Cached::Force(core)) => {
+                if core.x.len() != input.nodes.len() || core.routes.len() != input.edges.len() {
+                    return Err("the cached layout does not fit this graph".into());
+                }
                 let out = scope_force::finish(core, input.width);
                 let finite = out.bounds.iter().all(|v| v.is_finite())
                     && out

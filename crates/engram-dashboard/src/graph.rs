@@ -422,10 +422,17 @@ async fn layout_of(
     let input = Arc::new(input);
     let key = input.digest();
     let cached = cached_layout(state, &input, &key).await?;
-    tokio::task::spawn_blocking(move || input.render(&cached, &key, groups, dirs.as_ref()))
-        .await
-        .map_err(layout_failed)?
-        .map_err(layout_failed)
+    let k = key.clone();
+    let rendered =
+        tokio::task::spawn_blocking(move || input.render(&cached, &k, groups, dirs.as_ref()))
+            .await
+            .map_err(layout_failed)?;
+    rendered.map_err(|why| {
+        // What the cache holds for this key cannot be sent: drop it, so
+        // *Try again* computes it afresh instead of failing the same way.
+        state.layouts.forget(&key);
+        layout_failed(why)
+    })
 }
 
 /// A memory's sub-scope: the first two segments of its first logical scope,
