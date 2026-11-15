@@ -477,12 +477,40 @@ jobs:
       - name: Test platform-gated IPC and filesystem code
         # `daemon::transport` exercises the Unix-socket/named-pipe transports
         # (bind/yield/reclaim/permissions), `paths::tests` the platform dir
-        # resolution, `write_lock::tests` the fs4 advisory-lock semantics.
-        # All three use only temp dirs — no models, no network (see the job
-        # comment above before adding filters).
+        # resolution, `write_lock::tests` the fs4 advisory-lock semantics,
+        # `volume::` the unplugged-drive check (its Windows tests exist only
+        # here), `state_file::` / `registry::` / `harvest_state::` the
+        # O_NOFOLLOW opens and the files they guard, `layout::tests::` that
+        # the pinned layout digests hold on every target, `engram-onnx` the
+        # runtime search order (its Windows/macOS cwd test runs nowhere
+        # else), `daemon::client::` the spawn command and environment, and
+        # `daemon::tests::` the daemon end to end. The concurrency test is
+        # the cross-process write lock. Everything here uses only temp dirs —
+        # no models, no network (see the job comment above before adding
+        # filters). The two daemon tests that load the real embedding model
+        # are excluded by exact name; never exclude a module wholesale: a
+        # test that fails off Linux is either a platform defect (report it,
+        # then exclude that one test by exact name with a comment linking the
+        # report) or a test assumption to fix.
         run: >-
           cargo nextest run --workspace --all-features --locked
-          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
+          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)
+          + test(volume::) + test(state_file::) + test(registry::) + test(harvest_state::)
+          + test(layout::tests::) + package(engram-onnx) + test(daemon::client::)
+          + (test(daemon::tests::)
+             - test(=daemon::tests::daemon_loads_the_bundle_named_by_the_request_not_by_dir)
+             - test(=daemon::tests::remote_embedding_end_to_end))
+          + test(=concurrency::concurrent_adds_from_separate_processes_all_persist)'
+
+      - name: Test the CLI snapshots (macOS)
+        # Tier 2 spawns the binary; its fixture already forces offline mode
+        # and an empty model cache, so it is model-free. A difference here
+        # (`/private/var`, a path separator) is a redaction gap to fix in
+        # `snapshot/mod.rs::normalize`, never a platform-specific snapshot.
+        if: runner.os == 'macOS'
+        run: >-
+          cargo nextest run --workspace --all-features --locked
+          -E 'binary(cli) & test(snapshot::)'
 
       - name: Upload the JUnit report
         # `if: always()`: the report matters most when a test failed or was
