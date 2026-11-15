@@ -1091,7 +1091,9 @@ mod tests {
         // An existing loose one is reported, then tightened.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         let problem = private_dir_problem(&dir).unwrap();
-        assert!(problem.contains("755"), "{problem}");
+        // The message names the owner's uid too; the assertion does not
+        // print it (CodeQL reads a printed uid as sensitive data in a log).
+        assert!(problem.contains("755"), "the problem names the loose mode");
         assert_eq!(
             mode_of(&dir),
             0o755,
