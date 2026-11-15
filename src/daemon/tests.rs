@@ -2656,3 +2656,104 @@ async fn in_process_models_unload_once_the_daemon_serves() {
     assert_eq!(super::sweep_in_process_models(&cache, true, idle).await, 1);
     assert_eq!(cache.loaded_count().await, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Eviction side effect: who is sent `Shutdown`
+// ---------------------------------------------------------------------------
+
+/// One health check against a recording stub that answers `Ping` with
+/// `pong` and acks `Shutdown`; returns the classification and the ops the
+/// stub saw.
+async fn health_against(pong: DaemonResponse) -> (super::client::Health, Vec<String>) {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let log = spawn_recording_stub(socket.clone(), move |op| match op {
+        DaemonOp::Ping => Some(pong.clone()),
+        DaemonOp::Shutdown => Some(DaemonResponse::ShuttingDown),
+        _ => None,
+    });
+    wait_connectable(&socket).await;
+    // `wait_connectable` opened (and dropped) connections without a frame;
+    // they log nothing.
+    let health = super::DaemonHandle::connect_existing(socket).health().await;
+    // `oneshot` returns once the ack is read, so the op is already logged.
+    let ops = log.lock().unwrap().clone();
+    (health, ops)
+}
+
+fn shutdown_sent(ops: &[String]) -> bool {
+    ops.iter().any(|op| op == "Shutdown")
+}
+
+/// The protocol one below ours, computed so the test survives a bump.
+fn protocol_offset(by: i64) -> String {
+    let current: i64 = super::PROTOCOL_VERSION.parse().expect("numeric protocol");
+    (current + by).to_string()
+}
+
+#[tokio::test]
+async fn check_health_asks_an_older_protocol_daemon_to_shut_down() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: protocol_offset(-1),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Evicting);
+    assert!(
+        shutdown_sent(&ops),
+        "an older protocol was not evicted: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_health_asks_an_older_build_to_shut_down() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some("0.0.1".to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Evicting);
+    assert!(
+        shutdown_sent(&ops),
+        "an older build was not evicted: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_health_never_shuts_down_a_newer_protocol_daemon() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: protocol_offset(1),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Incompatible);
+    assert!(
+        !shutdown_sent(&ops),
+        "a newer protocol was evicted: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_health_never_shuts_down_a_newer_build() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some("99.0.0".to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Incompatible);
+    assert!(!shutdown_sent(&ops), "a newer build was evicted: {ops:?}");
+}
+
+#[tokio::test]
+async fn check_health_leaves_an_unparseable_version_alone() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: "999.bogus".to_string(),
+        build: None,
+    })
+    .await;
+    assert_ne!(health, super::client::Health::Healthy);
+    assert!(
+        !shutdown_sent(&ops),
+        "a daemon of unknown version was evicted: {ops:?}"
+    );
+}
