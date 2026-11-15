@@ -134,7 +134,12 @@ async fn fixture() -> (tempfile::TempDir, MemoryStore) {
             w(4),
             w(5)
         );
-        let mut m = Memory::new(TYPES[n % TYPES.len()], &summary, content, Provenance::human());
+        let mut m = Memory::new(
+            TYPES[n % TYPES.len()],
+            &summary,
+            content,
+            Provenance::human(),
+        );
         m.id = id(n);
         m.visibility = Visibility::Shared;
         m.criticality = 0.3 + (n % 7) as f64 * 0.1;
@@ -267,7 +272,11 @@ async fn text_query_output_is_pinned() {
         for mode in [RetrievalMode::Filter, RetrievalMode::Rank] {
             for (name, engine) in engines {
                 for max_results in [3usize, 50] {
-                    for detail in [DetailLevel::Summary, DetailLevel::Content, DetailLevel::Full] {
+                    for detail in [
+                        DetailLevel::Summary,
+                        DetailLevel::Content,
+                        DetailLevel::Full,
+                    ] {
                         for expand in [0usize, 2] {
                             for include_expired in [false, true] {
                                 let q = RetrievalQuery {
@@ -320,4 +329,100 @@ async fn text_query_output_is_pinned() {
             context(&out)
         );
     }
+}
+
+fn files_requested() -> usize {
+    super::FILES_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn text_filter(text: &str, max_results: usize) -> RetrievalQuery {
+    RetrievalQuery {
+        mode: RetrievalMode::Filter,
+        query: Some(text.to_string()),
+        max_results: Some(max_results),
+        expand_links: Some(0),
+        ..Default::default()
+    }
+}
+
+/// A text query scores from the index and reads only the files it returns,
+/// plus the rows whose stems it has to derive from the file.
+#[tokio::test]
+async fn text_query_reads_only_survivor_files() {
+    let (_tmp, store) = fixture().await;
+    let engine = RetrievalEngine::new(store, EngramConfig::default());
+    let before = files_requested();
+    let r = engine
+        .query(&text_filter("token refresh rotation", 3))
+        .await
+        .unwrap();
+    assert_eq!(r.memories.len(), 3);
+    assert!(r.total > 3, "more candidates than survivors: {}", r.total);
+    let fallback = [id(1), id(2)];
+    let survivors_beyond_fallback = r
+        .memories
+        .iter()
+        .filter(|sm| !fallback.contains(&sm.memory.id))
+        .count();
+    assert_eq!(
+        files_requested() - before,
+        fallback.len() + survivors_beyond_fallback,
+        "the two stem-less rows and the survivors, nothing else"
+    );
+}
+
+/// A survivor whose file has gone (a drifted store) is dropped, uncounted,
+/// and replaced by the next candidate, so the answer is not short.
+#[tokio::test]
+async fn text_query_refills_when_a_survivor_file_is_missing() {
+    let (tmp, store) = fixture().await;
+    let engine = RetrievalEngine::new(store, EngramConfig::default());
+    let q = text_filter("token refresh rotation", 3);
+    let full = engine.query(&q).await.unwrap();
+    let ids: Vec<String> = full.memories.iter().map(|m| m.memory.id.clone()).collect();
+    let wider = engine
+        .query(&text_filter("token refresh rotation", 4))
+        .await
+        .unwrap();
+    let fourth = wider.memories[3].memory.id.clone();
+
+    let path = crate::storage::paths::memory_path(tmp.path(), &ids[0])
+        .await
+        .expect("memory file");
+    std::fs::remove_file(path).unwrap();
+
+    let r = engine.query(&q).await.unwrap();
+    let got: Vec<String> = r.memories.iter().map(|m| m.memory.id.clone()).collect();
+    assert_eq!(got, vec![ids[1].clone(), ids[2].clone(), fourth]);
+    assert_eq!(r.total, full.total - 1, "the missing file is not counted");
+}
+
+/// A row with no stored stems still matches: its stems come from the file.
+#[tokio::test]
+async fn text_query_falls_back_to_the_file_for_rows_without_stems() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+        .await
+        .unwrap();
+    let mut m = Memory::new(
+        MemoryType::Decision,
+        "zebra crossings need a stem",
+        "only the file knows this word",
+        Provenance::human(),
+    );
+    m.id = id(900);
+    store.create(&m).await.unwrap();
+    store.null_keyword_stems_for_test(&[id(900)]).await.unwrap();
+    assert!(store
+        .list_for_filtering()
+        .await
+        .unwrap()
+        .iter()
+        .all(|e| e.keyword_stems.is_none()));
+
+    let engine = RetrievalEngine::new(store, EngramConfig::default());
+    let r = engine.query(&text_filter("zebra", 5)).await.unwrap();
+    assert_eq!(r.memories.len(), 1, "{r:?}");
+    assert_eq!(r.memories[0].memory.id, id(900));
+    assert_eq!(r.retrieval_quality, "keyword_only");
 }

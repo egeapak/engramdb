@@ -10,9 +10,8 @@ use super::signals::{GraphSnapshot, UsageCache};
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::scoring::{
-    composite_score, composite_score_ignore_decay, composite_score_target,
-    composite_score_target_ignore_decay, LinkVia, ScoreBreakdown, ScoreSignals, ScoreTarget,
-    ScoringContext,
+    composite_score_target, composite_score_target_ignore_decay, LinkVia, ScoreBreakdown,
+    ScoreSignals, ScoreTarget, ScoringContext,
 };
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Epistemic, KeywordStems, Memory, MemoryType, Situation};
@@ -1344,13 +1343,25 @@ impl RetrievalEngine {
                 .await;
         }
 
-        // Step 3: Batch-load surviving memories (single dir scan). Needed on the
-        // query / Filter paths for keyword search and result materialization.
-        // The scalar-filter pushdown (Step 1) shrinks this batch when those
-        // filters are selective.
-        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
-        let loaded = self.store.get_batch(&ids).await?;
-        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
+        // Step 3: Load only the files scoring cannot do without. Every scoring
+        // input is in the index projection (`score_target`), so the rows are
+        // scored from the index and only the survivors are loaded (Step 9).
+        // The one exception is a row with no stored `keyword_stems` (written
+        // before the column existed), whose stems a text query has to derive
+        // from the file. Such a row whose file does not load is left out of
+        // the keyword pass and of scoring, as every row whose file did not
+        // load used to be.
+        let mut memory_map: HashMap<String, Memory> = HashMap::new();
+        if query.query.is_some() {
+            let fallback = filtered_entries
+                .iter()
+                .filter(|e| e.keyword_stems.is_none())
+                .map(|e| e.id.as_str());
+            self.load_missing(&mut memory_map, fallback).await?;
+        }
+        let needs_file = |e: &crate::storage::IndexForFiltering| {
+            query.query.is_some() && e.keyword_stems.is_none() && !memory_map.contains_key(&e.id)
+        };
 
         // Step 4: If query text + embeddings available, get semantic scores.
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
@@ -1429,9 +1440,8 @@ impl RetrievalEngine {
         // The `has_embedding` column (schema v0.2.0, finding performance-3
         // Part B) carries this per memory in the index projection, so the set
         // is read straight from `filtered_entries` with **no** chunks-table
-        // scan. It covers exactly the memories being scored (memory_map's ids
-        // come from filtered_entries), which is all `embedded_ids` is consulted
-        // for. The migration keeps the column authoritative (a reindex rebuilds
+        // scan. It covers exactly the memories being scored (the entries in
+        // filtered_entries), which is all `embedded_ids` is consulted for. The migration keeps the column authoritative (a reindex rebuilds
         // it), so there is no half-migrated mis-scoring window.
         let embedded_ids: Option<std::collections::HashSet<String>> =
             if semantic_scores_map.is_some() {
@@ -1454,11 +1464,12 @@ impl RetrievalEngine {
             // Rebuilding them here is the dominant cost of keyword scoring —
             // ~17.7ms per 1000 memories — and it is identical on every query.
             //
-            // `filtered_entries` and `memory_map` cover the same ids, so either
-            // can drive the scoring; iterate the entries and fall back to the
-            // loaded memory only for rows written before the column existed, so
-            // a partially-migrated store degrades in speed and never in
-            // correctness.
+            // Iterate the entries and fall back to the loaded memory only for
+            // rows written before the column existed (Step 3 loaded exactly
+            // those), so a partially-migrated store degrades in speed and never
+            // in correctness.
+            // Borrowed from the row on the common path; owned only for the
+            // fallback it has to compute.
             fn stems_for<'a>(
                 e: &'a crate::storage::IndexForFiltering,
                 memory_map: &HashMap<String, Memory>,
@@ -1533,7 +1544,9 @@ impl RetrievalEngine {
 
         let t_score = std::time::Instant::now();
         let score_one = |entry: &crate::storage::IndexForFiltering| {
-            let memory = memory_map.get(&entry.id)?;
+            if needs_file(entry) {
+                return None;
+            }
 
             // Gather query evidence for this memory. Semantic comes from the
             // vector top-k when present; an embedded memory that missed the
@@ -1541,15 +1554,15 @@ impl RetrievalEngine {
             // no chunks at all keeps sem = None (no evidence). See Step 4.5.
             let sem_score = semantic_scores_map
                 .as_ref()
-                .and_then(|m| m.get(&memory.id))
+                .and_then(|m| m.get(&entry.id))
                 .copied()
                 .or_else(|| {
                     embedded_ids
                         .as_ref()
-                        .is_some_and(|ids| ids.contains(&memory.id))
+                        .is_some_and(|ids| ids.contains(&entry.id))
                         .then_some(0.0)
                 });
-            let kw_score = keyword_map.get(&memory.id).copied();
+            let kw_score = keyword_map.get(&entry.id).copied();
 
             // Build scoring context. In rank mode the user-supplied path and
             // logical scopes drive the scope proximity signal. In filter mode
@@ -1584,7 +1597,7 @@ impl RetrievalEngine {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
             }
             .with_situation(query.situation)
-            .with_signals(signals.as_ref().and_then(|m| m.get(&memory.id)));
+            .with_signals(signals.as_ref().and_then(|m| m.get(&entry.id)));
 
             // Expired memories (only present when `include_expired` is set —
             // otherwise Step 2.5b already dropped them) are scored ignoring
@@ -1594,10 +1607,14 @@ impl RetrievalEngine {
             // of `include_expired` — a half-decayed active memory must not
             // rank as fresh just because the caller asked to also see expired
             // ones.
-            let breakdown = if memory.is_expired_at(now) {
-                composite_score_ignore_decay(memory, &context, &self.config, now)
+            // Scored from the index row (`score_target`), which carries every
+            // input `composite_score` reads from a memory; the expiry test is
+            // `Memory::is_expired_at`'s.
+            let target = score_target(entry);
+            let breakdown = if entry.expires_at.is_some_and(|exp| now > exp) {
+                composite_score_target_ignore_decay(target, &context, &self.config, now)
             } else {
-                composite_score(memory, &context, &self.config, now)
+                composite_score_target(target, &context, &self.config, now)
             };
 
             // Filter-mode sufficiency check.
@@ -1614,7 +1631,7 @@ impl RetrievalEngine {
             if query.mode == RetrievalMode::Filter {
                 let has_kw = kw_score.is_some_and(|v| v > 0.0);
                 let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
-                    !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
+                    !filter_tags.is_empty() && filter_tags.iter().any(|t| entry.tags.contains(t))
                 });
                 // `query_path` (not `query.path`): an empty-string path was
                 // normalized away in Step 1.5 and must not count as a
@@ -1626,15 +1643,15 @@ impl RetrievalEngine {
             }
 
             Some(ScoredCandidate {
-                id: memory.id.clone(),
+                id: entry.id.clone(),
                 score: breakdown.final_score,
                 breakdown,
             })
         };
 
         // Same independence argument as `rank_scope_only_from_index`: every
-        // iteration reads `memory_map` / `keyword_map` / `semantic_scores_map`
-        // and writes nothing shared. `filter_map` over an indexed parallel
+        // iteration reads `keyword_map` / `semantic_scores_map` and writes
+        // nothing shared. `filter_map` over an indexed parallel
         // iterator keeps input order, so the candidate list is identical to
         // the sequential one, not merely equivalent.
         let mut candidates: Vec<ScoredCandidate> = if filtered_entries.len() >= PARALLEL_SCORE_MIN {
@@ -1672,12 +1689,15 @@ impl RetrievalEngine {
         // class-appropriate candidates and rerank-blend semantics stay
         // untouched. Rerank runs on the full sorted candidate set BEFORE
         // truncation (identical to before);
-        // it reads memory text from `memory_map` by id, so it needs no cloned
-        // memories.
+        // it reads memory text from `memory_map` by id, so the documents it
+        // will read — the first `rerank.top_n` candidates — are loaded here.
         // Only timed when the reranker is actually configured + enabled to
         // avoid recording bogus 0ms samples for the no-op path.
         if let Some(ref q) = query.query {
             if self.reranking_available() && !candidates.is_empty() {
+                let top_n = self.config.rerank.top_n.min(candidates.len());
+                let want = candidates[..top_n].iter().map(|c| c.id.as_str());
+                self.load_missing(&mut memory_map, want).await?;
                 let t_rerank = std::time::Instant::now();
                 let rerank_result = self.apply_rerank(q, &mut candidates, &memory_map).await;
                 self.record_stage("rerank", t_rerank.elapsed().as_secs_f64() * 1000.0);
@@ -1696,19 +1716,42 @@ impl RetrievalEngine {
             Vec::new()
         };
 
-        let total = candidates.len();
+        let mut total = candidates.len();
 
-        // Step 9: Apply max_results limit, THEN materialize survivors. Cloning
-        // the memory is deferred to here so only the returned memories are
-        // cloned, not every scored candidate (finding performance-0).
+        // Step 9: Apply max_results limit, THEN load the survivors' files —
+        // the only files most text queries read (finding performance-4).
         let max_results = query
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
-        let tail = candidates.split_off(max_results.min(candidates.len()));
+        let mut tail = candidates.split_off(max_results.min(candidates.len()));
+        self.load_missing(&mut memory_map, candidates.iter().map(|c| c.id.as_str()))
+            .await?;
+        // A row scored from the index whose file is gone or no longer parses
+        // (a drifted store) cannot be returned. Drop it, uncount it, and
+        // refill from the cut tail once, with exactly as many as went
+        // missing; a refill that fails to load is dropped too, without a
+        // second round. Before scores came from the index such a row was
+        // never scored at all, so a healthy store answers exactly as before.
+        let before = candidates.len();
+        candidates.retain(|c| memory_map.contains_key(&c.id));
+        let missing = before - candidates.len();
+        if missing > 0 {
+            total -= missing;
+            let refill: Vec<ScoredCandidate> = tail.drain(..missing.min(tail.len())).collect();
+            self.load_missing(&mut memory_map, refill.iter().map(|c| c.id.as_str()))
+                .await?;
+            for c in refill {
+                if memory_map.contains_key(&c.id) {
+                    candidates.push(c);
+                } else {
+                    total -= 1;
+                }
+            }
+        }
 
         // Step 9.5: one-hop link expansion (opt-in). Neighbours come from the
-        // filtered candidate set only, so `memory_map` already holds them.
-        let (expanded, new_in_total) = self
+        // filtered candidate set; their files are loaded after it.
+        let (mut expanded, new_in_total) = self
             .expand_candidates(
                 query,
                 &candidates,
@@ -1719,11 +1762,20 @@ impl RetrievalEngine {
                 expansion_parents,
             )
             .await;
-        let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
         // Expanded neighbours are results the caller sees, so `total` counts
         // them ("Found 3 memories (out of 2 total)" would read as a bug) —
         // only those it did not already count as a cut candidate.
-        let total = total + new_in_total;
+        let mut total = total + new_in_total;
+        if !expanded.is_empty() {
+            self.load_missing(&mut memory_map, expanded.iter().map(|c| c.id.as_str()))
+                .await?;
+            // Counted either way (in the tail or by `new_in_total`), so a
+            // neighbour whose file does not load is uncounted.
+            let before = expanded.len();
+            expanded.retain(|c| memory_map.contains_key(&c.id));
+            total -= before - expanded.len();
+        }
+        let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
         if !expanded.is_empty() {
             candidates.extend(expanded);
             sort_candidates(&mut candidates);
@@ -1732,10 +1784,10 @@ impl RetrievalEngine {
         let mut scored_memories: Vec<ScoredMemory> = candidates
             .into_iter()
             .filter_map(|c| {
-                // Every candidate id came from `memory_map`, so the lookup
-                // always hits; `filter_map` guards defensively without panicking.
-                memory_map.get(&c.id).map(|memory| ScoredMemory {
-                    memory: memory.clone(),
+                // Every candidate was loaded above; `filter_map` guards
+                // defensively without panicking.
+                memory_map.remove(&c.id).map(|memory| ScoredMemory {
+                    memory,
                     score: c.score,
                     score_breakdown: c.breakdown,
                 })
@@ -1770,6 +1822,22 @@ impl RetrievalEngine {
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
 
         Ok(result)
+    }
+
+    /// Load into `map` the memories among `ids` it does not hold yet, in one
+    /// batch (no call when it holds them all).
+    async fn load_missing<'a>(
+        &self,
+        map: &mut HashMap<String, Memory>,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Result<()> {
+        let want: Vec<&str> = ids.filter(|id| !map.contains_key(*id)).collect();
+        if !want.is_empty() {
+            #[cfg(test)]
+            FILES_REQUESTED.fetch_add(want.len(), std::sync::atomic::Ordering::SeqCst);
+            map.extend(self.store.get_batch(&want).await?);
+        }
+        Ok(())
     }
 
     /// Rank mode's relevance cut, on candidates already sorted by score.
@@ -1835,17 +1903,7 @@ impl RetrievalEngine {
 
         let t_score = std::time::Instant::now();
         let score_entry = |e: &crate::storage::IndexForFiltering| {
-            let target = ScoreTarget {
-                created_at: e.created_at,
-                decay: &e.decay,
-                criticality: e.criticality,
-                physical: &e.physical,
-                logical: &e.logical,
-                provenance_source: e.provenance_source,
-                status: e.status,
-                epistemic: e.epistemic,
-                verified_at: e.verified_at,
-            };
+            let target = score_target(e);
             let context = ScoringContext::scope_only(ctx_path, &query.logical)
                 .with_situation(query.situation)
                 .with_signals(signals.and_then(|m| m.get(&e.id)));
@@ -2079,17 +2137,7 @@ impl RetrievalEngine {
                             // components, with its own signals and the
                             // query's situation, so the breakdown still
                             // explains — and still flags — the memory.
-                            let target = ScoreTarget {
-                                created_at: entry.created_at,
-                                decay: &entry.decay,
-                                criticality: entry.criticality,
-                                physical: &entry.physical,
-                                logical: &entry.logical,
-                                provenance_source: entry.provenance_source,
-                                status: entry.status,
-                                epistemic: entry.epistemic,
-                                verified_at: entry.verified_at,
-                            };
+                            let target = score_target(entry);
                             let ctx = ScoringContext::scope_only(None, &[])
                                 .with_situation(query.situation)
                                 .with_signals(signals.and_then(|m| m.get(nid)));
@@ -2156,6 +2204,31 @@ impl RetrievalEngine {
 /// `dropped_below_threshold` for a query: the candidates the rank threshold
 /// removed, less any link expansion brought back — a neighbour the caller is
 /// shown was not dropped.
+/// How many memory files the text-query path asked the store for, so a test
+/// can prove it reads only the survivors. Process-wide; nextest runs each test
+/// in its own process.
+#[cfg(test)]
+pub(crate) static FILES_REQUESTED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The scoring inputs of an index row: what `ScoreTarget::from(&Memory)`
+/// takes from the loaded memory, carried in the projection (schema v0.2.0),
+/// so a row scores identically without its file
+/// (`tests::rank_from_index_matches_file_load`).
+fn score_target(e: &crate::storage::IndexForFiltering) -> ScoreTarget<'_> {
+    ScoreTarget {
+        created_at: e.created_at,
+        decay: &e.decay,
+        criticality: e.criticality,
+        physical: &e.physical,
+        logical: &e.logical,
+        provenance_source: e.provenance_source,
+        status: e.status,
+        epistemic: e.epistemic,
+        verified_at: e.verified_at,
+    }
+}
+
 fn dropped_minus_returned(dropped: &[ScoredCandidate], expanded: &[ScoredCandidate]) -> usize {
     if expanded.is_empty() || dropped.is_empty() {
         return dropped.len();
@@ -2735,6 +2808,7 @@ async fn classify_among(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scoring::{composite_score, composite_score_ignore_decay};
     use crate::storage::InMemoryRegistry;
 
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
