@@ -865,9 +865,18 @@ export async function renderGraph(main, ctx) {
     }
     return { x: b.x + (b.w - w) / 2, y: b.y + (b.h - hh) / 2, w, h: hh };
   }
+  // The view object fit() last set: any other move makes a new one.
+  let fitted = null;
   function fit() {
     view = fitView();
+    fitted = view;
     apply();
+  }
+  /** Whether the view is what Fit shows for the box as it is now (to half a unit). */
+  function atFit() {
+    if (!view || view === fitted) return true;
+    const f = fitView();
+    return Math.abs(view.x - f.x) < 0.5 && Math.abs(view.y - f.y) < 0.5 && Math.abs(view.w - f.w) < 0.5 && Math.abs(view.h - f.h) < 0.5;
   }
   /** The view `factor` times as wide, around (cx, cy) (default: its centre). */
   function zoomedView(factor, cx, cy) {
@@ -1025,10 +1034,11 @@ export async function renderGraph(main, ctx) {
     if (ev.target !== graphBox && !onNode) return;
     const step = ev.shiftKey ? 0.5 : 0.15;
     const keys = {
-      ArrowLeft: () => (view.x -= view.w * step),
-      ArrowRight: () => (view.x += view.w * step),
-      ArrowUp: () => (view.y -= view.h * step),
-      ArrowDown: () => (view.y += view.h * step),
+      // A new object, never a write into it: atFit() knows Fit's by identity.
+      ArrowLeft: () => (view = { ...view, x: view.x - view.w * step }),
+      ArrowRight: () => (view = { ...view, x: view.x + view.w * step }),
+      ArrowUp: () => (view = { ...view, y: view.y - view.h * step }),
+      ArrowDown: () => (view = { ...view, y: view.y + view.h * step }),
     };
     if (keys[ev.key]) {
       keys[ev.key]();
@@ -1072,13 +1082,33 @@ export async function renderGraph(main, ctx) {
         return;
       }
       // Layout is clean here: reading the box costs nothing.
-      boxSize.w = graphBox.clientWidth;
-      boxSize.h = graphBox.clientHeight;
-      if (Math.abs(boxSize.w - lastW) > 2) {
-        lastW = boxSize.w;
-        lastH = boxSize.h;
-        fit();
-      } else if (surface.composited && view && (boxSize.w !== lastW || boxSize.h !== lastH)) {
+      const w = graphBox.clientWidth;
+      const hh = graphBox.clientHeight;
+      if (Math.abs(w - lastW) > 2) {
+        // Asked of the old box, before boxSize moves. A view at Fit stays
+        // at Fit; a zoomed or panned one (a scrollbar coming or going, a
+        // window resize) keeps its centre and its pixels per unit, so the
+        // memory the reader was looking at stays put.
+        const wasFit = atFit();
+        const oldW = boxSize.w || w;
+        boxSize.w = w;
+        boxSize.h = hh;
+        lastW = w;
+        lastH = hh;
+        if (wasFit || !w || !hh) fit();
+        else {
+          const cx = view.x + view.w / 2;
+          const cy = view.y + view.h / 2;
+          const vw = (view.w * w) / oldW;
+          const vh = (vw * hh) / w;
+          view = { x: cx - vw / 2, y: cy - vh / 2, w: vw, h: vh };
+          apply();
+        }
+        return;
+      }
+      boxSize.w = w;
+      boxSize.h = hh;
+      if (surface.composited && view && (boxSize.w !== lastW || boxSize.h !== lastH)) {
         // A canvas keeps its own view of the box (the SVG's viewBox does
         // this itself): any other change re-fits that view to the new box,
         // or hit testing and the drawing would use the old height.

@@ -33,6 +33,8 @@
 //                  pans) is within antialiasing of one drawn whole (< 0.2 %
 //                  of pixels off by more than 8 levels)
 //   zoom           a wheel gesture settles (no transform left on the pane)
+//   resize_view    a 16 px narrower window (a scrollbar) keeps a zoomed,
+//                  panned view's centre and scale; at Fit the view re-fits
 //   pan            (canvas) with a memory selected, a drag moves one flattened
 //                  canvas that looks exactly like the layers it stands for, and
 //                  the layers come back when it settles
@@ -421,6 +423,39 @@ async function check(browser, url, size, view, style) {
   await p.waitForTimeout(450);
   const settled = await p.evaluate(() => document.querySelector('.g-pane').style.transform);
   ok('zoom', mid !== '' && settled === '', { mid, settled });
+
+  // resize_view: a width change (a scrollbar coming or going, 16 px) keeps
+  // a zoomed and panned view's centre and scale; at Fit it re-fits.
+  {
+    await p.keyboard.press('ArrowRight');
+    await p.keyboard.press('ArrowDown');
+    await p.waitForTimeout(250);
+    const at = async () => {
+      const box = await p.evaluate(() => { const r = document.querySelector('.graph-box').getBoundingClientRect(); return { w: r.width, h: r.height }; });
+      return { box, mems: (await p.evaluate(MEMORIES)).map((m) => ({ i: m.i, dx: m.x - box.w / 2, dy: m.y - box.h / 2 })) };
+    };
+    const near = (a) => a.mems.filter((m) => Math.abs(m.dx) < a.box.w / 4 && Math.abs(m.dy) < a.box.h / 4);
+    const moved = (a, b) => {
+      const by = new Map(b.mems.map((m) => [m.i, m]));
+      return near(a).map((m) => Math.hypot(m.dx - by.get(m.i).dx, m.dy - by.get(m.i).dy)).reduce((x, y) => Math.max(x, y), 0);
+    };
+    const z0 = await at();
+    await p.setViewportSize({ width: VIEWPORT.width - 16, height: VIEWPORT.height });
+    await p.waitForTimeout(400);
+    const z1 = await at();
+    // at Fit: the narrower box re-fits, so a later Fit moves nothing
+    await p.keyboard.press('0');
+    await p.waitForTimeout(250);
+    await p.setViewportSize(VIEWPORT);
+    await p.waitForTimeout(400);
+    const f1 = await at();
+    await p.keyboard.press('0');
+    await p.waitForTimeout(250);
+    const f2 = await at();
+    const kept = moved(z0, z1);
+    const refit = moved(f1, f2);
+    ok('resize_view', z1.box.w < z0.box.w && near(z0).length > 0 && kept < 1.5 && refit < 1.5, { width: [z0.box.w, z1.box.w], near: near(z0).length, kept, refit });
+  }
 
   if (canvas) {
     // pan with a selection: one canvas mid-gesture, the same picture moved
