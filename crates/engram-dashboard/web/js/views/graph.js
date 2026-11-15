@@ -82,6 +82,7 @@ import { svgSurface } from '../graph/surface-svg.js';
 import { canvasSurface, canvasSupported } from '../graph/canvas/host.js';
 import { memoryPanel } from '../graph/details.js';
 import { placeLabels } from '../graph/labels.js';
+import { stepIndex } from '../graph/walk.js';
 import { projHead, secHead, alertBanner, errorBox } from './common.js';
 import { reviewControls } from './review.js';
 import { OVERVIEW_MIN, renderOverview } from './graph-overview.js';
@@ -988,13 +989,12 @@ export async function renderGraph(main, ctx) {
   // Top to bottom, then left to right; sorted on the first step, since a
   // 2k-memory sort cost the first paint ~1.3 ms (measured).
   let walk = null;
-  let walkAt = -1;
   function stepNode(dir) {
     if (!walk) walk = [...g.nodes.keys()].sort((a, b) => lay.pos[2 * a + 1] - lay.pos[2 * b + 1] || lay.pos[2 * a] - lay.pos[2 * b]);
-    const cur = document.activeElement && document.activeElement.getAttribute ? Number(document.activeElement.getAttribute('data-i')) : NaN;
-    if (!Number.isNaN(cur)) walkAt = walk.indexOf(cur);
-    walkAt = (walkAt + dir + walk.length) % walk.length;
-    const i = walk[walkAt];
+    // -1 for the graph box itself (no memory focused): the walk starts at an end.
+    const at = stepIndex(walk, surface.nodeIndexOf(document.activeElement), dir);
+    if (at < 0) return;
+    const i = walk[at];
     const [x, y] = P(i);
     if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
     surface.focusNode(i);

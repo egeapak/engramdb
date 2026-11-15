@@ -10,6 +10,7 @@
 
 import { filtered, merge, emptyTally } from '../web/js/graph/tally.js';
 import { kindLabel } from '../web/js/relations.js';
+import { stepIndex } from '../web/js/graph/walk.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
 import { moreLink } from '../web/js/views/overview.js';
@@ -68,6 +69,21 @@ export function ok(name, cond, detail) {
   eq('kindLabel(constructor)', kindLabel('constructor'), 'constructor');
   eq('kindLabel(__proto__)', kindLabel('__proto__'), '  proto  ');
   eq('kindLabel(derived_from)', kindLabel('derived_from'), 'Derived from');
+}
+
+// ---------------------------------------------------------------------------
+// graph/walk.js (E5)
+// ---------------------------------------------------------------------------
+{
+  const walk = [4, 0, 2, 1, 3];
+  eq('stepIndex: ] with nothing focused starts at the first', stepIndex(walk, -1, 1), 0);
+  eq('stepIndex: [ with nothing focused starts at the last', stepIndex(walk, -1, -1), 4);
+  eq('stepIndex: memory 0 is a memory, not "nothing"', stepIndex(walk, 0, 1), 2);
+  eq('stepIndex: ] from the last wraps', stepIndex(walk, 3, 1), 0);
+  eq('stepIndex: [ from the first wraps', stepIndex(walk, 4, -1), 4);
+  eq('stepIndex: [ from the middle', stepIndex(walk, 2, -1), 1);
+  eq('stepIndex: a memory not in the walk starts at an end', stepIndex(walk, 9, 1), 0);
+  eq('stepIndex: empty walk', stepIndex([], -1, 1), -1);
 }
 
 // ---------------------------------------------------------------------------

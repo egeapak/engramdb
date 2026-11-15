@@ -14,7 +14,9 @@
 //   a11y_list      one focusable element per drawn memory, with the SVG `<g>`'s
 //                  aria label (the canvas's list against Grid's SVG, in order)
 //   canvas_role    a canvas surface's picture has role="img" and a label
-//   keyboard       ] walks memories top to bottom (roving focus), Enter selects
+//   keyboard       ] walks memories top to bottom (roving focus; from the graph
+//                  box the first ] lands on the topmost memory, the first [
+//                  on the bottommost), Enter selects
 //                  (the panel's heading takes focus), ] / [ then walk the panel
 //                  rows (focus on the neighbour, the live region speaks), Escape
 //                  clears and returns focus to the graph
@@ -302,7 +304,16 @@ async function check(browser, url, size, view, style) {
   await p.keyboard.press('Escape');
   await p.waitForTimeout(100);
   const cleared = await p.evaluate(() => ({ box: document.activeElement === document.querySelector('.graph-box'), head: (document.querySelector('.g-card h3') || {}).textContent || '' }));
-  ok('keyboard', roving && sel.head.includes(want) && sel.focus === 'H3' && (row.rows === 0 || (row.said && row.i !== null)) && cleared.box && cleared.head === 'Select a memory or relation', { walk: walk.map((w) => w.i), ys: ys.map(Math.round), selected: sel, row, cleared });
+  // With the graph box focused (nothing selected), the first ] lands on the
+  // topmost memory and the first [ on the bottommost: the walk starts at an
+  // end rather than treating "no memory" as memory 0.
+  await p.keyboard.press('[');
+  const lastI = await p.evaluate(() => +document.activeElement.getAttribute('data-i'));
+  const yOf = (i) => (mems.find((m) => m.i === i) || { y: NaN }).y;
+  const ysAll = mems.map((m) => m.y);
+  const ends = { first: walk[0].i, firstY: yOf(walk[0].i), minY: Math.min(...ysAll), last: lastI, lastY: yOf(lastI), maxY: Math.max(...ysAll) };
+  const endsOk = Math.abs(ends.firstY - ends.minY) < 0.5 && Math.abs(ends.lastY - ends.maxY) < 0.5;
+  ok('keyboard', roving && endsOk && sel.head.includes(want) && sel.focus === 'H3' && (row.rows === 0 || (row.said && row.i !== null)) && cleared.box && cleared.head === 'Select a memory or relation', { walk: walk.map((w) => w.i), ys: ys.map(Math.round), ends, selected: sel, row, cleared });
 
   // hover: 30 memories, pointer at each centre
   await p.keyboard.press('0');
