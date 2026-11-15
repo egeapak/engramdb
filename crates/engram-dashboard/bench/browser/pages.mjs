@@ -120,6 +120,13 @@ async function readOnly(browser, url) {
   const t = await open(browser, url);
   await go(t, '', '.stats');
   ok('overview renders', (await text(t, '.stats')).includes('Memories'));
+  // E18: the daily buckets are UTC days, and the page says so.
+  const utc = await t.p.evaluate(() => {
+    const cap = [...document.querySelectorAll('#main h2')].find((x) => x.textContent.startsWith('Activity'));
+    const tile = [...document.querySelectorAll('.stat .eyebrow')].find((x) => x.textContent === 'Reads, last 7 days');
+    return { cap: cap ? cap.parentElement.textContent : '', tile: tile ? tile.title : '' };
+  });
+  ok('overview: the activity chart and the reads tile say days are UTC', utc.cap.includes('per day (UTC)') && utc.tile.includes('UTC'), utc);
   // E2: the Challenged tile counts the store (15), not the capped list (12).
   const tile = await t.p.evaluate(() => {
     const st = [...document.querySelectorAll('.stat')].find((s) => (s.querySelector('.eyebrow') || {}).textContent === 'Challenged');

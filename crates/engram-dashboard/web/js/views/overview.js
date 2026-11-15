@@ -26,7 +26,7 @@ function readsStat(u) {
   return h(
     'div',
     { class: ['stat', 'wide'] },
-    h('div', { class: 'eyebrow' }, 'Reads, last 7 days'),
+    h('div', { class: 'eyebrow', title: 'Days are counted in UTC' }, 'Reads, last 7 days'),
     h('div', { class: 'trio' }, cell('Retrieved', 'returned'), cell('Injected', 'injected'), cell('Fetched', 'fetched')),
   );
 }
@@ -199,7 +199,7 @@ export async function renderOverview(main, ctx) {
       h(
         'div',
         null,
-        secHead('Activity, last 30 days', h('span', { class: 'faint' }, 'per day, each row on its own scale')),
+        secHead('Activity, last 30 days', h('span', { class: 'faint' }, 'per day (UTC), each row on its own scale')),
         chartBox,
         h(
           'p',
