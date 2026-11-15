@@ -11,6 +11,7 @@
 import { filtered, merge } from '../web/js/graph/tally.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
+import { moreLink } from '../web/js/views/overview.js';
 
 let failed = 0;
 let ran = 0;
@@ -77,6 +78,19 @@ export function ok(name, cond, detail) {
   for (const v of [null, undefined, NaN, Infinity, 'x', '']) eq(`score(${String(v)})`, score(v), '0.00');
   eq('score(0.5)', score(0.5), '0.50');
   eq('score(1.234)', score(1.234), '1.23');
+}
+
+// ---------------------------------------------------------------------------
+// views/overview.js
+// ---------------------------------------------------------------------------
+{
+  eq('moreLink proposed_contradiction', moreLink('proposed_contradiction'), ['relations', 'status=proposed&kind=contradicts']);
+  eq('moreLink proposed_edge', moreLink('proposed_edge'), ['relations', 'status=proposed']);
+  eq('moreLink challenged', moreLink('challenged'), ['memories', 'status=challenged']);
+  eq('moreLink needs_review', moreLink('needs_review'), ['memories', 'status=needs_review']);
+  eq('moreLink stale', moreLink('stale'), ['memories', 'sort=last_read&dir=asc']);
+  eq('moreLink never_read', moreLink('never_read'), ['memories', 'sort=last_read&dir=asc']);
+  eq('moreLink unknown', moreLink('future_reason'), null);
 }
 
 if (failed) {

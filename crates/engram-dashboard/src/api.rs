@@ -699,6 +699,8 @@ struct AttentionEdge {
 /// The store's edges at a glance.
 #[derive(Serialize, Default)]
 struct EdgeTotals {
+    /// What the Relations tab lists by default: no rejected relation and
+    /// none with an invalidated end (dangling ones included).
     total: usize,
     proposed: usize,
     proposed_contradictions: usize,
@@ -711,7 +713,9 @@ struct UsageTotals {
     fetched: u64,
     updated: u64,
     challenged: u64,
-    /// Memories with at least one read of any kind.
+    /// Live memories with at least one read of any kind (the page prints
+    /// it as "N of `live`"). The lifetime sums above count every memory's
+    /// reads, invalidated and deleted ones included.
     used_memories: usize,
     /// Per signal, never summed: a retrieval, a hook injection and a fetch
     /// by id are three different things (see `stats` in the CLI reference).
@@ -761,6 +765,9 @@ struct StatsPage {
     /// Oldest first; the last 30 days, today included.
     series: Vec<DailyUsage>,
     attention: Vec<AttentionItem>,
+    /// Per attention reason, how many items the store has: `attention`
+    /// lists at most [`ATTENTION_PER_KIND`] of each.
+    attention_totals: BTreeMap<&'static str, usize>,
     /// See `MemoryPage::rebuilding`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     rebuilding: bool,
@@ -783,6 +790,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
 
     let slots = color_slots(&all);
     let live: Vec<&IndexFilterable> = all.iter().filter(|e| !is_invalidated(e, now)).collect();
+    let live_ids: std::collections::HashSet<&str> = live.iter().map(|e| e.id.as_str()).collect();
     let mut by_epistemic = BTreeMap::new();
     let mut by_scope = BTreeMap::new();
     for e in &live {
@@ -805,14 +813,14 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         previous_7_days: Signals::default(),
         last_read_at: None,
     };
-    for m in usage.by_memory.values() {
+    for (mid, m) in &usage.by_memory {
         let c = &m.counts;
         totals.returned += c.returned;
         totals.injected += c.injected;
         totals.fetched += c.fetched;
         totals.updated += c.updated;
         totals.challenged += c.challenged;
-        if c.returned + c.injected + c.fetched > 0 {
+        if c.returned + c.injected + c.fetched > 0 && live_ids.contains(mid.as_str()) {
             totals.used_memories += 1;
         }
         totals.last_read_at = totals.last_read_at.max(last_read(c));
@@ -827,10 +835,23 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
     let mut attention = Vec::new();
     let edges = store.edges().await?;
     let by_id: HashMap<&str, &IndexFilterable> = all.iter().map(|e| (e.id.as_str(), e)).collect();
+    // The Relations tab's default list (`relations.rs`): every kind,
+    // proposed included, no rejected one, no invalidated end.
+    let listed = engramdb::ops::links::graph_of(
+        &all,
+        edges.clone(),
+        &engramdb::ops::links::GraphFilter {
+            kinds: None,
+            include_proposed: true,
+            include_rejected: false,
+            include_invalidated: false,
+        },
+    );
     let mut edge_totals = EdgeTotals {
-        total: edges.len(),
+        total: listed.edges.len() + listed.dangling_edges.len(),
         ..EdgeTotals::default()
     };
+    let mut attention_totals: BTreeMap<&'static str, usize> = BTreeMap::new();
     let proposed_items = |contradictions: bool, out: &mut Vec<AttentionItem>| {
         let mut n = 0;
         for e in edges.iter().filter(|e| {
@@ -881,6 +902,13 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         n
     };
     edge_totals.proposed_contradictions = proposed_items(true, &mut attention);
+    attention_totals.insert(
+        "proposed_contradiction",
+        edge_totals.proposed_contradictions,
+    );
+    let count_status = |status: Status| live.iter().filter(|e| e.status == status).count();
+    attention_totals.insert("challenged", count_status(Status::Challenged));
+    attention_totals.insert("needs_review", count_status(Status::NeedsReview));
     let challenged: Vec<String> = live
         .iter()
         .filter(|e| e.status == Status::Challenged)
@@ -927,6 +955,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         });
     }
     let other_proposed = proposed_items(false, &mut attention);
+    attention_totals.insert("proposed_edge", other_proposed);
     edge_totals.proposed = edge_totals.proposed_contradictions + other_proposed;
     let cutoff = now - Duration::days(STALE_DAYS);
     let mut stale: Vec<(&IndexFilterable, Option<DateTime<Utc>>)> = live
@@ -941,6 +970,9 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         })
         .filter(|(_, lr)| lr.is_none_or(|t| t < cutoff))
         .collect();
+    let stale_read = stale.iter().filter(|(_, lr)| lr.is_some()).count();
+    attention_totals.insert("stale", stale_read);
+    attention_totals.insert("never_read", stale.len() - stale_read);
     // Never read first (oldest first), then the longest unread.
     stale.sort_by(|a, b| match (a.1, b.1) {
         (None, None) => a.0.created_at.cmp(&b.0.created_at),
@@ -992,6 +1024,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         edges: edge_totals,
         series,
         attention,
+        attention_totals,
         rebuilding,
         schema: store.schema_state().await,
         staleness: store.staleness().await,

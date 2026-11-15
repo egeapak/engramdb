@@ -4080,12 +4080,17 @@ async fn walk_memories(app: &axum::Router, id: &str, extra: &str) -> Vec<String>
     for _ in 0..100 {
         let uri = format!(
             "/api/projects/{id}/memories?limit=1{extra}{}",
-            cursor.as_ref().map_or(String::new(), |c| format!("&cursor={c}"))
+            cursor
+                .as_ref()
+                .map_or(String::new(), |c| format!("&cursor={c}"))
         );
         let (s, p) = get_json(app, &uri).await;
         assert_eq!(s, StatusCode::OK, "{uri}: {p}");
         for m in p["items"].as_array().unwrap() {
-            assert!(m["criticality"].is_number(), "criticality not a number: {m}");
+            assert!(
+                m["criticality"].is_number(),
+                "criticality not a number: {m}"
+            );
             ids.push(m["id"].as_str().unwrap().to_string());
         }
         match p["next_cursor"].as_str() {
@@ -4113,7 +4118,11 @@ async fn a_non_finite_criticality_never_breaks_the_list_or_its_cursor() {
         store.create(m).await.unwrap();
     }
     let app = app(Some(fx.current.clone()));
-    for sort in ["", "&sort=criticality&dir=asc", "&sort=criticality&dir=desc"] {
+    for sort in [
+        "",
+        "&sort=criticality&dir=asc",
+        "&sort=criticality&dir=desc",
+    ] {
         let ids = walk_memories(&app, &fx.id, sort).await;
         let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
         assert_eq!(unique.len(), ids.len(), "an id repeated: {ids:?}");
@@ -4127,5 +4136,113 @@ async fn a_non_finite_criticality_never_breaks_the_list_or_its_cursor() {
         assert!(n["criticality"].is_number(), "{n}");
     }
     let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
-    assert!(st["avg_criticality"].is_number(), "{}", st["avg_criticality"]);
+    assert!(
+        st["avg_criticality"].is_number(),
+        "{}",
+        st["avg_criticality"]
+    );
+}
+
+/// `attention` lists at most a dozen items per reason; the tile and the
+/// banner used to count that list, so 15 challenged memories read as 12.
+#[tokio::test]
+async fn attention_totals_count_the_store_not_the_capped_list() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // The fixture has one challenged memory; 14 more make 15.
+    for i in 0..14 {
+        let mut m = memory(MemoryType::Decision, &format!("Contested {i}"), &[], &[]);
+        m.status = Status::Challenged;
+        m.challenges = vec![Challenge::new(format!("seen otherwise {i}"))];
+        store.create(&m).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    let (s, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{st}");
+    let listed = st["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["reason"] == "challenged")
+        .count();
+    assert_eq!(listed, 12, "the list stays capped");
+    let totals = &st["attention_totals"];
+    assert_eq!(totals["challenged"], 15, "{totals}");
+    for reason in [
+        "proposed_contradiction",
+        "proposed_edge",
+        "needs_review",
+        "stale",
+        "never_read",
+    ] {
+        assert!(totals[reason].is_u64(), "{reason} missing from {totals}");
+    }
+}
+
+/// "N of `live` read at least once": reads of an invalidated memory and of
+/// an id with no row were counted in N, so N could exceed `live`.
+#[tokio::test]
+async fn memories_in_use_never_exceeds_live() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let owner = StoreRef::of(&store);
+    let ev = |id: &str| MemoryEvent::new(id, &store.project_id, UsageKind::Fetched, Surface::Cli);
+    // The fixture read `a` and `b` (live); `e` is invalidated.
+    engramdb::ops::usage::write_events(
+        &owner,
+        &[ev(&fx.ids[4]), ev("0bdeadbe-0000-7000-8000-000000000000")],
+    );
+    let app = app(Some(fx.current.clone()));
+    let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    assert_eq!(st["usage"]["used_memories"], 2, "{}", st["usage"]);
+    assert!(st["usage"]["used_memories"].as_u64() <= st["live"].as_u64());
+    // The lifetime sums still count every read.
+    assert_eq!(st["usage"]["fetched"], 4, "{}", st["usage"]);
+}
+
+/// Overview's relation total used to count every stored edge, rejected ones
+/// and ones with an invalidated end included, so it never matched the
+/// Relations tab it links to.
+#[tokio::test]
+async fn the_overview_relation_total_is_what_the_relations_tab_lists() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let params = |src: &str, kind, dst: &str, status| LinkParams {
+        src: src.to_string(),
+        kind,
+        dst: dst.to_string(),
+        dst_store: None,
+        confidence: Some(0.7),
+        origin: LinkOrigin::Human,
+        status: Some(status),
+        note: None,
+    };
+    // A rejected relation, and one whose end (`e`) is invalidated.
+    for p in [
+        params(
+            &fx.ids[0],
+            LinkKind::RelatedTo,
+            &fx.ids[1],
+            LinkStatus::Rejected,
+        ),
+        params(
+            &fx.ids[1],
+            LinkKind::RelatedTo,
+            &fx.ids[4],
+            LinkStatus::Confirmed,
+        ),
+    ] {
+        ops_links::link(&store, p, Surface::Cli).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    let (s, rel) = get_json(&app, &format!("/api/projects/{}/relations", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{rel}");
+    assert_eq!(
+        st["edges"]["total"], rel["total"],
+        "stats {} vs relations {}",
+        st["edges"], rel["total"]
+    );
+    assert!(st["edges"]["total"].as_u64().unwrap() > 0);
 }

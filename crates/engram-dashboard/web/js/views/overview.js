@@ -50,6 +50,28 @@ const REASON = {
   never_read: 'Never read',
 };
 
+/**
+ * Where a group's "and N more" leads: the list that holds every item of
+ * that reason, as `[view, query]` for `ctx.href` (null for an unknown one).
+ */
+export function moreLink(reason) {
+  switch (reason) {
+    case 'proposed_contradiction':
+      return ['relations', 'status=proposed&kind=contradicts'];
+    case 'proposed_edge':
+      return ['relations', 'status=proposed'];
+    case 'challenged':
+      return ['memories', 'status=challenged'];
+    case 'needs_review':
+      return ['memories', 'status=needs_review'];
+    case 'stale':
+    case 'never_read':
+      return ['memories', 'sort=last_read&dir=asc'];
+    default:
+      return null;
+  }
+}
+
 /** A proposed edge in the review queue: both ends, and the review controls behind a disclosure. */
 function proposalItem(it, ctx) {
   const e = it.edge;
@@ -74,7 +96,7 @@ function proposalItem(it, ctx) {
   );
 }
 
-function attention(items, ctx) {
+function attention(items, totals, ctx) {
   if (!items.length) return h('p', { class: 'muted' }, 'Nothing needs attention.');
   const groups = new Map();
   for (const it of items) {
@@ -109,6 +131,9 @@ function attention(items, ctx) {
         }),
       ),
     );
+    const rest = (totals[reason] || 0) - list.length;
+    const to = moreLink(reason);
+    if (rest > 0) out.push(h('p', { class: 'att-more' }, to ? h('a', { href: ctx.href(to[0], ctx.project.id, to[1]) }, `and ${fmt(rest)} more`) : `and ${fmt(rest)} more`));
   }
   return out;
 }
@@ -125,7 +150,10 @@ export async function renderOverview(main, ctx) {
 
   const days = st.series.map((d) => d.day);
   const col = (k) => st.series.map((d) => d[k]);
-  const challenged = st.attention.filter((a) => a.reason === 'challenged');
+  // Counted over the store: `attention` lists at most a dozen per reason.
+  const totals = st.attention_totals || {};
+  const challenged = totals.challenged || 0;
+  const attentionTotal = Object.values(totals).reduce((a, n) => a + n, 0);
   const scopes = st.by_scope.filter((l) => l.name).length;
 
   const meta = [h('span', { class: 'mono' }, p.path)];
@@ -145,10 +173,10 @@ export async function renderOverview(main, ctx) {
           h('a', { class: 'btn sm solid', href: ctx.href('graph', p.id) }, 'Graph'),
         )
       : null,
-    challenged.length
+    challenged
       ? alertBanner(
           'Challenged',
-          `${plural(challenged.length, 'memory', 'memories')} awaiting review.`,
+          `${plural(challenged, 'memory', 'memories')} awaiting review.`,
           null,
           h('a', { class: 'btn sm solid', href: ctx.href('memories', p.id, 'status=challenged') }, 'Review'),
         )
@@ -163,7 +191,7 @@ export async function renderOverview(main, ctx) {
       ),
       readsStat(st.usage),
       stat('Memories in use', fmt(st.usage.used_memories), `of ${fmt(st.live)} read at least once`),
-      stat('Challenged', fmt(challenged.length), challenged.length ? 'Contested, awaiting review' : 'Nothing to review', challenged.length > 0),
+      stat('Challenged', fmt(challenged), challenged ? 'Contested, awaiting review' : 'Nothing to review', challenged > 0),
     ),
     h(
       'div',
@@ -189,7 +217,7 @@ export async function renderOverview(main, ctx) {
             )
           : h('p', { class: 'muted' }, 'No memories yet. Agents add them with the create tool, or run engramdb add.'),
       ),
-      h('div', null, secHead('Needs attention', h('span', { class: 'faint num' }, plural(st.attention.length, 'item'))), attention(st.attention, ctx)),
+      h('div', null, secHead('Needs attention', h('span', { class: 'faint num' }, plural(Math.max(attentionTotal, st.attention.length), 'item'))), attention(st.attention, totals, ctx)),
     ),
     secHead('Projects on this machine', h('a', { href: ctx.href('projects') }, 'All stores →')),
     projectCards(ctx.state.catalog.projects.filter((q) => q.kind === 'project' && !q.parent_id).slice(0, 8), ctx),

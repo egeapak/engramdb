@@ -120,6 +120,19 @@ async function readOnly(browser, url) {
   const t = await open(browser, url);
   await go(t, '', '.stats');
   ok('overview renders', (await text(t, '.stats')).includes('Memories'));
+  // E2: the Challenged tile counts the store (15), not the capped list (12).
+  const tile = await t.p.evaluate(() => {
+    const st = [...document.querySelectorAll('.stat')].find((s) => (s.querySelector('.eyebrow') || {}).textContent === 'Challenged');
+    return st ? st.querySelector('.v').textContent.trim() : null;
+  });
+  ok('overview: Challenged tile counts every challenged memory', tile === '15', tile);
+  ok('overview: a capped group says how many more', (await text(t, '.att-more')).includes('and 3 more'), await text(t, '.att-more'));
+  // E3: memories in use never exceed the live count.
+  const inUse = await t.p.evaluate(() => {
+    const st = [...document.querySelectorAll('.stat')].find((s) => (s.querySelector('.eyebrow') || {}).textContent === 'Memories in use');
+    return st ? [st.querySelector('.v').textContent, st.querySelector('.s').textContent] : null;
+  });
+  ok('overview: memories in use is at most the live count', inUse && Number(inUse[0]) <= Number(inUse[1].replace(/[^0-9]/g, '')), inUse);
   await go(t, 'memories', '#main table tbody tr');
   const rows0 = (await t.p.$$('#main table tbody tr')).length;
   ok('memories renders rows', rows0 > 0);

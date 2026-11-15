@@ -70,9 +70,7 @@ use engramdb::storage::lance_index::IndexFilterable;
 use engramdb::types::Status;
 use serde::Serialize;
 
-use crate::api::{
-    color_slots, finite, ok, open, query, status_str, top_scope_of, wire, ApiResult,
-};
+use crate::api::{color_slots, finite, ok, open, query, status_str, top_scope_of, wire, ApiResult};
 use crate::layout::{
     cache::Flight, overview::OverviewInput, Cached, EdgeFacts, ForceInput, Groups, LayoutInput,
     LayoutRequest, NodeFacts,
