@@ -3207,10 +3207,29 @@ fn check_global_gitignore() -> EnvironmentCheck {
             }
         })
         .or_else(|| {
-            // Default location: $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore
-            dirs::config_dir().map(|c| c.join("git").join("ignore"))
+            git_default_excludes_path(
+                std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                dirs::home_dir(),
+            )
         });
     check_global_gitignore_at(excludes_path.as_deref())
+}
+
+/// Where git reads global excludes when `core.excludesFile` is unset:
+/// `$XDG_CONFIG_HOME/git/ignore` when that variable is set and not empty,
+/// else `~/.config/git/ignore`. Git uses this rule on every platform.
+///
+/// `dirs::config_dir()` is not this path off Linux (`~/Library/Application
+/// Support` on macOS, `%APPDATA%` on Windows), so `doctor` told macOS and
+/// Windows users to edit a file git never reads.
+fn git_default_excludes_path(
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    xdg_config_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".config")))
+        .map(|c| c.join("git").join("ignore"))
 }
 
 /// [`check_global_gitignore`] against a resolved excludes file (`None`: none
@@ -5803,6 +5822,26 @@ mod tests {
             .as_deref()
             .is_some_and(|s| s.contains(&file.display().to_string())));
         assert_eq!(r.status, Some(CheckStatus::Info));
+    }
+
+    /// Git's own default, on every platform: `$XDG_CONFIG_HOME/git/ignore`,
+    /// else `~/.config/git/ignore` (an empty `XDG_CONFIG_HOME` is unset).
+    #[test]
+    fn git_default_excludes_path_follows_git_on_every_platform() {
+        let home = PathBuf::from("home");
+        assert_eq!(
+            git_default_excludes_path(Some(PathBuf::from("xdg")), Some(home.clone())),
+            Some(PathBuf::from("xdg").join("git").join("ignore"))
+        );
+        assert_eq!(
+            git_default_excludes_path(Some(PathBuf::new()), Some(home.clone())),
+            Some(home.join(".config").join("git").join("ignore"))
+        );
+        assert_eq!(
+            git_default_excludes_path(None, Some(home.clone())),
+            Some(home.join(".config").join("git").join("ignore"))
+        );
+        assert_eq!(git_default_excludes_path(None, None), None);
     }
 
     #[test]
