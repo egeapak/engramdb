@@ -1820,8 +1820,26 @@ async fn reindex_re_embeds_in_error_mode_despite_mismatch() {
         Err(_) => {} // gate fired as required
         Ok(engine) => {
             if !engine.embeddings_available() {
-                eprintln!("skipping: embedding provider unavailable (model-load race)");
-                return;
+                // The cause is the in-process load's, which this engine did
+                // not keep: load the default model directly to report it (and
+                // to fail under ENGRAMDB_TEST_REQUIRE_MODELS, where the
+                // second half below must run).
+                #[cfg(feature = "onnxruntime")]
+                let cause = engramdb::embeddings::OnnxProvider::new().map(|_| {
+                    "it loads directly, but the engine resolved no embedding \
+                     provider (the model-load race)"
+                        .to_string()
+                });
+                #[cfg(not(feature = "onnxruntime"))]
+                let cause: Result<String, String> = Ok("built without onnxruntime".into());
+                let cause = match cause {
+                    Ok(why) => why,
+                    Err(e) => format!("{e:#}"),
+                };
+                engram_test_support::require_model!(
+                    "default ONNX embedding model (the engine resolved none)",
+                    Err::<(), _>(cause)
+                );
             }
             panic!("error mode must gate the normal embedding path");
         }

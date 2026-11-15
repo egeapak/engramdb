@@ -3269,14 +3269,22 @@ mod tests {
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
         use crate::retrieval::reranker::LocalReranker;
         use std::sync::LazyLock;
-        static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
-            LazyLock::new(|| LocalReranker::load(crate::types::DEFAULT_RERANK_MODEL).ok());
-        SHARED_RERANKER.clone()
+        // The cause is kept so a skip says why, and a run with
+        // ENGRAMDB_TEST_REQUIRE_MODELS fails with it.
+        static SHARED_RERANKER: LazyLock<std::result::Result<Arc<dyn Reranker>, String>> =
+            LazyLock::new(|| {
+                LocalReranker::load(crate::types::DEFAULT_RERANK_MODEL)
+                    .map_err(|e| format!("{e:#}"))
+            });
+        engram_test_support::model_or_skip("default reranker", SHARED_RERANKER.clone())
     }
 
     #[cfg(not(feature = "onnxruntime"))]
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
-        None
+        engram_test_support::model_or_skip(
+            "default reranker",
+            Err::<Arc<dyn Reranker>, _>("built without the onnxruntime feature"),
+        )
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape
@@ -4976,14 +4984,14 @@ mod tests {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
-        let Some(embedding) = OnnxProvider::try_new() else {
-            eprintln!("skipping: ONNX embedding model unavailable");
-            return;
-        };
-        let Some(nli) = OnnxNliProvider::try_new("cross-encoder/nli-deberta-v3-xsmall") else {
-            eprintln!("skipping: NLI model unavailable");
-            return;
-        };
+        let embedding = engram_test_support::require_model!(
+            "default ONNX embedding model",
+            OnnxProvider::new()
+        );
+        let nli = engram_test_support::require_model!(
+            "NLI model cross-encoder/nli-deberta-v3-xsmall",
+            OnnxNliProvider::new("cross-encoder/nli-deberta-v3-xsmall")
+        );
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
@@ -5064,10 +5072,10 @@ mod tests {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
-        let Some(embedding) = OnnxProvider::try_new() else {
-            eprintln!("skipping: ONNX embedding model unavailable");
-            return;
-        };
+        let embedding = engram_test_support::require_model!(
+            "default ONNX embedding model",
+            OnnxProvider::new()
+        );
 
         // NLI shouldn't be called — we route through the similarity
         // threshold gate first. Use a dummy provider that panics if hit.

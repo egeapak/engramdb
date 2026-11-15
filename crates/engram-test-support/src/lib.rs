@@ -90,3 +90,104 @@ pub fn assert_isolated(data_dir: &std::path::Path, config_dir: &std::path::Path)
         );
     }
 }
+
+/// Set to `1`/`true`/`yes`/`on` where the models are staged (the CI test jobs,
+/// a sandbox with the models and the runtime in place): a model-backed test
+/// then fails with the load error instead of passing by skipping.
+///
+/// Test-only: the product never reads it.
+pub const REQUIRE_MODELS_ENV: &str = "ENGRAMDB_TEST_REQUIRE_MODELS";
+
+/// Whether [`REQUIRE_MODELS_ENV`] is set to a truthy value.
+pub fn models_required() -> bool {
+    std::env::var(REQUIRE_MODELS_ENV)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// The outcome of a model load, as [`model_or_skip`] takes it: either the
+/// model, or the reason it is not there.
+pub trait ModelLoad<T> {
+    fn into_load(self) -> Result<T, String>;
+}
+
+impl<T> ModelLoad<T> for Option<T> {
+    fn into_load(self) -> Result<T, String> {
+        self.ok_or_else(|| "the constructor returned None and kept no cause".to_string())
+    }
+}
+
+impl<T, E: std::fmt::Display> ModelLoad<T> for Result<T, E> {
+    fn into_load(self) -> Result<T, String> {
+        self.map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// `Some(model)`, or `None` after printing
+/// `SKIPPED (model unavailable): <what>: <cause>` — and a panic with the same
+/// text when models are required ([`models_required`]).
+#[track_caller]
+pub fn model_or_skip<T>(what: &str, load: impl ModelLoad<T>) -> Option<T> {
+    model_or_skip_with(models_required(), what, load)
+}
+
+/// [`model_or_skip`] with the requirement passed in (what its tests use, so
+/// they never set the environment variable).
+#[track_caller]
+pub fn model_or_skip_with<T>(required: bool, what: &str, load: impl ModelLoad<T>) -> Option<T> {
+    match load.into_load() {
+        Ok(model) => Some(model),
+        Err(cause) => {
+            let msg = format!("SKIPPED (model unavailable): {what}: {cause}");
+            if required {
+                panic!("{msg} ({REQUIRE_MODELS_ENV} is set, so a missing model is a failure)");
+            }
+            eprintln!("{msg}");
+            None
+        }
+    }
+}
+
+/// The model, or `return` from the test after [`model_or_skip`] reported
+/// why. Use it for every test that needs a real model; under
+/// `ENGRAMDB_TEST_REQUIRE_MODELS=1` a missing model fails the test.
+#[macro_export]
+macro_rules! require_model {
+    ($what:expr, $load:expr) => {
+        match $crate::model_or_skip($what, $load) {
+            Some(m) => m,
+            None => return,
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_or_skip_returns_the_model() {
+        assert_eq!(model_or_skip_with(true, "m", Some(7)), Some(7));
+        assert_eq!(
+            model_or_skip_with(true, "m", Ok::<_, std::io::Error>(7)),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn model_or_skip_skips_when_not_required() {
+        assert_eq!(model_or_skip_with(false, "m", None::<u8>), None);
+        assert_eq!(model_or_skip_with(false, "m", Err::<u8, _>("gone")), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "SKIPPED (model unavailable): m: no such file")]
+    fn model_or_skip_panics_when_required() {
+        let _ = model_or_skip_with(true, "m", Err::<u8, _>("no such file"));
+    }
+}

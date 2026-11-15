@@ -9,7 +9,6 @@ use super::protocol::{
     read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, ModelSelection,
 };
 use super::server::run_daemon;
-use crate::storage::paths::model_cache_dir;
 use crate::types::{EmbeddingBackend, EngramConfig};
 
 /// The model selection a client with a default project config sends.
@@ -99,23 +98,31 @@ async fn daemon_answers_ping() {
     }
 }
 
+/// Load the default ONNX embedding model in-process, keeping the cause of a
+/// failure, so a test gated on it says why it skipped (or, with
+/// `ENGRAMDB_TEST_REQUIRE_MODELS`, fails).
+fn default_onnx_model() -> Result<(), String> {
+    #[cfg(feature = "onnxruntime")]
+    {
+        crate::embeddings::OnnxProvider::new()
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        Err("built without the onnxruntime feature".to_string())
+    }
+}
+
 /// Full delegation: a remote embedding provider built against a real daemon
-/// produces vectors. Skipped when the embedding model isn't staged.
+/// produces vectors. Skipped when the default embedding model cannot load.
+///
+/// The gate used to look for the L6 model's files, which the default config
+/// stopped using at #77, so it skipped on every machine that had staged the
+/// default.
 #[tokio::test]
 async fn remote_embedding_end_to_end() {
-    let model = model_cache_dir()
-        .map(|d| {
-            d.join("models--Qdrant--all-MiniLM-L6-v2-onnx")
-                .join("snapshots")
-                .join("main")
-                .join("model.onnx")
-        })
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    if !model {
-        eprintln!("skipping remote_embedding_end_to_end: embedding model not staged");
-        return;
-    }
+    engram_test_support::require_model!("default ONNX embedding model", default_onnx_model());
 
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
@@ -1718,12 +1725,10 @@ async fn daemon_loads_the_bundle_named_by_the_request_not_by_dir() {
     use tokio::io::AsyncWriteExt;
 
     let config = EngramConfig::default();
-    let Some(local) =
-        crate::ops::resolve_engine_providers(&config, Some(EmbeddingBackend::Onnx), 1).embedding
-    else {
-        eprintln!("skipping: the default ONNX embedding model cannot load here");
-        return;
-    };
+    engram_test_support::require_model!("default ONNX embedding model", default_onnx_model());
+    let local = crate::ops::resolve_engine_providers(&config, Some(EmbeddingBackend::Onnx), 1)
+        .embedding
+        .expect("the default ONNX model loaded a moment ago");
     let expected_id = local.model_id();
     let expected_dims = local.dimensions();
     drop(local);

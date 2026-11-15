@@ -412,16 +412,13 @@ mod tests {
 
     /// Shared NLI provider across all tests in this module to avoid loading
     /// the ~400MB ONNX model once per test (which causes OOM when parallel).
-    static SHARED_PROVIDER: LazyLock<Option<OnnxNliProvider>> =
-        LazyLock::new(|| OnnxNliProvider::try_new(DEFAULT_MODEL_REPO));
+    static SHARED_PROVIDER: LazyLock<Result<OnnxNliProvider, String>> =
+        LazyLock::new(|| OnnxNliProvider::new(DEFAULT_MODEL_REPO).map_err(|e| format!("{e:#}")));
 
-    /// Returns the shared provider, or None if unavailable (for graceful skip).
+    /// Returns the shared provider, or None after saying why it is
+    /// unavailable (a failure under `ENGRAMDB_TEST_REQUIRE_MODELS`).
     fn try_provider() -> Option<&'static OnnxNliProvider> {
-        let provider = SHARED_PROVIDER.as_ref();
-        if provider.is_none() {
-            eprintln!("Skipping: NLI model not available");
-        }
-        provider
+        engram_test_support::model_or_skip("default NLI model", SHARED_PROVIDER.as_ref())
     }
 
     #[test]
@@ -451,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        // This test requires model download; skip gracefully if unavailable
+        // Skips (or, with models required, fails) when the model is missing.
         let _ = try_provider();
     }
 

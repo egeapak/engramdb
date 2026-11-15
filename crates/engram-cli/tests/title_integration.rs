@@ -519,16 +519,15 @@ mod title_integration {
     // assertion rather than fail — keeping CI honest about what's loaded.
     // -----------------------------------------------------------------------
 
-    fn t5_model_available() -> bool {
-        engramdb::title::t5::T5TitleGenerator::try_new().is_some()
+    /// Load the T5 model with its cause kept, so a skip says why (and fails
+    /// under `ENGRAMDB_TEST_REQUIRE_MODELS`).
+    fn t5_model() -> anyhow::Result<()> {
+        engramdb::title::t5::T5TitleGenerator::new().map(|_| ())
     }
 
     #[tokio::test]
     async fn t5_strategy_generates_non_empty_title() {
-        if !t5_model_available() {
-            eprintln!("skipping: T5 model not staged in cache");
-            return;
-        }
+        engram_test_support::require_model!("default T5 title model", t5_model());
         let (_temp_dir, store) = setup().await;
 
         let mut params = test_params();
@@ -560,10 +559,7 @@ mod title_integration {
     /// real-world case.
     #[tokio::test]
     async fn t5_strategy_handles_long_text() {
-        if !t5_model_available() {
-            eprintln!("skipping: T5 model not staged in cache");
-            return;
-        }
+        engram_test_support::require_model!("default T5 title model", t5_model());
         let (_temp_dir, store) = setup().await;
 
         // Build a >128-token input by repeating sentences.

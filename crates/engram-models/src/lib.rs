@@ -74,3 +74,47 @@ fn the_data_and_config_dirs_are_isolated() {
         &engram_storage::paths::global_config_dir().unwrap(),
     );
 }
+
+/// The one process that may download models: run it before the suite
+/// (`--run-ignored only -E 'test(=staging::stage_default_models)'`) so no two
+/// test processes download the same files at once, which is the suspected
+/// cause of the "model-load race". It loads, one after another, with the
+/// fallible constructors, every model a test loads, and fails with the cause
+/// of the first that does not load. A test that loads a new model must add it
+/// here.
+#[cfg(all(test, feature = "onnxruntime"))]
+mod staging {
+    #[test]
+    #[ignore = "stages the models for a test run; run explicitly"]
+    fn stage_default_models() {
+        use crate::embeddings::{OnnxProvider, ONNX_ALL_MINILM};
+        fn ok<T>(what: &str, r: anyhow::Result<T>) {
+            if let Err(e) = r {
+                panic!("staging {what} failed: {e:#}");
+            }
+        }
+        ok("the default embedding model", OnnxProvider::new());
+        // fp32 L6: embeddings::onnx::tests::fp32_embedding_is_bit_exact.
+        ok(
+            "the fp32 all-MiniLM-L6-v2 embedding model",
+            OnnxProvider::with_model(ONNX_ALL_MINILM),
+        );
+        ok(
+            "the default NLI model",
+            crate::nli::OnnxNliProvider::new(crate::nli::DEFAULT_NLI_MODEL.repo),
+        );
+        // The NLI tests in nli::onnx and retrieval::engine load this repo.
+        ok(
+            "the cross-encoder NLI model",
+            crate::nli::OnnxNliProvider::new("cross-encoder/nli-deberta-v3-xsmall"),
+        );
+        ok(
+            "the default T5 title model",
+            crate::title::t5::T5TitleGenerator::new(),
+        );
+        ok(
+            "the default reranker",
+            crate::rerank::LocalReranker::load(engram_types::DEFAULT_RERANK_MODEL),
+        );
+    }
+}

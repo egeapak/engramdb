@@ -613,14 +613,13 @@ mod tests {
 
     /// Shared embedding provider across all tests to avoid loading the ONNX
     /// model once per test (which causes OOM when parallel).
-    static SHARED_PROVIDER: LazyLock<Option<OnnxProvider>> = LazyLock::new(OnnxProvider::try_new);
+    /// The load error is kept (as text) so a skip says why, and a run with
+    /// `ENGRAMDB_TEST_REQUIRE_MODELS` fails with it.
+    static SHARED_PROVIDER: LazyLock<Result<OnnxProvider, String>> =
+        LazyLock::new(|| OnnxProvider::new().map_err(|e| format!("{e:#}")));
 
     fn try_provider() -> Option<&'static OnnxProvider> {
-        let provider = SHARED_PROVIDER.as_ref();
-        if provider.is_none() {
-            eprintln!("Skipping: embedding model not available");
-        }
-        provider
+        engram_test_support::model_or_skip("default ONNX embedding model", SHARED_PROVIDER.as_ref())
     }
 
     #[test]
@@ -742,10 +741,10 @@ mod tests {
     /// Self-skips when the ~86 MB fp32 model isn't cached (CI / offline).
     #[tokio::test]
     async fn fp32_embedding_is_bit_exact() {
-        let Some(provider) = OnnxProvider::try_with_model(ONNX_ALL_MINILM) else {
-            eprintln!("Skipping: fp32 ONNX model not available");
-            return;
-        };
+        let provider = engram_test_support::require_model!(
+            "fp32 ONNX model all-MiniLM-L6-v2",
+            OnnxProvider::with_model(ONNX_ALL_MINILM)
+        );
         let text = "deterministic across calls and across the batch path";
         let a = provider.embed(text).await.unwrap();
         let b = provider.embed(text).await.unwrap();
