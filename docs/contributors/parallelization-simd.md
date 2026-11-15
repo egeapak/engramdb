@@ -738,10 +738,31 @@ Three loops, all guarded by `PARALLEL_SCORE_MIN = 64`:
   `keyword_stems` column landed.
 
 Scope matching goes through `scope::physical`'s process-wide
-`Mutex<HashMap<String, GlobMatcher>>` matcher cache, so this was the one place
-lock contention could have eaten the gain. It does not: the cache's fast path
-is a read under the mutex with no allocation, and the measured scaling
-(3.5× on four cores at 5,000 rows) leaves no room for meaningful serialization.
+`Mutex<HashMap<String, Option<Arc<GlobMatcher>>>>` matcher cache, so this was
+the one place lock contention could have eaten the gain. It does not: the
+cache's fast path is a read under the mutex with no allocation (and, since
+literal scopes are compared directly, only glob scopes reach it at all), and
+the measured scaling (3.5× on four cores at 5,000 rows) leaves no room for
+meaningful serialization.
+
+**Does a one-shot hook pay for starting the pool?** A hook is a fresh
+process, so the first `par_iter` there starts rayon's global pool, which a
+long-lived `serve` or daemon pays once. Measured (2026-11, `engramdb hook
+pre-tool-use` built with the bench profile, `ENGRAMDB_IN_PROCESS=1`, maintenance
+off, 4 cores; p50 of 40 runs at 1,000 rows and 20 at 10,000, the 1,000-row
+pair run twice):
+
+| rows | `PARALLEL_SCORE_MIN = 64` | `= 2000` (serial below) |
+|---|---|---|
+| 1,000 | 21.26 / 22.19 ms | 21.56 / 21.04 ms |
+| 10,000 | 57.12 ms | 59.10 ms |
+
+At 1,000 rows the two runs disagree in sign (−0.3 ms, +1.2 ms) and the
+run-to-run spread of one binary is ~0.9 ms, so there is no gain to claim; at
+10,000 rows the pool wins, as it should. The rule set before measuring was "a
+separate threshold for one-shot processes only if serial is ≥ 0.3 ms better at
+1,000 rows", so the threshold stays 64 everywhere and no `set_long_lived`
+switch was added.
 
 ### `consolidation_pass` — one batched embed instead of N
 
