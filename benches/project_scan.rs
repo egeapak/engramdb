@@ -45,6 +45,9 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Returns the temp dir root (kept alive by the caller) and the registry the
 /// stores registered into — that registry is what `aggregate_stats` walks.
 async fn seed_projects(projects: usize, per_project: usize) -> (TempDir, InMemoryRegistry) {
+    // Run against the per-process temp data/config dirs, never the user's
+    // (the `#[ctor]` in engram-test-support, linked by this reference).
+    engram_test_support::arm();
     let root = TempDir::new().expect("failed to create temp dir");
     let registry = InMemoryRegistry::new();
 
@@ -137,6 +140,7 @@ fn git(dir: &std::path::Path, args: &[&str]) {
 /// only moves a store git does not track, so a fake layout would measure
 /// nothing.
 async fn seed_worktree(main_count: usize, stray_count: usize) -> (TempDir, std::path::PathBuf) {
+    engram_test_support::arm();
     let root = TempDir::new().expect("failed to create temp dir");
     let registry = InMemoryRegistry::new();
 

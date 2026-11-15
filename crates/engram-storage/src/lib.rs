@@ -65,3 +65,14 @@ pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 fn arm_test_isolation() {
     engram_test_support::arm();
 }
+
+/// The `#[ctor]` above really ran in this test binary: the product resolves
+/// its data and config dirs under the temp dir, never the user's.
+#[cfg(test)]
+#[test]
+fn the_data_and_config_dirs_are_isolated() {
+    engram_test_support::assert_isolated(
+        &crate::paths::global_data_dir().unwrap(),
+        &crate::paths::global_config_dir().unwrap(),
+    );
+}

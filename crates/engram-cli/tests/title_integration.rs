@@ -7,6 +7,23 @@
 //! - title_strategy: none produces uuid-only filename
 //! - Title update changes filename on disk
 
+// An integration-test binary is its own crate: the lib's `#[cfg(test)]` arm in
+// `src/lib.rs` is not compiled into it, so this binary arms the per-process
+// data/config-dir isolation itself. Without it `MemoryStore::init` below
+// registered and wrote under the developer's real data dir.
+#[ctor::ctor(unsafe)]
+fn arm_test_isolation() {
+    engram_test_support::arm();
+}
+
+#[test]
+fn the_data_and_config_dirs_are_isolated() {
+    engram_test_support::assert_isolated(
+        &engramdb::storage::paths::global_data_dir().unwrap(),
+        &engramdb::storage::paths::global_config_dir().unwrap(),
+    );
+}
+
 #[cfg(test)]
 mod title_integration {
     use engramdb::ops::{create_memory, CreateParams};

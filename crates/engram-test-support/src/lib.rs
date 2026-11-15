@@ -54,3 +54,39 @@ pub fn arm() {
     let _ = TEST_CONFIG_DIR.path();
     let _ = TEST_DASHBOARD_CACHE_DIR.path();
 }
+
+/// Assert that this test binary runs isolated: both isolation variables are
+/// set, and the data and config dirs the product resolved (`data_dir` and
+/// `config_dir`, passed in by the caller from `paths::global_data_dir()` /
+/// `paths::global_config_dir()`, since this leaf crate must not depend on
+/// storage) are under the system temp dir.
+///
+/// Paths are compared canonicalized, never as text: `/tmp` is a symlink on
+/// macOS, and the temp dir may be spelled relatively.
+#[track_caller]
+pub fn assert_isolated(data_dir: &std::path::Path, config_dir: &std::path::Path) {
+    for (var, resolved) in [
+        ("ENGRAMDB_DATA_DIR", data_dir),
+        ("ENGRAMDB_CONFIG_DIR", config_dir),
+    ] {
+        let set = std::env::var_os(var).unwrap_or_else(|| {
+            panic!("{var} is not set: this test binary does not link engram_test_support::arm()")
+        });
+        let canon = |p: &std::path::Path| {
+            std::fs::canonicalize(p).unwrap_or_else(|e| panic!("canonicalize {}: {e}", p.display()))
+        };
+        let temp = canon(&std::env::temp_dir());
+        let set = canon(std::path::Path::new(&set));
+        let resolved = canon(resolved);
+        assert_eq!(
+            resolved, set,
+            "{var}: the product resolved a different dir than the armed one"
+        );
+        assert!(
+            resolved.starts_with(&temp),
+            "{var} = {} is not under the temp dir {}",
+            resolved.display(),
+            temp.display()
+        );
+    }
+}
