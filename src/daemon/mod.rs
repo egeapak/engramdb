@@ -53,6 +53,8 @@ pub use server::{run_daemon, run_daemon_with_hooks};
 // seam, so they build and run on both Unix (domain sockets) and Windows (named
 // pipes). The single Unix-domain-socket-specific case (a stale regular file at
 // the socket path) is `#[cfg(unix)]`-gated within the module.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 

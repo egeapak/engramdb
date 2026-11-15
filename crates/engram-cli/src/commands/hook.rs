@@ -5683,3 +5683,166 @@ mod daemon_executor_tests {
         assert!(!capped, "exactly the cap is not over it");
     }
 }
+
+/// `delegate_to_daemon`'s mapping from what the daemon did to what the CLI
+/// does next. The socket is steered through the armed (per-process) global
+/// config, so no environment variable is touched.
+#[cfg(test)]
+mod delegation_tests {
+    use super::*;
+    use engramdb::daemon::protocol::{DaemonOp, DaemonResponse};
+    use engramdb::daemon::test_support::{current_pong, spawn_recording_stub, wait_connectable};
+
+    /// A 0700 temp dir: the transport refuses a daemon folder with group or
+    /// other bits, and `TempDir::new` follows the umask.
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    /// Point the global `[daemon]` at `socket`.
+    fn configure(socket: &Path, enabled: bool, use_for_cli: bool) {
+        let path = engramdb::storage::paths::global_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "[daemon]\nenabled = {enabled}\nuse_for_cli = {use_for_cli}\nsocket_path = {:?}\n",
+                socket.display().to_string()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn ops(log: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        log.lock().unwrap().clone()
+    }
+
+    fn sent_hook(ops: &[String]) -> bool {
+        ops.iter().any(|op| op.starts_with("Hook"))
+    }
+
+    const EVENT: &str = r#"{"session_id":"s1"}"#;
+
+    #[tokio::test]
+    async fn hook_lost_reply_is_done_and_runs_nothing_here() {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let log = spawn_recording_stub(socket.clone(), |op| match op {
+            DaemonOp::Version => Some(current_pong()),
+            // The daemon took the hook and died before answering.
+            _ => None,
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, true, true);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(
+            matches!(out, Delegated::Done),
+            "a lost reply must not run the hook again here"
+        );
+        assert!(
+            sent_hook(&ops(&log)),
+            "the hook was never sent: {:?}",
+            ops(&log)
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_not_sent_runs_here() {
+        let sock_dir = private_dir();
+        configure(&sock_dir.path().join("nobody.sock"), true, true);
+        let project = tempfile::TempDir::new().unwrap();
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+        assert!(matches!(out, Delegated::RunHere));
+    }
+
+    #[tokio::test]
+    async fn hook_to_an_older_protocol_daemon_runs_here() {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let older = (engramdb::daemon::PROTOCOL_VERSION.parse::<i64>().unwrap() - 1).to_string();
+        let log = spawn_recording_stub(socket.clone(), move |op| match op {
+            DaemonOp::Version | DaemonOp::Ping => Some(DaemonResponse::Pong {
+                version: older.clone(),
+                build: Some(env!("CARGO_PKG_VERSION").to_string()),
+            }),
+            _ => None,
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, true, true);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(matches!(out, Delegated::RunHere));
+        assert!(
+            !sent_hook(&ops(&log)),
+            "a hook was sent to an older protocol: {:?}",
+            ops(&log)
+        );
+    }
+
+    async fn never_connects(enabled: bool, use_for_cli: bool) {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let log = spawn_recording_stub(socket.clone(), |op| match op {
+            DaemonOp::Version | DaemonOp::Ping => Some(current_pong()),
+            _ => Some(DaemonResponse::HookOutput {
+                stdout: None,
+                ok: true,
+            }),
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, enabled, use_for_cli);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(matches!(out, Delegated::RunHere));
+        assert!(
+            ops(&log).is_empty(),
+            "the daemon was contacted: {:?}",
+            ops(&log)
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_use_for_cli_false_never_connects() {
+        never_connects(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn hook_daemon_disabled_never_connects() {
+        never_connects(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn hook_served_is_done() {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let log = spawn_recording_stub(socket.clone(), |op| match op {
+            DaemonOp::Version | DaemonOp::Ping => Some(current_pong()),
+            DaemonOp::Hook { .. } => Some(DaemonResponse::HookOutput {
+                stdout: None,
+                ok: true,
+            }),
+            _ => None,
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, true, true);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(matches!(out, Delegated::Done));
+        assert!(sent_hook(&ops(&log)));
+    }
+}

@@ -108,17 +108,28 @@ pub fn runtime_dir() -> &'static Path {
 /// `ENGRAMDB_CONFIG_DIR` to shared temp dirs and applies [`isolation_env`],
 /// so integration tests never pollute the user's global state or talk to the
 /// user's daemon.
-#[allow(deprecated)]
 pub fn cmd() -> assert_cmd::Command {
+    assert_cmd::Command::from_std(std_cmd())
+}
+
+/// [`cmd`] as a `std::process::Command`, for a child that must run in the
+/// background (`spawn`) rather than to completion.
+#[allow(deprecated)]
+pub fn std_cmd() -> std::process::Command {
     let dirs = test_dirs();
-    let mut c = assert_cmd::Command::cargo_bin("engramdb").expect("binary engramdb not found");
+    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("engramdb"));
     c.env(
         "ENGRAMDB_REGISTRY_PATH",
         dirs.registry_dir.path().join("registry.json"),
     );
     c.env("ENGRAMDB_DATA_DIR", dirs.data_dir.path());
     c.env("ENGRAMDB_CONFIG_DIR", dirs.config_dir.path());
-    isolate(&mut c, dirs.home_dir.path(), dirs.runtime_dir.path());
+    for (k, v) in isolation_env(dirs.home_dir.path(), dirs.runtime_dir.path()) {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
     c
 }
 

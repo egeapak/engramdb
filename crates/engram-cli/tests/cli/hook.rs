@@ -497,3 +497,129 @@ fn hook_with_closed_stdout_exits_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A background `engramdb daemon run`, killed when dropped so a failed
+/// assertion never leaves it running.
+#[cfg(unix)]
+struct DaemonChild(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The same environment for the daemon and the hook client: every
+/// `HOOK_ENV_KEYS` value must match or the daemon refuses the hook (and the
+/// client then runs it in-process, which this test must not mistake for a
+/// served hook). No `ENGRAMDB_IN_PROCESS`, which would keep the hook local.
+#[cfg(unix)]
+fn daemon_env(c: &mut std::process::Command, socket: &std::path::Path, empty_cache: &TempDir) {
+    c.env_remove("ENGRAMDB_IN_PROCESS");
+    c.env("ENGRAMDB_DAEMON_SOCKET", socket);
+    c.env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+    c.env("ENGRAMDB_OFFLINE", "1");
+}
+
+/// `engramdb hook` offers the event to a running daemon (never spawning one)
+/// and prints what the daemon answered: the same document the in-process
+/// run prints, and the daemon, not this process, records the call.
+#[cfg(unix)]
+#[test]
+fn a_hook_is_served_by_a_running_daemon() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+    let sock_dir = crate::helpers::private_tempdir();
+    let socket = sock_dir.path().join("d.sock");
+
+    // The in-process answer first, the reference.
+    let local = hook_cmd(
+        project.path(),
+        &["session-start", "--min-criticality", "0.7"],
+        &empty_cache,
+    )
+    .write_stdin(r#"{"session_id":"local"}"#)
+    .output()
+    .unwrap();
+    assert!(local.status.success(), "{local:?}");
+
+    let mut daemon = crate::helpers::std_cmd();
+    daemon_env(&mut daemon, &socket, &empty_cache);
+    daemon
+        .args(["daemon", "run", "--socket", socket.to_str().unwrap()])
+        .args(["--idle-timeout", "120"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _daemon = DaemonChild(daemon.spawn().expect("spawn the daemon"));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut status = crate::helpers::std_cmd();
+        daemon_env(&mut status, &socket, &empty_cache);
+        let out = status
+            .args(["daemon", "status", "--format", "json"])
+            .args(["--socket", socket.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if json["running"] != false && json["pid"].is_number() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never answered: {json}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut hook = crate::helpers::std_cmd();
+    daemon_env(&mut hook, &socket, &empty_cache);
+    let served = hook
+        .args(["--dir", project.path().to_str().unwrap()])
+        .args(["hook", "session-start", "--min-criticality", "0.7"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"session_id":"local"}"#)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(served.status.success(), "{served:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        String::from_utf8_lossy(&local.stdout),
+        "the daemon's answer differs from the in-process one"
+    );
+
+    // Proof the daemon ran it: a hook run in this process appends a line to
+    // hook_stats.jsonl; one the daemon ran is buffered in the daemon and
+    // recorded under the path "daemon", never in that file. The in-process
+    // reference run above wrote exactly one line.
+    let log = project
+        .path()
+        .join(".engramdb")
+        .join("state")
+        .join("hook_stats.jsonl");
+    let lines = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        lines
+            .lines()
+            .filter(|l| l.contains("session-start"))
+            .count(),
+        1,
+        "the hook ran in-process instead of in the daemon: {lines}"
+    );
+}

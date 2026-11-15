@@ -1806,56 +1806,7 @@ fn v4_daemon_can_parse_a_v5_ping() {
 
 // ---- hooks (protocol 6) ------------------------------------------------------
 
-/// Like [`spawn_stub`], but the reply may be `None`: drop the connection
-/// without answering (a daemon that died mid-request). Every op received is
-/// logged.
-fn spawn_recording_stub<F>(
-    socket: std::path::PathBuf,
-    reply: F,
-) -> std::sync::Arc<std::sync::Mutex<Vec<String>>>
-where
-    F: Fn(&DaemonOp) -> Option<DaemonResponse> + Send + Sync + 'static,
-{
-    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = std::sync::Arc::clone(&log);
-    tokio::spawn(async move {
-        let listener = super::transport::bind_or_yield(&socket)
-            .await
-            .unwrap()
-            .expect("stub owns the address");
-        while let Ok(stream) = listener.accept().await {
-            let (rh, mut wh) = tokio::io::split(stream);
-            let mut r = BufReader::new(rh);
-            while let Some(req) = read_msg::<_, DaemonRequest>(&mut r).await.unwrap_or(None) {
-                seen.lock().unwrap().push(format!("{:?}", req.op));
-                let Some(resp) = reply(&req.op) else {
-                    break;
-                };
-                if write_msg(&mut wh, &resp).await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    log
-}
-
-fn current_pong() -> DaemonResponse {
-    DaemonResponse::Pong {
-        version: super::PROTOCOL_VERSION.to_string(),
-        build: Some(env!("CARGO_PKG_VERSION").to_string()),
-    }
-}
-
-async fn wait_connectable(socket: &std::path::Path) {
-    for _ in 0..200 {
-        if super::transport::connect(socket).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("nothing listening on {}", socket.display());
-}
+use super::test_support::{current_pong, spawn_recording_stub, wait_connectable};
 
 fn sent_hook(log: &std::sync::Mutex<Vec<String>>) -> bool {
     log.lock().unwrap().iter().any(|op| op.starts_with("Hook"))
