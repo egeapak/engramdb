@@ -227,6 +227,29 @@ pub struct IndexForFiltering {
     pub keyword_stems: Option<KeywordStems>,
 }
 
+/// One row of [`LanceIndex::list_watched`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchedEntry {
+    pub id: String,
+    pub watch_paths: Vec<String>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+}
+
+/// Which columns a filtering scan projects.
+///
+/// `keyword_stems` is the one large column of the projection (a JSON object
+/// per row, parsed per row), and only a text query reads it. Every other
+/// caller asks for [`Self::NoStems`]; the rows then carry
+/// `keyword_stems: None`, the documented "no cache" value, so a text query
+/// handed one would still answer correctly by recomputing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterProjection {
+    /// Every filtering column.
+    Full,
+    /// Every filtering column but `keyword_stems`.
+    NoStems,
+}
+
 /// Filterable/displayable entry (15 columns).
 ///
 /// Contains every field needed for filtering, sorting, and display.
@@ -1312,11 +1335,23 @@ impl LanceIndex {
         &self,
         predicate: Option<String>,
     ) -> Result<Vec<IndexForFiltering>> {
+        self.list_for_filtering_where_projected(predicate, FilterProjection::Full)
+            .await
+    }
+
+    /// [`Self::list_for_filtering_where`] with a chosen [`FilterProjection`].
+    pub async fn list_for_filtering_where_projected(
+        &self,
+        predicate: Option<String>,
+        proj: FilterProjection,
+    ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
         let mut query = table
             .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns()));
+            .select(lancedb::query::Select::Columns(Self::filtering_columns(
+                proj,
+            )));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
         }
@@ -1332,6 +1367,66 @@ impl LanceIndex {
             entries.extend(batch_to_for_filtering(&batch)?);
         }
         Ok(entries)
+    }
+
+    /// Every row that watches at least one path: `(id, watch_paths,
+    /// invalidated_at)`, three columns and a pushdown instead of the whole
+    /// filtering projection.
+    ///
+    /// The PostToolUse hook's read, which runs on every edit and needs only
+    /// these. `watch_paths` is a non-nullable JSON array string, `[]` when the
+    /// memory watches nothing (the write path always serializes it), so
+    /// `watch_paths != '[]'` is exact; the caller's glob match stays the
+    /// authority on which rows apply.
+    pub async fn list_watched(&self) -> Result<Vec<WatchedEntry>> {
+        use lancedb::expr::{col, lit};
+        let table = self.open_table().await?;
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "watch_paths".into(),
+                "invalidated_at".into(),
+            ]))
+            .only_if_expr(col("watch_paths").not_eq(lit("[]")))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for watched entries")?;
+        let mut out = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch.context("Failed to read batch")?;
+            let col_str = |name: &str| -> Result<StringArray> {
+                Ok(batch
+                    .column_by_name(name)
+                    .with_context(|| format!("Missing '{name}' column"))?
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .with_context(|| format!("Failed to cast '{name}'"))?
+                    .clone())
+            };
+            let ids = col_str("id")?;
+            let watch = col_str("watch_paths")?;
+            let invalidated = col_str("invalidated_at")?;
+            for i in 0..batch.num_rows() {
+                let watch_paths: Vec<String> = serde_json::from_str(watch.value(i))
+                    .context("Failed to parse watch_paths JSON")?;
+                let invalidated_at = if invalidated.is_null(i) {
+                    None
+                } else {
+                    Some(
+                        chrono::DateTime::parse_from_rfc3339(invalidated.value(i))
+                            .context("Failed to parse invalidated_at")?
+                            .with_timezone(&Utc),
+                    )
+                };
+                out.push(WatchedEntry {
+                    id: ids.value(i).to_string(),
+                    watch_paths,
+                    invalidated_at,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Upsert embedding chunks for a memory.
@@ -2392,9 +2487,10 @@ impl LanceIndex {
         "audience",
     ];
 
-    fn filtering_columns() -> Vec<String> {
+    fn filtering_columns(proj: FilterProjection) -> Vec<String> {
         Self::FILTERING_COLUMNS
             .iter()
+            .filter(|c| proj == FilterProjection::Full || **c != "keyword_stems")
             .map(|c| (*c).to_string())
             .collect()
     }
@@ -2562,10 +2658,23 @@ impl LanceIndex {
         &self,
         predicate: lancedb::expr::DfExpr,
     ) -> Result<Vec<IndexForFiltering>> {
+        self.list_for_filtering_where_expr_projected(predicate, FilterProjection::Full)
+            .await
+    }
+
+    /// [`Self::list_for_filtering_where_expr`] with a chosen
+    /// [`FilterProjection`].
+    pub async fn list_for_filtering_where_expr_projected(
+        &self,
+        predicate: lancedb::expr::DfExpr,
+        proj: FilterProjection,
+    ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
         let query = table
             .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns()))
+            .select(lancedb::query::Select::Columns(Self::filtering_columns(
+                proj,
+            )))
             .only_if_expr(predicate);
 
         let mut stream = query
@@ -3309,6 +3418,41 @@ mod tests {
             expires_at: None,
         };
         IndexEntry::without_digest(&memory)
+    }
+
+    #[tokio::test]
+    async fn no_stems_projection_matches_full_except_stems() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+        for n in 0..5 {
+            let mut entry = create_test_entry(&format!("p-{n}"));
+            entry.watch_paths = vec![format!("src/{n}.rs")];
+            entry.tags = vec![format!("tag{n}")];
+            lance.upsert(&entry).await.unwrap();
+        }
+        let full = lance
+            .list_for_filtering_where_projected(None, FilterProjection::Full)
+            .await
+            .unwrap();
+        let lean = lance
+            .list_for_filtering_where_projected(None, FilterProjection::NoStems)
+            .await
+            .unwrap();
+        assert_eq!(full.len(), 5);
+        assert!(full.iter().all(|e| e.keyword_stems.is_some()));
+        assert!(lean.iter().all(|e| e.keyword_stems.is_none()));
+        let without_stems = |rows: Vec<IndexForFiltering>| -> Vec<String> {
+            let mut out: Vec<String> = rows
+                .into_iter()
+                .map(|mut e| {
+                    e.keyword_stems = None;
+                    format!("{e:?}")
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(without_stems(full), without_stems(lean));
     }
 
     #[tokio::test]

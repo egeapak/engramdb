@@ -1628,7 +1628,9 @@ async fn process_post_tool_use_in(
         }
     };
 
-    let entries = match store.list_for_filtering().await {
+    // Three columns of the rows that watch anything, not the whole filtering
+    // projection: this runs on every edit.
+    let entries = match store.list_watched().await {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Hook index read failed (non-fatal): {}", e);
@@ -1640,7 +1642,8 @@ async fn process_post_tool_use_in(
     let matched_ids: Vec<&str> = entries
         .iter()
         .filter(|entry| {
-            // §2.4 validity guard: closed windows never warn (§14.14).
+            // §2.4 validity guard: closed windows never warn (§14.14). The
+            // projection's pushdown is a narrowing; this filter is the gate.
             entry.invalidated_at.is_none_or(|t| t > now)
                 && !entry.watch_paths.is_empty()
                 && engramdb::scope::physical::matches(&entry.watch_paths, &relative_path)
@@ -3907,6 +3910,58 @@ mod tests {
         for tool in ["query", "create(", "challenge(", "mcp__"] {
             assert!(!REFLECTION_NUDGE.contains(tool), "nudge names {tool:?}");
         }
+    }
+
+    /// The hook reads the three-column watch projection, not the filtering
+    /// one: the warning is the same, a memory watching nothing never reaches
+    /// the matcher, and a scheduled (future) invalidation still warns.
+    #[tokio::test]
+    async fn post_tool_use_warns_from_the_watch_projection() {
+        use engramdb::types::Validity;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for n in 0..5 {
+            let mut m = Memory::new(
+                MemoryType::Context,
+                format!("unwatched {n}"),
+                "content",
+                Provenance::human(),
+            );
+            m.physical = vec!["src/**".into()];
+            store.create(&m).await.unwrap();
+        }
+        let mut scheduled = Memory::new(
+            MemoryType::Decision,
+            "Glob watcher",
+            "content",
+            Provenance::human(),
+        );
+        scheduled.id = "watch-glob-0001".to_string();
+        scheduled.valid_while = Some(Validity {
+            invalidated_by: vec!["src/**/*.rs".into()],
+            ..Default::default()
+        });
+        scheduled.invalidated_at = Some(chrono::Utc::now() + chrono::Duration::days(30));
+        store.create(&scheduled).await.unwrap();
+
+        let input = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": temp_dir.path().join("src/a/b.rs").to_str().unwrap() }
+        })
+        .to_string();
+        let out = process_post_tool_use(&input, temp_dir.path())
+            .await
+            .unwrap()
+            .expect("a watch match warns");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "[EngramDB]\n⚠ this edit may invalidate memory watch-glob-00 ('Glob watcher') — verify \
+             it or update/invalidate it"
+        );
     }
 
     #[tokio::test]

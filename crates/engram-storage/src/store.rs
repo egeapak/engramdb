@@ -1488,7 +1488,8 @@ impl MemoryStore {
     }
 
     /// Index rows for exactly `ids` (full ids; unknown ids are simply
-    /// absent), in `IN` lists of at most 500. Read-only.
+    /// absent), in `IN` lists of at most 500. Read-only. The rows carry no
+    /// `keyword_stems` (`FilterProjection::NoStems`).
     pub async fn list_for_filtering_by_ids(
         &self,
         ids: &[String],
@@ -1497,7 +1498,16 @@ impl MemoryStore {
         let mut out = Vec::new();
         for chunk in ids.chunks(500) {
             let expr = is_in(col("id"), chunk.iter().map(lit).collect());
-            out.extend(self.list_for_filtering_where_expr(expr).await?);
+            // No caller of this reads the stems.
+            out.extend(
+                self.lance_index
+                    .list_for_filtering_where_expr_projected(
+                        expr,
+                        crate::lance_index::FilterProjection::NoStems,
+                    )
+                    .await
+                    .map_err(StorageError::index("list_for_filtering_by_ids"))?,
+            );
         }
         Ok(out)
     }
@@ -1710,6 +1720,29 @@ impl MemoryStore {
             .list_for_filtering_where(predicate)
             .await
             .map_err(StorageError::index("list_for_filtering_where"))
+    }
+
+    /// [`Self::list_for_filtering_where`] with a chosen projection; a caller
+    /// that never reads `keyword_stems` passes
+    /// [`crate::lance_index::FilterProjection::NoStems`].
+    pub async fn list_for_filtering_where_projected(
+        &self,
+        predicate: Option<String>,
+        proj: crate::lance_index::FilterProjection,
+    ) -> Result<Vec<IndexForFiltering>> {
+        self.lance_index
+            .list_for_filtering_where_projected(predicate, proj)
+            .await
+            .map_err(StorageError::index("list_for_filtering_where"))
+    }
+
+    /// The rows that watch at least one path (the PostToolUse hook's read).
+    /// See [`LanceIndex::list_watched`].
+    pub async fn list_watched(&self) -> Result<Vec<crate::lance_index::WatchedEntry>> {
+        self.lance_index
+            .list_watched()
+            .await
+            .map_err(StorageError::index("list_watched"))
     }
 
     /// [`Self::list_for_filtering_where`] driven by a type-safe expression.
@@ -4108,6 +4141,41 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from("data.md")]);
+    }
+
+    #[tokio::test]
+    async fn list_watched_returns_only_rows_with_watch_paths() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut watching = create_test_memory("watch-1", Visibility::Shared);
+        watching.valid_while = Some(engram_types::Validity {
+            invalidated_by: vec!["src/lib.rs".to_string()],
+            ..Default::default()
+        });
+        let mut closed = create_test_memory("watch-2", Visibility::Shared);
+        closed.valid_while = Some(engram_types::Validity {
+            invalidated_by: vec!["src/**".to_string()],
+            ..Default::default()
+        });
+        let at = Utc::now() - chrono::Duration::days(1);
+        closed.invalidated_at = Some(at);
+        let plain = create_test_memory("plain-1", Visibility::Shared);
+        for m in [&watching, &closed, &plain] {
+            store.create(m).await.unwrap();
+        }
+        let mut rows = store.list_watched().await.unwrap();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["watch-1", "watch-2"], "a row watching nothing is left out");
+        assert_eq!(rows[0].watch_paths, vec!["src/lib.rs".to_string()]);
+        assert_eq!(rows[0].invalidated_at, None);
+        // Carried, not filtered: the caller decides what a closed window means.
+        assert_eq!(
+            rows[1].invalidated_at.map(|t| t.timestamp()),
+            Some(at.timestamp())
+        );
     }
 
     fn create_test_memory(id: &str, visibility: Visibility) -> Memory {

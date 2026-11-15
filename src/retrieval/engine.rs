@@ -1201,9 +1201,16 @@ impl RetrievalEngine {
         // post-predicate rows — NOT the whole store — and can no longer be
         // used on its own to detect "the filters narrowed the candidates".
         let pushdown_applied = pushdown_predicate.is_some();
+        // Only a text query reads the stems; every other shape skips the
+        // projection's one large column and its per-row JSON parse.
+        let projection = if query.query.is_some() {
+            crate::storage::FilterProjection::Full
+        } else {
+            crate::storage::FilterProjection::NoStems
+        };
         let all_entries = self
             .store
-            .list_for_filtering_where(pushdown_predicate)
+            .list_for_filtering_where_projected(pushdown_predicate, projection)
             .await?;
         let total_entry_count = all_entries.len();
 
