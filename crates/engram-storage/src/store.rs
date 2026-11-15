@@ -1986,6 +1986,26 @@ impl MemoryStore {
         // `reindex_locked`, not `reindex_with`: the lock is already held and
         // is not reentrant.
         self.reindex_locked(true, false).await?;
+        // 0.6.0 added the `conversations` table, and its bump exists so a store
+        // created before it gets one. Only a project store: the table lives in
+        // a project's `lancedb/` (the root project's, but a store does not know
+        // whether it is a root; an empty table in a sub-project is never
+        // written and searches as empty). Best-effort: a table that is already
+        // there at another width is the conversation index's own repair
+        // (`reindex --archive-only`), and must not block every open.
+        let predates_conversations = stored
+            .as_deref()
+            .is_none_or(|v| manifest::schema_version_is_before(v, "0.6.0"));
+        if predates_conversations && !self.is_global() && !paths::is_group_id(&self.project_id) {
+            if let Err(e) = crate::conversation_index::ConversationIndex::open(
+                &self.project_id,
+                self.lance_index.dimensions(),
+            )
+            .await
+            {
+                tracing::warn!("could not create the conversations table during migration: {e:#}");
+            }
+        }
         // reindex's `update_manifest_stats` rewrote the manifest but preserved
         // the old `schema_version`; stamp the new one now that the rebuild
         // succeeded (mirrors how the embedding fingerprint is stamped only on
@@ -5796,13 +5816,7 @@ mod tests {
     /// The 0.6.0 bump exists "only so a store created before the table gets
     /// one" (manifest docs). A store stamped 0.5.0 with no `conversations`
     /// table must have one after a plain open, with its memories untouched.
-    ///
-    /// Ignored: the migration is a memories-table reindex and never creates
-    /// the table (only `ConversationIndex::open`, from the harvest path, does),
-    /// so the documented behaviour does not hold. Reported to group A
-    /// (storage integrity); un-ignore once the migration or the docs change.
     #[tokio::test]
-    #[ignore = "storage defect reported to group A: the 0.6.0 migration does not create the conversations table"]
     async fn migration_from_0_5_0_creates_the_conversations_table() {
         let tmp = TempDir::new().unwrap();
         let reg = InMemoryRegistry::new();
@@ -6335,12 +6349,9 @@ mod tests {
     }
 
     /// `reindex` is the documented repair for edge-table drift, so it must
-    /// rebuild a table that will not open. It does not: the rebuild opens the
-    /// table first and fails with "Table 'edges' exists but could not be
-    /// loaded". Found by the tests above; a storage defect, reported for the
-    /// storage group to fix. Ignored, not deleted, until then.
+    /// rebuild a table that will not open (it used to fail with "Table
+    /// 'edges' exists but could not be loaded").
     #[tokio::test]
-    #[ignore = "storage defect: reindex cannot rebuild an edges table whose _versions is gone"]
     async fn reindex_rebuilds_an_edges_table_that_will_not_open() {
         let tmp = TempDir::new().unwrap();
         let store = store_with_a_broken_edges_table(&tmp).await;

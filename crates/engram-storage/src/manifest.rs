@@ -63,6 +63,12 @@ fn default_schema_version() -> String {
 /// column set would rebuild the table without the newer columns and stamp the
 /// version backwards, silently dropping data. When ahead, we leave it untouched.
 pub fn schema_version_is_current(stored: &str) -> bool {
+    !schema_version_is_before(stored, CURRENT_SCHEMA_VERSION)
+}
+
+/// Is `stored` older than `version`? An unparseable `stored` counts as older
+/// (it needs migration), like in [`schema_version_is_current`].
+pub fn schema_version_is_before(stored: &str, version: &str) -> bool {
     fn parse(v: &str) -> Option<(u64, u64, u64)> {
         let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
         let major = it.next()??;
@@ -70,10 +76,10 @@ pub fn schema_version_is_current(stored: &str) -> bool {
         let patch = it.next().unwrap_or(Some(0))?;
         Some((major, minor, patch))
     }
-    match (parse(stored), parse(CURRENT_SCHEMA_VERSION)) {
-        (Some(s), Some(c)) => s >= c,
+    match (parse(stored), parse(version)) {
+        (Some(s), Some(v)) => s < v,
         // Unparseable stored version → treat as needing migration.
-        _ => false,
+        _ => true,
     }
 }
 
