@@ -3,7 +3,7 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, shortId } from '../format.js';
-import { projHead, secHead, schemaNote, errorBox } from './common.js';
+import { projHead, secHead, schemaNote, errorBox, unavailable } from './common.js';
 
 function check(state, title, detail, ids) {
   const mark = state === 'ok' ? '✓' : state === 'bad' ? '✕' : '–';
@@ -30,7 +30,7 @@ function check(state, title, detail, ids) {
 export async function renderDoctor(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, errorBox({ status: 409, message: `${p.name} is unavailable: ${p.unavailable_reason}` }));
+    mount(main, unavailable(p, ctx, 'Health'));
     return;
   }
   mount(main, h('p', { class: 'loading' }, 'Checking every memory file against the index…'));

@@ -11,6 +11,7 @@
 import { filtered, merge, emptyTally } from '../web/js/graph/tally.js';
 import { kindLabel } from '../web/js/relations.js';
 import { stepIndex } from '../web/js/graph/walk.js';
+import { parseHash, needsCatalog, href } from '../web/js/route.js';
 import { scopeKey, scopeFromKey, scopeKeys, scopesFromKeys } from '../web/js/scopes.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
@@ -155,6 +156,32 @@ export function ok(name, cond, detail) {
   eq('scopeKey: a plain name is unchanged', scopeKey('storage'), 'storage');
   eq('scopeKeys / scopesFromKeys round trip', scopesFromKeys(scopeKeys(['-', '', 'a,b'])), ['-', '', 'a,b']);
   eq('scopeFromKey: a bad escape reads as itself', scopeFromKey('%E0%A4%A'), '%E0%A4%A');
+}
+
+// ---------------------------------------------------------------------------
+// route.js (E8, E9)
+// ---------------------------------------------------------------------------
+{
+  const r = (hash) => {
+    const x = parseHash(hash);
+    return { ...x, query: x.query.toString() };
+  };
+  eq('parseHash: a bad escape is notfound', parseHash('#/p/x/m/%E0%A4%A').view, 'notfound');
+  eq('parseHash: empty', r(''), { view: 'overview', id: null, query: '' });
+  eq('parseHash: projects', r('#/projects'), { view: 'projects', query: '' });
+  eq('parseHash: overview', r('#/p/abc'), { view: 'overview', id: 'abc', query: '' });
+  eq('parseHash: memories with a query', r('#/p/abc/memories?status=challenged'), { view: 'memories', id: 'abc', query: 'status=challenged' });
+  eq('parseHash: detail', r('#/p/abc/m/m%2F1'), { view: 'detail', id: 'abc', mid: 'm/1', query: '' });
+  eq('parseHash: graph', r('#/p/abc/graph?top_scope=a%252Cb').view, 'graph');
+  eq('parseHash: relations', r('#/p/abc/relations').view, 'relations');
+  eq('parseHash: doctor', r('#/p/abc/doctor').view, 'doctor');
+  eq('href round trip', parseHash(href('detail', 'p 1', 'm/2')).mid, 'm/2');
+  const cat = { projects: [{ id: 'a', available: true }, { id: 'b', available: false }] };
+  eq('needsCatalog: projects view', needsCatalog({ view: 'projects' }, cat), true);
+  eq('needsCatalog: an available project', needsCatalog({ view: 'overview', id: 'a' }, cat), false);
+  eq('needsCatalog: an unavailable project', needsCatalog({ view: 'memories', id: 'b' }, cat), true);
+  eq('needsCatalog: an unknown project', needsCatalog({ view: 'graph', id: 'c' }, cat), true);
+  eq('needsCatalog: no project', needsCatalog({ view: 'overview', id: null }, cat), false);
 }
 
 if (failed) {

@@ -1,14 +1,5 @@
-// Entry module: session, theme, project switcher and hash routing.
-//
-// Routes (all hash-based, so the server only ever serves `/`):
-//   #/                      overview of the selected project
-//   #/p/<id>                overview
-//   #/p/<id>/memories?…     memory list (filters in the hash query)
-//   #/p/<id>/m/<memory id>  memory detail
-//   #/p/<id>/graph?…        memory graph (filters in the hash query)
-//   #/p/<id>/relations?…    relation matrix and list (filters in the hash query)
-//   #/p/<id>/doctor         store health
-//   #/projects              every store on the machine
+// Entry module: session, theme, project switcher and hash routing (the
+// routes themselves: route.js).
 
 import { $, $$, h, mount } from './dom.js';
 import { api, takeToken, setCsrf } from './api.js';
@@ -20,6 +11,7 @@ import { renderRelations } from './views/relations.js';
 import { renderDoctor } from './views/doctor.js';
 import { renderProjects } from './views/projects.js';
 import { errorBox } from './views/common.js';
+import { parseHash, href, needsCatalog } from './route.js';
 import { currentStyle, onStyleChange, useStyle } from './graph/themes/index.js';
 import { makeT } from './graph/strings.js';
 
@@ -71,42 +63,26 @@ function toggleTheme() {
 }
 
 export function parseRoute() {
-  const raw = location.hash.replace(/^#/, '') || '/';
-  const [path, qs] = raw.split('?');
-  const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
-  const query = new URLSearchParams(qs || '');
-  if (parts[0] === 'projects') return { view: 'projects', query };
-  if (parts[0] === 'p' && parts[1]) {
-    const id = parts[1];
-    if (parts[2] === 'memories') return { view: 'memories', id, query };
-    if (parts[2] === 'm' && parts[3]) return { view: 'detail', id, mid: parts[3], query };
-    if (parts[2] === 'graph') return { view: 'graph', id, query };
-    if (parts[2] === 'relations') return { view: 'relations', id, query };
-    if (parts[2] === 'doctor') return { view: 'doctor', id, query };
-    return { view: 'overview', id, query };
-  }
-  return { view: 'overview', id: null, query };
+  return parseHash(location.hash);
 }
 
-export function href(view, id, extra) {
-  const e = encodeURIComponent;
-  switch (view) {
-    case 'projects':
-      return '#/projects';
-    case 'memories':
-      return `#/p/${e(id)}/memories${extra ? '?' + extra : ''}`;
-    case 'detail':
-      return `#/p/${e(id)}/m/${e(extra)}`;
-    case 'graph':
-      return `#/p/${e(id)}/graph${extra ? '?' + extra : ''}`;
-    case 'relations':
-      return `#/p/${e(id)}/relations${extra ? '?' + extra : ''}`;
-    case 'doctor':
-      return `#/p/${e(id)}/doctor`;
-    default:
-      return `#/p/${e(id)}`;
+export { href };
+
+/**
+ * Fetch the project catalog again (on failure keep the copy we have): the
+ * one fetched at boot goes stale when a drive is mounted or a project is
+ * registered while the page is open.
+ */
+async function refreshCatalog() {
+  try {
+    state.catalog = await api.projects();
+  } catch (_) {
+    /* keep the old copy; the view says what it can */
   }
 }
+
+/** Set by boot's own fetch, so the first route does not fetch it again. */
+let catalogFresh = false;
 
 function project(id) {
   return state.catalog && state.catalog.projects.find((p) => p.id === id);
@@ -167,7 +143,7 @@ let keepFocus = false;
 async function route() {
   const seq = ++renderSeq;
   const r = parseRoute();
-  if (r.view !== 'projects') {
+  if (r.view !== 'projects' && r.view !== 'notfound') {
     const id = r.id || defaultProject();
     if (!r.id && id) {
       // Canonicalize so the address bar names the project being shown.
@@ -176,6 +152,11 @@ async function route() {
     state.project = id;
     r.id = id;
   }
+  if (r.view !== 'notfound' && needsCatalog(r, state.catalog) && !catalogFresh) {
+    await refreshCatalog();
+    if (seq !== renderSeq) return;
+  }
+  catalogFresh = false;
   // A graph link's `style=` holds only while that graph is shown (the graph
   // view applies it); every other view uses this browser's stored pick.
   onGraph = r.view === 'graph';
@@ -219,7 +200,8 @@ async function route() {
   // meanwhile (it would render that view a second time).
   ctx.refreshSoon = (ms, opts) => setTimeout(() => !ctx.isStale() && ctx.refresh(opts), ms);
   try {
-    if (r.view === 'projects') await renderProjects(main, ctx);
+    if (r.view === 'notfound') mount(main, errorBox({ status: 404, message: 'This link is not valid.' }));
+    else if (r.view === 'projects') await renderProjects(main, ctx);
     else if (!r.id) mount(main, h('p', { class: 'muted' }, 'No EngramDB projects are registered on this machine yet. Run `engramdb init` in a project.'));
     else if (!ctx.project) mount(main, errorBox({ status: 404, message: `No project ${r.id} on this machine.` }));
     else if (r.view === 'memories') await renderMemories(main, ctx);
@@ -252,7 +234,7 @@ async function boot() {
   $('#theme-btn').addEventListener('click', toggleTheme);
   $('#proj-select').addEventListener('change', (ev) => {
     const r = parseRoute();
-    const keep = r.view === 'detail' || r.view === 'projects' ? 'overview' : r.view;
+    const keep = r.view === 'detail' || r.view === 'projects' || r.view === 'notfound' ? 'overview' : r.view;
     location.hash = href(keep, ev.target.value);
   });
   try {
@@ -271,6 +253,7 @@ async function boot() {
     $('#foot-mode').textContent = 'Started with --allow-writes · confirming or rejecting a proposed relation writes to the store';
   }
   $('#foot-version').textContent = `engramdb ${s.version} · schema ${s.schema_version} · served by engramdb dashboard`;
+  catalogFresh = true;
   window.addEventListener('hashchange', route);
   await route();
 }

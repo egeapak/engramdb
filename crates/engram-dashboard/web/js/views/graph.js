@@ -83,7 +83,7 @@ import { canvasSurface, canvasSupported } from '../graph/canvas/host.js';
 import { memoryPanel } from '../graph/details.js';
 import { placeLabels } from '../graph/labels.js';
 import { stepIndex } from '../graph/walk.js';
-import { projHead, secHead, alertBanner, errorBox } from './common.js';
+import { projHead, secHead, alertBanner, errorBox, unavailable } from './common.js';
 import { reviewControls } from './review.js';
 import { OVERVIEW_MIN, renderOverview } from './graph-overview.js';
 
@@ -328,7 +328,7 @@ export async function renderGraph(main, ctx) {
   const theme = useStyle(f.style);
   const t = makeT(theme);
   if (!p.available) {
-    mount(main, projHead('Graph', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
+    mount(main, unavailable(p, ctx, 'Graph'));
     return;
   }
   // Ask the server for the layouts it computes (graph/server-layout.js):

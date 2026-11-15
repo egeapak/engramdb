@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { fmt, ago, plural, shortId, score } from '../format.js';
 import { badge, warnGlyph, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { smallMultiples } from '../chart.js';
-import { projHead, secHead, alertBanner, schemaNote } from './common.js';
+import { projHead, secHead, alertBanner, schemaNote, unavailable } from './common.js';
 import { projectCards } from './projects.js';
 import { reviewControls } from './review.js';
 import { kindLabel } from '../relations.js';
@@ -141,7 +141,7 @@ function attention(items, totals, ctx) {
 export async function renderOverview(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, projHead('Project', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
+    mount(main, unavailable(p, ctx, 'Project'));
     return;
   }
   mount(main, h('p', { class: 'loading' }, 'Loading overview…'));

@@ -14,6 +14,24 @@ export function errorBox(e) {
 }
 
 /** A section heading; `title` is its text, or `{ text, id }` for one a refresh can return focus to. */
+/**
+ * A project the catalog holds as unavailable (a gone path, an unmounted
+ * drive, a store-less sub-project): why, and *Try again*, which re-renders
+ * the view — and a route to an unavailable project refetches the catalog
+ * first (app.js), so a drive mounted meanwhile shows without a reload.
+ */
+export function unavailable(p, ctx, eyebrow) {
+  return [
+    projHead(eyebrow || 'Project', p.name, p.path ? [h('span', { class: 'mono' }, p.path)] : []),
+    h(
+      'div',
+      { class: 'note warn', role: 'status' },
+      `Unavailable: ${p.unavailable_reason || 'no readable store'}. `,
+      h('button', { type: 'button', class: 'btn sm', onclick: () => ctx.refresh() }, 'Try again'),
+    ),
+  ];
+}
+
 export function secHead(title, ...aside) {
   const t = title !== null && typeof title === 'object' && !title.nodeType && 'text' in title ? title : { text: title };
   return h('div', { class: 'sec-head' }, h('h2', t.id ? { id: t.id, tabindex: '-1' } : null, t.text), aside.length ? h('div', { class: 'sec-aside' }, aside) : null);

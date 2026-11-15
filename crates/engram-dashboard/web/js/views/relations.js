@@ -32,7 +32,7 @@ import { KINDS, kindLabel } from '../relations.js';
 import { currentStyle } from '../graph/themes/index.js';
 import { OVERVIEW_MIN } from './graph-overview.js';
 import { reviewControls } from './review.js';
-import { errorBox, projHead } from './common.js';
+import { errorBox, projHead, unavailable } from './common.js';
 
 const PAGE = 100;
 
@@ -147,7 +147,7 @@ function headName(sc, subs) {
 export async function renderRelations(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, errorBox({ status: 409, message: `${p.name} is unavailable: ${p.unavailable_reason}` }));
+    mount(main, unavailable(p, ctx, 'Relations'));
     return;
   }
   const f = filtersOf(ctx.route.query);

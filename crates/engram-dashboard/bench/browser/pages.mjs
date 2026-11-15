@@ -163,8 +163,37 @@ async function readOnly(browser, url) {
   ok('health renders', (await text(t, '#main')).length > 0);
   await go(t, 'relations', '#main h1');
   ok('relations renders', (await text(t, '#main')).includes('relation'));
+  // E9: a malformed escape in the hash is a not-found view, not a stuck page.
+  await t.p.evaluate((h) => (location.hash = h), `#/p/${t.pid}/m/%E0%A4%A`);
+  await t.p.waitForTimeout(300);
+  ok('a malformed link shows a not-found message', (await text(t, '#main .error-box')).includes('This link is not valid'), await text(t, '#main'));
   ok('read-only pages: no console or page error', t.errors.length === 0, t.errors.slice(0, 5));
   await t.ctx.close();
+
+  // E8: a project unavailable when the page loaded comes back with
+  // "Try again", without a browser reload.
+  const away = join(stores, 'sfault-away');
+  renameSync(away, away + '.moved');
+  let moved = true;
+  try {
+    const u = await open(browser, url);
+    const id = await u.p.evaluate(() => {
+      const o = [...document.querySelectorAll('#proj-select option')].find((x) => x.textContent.startsWith('sfault-away'));
+      return o ? o.value : null;
+    });
+    await u.p.evaluate((h) => (location.hash = h), `#/p/${id}`);
+    await u.p.waitForSelector('#main .note.warn button', { timeout: 20000 });
+    const said = await text(u, '#main .note.warn');
+    renameSync(away + '.moved', away);
+    moved = false;
+    await u.p.evaluate(() => [...document.querySelectorAll('#main .note.warn button')].find((b) => b.textContent === 'Try again').click());
+    const back = await u.p.waitForSelector('#main .stats', { timeout: 20000 }).then(() => true, () => false);
+    ok('an unavailable project renders after Try again once it is back', !!id && said.includes('Unavailable') && back, { id, said, back });
+    ok('unavailable project page: no console or page error', u.errors.length === 0, u.errors.slice(0, 5));
+    await u.ctx.close();
+  } finally {
+    if (moved) renameSync(away + '.moved', away);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, daysSince, shortId, score } from '../format.js';
 import { badge, kindIcon, scopeName, scopeKey, TYPE_LABEL } from '../scopes.js';
-import { projHead, statusPill, errorBox } from './common.js';
+import { projHead, statusPill, errorBox, unavailable } from './common.js';
 
 const COLS = [
   { k: 'scope', label: 'Top-level scope' },
@@ -45,7 +45,7 @@ export function nextTopScope(on, scopes) {
 export async function renderMemories(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, errorBox({ status: 409, message: `${p.name} is unavailable: ${p.unavailable_reason}` }));
+    mount(main, unavailable(p, ctx, 'Memories'));
     return;
   }
   const q = ctx.route.query;
