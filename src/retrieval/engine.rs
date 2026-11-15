@@ -1462,12 +1462,14 @@ impl RetrievalEngine {
             fn stems_for<'a>(
                 e: &'a crate::storage::IndexForFiltering,
                 memory_map: &HashMap<String, Memory>,
-            ) -> Option<(&'a str, KeywordStems)> {
+            ) -> Option<(&'a str, std::borrow::Cow<'a, KeywordStems>)> {
                 let stems = match &e.keyword_stems {
-                    Some(s) => s.clone(),
+                    Some(s) => std::borrow::Cow::Borrowed(s),
                     None => {
                         let m = memory_map.get(&e.id)?;
-                        KeywordStems::compute(&m.summary, &m.tags, &m.content)
+                        std::borrow::Cow::Owned(KeywordStems::compute(
+                            &m.summary, &m.tags, &m.content,
+                        ))
                     }
                 };
                 Some((e.id.as_str(), stems))
@@ -1479,27 +1481,29 @@ impl RetrievalEngine {
             // the same threshold as scoring; order-preserving either way,
             // which matters here because `kw_results` indexes back into this
             // vector.
-            let scored: Vec<(&str, KeywordStems)> = if filtered_entries.len() >= PARALLEL_SCORE_MIN
-            {
-                use rayon::prelude::*;
-                filtered_entries
-                    .par_iter()
-                    .filter_map(|e| stems_for(e, &memory_map))
-                    .collect()
-            } else {
-                filtered_entries
-                    .iter()
-                    .filter_map(|e| stems_for(e, &memory_map))
-                    .collect()
-            };
-            let stems: Vec<KeywordStems> = scored.iter().map(|(_, s)| s.clone()).collect();
+            let scored: Vec<(&str, std::borrow::Cow<'_, KeywordStems>)> =
+                if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+                    use rayon::prelude::*;
+                    filtered_entries
+                        .par_iter()
+                        .filter_map(|e| stems_for(e, &memory_map))
+                        .collect()
+                } else {
+                    filtered_entries
+                        .iter()
+                        .filter_map(|e| stems_for(e, &memory_map))
+                        .collect()
+                };
+            // Split, order kept, so `kw_results` indexes both halves alike.
+            let (scored_ids, stems): (Vec<&str>, Vec<std::borrow::Cow<'_, KeywordStems>>) =
+                scored.into_iter().unzip();
             let kw_results = keyword_search_stems(q, &stems);
             let num_tokens = query_token_count(q);
             kw_results
                 .into_iter()
                 .map(|(idx, raw)| {
                     let norm = normalize_keyword_score(raw, num_tokens);
-                    (scored[idx].0.to_string(), norm)
+                    (scored_ids[idx].to_string(), norm)
                 })
                 .collect()
         } else {
