@@ -304,14 +304,17 @@ jobs:
         run: python3 .github/scripts/check_print_macros.py
 
   # The dashboard frontend is vanilla ES modules with no bundler and no build
-  # step, so no tool looked at the JavaScript before a browser did. Two cheap
+  # step, so no tool looked at the JavaScript before a browser did. Cheap
   # checks, no dependencies installed:
   #   - every module under web/js and bench parses (see the script for why it
   #     is not a plain `node --check <file>`);
   #   - the Plain style's relation geometry (bench/relations.mjs): no NaN in
   #     path data, the wide end at the source, chevron direction, bounded
   #     path length. `--no-timing` prints its timings without failing on
-  #     them; shared-runner wall-clock thresholds are flaky.
+  #     them; shared-runner wall-clock thresholds are flaky;
+  #   - the frontend's pure functions (bench/unit.mjs: tallies, routing,
+  #     scope keys, number formatting, link builders) and the details
+  #     panel's relation wording from both ends (bench/details.mjs).
   # The headless browser checks are the separate `frontend-browser` job.
   frontend:
     name: Frontend (syntax, relation geometry)
@@ -330,6 +333,14 @@ jobs:
       - name: Relation geometry
         working-directory: crates/engram-dashboard
         run: node bench/relations.mjs --no-timing
+
+      - name: Pure functions
+        working-directory: crates/engram-dashboard
+        run: node bench/unit.mjs
+
+      - name: Details panel wording
+        working-directory: crates/engram-dashboard
+        run: node bench/details.mjs
 
   # Supply-chain gate on what a pull request itself changes: banned or
   # wildcard crates, licenses outside deny.toml's allow-list, and crates from
@@ -927,15 +938,18 @@ jobs:
         with:
           name: dashboard-browser-bins
 
-      - name: Generate the dashboard stores (60 and 1,000 memories)
+      - name: Generate the dashboard stores (60 and 1,000 memories, the fault fixture)
         # Deterministic `.md` files plus one reindex; no model, no network.
         # 1,000 is above the overview threshold (150), so the opened-scope
-        # checks run without the 10k store.
+        # checks run without the 10k store. `sfault` (with its `sfault-away`
+        # sibling) is the non-graph pages' fixture: challenged and
+        # invalidated memories, proposed relations, a NaN criticality, a
+        # merge-conflicted file (examples/support/dashboard_store.rs).
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bins"
           tar -C "$RUNNER_TEMP/bins" -xf dashboard-browser-bins.tar
-          "$RUNNER_TEMP/bins/examples/dashboard_bench_store" "$RUNNER_TEMP/dash-bench" s60 s1k
+          "$RUNNER_TEMP/bins/examples/dashboard_bench_store" "$RUNNER_TEMP/dash-bench" s60 s1k sfault
 
       - name: Install the pinned Playwright driver
         working-directory: crates/engram-dashboard/bench/browser
@@ -960,12 +974,29 @@ jobs:
             --views s60:full,s1k:all,s1k:open \
             --json "$RUNNER_TEMP/browser-checks.json"
 
+      - name: Run the page checks
+        # bench/browser/pages.mjs: Overview, Memories, Health, Relations and
+        # the review flow on `sfault`, with one read-only and one
+        # `--allow-writes` dashboard it starts itself.
+        if: always()
+        working-directory: crates/engram-dashboard
+        run: |
+          set -euo pipefail
+          chrome=$(command -v google-chrome || command -v google-chrome-stable)
+          node bench/browser/pages.mjs \
+            --stores "$RUNNER_TEMP/dash-bench" \
+            --bin "$RUNNER_TEMP/bins/engramdb" \
+            --chrome "$chrome" \
+            --json "$RUNNER_TEMP/browser-pages.json"
+
       - name: Upload the check results
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: browser-checks
-          path: ${{ runner.temp }}/browser-checks.json
+          path: |
+            ${{ runner.temp }}/browser-checks.json
+            ${{ runner.temp }}/browser-pages.json
           retention-days: 7
           if-no-files-found: warn
 
