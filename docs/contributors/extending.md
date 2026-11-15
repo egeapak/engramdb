@@ -102,7 +102,7 @@ Existing tools (`create_memory`, `query`) are the template — implement once in
 
 ## Add a graph style
 
-A graph style is one look of the dashboard's graph view. The rules are in the `crates/engram-dashboard/` paragraph of [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) ("Graph styles" and "Surfaces"). Paths below are relative to `crates/engram-dashboard/`.
+A graph style is one look of the dashboard's graph view. The rules are in [dashboard.md](./dashboard.md), sections [Graph styles](./dashboard.md#graph-styles) and [Surfaces](./dashboard.md#surfaces-svg-and-canvas). Paths below are relative to `crates/engram-dashboard/`.
 
 1. **`web/js/graph/themes/<id>/index.js`**: create the style. It exports, as named exports, `id` (equal to the folder name), `name`, `strings`, `layout`, `drawBackdrop`, `drawNode`, `drawEdge`, `edgeSample` and `legend`. `layout.name` must be a key of `LAYOUTS` in `web/js/graph/layouts.js`. The server computes every layout; a style does not.
 

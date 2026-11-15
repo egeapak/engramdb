@@ -188,7 +188,7 @@ re-exported from it).
 └── bench/               # Node and browser benches, run by hand (not embedded)
 ```
 
-The rules for this crate are in the `crates/engram-dashboard/` paragraph of [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md).
+The crate is described in [dashboard.md](./dashboard.md). Read it before you change the crate.
 Budgets and measurements are in [dashboard-performance.md](./dashboard-performance.md).
 
 ### `crates/engram-cli/src/` — CLI surface + the binary
@@ -226,8 +226,8 @@ Black-box CLI integration tests live in `crates/engram-cli/tests/cli/` (see
 | Change the retrieval pipeline | `src/retrieval/engine.rs` (stages) or `src/retrieval/filters.rs` (LanceDB filter mapping) |
 | Add a hook | `crates/engram-cli/src/commands/hook.rs` + `crates/engram-cli/src/app.rs::HookCommand` + plugin manifest `.claude-plugin/plugin.json` + setup writer `crates/engram-cli/src/commands/setup.rs` |
 | Add a daemon RPC | `src/daemon/protocol.rs` (wire) + `src/daemon/server.rs` (handler) + `src/daemon/remote.rs` (client) + bump `PROTOCOL_VERSION` if breaking |
-| Add a dashboard API endpoint | `crates/engram-dashboard/src/api.rs` (or a new module beside `graph.rs`) + the route in `src/lib.rs` + a test in `src/tests.rs`. A GET must write nothing. Read the `crates/engram-dashboard/` paragraph of [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) first. |
-| Change a dashboard layout | `crates/engram-dashboard/src/layout/` + bump `LAYOUT_VERSION` when the output changes + `src/layout/tests.rs` |
+| Add a dashboard API endpoint | `crates/engram-dashboard/src/api.rs` (or a new module beside `graph.rs`) + the route in `src/lib.rs` + a test in `src/tests.rs`. A GET must write nothing. Read [dashboard.md](./dashboard.md) first. |
+| Change a dashboard layout | `crates/engram-dashboard/src/layout/` + bump `LAYOUT_VERSION` when the output changes + `src/layout/tests.rs`. See [dashboard.md](./dashboard.md#server-side-layout-and-cache). |
 | Add a graph style | See "Add a graph style" in [extending.md](./extending.md) |
 | Touch the LanceDB schema | `crates/engram-storage/src/lance_index.rs` (Arrow schema) + a migration in `crates/engram-cli/src/commands/migrate.rs` |
 

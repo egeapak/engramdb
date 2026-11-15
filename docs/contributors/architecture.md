@@ -199,7 +199,7 @@ The daemon's settings (`[daemon]`) come only from the **global** config file (`e
 
 ## Dashboard
 
-`engramdb dashboard` (`crates/engram-dashboard/`) is a local web view of every store on the machine. It runs as its own process, never inside the daemon, and it loads no model. It opens stores read-only, so a GET writes nothing: no migration, no usage event. The server computes every graph layout; the page has no layout code. The one write path is the review of a proposed relation, and it works only with `--allow-writes`. The full rules are in the `crates/engram-dashboard/` paragraph of [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md); budgets and measurements are in [dashboard-performance.md](./dashboard-performance.md).
+`engramdb dashboard` (`crates/engram-dashboard/`) is a local web view of every store on the machine. It runs as its own process, never inside the daemon, and it loads no model. It opens stores read-only, so a GET writes nothing: no migration, no usage event. The server computes every graph layout; the page has no layout code. The one write path is the review of a proposed relation, and it works only with `--allow-writes`. The full description is [dashboard.md](./dashboard.md); the rules that guard known defects are also listed in [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md). Budgets and measurements are in [dashboard-performance.md](./dashboard-performance.md).
 
 ## Retrieval pipeline
 
