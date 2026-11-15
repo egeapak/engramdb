@@ -5623,6 +5623,440 @@ mod tests {
         assert_eq!(store.edges_touching("mig9-old").await.unwrap().len(), 1);
     }
 
+    /// The column names of the `memories` table under `lance_path`, read from
+    /// the Arrow schema Lance stores — not from what the index layer expects.
+    async fn memories_columns_at(lance_path: &Path) -> Vec<String> {
+        let conn = lancedb::connect(lance_path.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let table = conn.open_table("memories").execute().await.unwrap();
+        table
+            .schema()
+            .await
+            .unwrap()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
+    async fn memories_columns(dir: &Path) -> Vec<String> {
+        memories_columns_at(&paths::lancedb_dir(&project_id::compute_project_id(dir)).unwrap())
+            .await
+    }
+
+    async fn memories_table_version(dir: &Path) -> u64 {
+        let lance = paths::lancedb_dir(&project_id::compute_project_id(dir)).unwrap();
+        let conn = lancedb::connect(lance.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let table = conn.open_table("memories").execute().await.unwrap();
+        table.version().await.unwrap()
+    }
+
+    async fn schema_version_of(manifest_path: &Path) -> String {
+        manifest::load_manifest(manifest_path)
+            .await
+            .unwrap()
+            .schema_version
+    }
+
+    const EPISTEMIC_COLUMNS: [&str; 7] = [
+        "epistemic",
+        "verified_at",
+        "generality",
+        "origin_task",
+        "valid_from",
+        "invalidated_at",
+        "watch_paths",
+    ];
+
+    /// The 0.3.0 migration against a table that really lacks the seven
+    /// epistemic columns (the stamp-only twin above keeps every column, so it
+    /// never exercises the case that breaks). The columns come back with the
+    /// values the `.md` files carry, including an off-diagonal one.
+    #[tokio::test]
+    async fn migration_from_0_2_0_backfills_the_seven_epistemic_columns() {
+        use engram_types::{Epistemic, Generality};
+
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            let mut debug_mem = create_test_memory("mig2r-debug", Visibility::Shared);
+            debug_mem.type_ = MemoryType::Debug;
+            debug_mem.epistemic = MemoryType::Debug.default_epistemic();
+            store.create(&debug_mem).await.unwrap();
+            store
+                .upsert_chunks("mig2r-debug", vec![vec![0.1f32; 384]])
+                .await
+                .unwrap();
+            let mut watched = create_test_memory("mig2r-watched", Visibility::Shared);
+            watched.type_ = MemoryType::Hazard;
+            watched.epistemic = Epistemic::Observation; // off-diagonal
+            watched.verified_at = Some("2026-03-01T00:00:00Z".parse().unwrap());
+            watched.valid_from = Some("2026-01-10T00:00:00Z".parse().unwrap());
+            watched.valid_while = Some(engram_types::Validity {
+                premise: Some("while ort is pinned".into()),
+                invalidated_by: vec!["src/lib.rs".into()],
+                origin_task: Some("task-42".into()),
+                generality: Generality::Task,
+                derived_from: vec![],
+            });
+            store.create(&watched).await.unwrap();
+        }
+        downgrade_dropping(tmp.path(), &EPISTEMIC_COLUMNS, "0.2.0").await;
+        let before = memories_columns(tmp.path()).await;
+        for col in EPISTEMIC_COLUMNS {
+            assert!(
+                !before.iter().any(|c| c == col),
+                "fixture still has {col}, so the test proves nothing"
+            );
+        }
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        assert_eq!(
+            schema_version_of(&manifest_path).await,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        let after = memories_columns(tmp.path()).await;
+        for col in EPISTEMIC_COLUMNS {
+            assert!(after.iter().any(|c| c == col), "{col} not backfilled");
+        }
+
+        let entries = store.lance_index.list_for_filtering().await.unwrap();
+        let debug_row = entries.iter().find(|e| e.id == "mig2r-debug").unwrap();
+        assert_eq!(debug_row.epistemic, Epistemic::Observation);
+        assert_eq!(debug_row.generality, Generality::Project);
+        assert!(debug_row.watch_paths.is_empty());
+        assert!(debug_row.has_embedding, "vectors preserved");
+        let watched_row = entries.iter().find(|e| e.id == "mig2r-watched").unwrap();
+        assert_eq!(watched_row.epistemic, Epistemic::Observation);
+        assert_eq!(watched_row.generality, Generality::Task);
+        assert_eq!(watched_row.watch_paths, vec!["src/lib.rs".to_string()]);
+        assert_eq!(watched_row.origin_task.as_deref(), Some("task-42"));
+        assert_eq!(
+            watched_row.verified_at,
+            Some("2026-03-01T00:00:00Z".parse().unwrap())
+        );
+        assert_eq!(watched_row.invalidated_at, None);
+        let filterable = store.lance_index.list_filterable().await.unwrap();
+        assert_eq!(
+            filterable
+                .iter()
+                .find(|e| e.id == "mig2r-watched")
+                .unwrap()
+                .valid_from,
+            Some("2026-01-10T00:00:00Z".parse().unwrap())
+        );
+    }
+
+    /// The 0.5.0 migration against a table that really lacks `keyword_stems`.
+    /// Only the schema axis is stale here (`downgrade_dropping` stamps the
+    /// current normalizer), so the version gate alone has to trigger it.
+    #[tokio::test]
+    async fn migration_from_0_4_0_backfills_keyword_stems() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        let mut mem = create_test_memory("mig4r-stems", Visibility::Shared);
+        mem.summary = "Compression merges near duplicate memories".to_string();
+        mem.content = "Candidates surface by similarity; compression is deferred.".to_string();
+        mem.tags = vec!["maintenance".to_string()];
+        MemoryStore::init(tmp.path(), &reg)
+            .await
+            .unwrap()
+            .create(&mem)
+            .await
+            .unwrap();
+        downgrade_dropping(tmp.path(), &["keyword_stems"], "0.4.0").await;
+        assert!(
+            !memories_columns(tmp.path())
+                .await
+                .iter()
+                .any(|c| c == "keyword_stems"),
+            "fixture still has keyword_stems"
+        );
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert!(memories_columns(tmp.path())
+            .await
+            .iter()
+            .any(|c| c == "keyword_stems"));
+        let entries = store.lance_index.list_for_filtering().await.unwrap();
+        let row = entries.iter().find(|e| e.id == "mig4r-stems").unwrap();
+        assert_eq!(
+            row.keyword_stems.as_ref().expect("stems backfilled"),
+            &engram_types::KeywordStems::compute(&mem.summary, &mem.tags, &mem.content)
+        );
+    }
+
+    /// The 0.6.0 bump exists "only so a store created before the table gets
+    /// one" (manifest docs). A store stamped 0.5.0 with no `conversations`
+    /// table must have one after a plain open, with its memories untouched.
+    ///
+    /// Ignored: the migration is a memories-table reindex and never creates
+    /// the table (only `ConversationIndex::open`, from the harvest path, does),
+    /// so the documented behaviour does not hold. Reported to group A
+    /// (storage integrity); un-ignore once the migration or the docs change.
+    #[tokio::test]
+    #[ignore = "storage defect reported to group A: the 0.6.0 migration does not create the conversations table"]
+    async fn migration_from_0_5_0_creates_the_conversations_table() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        MemoryStore::init(tmp.path(), &reg)
+            .await
+            .unwrap()
+            .create(&create_test_memory("mig5r-mem", Visibility::Shared))
+            .await
+            .unwrap();
+        let lance = paths::lancedb_dir(&project_id::compute_project_id(tmp.path())).unwrap();
+        let table_dir = crate::conversation_index::ConversationIndex::table_path_in(&lance);
+        let _ = std::fs::remove_dir_all(&table_dir);
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.5.0".to_string();
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(
+            schema_version_of(&manifest_path).await,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        assert!(
+            table_dir.exists(),
+            "the 0.6.0 migration must create the conversations table"
+        );
+        assert_eq!(
+            store.get("mig5r-mem").await.unwrap().summary,
+            "Test summary"
+        );
+    }
+
+    /// A store a newer binary wrote (a later stamp, a column this binary does
+    /// not know) is opened as it is: no rebuild, no restamp, no new table
+    /// version — a rebuild here would drop the newer binary's column.
+    #[tokio::test]
+    async fn a_store_from_a_newer_binary_is_opened_without_reindex_or_restamp() {
+        use arrow_array::RecordBatchIterator;
+        use futures_util::stream::StreamExt;
+        use lancedb::query::ExecutableQuery;
+
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        MemoryStore::init(tmp.path(), &reg)
+            .await
+            .unwrap()
+            .create(&create_test_memory("newer-mem", Visibility::Shared))
+            .await
+            .unwrap();
+
+        // Add a nullable column the way a newer binary's table would carry
+        // it: rebuild the table from its own batches plus one all-null field.
+        {
+            let lance = paths::lancedb_dir(&project_id::compute_project_id(tmp.path())).unwrap();
+            let conn = lancedb::connect(lance.to_str().unwrap())
+                .execute()
+                .await
+                .unwrap();
+            let table = conn.open_table("memories").execute().await.unwrap();
+            let mut stream = table.query().execute().await.unwrap();
+            let mut batches = Vec::new();
+            let mut wider = None;
+            while let Some(batch) = stream.next().await {
+                let batch = batch.unwrap();
+                let mut fields: Vec<_> = batch.schema().fields().iter().cloned().collect();
+                fields.push(std::sync::Arc::new(arrow_schema::Field::new(
+                    "from_the_future",
+                    arrow_schema::DataType::Utf8,
+                    true,
+                )));
+                let schema = std::sync::Arc::new(arrow_schema::Schema::new(fields));
+                let mut columns = batch.columns().to_vec();
+                columns.push(arrow_array::new_null_array(
+                    &arrow_schema::DataType::Utf8,
+                    batch.num_rows(),
+                ));
+                batches.push(arrow_array::RecordBatch::try_new(schema.clone(), columns).unwrap());
+                wider = Some(schema);
+            }
+            drop(table);
+            conn.drop_table("memories", &[]).await.unwrap();
+            let reader: Box<dyn arrow_array::RecordBatchReader + Send> = Box::new(
+                RecordBatchIterator::new(batches.into_iter().map(Ok), wider.unwrap()),
+            );
+            conn.create_table("memories", reader)
+                .execute()
+                .await
+                .unwrap();
+        }
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        let mut m = manifest::load_manifest(&manifest_path).await.unwrap();
+        m.schema_version = "0.99.0".to_string();
+        m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
+        manifest::save_manifest(&manifest_path, &m).await.unwrap();
+        let version_before = memories_table_version(tmp.path()).await;
+        MIGRATION_REBUILDS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let store = MemoryStore::open(tmp.path()).await.unwrap();
+        assert_eq!(store.get("newer-mem").await.unwrap().id, "newer-mem");
+        drop(store);
+
+        assert_eq!(
+            MIGRATION_REBUILDS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a newer store must not be rebuilt"
+        );
+        assert_eq!(schema_version_of(&manifest_path).await, "0.99.0");
+        assert!(
+            memories_columns(tmp.path())
+                .await
+                .iter()
+                .any(|c| c == "from_the_future"),
+            "the newer binary's column must survive the open"
+        );
+        assert_eq!(
+            memories_table_version(tmp.path()).await,
+            version_before,
+            "opening must commit nothing to the memories table"
+        );
+    }
+
+    /// Two opens racing on a store that really lacks a column (not just a
+    /// stale stamp): both succeed, and the rows and vectors are what they were.
+    /// `concurrent_opens_migrate_once` covers the rebuild count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_opens_of_a_stale_store_both_succeed_and_agree() {
+        let tmp = TempDir::new().unwrap();
+        let reg = InMemoryRegistry::new();
+        {
+            let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+            for i in 0..4 {
+                let id = format!("race-{i}");
+                store
+                    .create(&create_test_memory(&id, Visibility::Shared))
+                    .await
+                    .unwrap();
+                if i % 2 == 0 {
+                    store
+                        .upsert_chunks(&id, vec![vec![0.3f32; 384]])
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        downgrade_to_0_6_0(tmp.path()).await;
+
+        let (a, b) = tokio::join!(MemoryStore::open(tmp.path()), MemoryStore::open(tmp.path()));
+        let (a, b) = (a.unwrap(), b.unwrap());
+        for store in [&a, &b] {
+            assert_eq!(store.count().await.unwrap(), 4);
+            for i in 0..4 {
+                assert_eq!(
+                    has_embedding_flag(store, &format!("race-{i}")).await,
+                    i % 2 == 0,
+                    "vectors of race-{i} changed across the racing migration"
+                );
+            }
+        }
+        let manifest_path = paths::project_dir(tmp.path()).join("manifest.toml");
+        assert_eq!(
+            schema_version_of(&manifest_path).await,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        assert!(memories_columns(tmp.path())
+            .await
+            .iter()
+            .any(|c| c == "source_sessions"));
+    }
+
+    /// The global store migrates on `open_global` like a project store: a
+    /// table that really lacks a column is rebuilt and stamped, vectors kept.
+    #[tokio::test]
+    async fn a_stale_global_store_migrates_on_open() {
+        let GlobalStoreHandle { store, _lock } = setup_global_store().await;
+        store
+            .create(&create_test_memory("global-stale", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .upsert_chunks("global-stale", vec![vec![0.4f32; 384]])
+            .await
+            .unwrap();
+        drop(store);
+        let lance = paths::global_lancedb_dir().unwrap();
+        let manifest_path =
+            paths::project_dir(&paths::global_store_dir().unwrap()).join("manifest.toml");
+        crate::test_support::downgrade_dropping_at(
+            &lance,
+            &manifest_path,
+            &["source_sessions"],
+            "0.6.0",
+        )
+        .await;
+        assert!(!memories_columns_at(&lance)
+            .await
+            .iter()
+            .any(|c| c == "source_sessions"));
+
+        let store = MemoryStore::open_global().await.unwrap();
+        assert_eq!(
+            schema_version_of(&manifest_path).await,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        assert!(memories_columns_at(&lance)
+            .await
+            .iter()
+            .any(|c| c == "source_sessions"));
+        assert_eq!(store.get("global-stale").await.unwrap().id, "global-stale");
+        assert!(has_embedding_flag(&store, "global-stale").await);
+    }
+
+    /// The same for a group store, through `open_group`.
+    #[tokio::test]
+    async fn a_stale_group_store_migrates_on_open() {
+        let group_id = paths::compute_group_id("test-group-stale-migrate");
+        {
+            let store = MemoryStore::init_group(&group_id).await.unwrap();
+            store
+                .create(&create_test_memory("group-stale", Visibility::Shared))
+                .await
+                .unwrap();
+            store
+                .upsert_chunks("group-stale", vec![vec![0.5f32; 384]])
+                .await
+                .unwrap();
+        }
+        let lance = paths::group_lancedb_dir(&group_id).unwrap();
+        let manifest_path =
+            paths::project_dir(&paths::group_store_dir(&group_id).unwrap()).join("manifest.toml");
+        crate::test_support::downgrade_dropping_at(
+            &lance,
+            &manifest_path,
+            &["source_sessions"],
+            "0.6.0",
+        )
+        .await;
+        assert!(!memories_columns_at(&lance)
+            .await
+            .iter()
+            .any(|c| c == "source_sessions"));
+
+        let store = MemoryStore::open_group(&group_id).await.unwrap();
+        assert_eq!(
+            schema_version_of(&manifest_path).await,
+            manifest::CURRENT_SCHEMA_VERSION
+        );
+        assert!(memories_columns_at(&lance)
+            .await
+            .iter()
+            .any(|c| c == "source_sessions"));
+        assert_eq!(store.get("group-stale").await.unwrap().id, "group-stale");
+        assert!(has_embedding_flag(&store, "group-stale").await);
+    }
+
     /// A real merge conflict in a hidden block must not cost the memory its
     /// row, its vectors or its edges on ANY reindex — full, incremental, or the
     /// schema migration's forced rebuild — and every one must report it.

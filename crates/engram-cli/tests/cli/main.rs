@@ -4,6 +4,7 @@ mod add_get;
 mod challenge;
 mod completions;
 mod compress;
+mod concurrency;
 mod dashboard;
 mod delete;
 mod doctor;
