@@ -20,7 +20,7 @@
 //! radius from reads ([`radius`], the size the page draws a memory at), the
 //! label's length ([`short_label_len`], the page's `shortLabel` text),
 //! edges with stub ends at `-1`. The box's `aspect` (a multiple of 0.05)
-//! and `width` (a multiple of 40 px) come from the page (`layout_aspect=`,
+//! and `width` (a multiple of 40 px, 40 to 20 000) come from the page (`layout_aspect=`,
 //! `layout_width=`); anything else is a 400, so a client cannot mint
 //! unbounded cache keys.
 //!
@@ -815,8 +815,12 @@ impl LayoutRequest {
         let width: f64 = q
             .get("layout_width")
             .and_then(|w| w.parse::<u32>().ok())
-            .filter(|w| *w <= MAX_LAYOUT_WIDTH && w % 40 == 0)
-            .ok_or_else(|| bad("layout_width must be a whole multiple of 40 pixels".into()))?
+            // 0 would be laid out at a default width, a cache key of its
+            // own for a box nobody measured (graph/input.js never sends it).
+            .filter(|w| (40..=MAX_LAYOUT_WIDTH).contains(w) && w % 40 == 0)
+            .ok_or_else(|| {
+                bad("layout_width must be a whole multiple of 40 pixels from 40 to 20000".into())
+            })?
             .into();
         let open_over = if opened {
             Some(

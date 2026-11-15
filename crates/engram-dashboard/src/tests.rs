@@ -3001,6 +3001,31 @@ async fn the_graph_and_detail_views_write_nothing() {
 }
 
 #[tokio::test]
+async fn a_zero_layout_width_is_refused() {
+    // E13: 0 was laid out at a default width, one more cache key for a box
+    // nobody measured. The page sends 800 for an unmeasured box instead.
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    for w in ["0", "20"] {
+        let uri = format!(
+            "/api/projects/{}/graph?layout=grid&layout_aspect=0.6&layout_width={w}",
+            fx.id
+        );
+        let (s, v) = get_json(&app, &uri).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{w}: {v}");
+        assert!(v.to_string().contains("from 40 to 20000"), "{v}");
+    }
+    let uri = format!(
+        "/api/projects/{}/graph?layout=grid&layout_aspect=0.6&layout_width=40",
+        fx.id
+    );
+    let (s, v) = get_json(&app, &uri).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["layout"]["name"], "grid");
+}
+
+#[tokio::test]
 async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     let ef = edge_fixture().await;
     let fx = &ef.fx;

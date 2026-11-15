@@ -99,6 +99,10 @@ export function ok(name, cond, detail) {
   eq('roundAspect clamps high', roundAspect(9), 3);
   eq('roundWidth rounds to 40', roundWidth(1000), 1000);
   eq('roundWidth clamps to the maximum', roundWidth(1e6), MAX_LAYOUT_WIDTH);
+  // E13: an unmeasured box is the default width, never 0 (a 400 now).
+  for (const w of [0, 10, NaN, -5, Infinity]) eq(`roundWidth(${w}) is the default`, roundWidth(w), 800);
+  eq('roundWidth(25) clamps up to 40', roundWidth(25), 40);
+  eq('roundAspect(NaN) is 0.6', roundAspect(NaN), 0.6);
   eq('shortLabel cuts at a clause break', shortLabel('Use flock for writes: always'), 'Use flock for writes');
   ok('shortLabel stays short', shortLabel('a very long summary that goes on and on and on').length <= 25);
 }

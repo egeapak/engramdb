@@ -197,7 +197,8 @@ fn the_page_never_asks_for_a_width_the_server_refuses() {
         )),
         "graph/input.js must clamp roundWidth to the server's MAX_LAYOUT_WIDTH"
     );
-    assert!(js.contains("Math.min(MAX_LAYOUT_WIDTH, w)"));
+    // Both ends: the server refuses under 40 too (E13).
+    assert!(js.contains("Math.min(MAX_LAYOUT_WIDTH, Math.max(40, w))"));
     assert_eq!(MAX_LAYOUT_WIDTH % 40, 0, "the cap is itself a valid width");
 }
 
