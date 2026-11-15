@@ -727,7 +727,11 @@ pub fn set_stage(project_dir: &Path, session_id: &str, stage: HarvestStage) -> R
 /// One append for the whole batch. The stage and decision are untouched, so a
 /// failure never reopens or settles anything; it only defers the next
 /// automatic attempt (see `ops::harvest_index`).
-pub fn set_index_failed(project_dir: &Path, session_ids: &[String], at: DateTime<Utc>) -> Result<()> {
+pub fn set_index_failed(
+    project_dir: &Path,
+    session_ids: &[String],
+    at: DateTime<Utc>,
+) -> Result<()> {
     let lines: Vec<LedgerLine> = session_ids
         .iter()
         .filter(|id| crate::transcripts::is_valid_session_id(id))
@@ -1647,7 +1651,10 @@ mod tests {
         set_stage(dir, "s1", HarvestStage::Indexed).unwrap();
         let entry = &read_harvested(dir)["s1"];
         assert_eq!(entry.stage, HarvestStage::Indexed);
-        assert_eq!(entry.index_failed_at, None, "indexing must clear the marker");
+        assert_eq!(
+            entry.index_failed_at, None,
+            "indexing must clear the marker"
+        );
         // A marker never touches the decision.
         assert_eq!(entry.decision(), HarvestDecision::Deferred);
     }

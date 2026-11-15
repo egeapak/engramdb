@@ -4168,7 +4168,11 @@ mod tests {
         let mut rows = store.list_watched().await.unwrap();
         rows.sort_by(|a, b| a.id.cmp(&b.id));
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["watch-1", "watch-2"], "a row watching nothing is left out");
+        assert_eq!(
+            ids,
+            vec!["watch-1", "watch-2"],
+            "a row watching nothing is left out"
+        );
         assert_eq!(rows[0].watch_paths, vec!["src/lib.rs".to_string()]);
         assert_eq!(rows[0].invalidated_at, None);
         // Carried, not filtered: the caller decides what a closed window means.

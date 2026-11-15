@@ -692,7 +692,12 @@ mod tests {
         drop(store);
         std::fs::remove_dir_all(&lancedb).unwrap();
         assert_eq!(
-            MemoryStore::open(dir.path()).await.unwrap().count().await.unwrap(),
+            MemoryStore::open(dir.path())
+                .await
+                .unwrap()
+                .count()
+                .await
+                .unwrap(),
             0,
             "precondition: the reopened index is empty"
         );

@@ -264,13 +264,14 @@ async fn engine_rows(
         .iter()
         .find_map(|e| e.physical.first().cloned())
         .unwrap_or_else(|| "src/main.rs".to_string());
-    let mut engines: Vec<(&str, RetrievalEngine)> =
-        vec![("keyword", RetrievalEngine::new(store.clone(), config.clone()))];
+    let mut engines: Vec<(&str, RetrievalEngine)> = vec![(
+        "keyword",
+        RetrievalEngine::new(store.clone(), config.clone()),
+    )];
     if let Some(p) = provider {
         engines.push((
             "onnx",
-            RetrievalEngine::new(store.clone(), config.clone())
-                .with_embedding_provider(p.clone()),
+            RetrievalEngine::new(store.clone(), config.clone()).with_embedding_provider(p.clone()),
         ));
     }
     println!("\nengine.query end to end ({reps} reps):");

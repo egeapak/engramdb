@@ -1347,11 +1347,12 @@ impl LanceIndex {
     ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
-        let mut query = table
-            .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns(
-                proj,
-            )));
+        let mut query =
+            table
+                .query()
+                .select(lancedb::query::Select::Columns(Self::filtering_columns(
+                    proj,
+                )));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
         }
