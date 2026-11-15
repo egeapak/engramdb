@@ -144,6 +144,26 @@ function headName(sc, subs) {
   return subs && sc.name.includes('.') ? '.' + sc.name.split('.').slice(1).join('.') : sc.name;
 }
 
+/**
+ * The graph hash query of a row's *Show in graph* link. The graph opens on
+ * the scope overview above OVERVIEW_MIN memories, so the link opens the
+ * source memory's scope there. `memories` is this page's count, read under
+ * its own filters and at its own time; the graph counts again under the
+ * link's, so the two can fall on opposite sides of OVERVIEW_MIN.
+ * `memory_scope` always names the scope, and the graph opens it when the
+ * link lands on the overview anyway (views/graph.js).
+ */
+export function graphLink(r, memories) {
+  const top = keyOf(r.from.top_scope || '');
+  const gq = new URLSearchParams();
+  if (memories > OVERVIEW_MIN) gq.set('top_scope', top);
+  if (r.status === 'rejected') gq.set('rejected', '1');
+  if (r.from.invalidated || r.to.invalidated) gq.set('invalidated', '1');
+  gq.set('memory', r.src);
+  gq.set('memory_scope', top);
+  return gq;
+}
+
 export async function renderRelations(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
@@ -386,14 +406,7 @@ export async function renderRelations(main, ctx) {
       e && e.summary
         ? h('span', { class: 'rel-scope' }, badge(e.top_scope, e.color_slot), h('span', { class: 'mono' }, e.scope || scopeName('')), e.invalidated ? h('span', { class: 'ep invalidated' }, 'invalidated') : null)
         : null;
-    // The graph opens on the scope overview above OVERVIEW_MIN memories,
-    // so the link opens the source memory's scope there.
-    const top = r.from.top_scope || '';
-    const gq = new URLSearchParams();
-    if (memories > OVERVIEW_MIN) gq.set('top_scope', keyOf(top));
-    if (r.status === 'rejected') gq.set('rejected', '1');
-    if (r.from.invalidated || r.to.invalidated) gq.set('invalidated', '1');
-    gq.set('memory', r.src);
+    const gq = graphLink(r, memories);
     const review = r.status === 'proposed' && writes ? reviewControls(r, ctx, { onDone: (out, text) => {
       // Named, since the relation may now be off this page.
       const cut = (x) => { const v = String(x || shortId(r.dst)); return v.length > 48 ? v.slice(0, 47) + '…' : v; };

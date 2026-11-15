@@ -318,6 +318,8 @@ export function renderOverview(main, ctx, g, env) {
     mount(
       notesBox,
       h('div', { class: 'note', role: 'status' }, t('overviewNote', total, named, unscoped, OVERVIEW_MIN), hidden ? ` ${t('overviewHidden', hidden, cut)}` : ''),
+      // A link named a memory the overview cannot select (views/graph.js).
+      env.memoryLost ? h('div', { class: 'note', role: 'status' }, t('noteMemoryNotDrawn')) : null,
     );
   }
 

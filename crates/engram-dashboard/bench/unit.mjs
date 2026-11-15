@@ -17,6 +17,7 @@ import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
 import { moreLink } from '../web/js/views/overview.js';
 import { typeOptions, nextTopScope } from '../web/js/views/memories.js';
+import { graphLink } from '../web/js/views/relations.js';
 
 let failed = 0;
 let ran = 0;
@@ -143,6 +144,18 @@ export function ok(name, cond, detail) {
   eq('nextTopScope: membership, not size', nextTopScope(new Set(['a', 'b', 'c']), ['a', 'c', 'd']), 'a,b,c');
   eq('nextTopScope: every facet on clears', nextTopScope(new Set(['a', 'b', 'c', 'd']), ['a', 'c', 'd']), '');
   eq('nextTopScope: none on', nextTopScope(new Set(), ['a']), '\u2205');
+}
+
+// ---------------------------------------------------------------------------
+// views/relations.js (E17)
+// ---------------------------------------------------------------------------
+{
+  const row = { src: 'm1', status: 'proposed', from: { top_scope: 'a,b', invalidated: false }, to: { invalidated: true } };
+  const small = graphLink(row, 140);
+  eq('graphLink: a small store carries memory_scope, not top_scope', [small.get('top_scope'), small.get('memory_scope'), small.get('memory'), small.get('invalidated')], [null, 'a%2Cb', 'm1', '1']);
+  const big = graphLink(row, 151);
+  eq('graphLink: a big store carries both', [big.get('top_scope'), big.get('memory_scope')], ['a%2Cb', 'a%2Cb']);
+  eq('graphLink: no scope is -', graphLink({ ...row, from: { top_scope: '' } }, 10).get('memory_scope'), '-');
 }
 
 // ---------------------------------------------------------------------------

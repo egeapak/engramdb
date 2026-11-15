@@ -166,6 +166,26 @@ async function readOnly(browser, url) {
   ok('health: lists the file that does not parse and says it needs a hand fix', health.includes('0bfa0170…007d') && health.includes('merge conflict') && health.includes('Needs a hand fix') && health.includes('cannot repair a file that does not parse'), health.slice(0, 600));
   await go(t, 'relations', '#main h1');
   ok('relations renders', (await text(t, '#main')).includes('relation'));
+  // E17: Show in graph selects its memory on either side of OVERVIEW_MIN.
+  // sfault has 140 live + 20 invalidated memories, so the graph with
+  // invalidated=1 is an overview (160 > 150). First the tab's own link for
+  // 120 → an invalidated memory, then the link a page that counted 140
+  // builds (no top_scope=): the graph must open the scope, not drop it.
+  const m120 = '0bfa0170-0000-7000-8000-000000000078';
+  const selects = async (rest) => {
+    await go(t, rest, '#main .g-card');
+    await t.p.waitForFunction(() => /Fault memory 120 /.test((document.querySelector('.g-card h3') || {}).textContent || ''), null, { timeout: 15000 }).catch(() => {});
+    return t.p.evaluate(() => ({ head: (document.querySelector('.g-card h3') || {}).textContent || '', hash: location.hash.replace(/^#\/p\/[^/]+\//, '') }));
+  };
+  await go(t, `relations?include_invalidated=1&q=${m120}`, '#main a.btn.sm');
+  const tabLink = await t.p.evaluate(() => ([...document.querySelectorAll('#main a.btn.sm')].find((a) => a.textContent === 'Show in graph' && a.closest('li') && /Fault memory 120 /.test(a.closest('li').textContent)) || {}).href || '');
+  const viaTab = tabLink ? await selects(tabLink.split('#/p/')[1].replace(/^[^/]+\//, '')) : null;
+  const viaSmall = await selects(`graph?invalidated=1&memory=${m120}&memory_scope=storage`);
+  ok(
+    'show in graph: the linked memory is selected even when the link lands on the overview',
+    tabLink.includes('memory_scope=storage') && viaTab && /Fault memory 120 /.test(viaTab.head) && /Fault memory 120 /.test(viaSmall.head) && viaSmall.hash.includes('top_scope=storage') && !viaSmall.hash.includes('memory'),
+    { tabLink: tabLink.replace(/^.*#\/p\/[^/]+\//, ''), viaTab, viaSmall },
+  );
   // E9: a malformed escape in the hash is a not-found view, not a stuck page.
   await t.p.evaluate((h) => (location.hash = h), `#/p/${t.pid}/m/%E0%A4%A`);
   await t.p.waitForTimeout(300);

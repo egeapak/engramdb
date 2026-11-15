@@ -200,6 +200,10 @@ function filtersOf(query) {
     // A memory to select once drawn (a link from the Relations tab); taken
     // out of the hash once used, so a later click is not undone by it.
     memory: query.get('memory') || '',
+    // The top-level scope (a scopeKey) that memory is in, so a link that
+    // lands on the overview can open its scope instead (E17); dropped with
+    // `memory`.
+    memory_scope: query.get('memory_scope') || '',
   };
 }
 
@@ -213,6 +217,7 @@ function filterQuery(f) {
   if (f.all) q.set('all', '1');
   if (f.style) q.set('style', f.style);
   if (f.memory) q.set('memory', f.memory);
+  if (f.memory && f.memory_scope) q.set('memory_scope', f.memory_scope);
   return q.toString();
 }
 
@@ -367,10 +372,26 @@ export async function renderGraph(main, ctx) {
   performance.mark('graph:data');
 
   if (g.summary) {
-    // The overview draws no memory to select.
+    // The overview draws no memory to select. A link that names one (the
+    // Relations tab's Show in graph) also names its scope: open that scope
+    // instead, where the memory is drawn. The link decides by the store's
+    // size under its own filters, which this answer can disagree with (an
+    // invalidated end adds memories), so this is where it is settled.
+    if (f.memory && f.memory_scope) {
+      f.top_scope = f.memory_scope;
+      f.memory_scope = '';
+      f.all = false;
+      history.replaceState(null, '', hashOf(ctx, f));
+      ctx.refresh({ scroll: false });
+      return;
+    }
+    const memoryLost = !!f.memory;
     f.memory = '';
+    f.memory_scope = '';
+    if (memoryLost) history.replaceState(null, '', hashOf(ctx, f));
     renderOverview(main, ctx, g, {
       t,
+      memoryLost,
       f,
       hashOf,
       styleControl,
@@ -1638,6 +1659,7 @@ export async function renderGraph(main, ctx) {
   if (f.memory) {
     const want = f.memory;
     f.memory = '';
+    f.memory_scope = '';
     history.replaceState(null, '', hashOf(ctx, f));
     if (!byId.has(want)) notesBox.append(h('div', { class: 'note', role: 'status' }, t('noteMemoryNotDrawn')));
     else if (!back) pin({ node: byId.get(want) }, true);
