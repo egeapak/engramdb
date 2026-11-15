@@ -108,6 +108,8 @@ jobs:
       # Same nextest profile as ci.yml: slow-test termination and a JUnit
       # report (see .config/nextest.toml).
       NEXTEST_PROFILE: ci
+      # Model-backed tests fail instead of skipping (see ci.yml's `test` job).
+      ENGRAMDB_TEST_REQUIRE_MODELS: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -150,6 +152,13 @@ jobs:
           path: ~/.cache/engramdb/models
           key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
           restore-keys: onnx-models-v1-
+
+      - name: Stage the models
+        # One process loads (and, on a cache miss, downloads) every model the
+        # suite loads, before the suite (see ci.yml's `test` job).
+        run: >-
+          cargo nextest run -p engram-models --all-features --locked
+          --run-ignored only -E 'test(=staging::stage_default_models)'
 
       - name: Run tests
         run: cargo nextest run --workspace --all-features --locked

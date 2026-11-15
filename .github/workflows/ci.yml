@@ -580,6 +580,11 @@ jobs:
     needs: test-build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # A model-backed test fails with the load error instead of passing by
+    # skipping (engram-test-support's `require_model!`). Only on the jobs that
+    # install a runtime and restore the model cache.
+    env:
+      ENGRAMDB_TEST_REQUIRE_MODELS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -620,6 +625,16 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nextest-all-features
+
+      - name: Stage the models
+        # One process loads (and, on a cache miss, downloads) every model the
+        # suite loads, before the suite: no two test processes download the
+        # same files at once, and a missing model fails here, named.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-all-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --run-ignored only -E 'test(=staging::stage_default_models)'
 
       - name: Run tests (shard ${{ matrix.shard }}/3)
         # `count:` deals each binary's tests round-robin across the shards, so
@@ -1005,6 +1020,11 @@ jobs:
     needs: test-load-dynamic-build
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # A model-backed test fails with the load error instead of passing by
+    # skipping (engram-test-support's `require_model!`). Only on the jobs that
+    # install a runtime and restore the model cache.
+    env:
+      ENGRAMDB_TEST_REQUIRE_MODELS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -1040,6 +1060,16 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nextest-default-features
+
+      - name: Stage the models
+        # One process loads (and, on a cache miss, downloads) every model the
+        # suite loads, before the suite: no two test processes download the
+        # same files at once, and a missing model fails here, named.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-default-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --run-ignored only -E 'test(=staging::stage_default_models)'
 
       - name: Test with the runtime discovered from /usr/local/lib (shard ${{ matrix.shard }}/3)
         # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
@@ -1127,6 +1157,15 @@ jobs:
           key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
           restore-keys: onnx-models-v1-
 
+      - name: Stage the models
+        # See the `test` job. The cache this job saves on master is the one
+        # the staging step filled.
+        env:
+          ENGRAMDB_TEST_REQUIRE_MODELS: "1"
+        run: >-
+          cargo llvm-cov nextest -p engram-models --all-features --locked --no-report
+          --run-ignored only -E 'test(=staging::stage_default_models)'
+
       - name: Run tests under coverage instrumentation
         # Mirror the `test` job's invocation so coverage reflects the real
         # suite. `--no-report` defers report generation so we can emit
@@ -1137,6 +1176,7 @@ jobs:
           # Read by the "unreferenced snapshots" step below. Set on this job
           # because it is the only one that runs the whole suite unsharded.
           INSTA_SNAPSHOT_REFERENCES_FILE: ${{ runner.temp }}/insta-snapshot-references.txt
+          ENGRAMDB_TEST_REQUIRE_MODELS: "1"
         run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
 
       # A snapshot whose test was renamed or deleted still looks like a pinned
