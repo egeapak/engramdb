@@ -189,6 +189,9 @@ pub(crate) async fn close_superseded_windows(
     supersedes: &[String],
     new_id: &str,
 ) {
+    if supersedes.is_empty() {
+        return;
+    }
     let now = chrono::Utc::now();
     // One batched read for the whole supersedes list. `supersedes` is
     // caller-supplied and unbounded (an agent can pass an arbitrarily long

@@ -2668,6 +2668,16 @@ impl MemoryStore {
 
     /// Null the `keyword_stems` column of these rows (a pre-0.5.0 row shape),
     /// so a fixture can reach the query path's file fallback.
+    /// The memories table's version (one per commit), for tests that count
+    /// a write path's commits from outside this crate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn memories_version_for_test(&self) -> Result<u64> {
+        self.lance_index
+            .memories_version()
+            .await
+            .map_err(StorageError::index("memories_version"))
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub async fn null_keyword_stems_for_test(&self, ids: &[String]) -> Result<()> {
         self.lance_index

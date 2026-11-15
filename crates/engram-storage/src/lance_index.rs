@@ -950,7 +950,7 @@ impl LanceIndex {
     }
 
     /// The memories table's current version (one per commit).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn memories_version(&self) -> Result<u64> {
         let table = self.open_table().await?;
         table

@@ -511,6 +511,68 @@ impl RetrievalEngine {
         .await
     }
 
+    /// The vectors for a memory that is **not written yet**, so the caller can
+    /// write file, chunks and row in one [`MemoryStore::create_with_chunks`]
+    /// (one memories-table commit instead of `create` and then the chunk
+    /// upsert's `has_embedding` flip). Nothing is written here; pass the
+    /// result's `fingerprint` to [`Self::stamp_first_embed`] once the create
+    /// has committed. `Ok(None)` when no provider is configured or the memory
+    /// has no text to embed — the caller then creates without vectors.
+    pub async fn embed_unwritten(&self, memory: &Memory) -> anyhow::Result<Option<NewVectors>> {
+        let Some(provider) = &self.embedding_provider else {
+            return Ok(None);
+        };
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+        let telemetry = self.ingest_telemetry();
+        let t = std::time::Instant::now();
+        let chunks = embedding_texts(memory, chunk_tokens, metadata_vector);
+        if let Some(t_) = telemetry.as_ref() {
+            t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+        // Decided before the write, as in `embed_memory_with`: afterwards our
+        // own chunks make the store non-empty.
+        let unstamped = matches!(self.store.embedding_fingerprint().await, Ok(None))
+            && matches!(self.store.has_any_chunks().await, Ok(false));
+        let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+        let t = std::time::Instant::now();
+        let vectors = provider.embed_batch(&chunk_refs).await?;
+        if let Some(t_) = telemetry.as_ref() {
+            t_.record("create.embed_batch", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let query = mean_direction(&vectors);
+        let embed_sha256 = embed_digest(&chunks, provider.as_ref(), metadata_vector, chunk_tokens);
+        Ok(Some(NewVectors {
+            vectors,
+            embed_sha256,
+            query,
+            fingerprint: unstamped
+                .then(|| first_embed_fingerprint(provider.as_ref(), metadata_vector)),
+        }))
+    }
+
+    /// Record the embedding model on a store whose first vectors a
+    /// [`Self::embed_unwritten`] create just wrote (see `embed_memory_with`
+    /// for why). Best-effort, like that path.
+    pub async fn stamp_first_embed(
+        &self,
+        fingerprint: Option<crate::storage::manifest::EmbeddingFingerprint>,
+    ) {
+        if let Some(fingerprint) = fingerprint {
+            if let Err(e) = self
+                .store
+                .stamp_embedding_fingerprint_if_unset(fingerprint)
+                .await
+            {
+                tracing::warn!("failed to stamp embedding fingerprint on first embed: {e}");
+            }
+        }
+    }
+
     /// [`Self::embed_memory`] for many memories: one batched inference and
     /// one batched chunk write for the whole set.
     ///
@@ -2547,14 +2609,7 @@ async fn embed_memory_with(
         t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
     }
     if written && stamp_first_embed {
-        let fingerprint = crate::storage::manifest::EmbeddingFingerprint {
-            model: provider.model_id(),
-            dimensions: provider.dimensions(),
-            // Mirrors `EmbeddingsConfig::composition_id` — `metadata_vector`
-            // here IS `config.embeddings.metadata_vector` at every call site.
-            composition: metadata_vector
-                .then(|| crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
-        };
+        let fingerprint = first_embed_fingerprint(provider, metadata_vector);
         // Conditional, not `set_embedding_fingerprint`: `stamp_first_embed`
         // was decided before the embed and the upsert, and the store may have
         // been stamped since (a reindex for a new model, a concurrent first
@@ -2570,6 +2625,32 @@ async fn embed_memory_with(
         }
     }
     Ok(query)
+}
+
+/// What [`RetrievalEngine::embed_unwritten`] computed for a memory that is
+/// not written yet: its chunk vectors, their `embed_sha256`, the ingest's
+/// search vector, and the fingerprint to stamp if these are the store's first
+/// vectors.
+pub struct NewVectors {
+    pub vectors: Vec<Vec<f32>>,
+    pub embed_sha256: String,
+    pub query: Option<Vec<f32>>,
+    pub fingerprint: Option<crate::storage::manifest::EmbeddingFingerprint>,
+}
+
+/// The fingerprint a first embed records for `provider`.
+fn first_embed_fingerprint(
+    provider: &dyn EmbeddingProvider,
+    metadata_vector: bool,
+) -> crate::storage::manifest::EmbeddingFingerprint {
+    crate::storage::manifest::EmbeddingFingerprint {
+        model: provider.model_id(),
+        dimensions: provider.dimensions(),
+        // Mirrors `EmbeddingsConfig::composition_id` — `metadata_vector`
+        // here IS `config.embeddings.metadata_vector` at every call site.
+        composition: metadata_vector
+            .then(|| crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
+    }
 }
 
 /// The unit-length mean of a memory's chunk vectors: the search vector an

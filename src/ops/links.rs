@@ -369,6 +369,11 @@ pub(crate) async fn check_privacy(
     let mut ids: Vec<&str> = named.iter().map(String::as_str).collect();
     ids.extend(supersede_targets.iter().map(String::as_str));
     ids.retain(|id| Some(*id) != holder_id);
+    // Nothing named and nothing inbound to check: the common create, which
+    // would otherwise still pay a batch read.
+    if ids.is_empty() && !check_inbound {
+        return Ok(());
+    }
     let loaded: HashMap<String, Memory> = store.get_batch(&ids).await?.into_iter().collect();
     let holder = holder_id.unwrap_or("the new memory");
     if holder_visibility == Visibility::Shared {
