@@ -468,8 +468,22 @@ pub async fn replace_owned(
 /// overwritten: Lance logs a user-visible `WARN` for an overwrite of a dataset
 /// that does not exist, which every reindex of a never-linked store would
 /// otherwise print.
+///
+/// A table that is listed but will not open (its `_versions` gone, a
+/// half-written manifest) is dropped and created again. The table is derived
+/// from the `.md` files, so nothing is lost, and `reindex` is the documented
+/// repair for it: refusing here left the store with no way back.
 pub async fn rebuild(conn: &Connection, rows: &[EdgeRow]) -> Result<()> {
-    let exists = open(conn).await?.is_some();
+    let exists = match open(conn).await {
+        Ok(table) => table.is_some(),
+        Err(e) => {
+            tracing::warn!("the edges table will not open ({e:#}); rebuilding it from the files");
+            conn.drop_table(EDGES_TABLE, &[])
+                .await
+                .context("Failed to drop the unreadable LanceDB edges table")?;
+            false
+        }
+    };
     if !exists && rows.is_empty() {
         return Ok(());
     }
