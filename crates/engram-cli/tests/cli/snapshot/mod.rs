@@ -889,9 +889,20 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             "[TIMESTAMP]",
         ),
         (Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap(), "[DATE]"),
+        // Sizes that depend on LanceDB's files (an index, a data dir that
+        // holds one, a store's total) are redacted by their label; any other
+        // size is the fixture's and stays asserted. A size that turns out to
+        // differ between machines goes here with its label, never back into
+        // a blanket rule.
         (
-            Regex::new(r"\b\d+(?:\.\d+)? (?:B|KB|MB|GB|TB)\b").unwrap(),
-            "[SIZE]",
+            Regex::new(r"((?:index|projects|disk usage): )\d+(?:\.\d+)? (?:B|KB|MB|GB|TB)\b")
+                .unwrap(),
+            "${1}[SIZE]",
+        ),
+        // The disk-usage check's JSON message is the store's total alone.
+        (
+            Regex::new(r#"("message": ")\d+(?:\.\d+)? (?:B|KB|MB|GB|TB)""#).unwrap(),
+            "${1}[SIZE]\"",
         ),
         (Regex::new(r"\b\d+(?:\.\d+)?ms\b").unwrap(), "[MS]"),
         (

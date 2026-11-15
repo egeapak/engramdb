@@ -151,20 +151,32 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_compress(temp_dir.path(), false, None, None, &formatter).await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(cap.stdout(), "No compression candidates found.\n");
     }
 
     #[tokio::test]
     async fn test_compress_with_low_criticality_memories() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_compress(temp_dir.path(), false, None, None, &formatter).await;
-        assert!(result.is_ok());
+        result.unwrap();
+        let out = cap.stdout();
+        // Only the memory under the 0.40 threshold is a candidate.
+        assert!(
+            out.contains("Compression candidates (1 memories, threshold 0.40)"),
+            "{out}"
+        );
+        assert!(out.contains("Test summary for mem-test-003-ccc"), "{out}");
+        assert!(
+            !out.contains("mem-test-001") && !out.contains("mem-test-002"),
+            "{out}"
+        );
     }
 
     #[tokio::test]

@@ -67,8 +67,8 @@ exit: 1
         },
         {
           "details": [
-            "shared: [SIZE] (0 memories)",
-            "personal: [SIZE] (0 memories)",
+            "shared: 0 B (0 memories)",
+            "personal: 0 B (0 memories)",
             "index: [SIZE]"
           ],
           "message": "[SIZE]",

@@ -157,19 +157,36 @@ mod tests {
             vec!["app.core".to_string()],
         );
 
+        // Distinct, explicit timestamps, ordered differently from criticality
+        // and from each other, so each sort has its own expected order.
+        let base = chrono::Utc::now() - chrono::Duration::hours(1);
+        let at = |minutes: i64| base + chrono::Duration::minutes(minutes);
+        let (mut mem1, mut mem2, mut mem3) = (mem1, mem2, mem3);
+        (mem1.created_at, mem1.updated_at) = (at(3), at(5));
+        (mem2.created_at, mem2.updated_at) = (at(1), at(6));
+        (mem3.created_at, mem3.updated_at) = (at(2), at(4));
+
         store.create(&mem1).await.unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
         store.create(&mem2).await.unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
         store.create(&mem3).await.unwrap();
 
         (temp_dir, store)
     }
 
+    /// The fixture ids a listing names, in the order it names them.
+    fn listed(stdout: &str) -> Vec<&'static str> {
+        let mut seen: Vec<(usize, &'static str)> = ["mem1", "mem2", "mem3"]
+            .into_iter()
+            .filter_map(|id| stdout.find(id).map(|at| (at, id)))
+            .collect();
+        seen.sort();
+        seen.into_iter().map(|(_, id)| id).collect()
+    }
+
     #[tokio::test]
     async fn test_scope_filter_physical() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -188,13 +205,14 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(listed(&cap.stdout()), ["mem1"], "{}", cap.stdout());
     }
 
     #[tokio::test]
     async fn test_scope_filter_logical() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -213,13 +231,14 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(listed(&cap.stdout()), ["mem1", "mem3"], "{}", cap.stdout());
     }
 
     #[tokio::test]
     async fn test_scope_filter_no_match() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -238,7 +257,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(listed(&cap.stdout()), [] as [&str; 0], "{}", cap.stdout());
     }
 
     #[tokio::test]
@@ -257,7 +277,7 @@ mod tests {
     #[tokio::test]
     async fn test_sort_by_created() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -276,13 +296,19 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            listed(&cap.stdout()),
+            ["mem2", "mem3", "mem1"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]
     async fn test_sort_by_updated() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -301,13 +327,19 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            listed(&cap.stdout()),
+            ["mem3", "mem1", "mem2"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]
     async fn test_sort_by_type() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -326,7 +358,13 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            listed(&cap.stdout()),
+            ["mem3", "mem1", "mem2"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]
@@ -361,7 +399,7 @@ mod tests {
     #[tokio::test]
     async fn test_reverse_sort() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -380,13 +418,19 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            listed(&cap.stdout()),
+            ["mem3", "mem2", "mem1"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]
     async fn test_limit() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -405,13 +449,14 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(listed(&cap.stdout()), ["mem1", "mem2"], "{}", cap.stdout());
     }
 
     #[tokio::test]
     async fn test_combined_filters_and_sorting() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_list(
             temp_dir.path(),
@@ -430,7 +475,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(listed(&cap.stdout()), ["mem1"], "{}", cap.stdout());
     }
 
     #[tokio::test]

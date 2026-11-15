@@ -367,10 +367,26 @@ mod tests {
         }
     }
 
+    /// The fixture memories a rendering shows, by the id in their summary.
+    fn shown(stdout: &str) -> Vec<&'static str> {
+        [
+            "mem-test-001-aaa",
+            "mem-test-002-bbb",
+            "mem-test-003-ccc",
+            "other-note-ddd",
+        ]
+        .into_iter()
+        .filter(|id| match *id {
+            "other-note-ddd" => stdout.contains("about caching"),
+            id => stdout.contains(&format!("for {id}")),
+        })
+        .collect()
+    }
+
     #[tokio::test]
     async fn test_query_rank_returns_ok() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let params = QueryParams {
             path: Some("src/main.rs".to_string()),
@@ -388,7 +404,14 @@ mod tests {
             DaemonPolicy::InProcess,
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
+        // mem-test-003-ccc (criticality 0.3) ranks under the rank threshold.
+        assert_eq!(
+            shown(&cap.stdout()),
+            ["mem-test-001-aaa", "mem-test-002-bbb"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]
@@ -423,7 +446,7 @@ mod tests {
     #[tokio::test]
     async fn test_query_rank_with_type_filter() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let params = QueryParams {
             path: Some("src/main.rs".to_string()),
@@ -442,13 +465,25 @@ mod tests {
             DaemonPolicy::InProcess,
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            shown(&cap.stdout()),
+            ["mem-test-001-aaa"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]
     async fn test_query_filter_with_text() {
-        let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (temp_dir, store) = setup_test_store().await;
+        // One memory the text does not match, so a filter that matched
+        // everything would show it.
+        let mut other = create_test_memory("other-note-ddd", MemoryType::Decision, 0.9);
+        other.summary = "Unrelated note about caching".to_string();
+        other.content = "Nothing here mentions the search word.".to_string();
+        store.create(&other).await.unwrap();
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let params = QueryParams {
             mode: RetrievalMode::Filter,
@@ -467,7 +502,13 @@ mod tests {
             DaemonPolicy::InProcess,
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            shown(&cap.stdout()),
+            ["mem-test-001-aaa", "mem-test-002-bbb", "mem-test-003-ccc"],
+            "{}",
+            cap.stdout()
+        );
     }
 
     #[tokio::test]

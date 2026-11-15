@@ -928,11 +928,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_projects_empty() {
+        // A fresh in-memory registry is private to this test.
         let registry = InMemoryRegistry::new();
-        // Verify list_projects returns a Vec (may contain entries from other tests)
         let entries = list_projects(&registry).await.unwrap();
-        // Just verify the function works and returns the right type
-        let _ = entries.len();
+        assert_eq!(entries.len(), 0);
     }
 
     #[tokio::test]
