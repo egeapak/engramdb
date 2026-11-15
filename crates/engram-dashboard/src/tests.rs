@@ -248,6 +248,29 @@ async fn static_files_are_public_and_never_set_a_cookie_or_redirect() {
     assert_eq!(page.header(header::REFERRER_POLICY), "no-referrer");
 }
 
+#[tokio::test]
+async fn the_page_declares_an_icon_it_serves() {
+    // Without one a browser asks for `/favicon.ico` and logs its 404 as a
+    // console error on every page.
+    let index = std::str::from_utf8(crate::assets::find("index.html").unwrap().bytes).unwrap();
+    assert!(
+        index.contains(r#"<link rel="icon" href="favicon.svg" type="image/svg+xml">"#),
+        "index.html must declare the icon"
+    );
+    let app = app(None);
+    let r = send(
+        &app,
+        req(Method::GET, "/favicon.svg")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header(header::CONTENT_TYPE), "image/svg+xml");
+    let svg = String::from_utf8_lossy(&r.body);
+    assert!(svg.starts_with("<svg ") && !svg.contains("<script") && !svg.contains("style"));
+}
+
 #[test]
 fn the_launch_url_carries_the_token_in_the_fragment_only() {
     let url = security().launch_url();

@@ -8,7 +8,7 @@
 //   node bench/browser/checks.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--assets web] [--views s60:full,s1k:all,s10k:open]
 //     [--styles plain,grid] [--dpr 2] [--viewport 1280x860] [--json out.json]
-//     [--chrome /usr/bin/google-chrome] [--allow-missing-favicon]
+//     [--chrome /usr/bin/google-chrome]
 //
 // Per view and style it checks:
 //   a11y_list      one focusable element per drawn memory, with the SVG `<g>`'s
@@ -50,12 +50,6 @@
 //                  pointer cursor, a click and Enter on its link open that scope
 //   dispose        (canvas) leaving the graph empties every canvas the host held
 //   console        no page error, no console error (a CSP violation is one)
-//
-// `--allow-missing-favicon` drops exactly one console error from that last
-// check: the 404 for `/favicon.ico`. The dashboard declares no icon, so a full
-// Chrome (`--chrome`, new headless mode) asks for the default one and logs the
-// 404. Measured with Chrome on the s60 and s1k stores: it is the only console
-// error in any view. Remove the flag from CI once the dashboard serves an icon.
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -243,7 +237,6 @@ async function check(browser, url, size, view, style) {
   p.on('console', (m) => {
     if (m.type() !== 'error') return;
     const from = m.location().url || '';
-    if (args['allow-missing-favicon'] && /^http:\/\/[^/]+\/favicon\.ico$/.test(from) && /\b404\b/.test(m.text())) return;
     errors.push('console: ' + m.text() + (from ? ' @ ' + from.replace(/token=[0-9a-f]+/, 'token=…') : ''));
   });
   await p.goto(url);

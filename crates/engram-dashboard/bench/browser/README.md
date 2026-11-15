@@ -132,7 +132,7 @@ canvas lists the same memories, with the same words, as the SVG surface.
 ```bash
 (cd bench/browser && npm ci --ignore-scripts)
 node bench/browser/checks.mjs --stores "$STORES" --bin "$BIN" \
-  --chrome "$(command -v google-chrome)" --allow-missing-favicon \
+  --chrome "$(command -v google-chrome)" \
   --views s60:full,s1k:all,s1k:open
 ```
 
@@ -143,13 +143,9 @@ node bench/browser/checks.mjs --stores "$STORES" --bin "$BIN" \
 - The browser is the runner's Google Chrome (`--chrome`), so nothing is
   downloaded. Playwright starts it without Chrome's sandbox, as it does its
   own Chromium.
-- `--allow-missing-favicon`: the dashboard declares no icon, so a full Chrome
-  requests `/favicon.ico` and logs the 404 as a console error, which the
-  `console` check would count. Measured on the s60 and s1k stores with Chrome
-  in new headless mode: it is the only console error in any view, and it was
-  logged in the Plain `full` and `all` views but not in the others. The flag
-  drops that one message and nothing else; remove it when the dashboard
-  serves an icon.
+- The dashboard declares its icon (`favicon.svg`, linked from `index.html`),
+  so a full Chrome no longer asks for `/favicon.ico` and logs a 404; the
+  `--allow-missing-favicon` flag that dropped that one console error is gone.
 - The job is **not** part of `CI result` yet: the pixel checks (filters undo
   < 0.05 %, copies < 0.2 %, theme round trip identical) have only been run on
   developer machines. Six views pass with a debug binary and Chrome in about
