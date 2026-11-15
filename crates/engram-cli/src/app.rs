@@ -1553,6 +1553,30 @@ pub enum Command {
 mod tests {
     use super::*;
 
+    /// Every visible subcommand has a `## ` heading in the CLI reference.
+    /// A heading may name several (`link` / `unlink` / `links`); every
+    /// backticked name in a level-2 heading counts.
+    #[test]
+    fn every_command_is_in_the_cli_reference() {
+        use clap::CommandFactory;
+        let doc = include_str!("../../../docs/users/cli-reference.md");
+        let documented: std::collections::HashSet<&str> = doc
+            .lines()
+            .filter_map(|l| l.strip_prefix("## "))
+            .flat_map(|h| h.split('`').skip(1).step_by(2))
+            .collect();
+        let missing: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name().to_string())
+            .filter(|name| !documented.contains(name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands without a heading in docs/users/cli-reference.md: {missing:?}"
+        );
+    }
+
     /// Epistemic-feature flag wiring: every new long flag must parse and land
     /// in the right field — a clap long-name typo ships silently otherwise.
     #[test]

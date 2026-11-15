@@ -1942,6 +1942,27 @@ mod tests {
         );
     }
 
+    /// Every tool the server exposes has a heading in the agent-facing tool
+    /// reference, so a new tool cannot ship undocumented.
+    #[test]
+    fn every_mcp_tool_is_in_the_tool_reference() {
+        let doc = include_str!("../../../../docs/agents/mcp-tools.md");
+        let headings: Vec<&str> = doc.lines().filter(|l| l.starts_with("### ")).collect();
+        let missing: Vec<String> = engram_mcp::EngramDbServer::tool_names()
+            .into_iter()
+            .filter(|name| {
+                let wanted = format!("### `{name}`");
+                !headings
+                    .iter()
+                    .any(|h| *h == wanted || h.starts_with(&format!("{wanted} ")))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "MCP tools without a heading in docs/agents/mcp-tools.md: {missing:?}"
+        );
+    }
+
     /// Linking projects shares past conversations between them, so the agent
     /// must ask: `setup` approves neither link tool.
     #[tokio::test]
