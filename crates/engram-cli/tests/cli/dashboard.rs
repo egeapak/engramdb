@@ -13,6 +13,12 @@ fn engramdb(home: &TempDir) -> Command {
     let bin = assert_cmd::cargo::cargo_bin("engramdb");
     let mut c = Command::new(bin);
     let h = home.path();
+    for (k, v) in super::helpers::isolation_env(&h.join("home"), h) {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
     c.env("ENGRAMDB_DATA_DIR", h.join("data"))
         .env("ENGRAMDB_CONFIG_DIR", h.join("config"))
         .env("ENGRAMDB_REGISTRY_PATH", h.join("registry.json"))

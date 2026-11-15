@@ -182,6 +182,9 @@ impl Fixture {
     #[allow(deprecated)]
     fn base(&self) -> assert_cmd::Command {
         let mut c = assert_cmd::Command::cargo_bin("engramdb").expect("binary engramdb not found");
+        // The shared isolation first; everything below overrides it where the
+        // snapshots need more (an empty model cache, offline, no logs).
+        crate::helpers::isolate(&mut c, self.home.path(), self.runtime.path());
         c.env("ENGRAMDB_DATA_DIR", self.data.path());
         c.env("ENGRAMDB_CONFIG_DIR", self.config.path());
         c.env(
