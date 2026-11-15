@@ -363,12 +363,6 @@ impl Memory {
         true
     }
 
-    /// Update the accessed_at timestamp. Deprecated with the field (see
-    /// [`Memory::accessed_at`]): do not call it on a read path.
-    pub fn touch(&mut self) {
-        self.accessed_at = Utc::now();
-    }
-
     /// Mark the memory as updated
     pub fn mark_updated(&mut self) {
         self.updated_at = Utc::now();
@@ -662,17 +656,6 @@ mod tests {
         let debug_decay = MemoryType::Debug.default_decay().unwrap();
         assert_eq!(debug_decay.strategy, DecayStrategy::Exponential);
         assert_eq!(debug_decay.half_life, Some(Duration::days(30)));
-    }
-
-    #[test]
-    fn test_memory_touch() {
-        let mut memory = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
-        let original_access = memory.accessed_at;
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        memory.touch();
-
-        assert!(memory.accessed_at > original_access);
     }
 
     #[test]
