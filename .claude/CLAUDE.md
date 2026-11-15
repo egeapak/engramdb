@@ -108,12 +108,14 @@ Two hazards the harness already handles, worth not reintroducing: id-redaction r
 
 The `engram-test-support` crate provides the `#[ctor::ctor]` arm that points `ENGRAMDB_DATA_DIR` and `ENGRAMDB_CONFIG_DIR` at per-process temp dirs so tests never touch the real `~/Library/Application Support/engramdb/` or registry. Each crate's test build links it (the core's `src/lib.rs` calls `engram_test_support::arm()` under `#[cfg(test)]`; downstream crates pull it in as a dev-dependency). Nextest's process-per-test model is load-bearing here — `cargo test` would not isolate these globals correctly.
 
+Integration-test binaries, benches and examples must call `engram_test_support::arm()` (or carry their own `#[ctor]`). Each crate has a `the_data_and_config_dirs_are_isolated` guard (`assert_isolated`). Tests must never set `ENGRAMDB_DATA_DIR` / `ENGRAMDB_CONFIG_DIR` themselves; `no_test_mutates_the_global_dirs` scans for it. Tier-2 children get their environment from `helpers::isolation_env`. Daemon test stubs live in `engramdb::daemon::test_support`. A model test gets its model through `require_model!`; `ENGRAMDB_TEST_REQUIRE_MODELS=1` makes a missing model a failure instead of a skip.
+
 The **model cache** is separate from the data dir and is *not* redirected by the `#[ctor]` arm (model-loading tests need the real shared cache). Two env vars (both resolved in `engram_storage::paths`) make model *presence* deterministic for the tests that assert a model is missing/available:
 
 - `ENGRAMDB_MODEL_CACHE_DIR` — overrides `model_cache_dir()` (mirrors `ENGRAMDB_DATA_DIR`). Point it at an empty temp dir to simulate an unstaged cache.
 - `ENGRAMDB_OFFLINE` (truthy: `1`/`true`/`yes`/`on`) — makes the embedding/NLI/T5 loaders refuse to download an uncached model, failing fast instead. An empty cache alone is *not* enough on a networked machine (fastembed would just download); pair it with offline. Example: `stats_embeddings_status_onnx_backend_model_missing` sets both so it passes regardless of what the developer has cached.
 
-Note: `cargo test --lib` has two pre-existing flaky failures under full parallelism (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) — they pass in isolation and fail identically on a clean base, so they are not a regression signal.
+Note: under `cargo test --lib`, `ops::doctor::tests::test_doctor_many_memories_healthy` now passes. `ops::projects::tests::test_get_project_info_with_memories` still fails (a lance "Not found"): the orphan-prune tests in `ops::projects` share the process's data dir and delete its store data as an orphan. It passes under nextest, so it is not a regression signal.
 
 Note: `mcp::server::tests::global_retrieve_with_semantic_query` and `reindex_re_embeds_in_error_mode_despite_mismatch` were similarly flaky under a full-parallel `cargo nextest run --all-features` (sandbox AND coverage-instrumented CI); both are now serialized in the `ml-models` nextest group. The daemon path is disabled under `#[cfg(test)]`, so every embedding test loads ONNX in-process; when many processes lose the model-load race at once, the embedding provider resolves to `None`, the memory is stored without a vector, and the semantic query returns empty. It passes in isolation and on adequately-resourced CI, so it is not a regression signal.
 
@@ -145,6 +147,16 @@ inputs originate from on-disk memory files:
   with the graph/usage terms fuzzed too (arbitrary `ScoreSignals`, usage
   counts up to `u64::MAX`, unvalidated `contradicts_penalty` /
   `supports_boost` / `usage_weight`).
+- `transcript_parse` — `parse_session` and `last_assistant_text` over
+  arbitrary JSONL with cut tails.
+- `sanitize_defang` — the sanitizers and `defang_metadata` / `defang_prose`
+  leave no escapes or invisibles, stay on one line within the cap, keep no
+  harness tag, and are idempotent.
+- `ledger_read` — the ledger fold is panic-free and repeatable.
+- `daemon_frame` — `read_msg` over arbitrary frames.
+
+The fold-preservation property of ledger compaction is an in-crate test,
+`compaction_preserves_the_fold_for_generated_ledgers`, not a fuzz target.
 
 Each target only calls already-`pub` pure functions — no API was widened for
 fuzzing. If the surface you want to fuzz is behind a private `mod`, prefer an
@@ -226,6 +238,8 @@ The web sandbox's egress gateway uses a custom CA that rustls/webpki-based downl
    ⚠️ Staging the *wrong* MiniLM repo is indistinguishable from staging none: `OnnxProvider::try_new()` returns `None`, embeddings appear unavailable, the `Auto` backend silently falls back to Ollama (unreachable in the sandbox), and ~20 tests fail — `ops::tests::expected_fingerprint_matches_live_default_provider` with "default ONNX model available in test env", plus most of `update::*`, `reindex::reindex_embeddings_only`, and `stats::stats_embeddings_status_all_minilm_available_via_onnx`. A pre-#77 cache (L6 `model_quantized.onnx`) fails exactly this way, so re-check this section against `DEFAULT_ONNX_EMBEDDING` before concluding those tests are a pre-existing repo failure.
 4. **T5 title model** (master makes `title.strategy = "t5"` the default; same download failure): pre-stage `DEFAULT_T5_MODEL = T5_XENOVA_Q` (repo `Xenova/t5-small`) into `~/.cache/engramdb/models/models--Xenova--t5-small/` with `refs/main` → `main` and `snapshots/main/<file>` for `onnx/encoder_model_quantized.onnx`, `onnx/decoder_model_quantized.onnx`, `tokenizer.json`. Without it, `create`-path title generation can't build T5.
 
+Once the models are staged, export `ENGRAMDB_TEST_REQUIRE_MODELS=1`, so a model test that cannot load its model fails instead of skipping.
+
 ## Architecture
 
 ### Layered structure
@@ -272,7 +286,7 @@ MCP (engram-mcp)  ─┘                  └─► scoring  ─► scope
   - `ReadStore` maps every failed index read: schema behind → 409 `schema_behind`, ambiguous prefix (`StorageError::AmbiguousId`) → 400, anything else (`StorageError::Index` included) → 500, never the caller's fault. No front end matches on error message text.
   - Read signals (`returned`, `injected`, `fetched`) are never summed, here either.
   - Scope colours are decided once, server-side (`api::color_slots`). Scope names in a list parameter are percent-escaped (`api::scope_key`, `scopes.js::scopeKey`). List endpoints page by keyset cursors bound to their sort and filters.
-  - **The server is the only source of every layout** (`src/layout/`); the page has no layout code. Guard: `the_server_layouts_have_no_browser_copy`. Layouts are deterministic: no random numbers, id-ordered loops, only `+ − × ÷ sqrt` in positions. **Any change to a layout's output must bump `LAYOUT_VERSION`.** Property tests: `src/layout/tests.rs`.
+  - **The server is the only source of every layout** (`src/layout/`); the page has no layout code. Guard: `the_server_layouts_have_no_browser_copy`. Layouts are deterministic: no random numbers, id-ordered loops, only `+ − × ÷ sqrt` in positions. **Any change to a layout's output must bump `LAYOUT_VERSION`** and update `PINNED` / `PINNED_AT` in `src/layout/tests.rs`. Property tests: `src/layout/tests.rs`.
   - Layout computation is single-flight per key, at most `MAX_COMPUTING` (2) running and `MAX_QUEUED` (16) waiting; beyond that a 503 `layout_busy`. A failed layout is a 500 and is never cached. The encoded layout is spliced into the response as **text**.
   - Neutral wording: the core frontend says graph / memory / relation / scope. Transit-map words live only in `web/js/graph/themes/grid/`. Guard: `the_core_frontend_uses_neutral_words`. The UI says *relation* and *type*; API paths and JSON keep `edges` / `kind`.
   - A graph style is a folder `web/js/graph/themes/<id>/` plus `css/themes/<id>.css` scoped under `[data-graph-style="<id>"]`. The core names no style. Guards: `every_graph_style_exports_the_interface`, `every_graph_style_css_is_linked_and_scoped`, `a_canvas_style_exports_every_canvas_hook`, `plain_draws_relations_without_grid_glyphs`, `plain_legend_swatches_share_the_relation_drawing`, `the_details_panel_words_every_relation_kind`, `the_canvas_accessible_list_covers_every_memory`.
