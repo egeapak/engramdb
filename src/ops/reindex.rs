@@ -314,6 +314,20 @@ pub async fn reindex(
                 }
             ));
         }
+        for (id, loser) in &counts.shadowed {
+            warnings.push(format!(
+                "memory {id} has a file in both the shared and the personal directory; \
+                 the other copy was indexed and {} was left on disk, shadowed — delete the \
+                 copy you do not want",
+                loser.display()
+            ));
+        }
+        for (id, path) in &counts.renamed {
+            warnings.push(format!(
+                "renamed the file of memory {id} to {}: its old name did not carry its id",
+                path.display()
+            ));
+        }
         unparseable = counts.unparseable;
         if let Some(other) = &foreign_checkout {
             warnings.push(format!(
@@ -836,6 +850,39 @@ mod tests {
             force: true,
             ..Default::default()
         }
+    }
+
+    /// Copy memory `id`'s shared file into the personal directory, so the id
+    /// has a file in both.
+    pub(super) fn duplicate_into_personal(tmp: &TempDir, store: &MemoryStore, id: &str) {
+        let shared = std::fs::read_dir(tmp.path().join(".engramdb/memories"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(id))
+            .unwrap();
+        let personal = crate::storage::paths::personal_memories_dir(&store.project_id).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::copy(&shared, personal.join(shared.file_name().unwrap())).unwrap();
+    }
+
+    /// The copy that lost an id's shared/personal duplicate is kept on disk
+    /// and named in the result, not left to a log line.
+    #[tokio::test]
+    async fn reindex_names_a_shadowed_duplicate() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 2).await;
+        duplicate_into_personal(&tmp, &store, &ids[0]);
+        let r = reindex(&store, None, ReindexOptions::default())
+            .await
+            .unwrap();
+        let shadowed: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("shadowed"))
+            .collect();
+        assert_eq!(shadowed.len(), 1, "{:?}", r.warnings);
+        assert!(shadowed[0].contains(&ids[0]), "{}", shadowed[0]);
+        assert_eq!(r.indexed, 2);
     }
 
     #[tokio::test]

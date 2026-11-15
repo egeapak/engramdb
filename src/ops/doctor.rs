@@ -595,6 +595,9 @@ pub async fn doctor_environment(
             if let Some(check) = check_memory_edges(s).await {
                 project_checks.push(check);
             }
+            if let Some(check) = check_cross_dir_duplicates(s).await {
+                project_checks.push(check);
+            }
         }
 
         // Three cases, not two. A re-keyed project is registered — just under
@@ -2638,6 +2641,64 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
             status: None,
         },
     }
+}
+
+/// Ids with a file in both the shared and the personal directory
+/// (`MemoryStore::cross_dir_duplicates`). One copy is indexed and read; the
+/// other stays on disk, shadowed, because which one the user meant is not
+/// something an unattended pass may decide. A `Warn`: nothing is lost yet,
+/// but an edit to the shadowed copy would be invisible. `None` when there
+/// are none.
+async fn check_cross_dir_duplicates(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let duplicates = match store.cross_dir_duplicates().await {
+        Ok(d) if d.is_empty() => return None,
+        Ok(d) => d,
+        Err(e) => {
+            return Some(EnvironmentCheck {
+                name: "Shared/personal duplicates".to_string(),
+                passed: true,
+                message: format!("not checked: {e}"),
+                suggestion: None,
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            })
+        }
+    };
+    let details = duplicates
+        .iter()
+        .map(|d| {
+            let (kept, shadowed) = match d.winner {
+                crate::storage::CrossDirWinner::Shared => (&d.shared, &d.personal),
+                crate::storage::CrossDirWinner::Personal => (&d.personal, &d.shared),
+            };
+            format!(
+                "{}: using {}, shadowed {}",
+                d.id,
+                kept.display(),
+                shadowed.display()
+            )
+        })
+        .collect();
+    Some(EnvironmentCheck {
+        name: "Shared/personal duplicates".to_string(),
+        passed: true,
+        message: format!(
+            "{} memor{} a file in both the shared and the personal directory",
+            duplicates.len(),
+            if duplicates.len() == 1 {
+                "y has"
+            } else {
+                "ies have"
+            }
+        ),
+        suggestion: Some(
+            "Only the newer copy (the personal one on a tie) is read. Delete the copy you do not \
+             want; an `engramdb update` of the memory also removes the other one."
+                .to_string(),
+        ),
+        details,
+        status: Some(CheckStatus::Warn),
+    })
 }
 
 /// Live memories with no vectors are invisible to semantic search.
@@ -5404,6 +5465,45 @@ mod tests {
         let result = check_chunk_orphans(&store).await;
         assert_eq!(result.name, "Chunk index integrity");
         assert!(result.passed);
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_shared_personal_duplicates() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(
+            MemoryType::Decision,
+            "duplicated",
+            "in both directories",
+            Provenance::human(),
+        );
+        store.create(&m).await.unwrap();
+        assert!(check_cross_dir_duplicates(&store).await.is_none());
+
+        let shared = std::fs::read_dir(tmp.path().join(".engramdb/memories"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(&m.id))
+            .unwrap();
+        let personal = crate::storage::paths::personal_memories_dir(&store.project_id).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::copy(&shared, personal.join(shared.file_name().unwrap())).unwrap();
+
+        let check = check_cross_dir_duplicates(&store).await.expect("reported");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert_eq!(
+            check.message,
+            "1 memory has a file in both the shared and the personal directory"
+        );
+        assert_eq!(check.details.len(), 1);
+        assert!(check.details[0].contains(&m.id), "{:?}", check.details);
+        assert!(
+            check.details[0].contains(&format!("shadowed {}", shared.display())),
+            "a tie keeps the personal copy: {:?}",
+            check.details
+        );
     }
 
     #[tokio::test]
