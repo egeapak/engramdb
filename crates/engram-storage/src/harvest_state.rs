@@ -1214,7 +1214,9 @@ fn maybe_compact(project_dir: &Path) {
             // a concurrent append could beat data that is newer than itself.
             at: f.last_at,
             stage: Some(entry.stage),
-            decision: Some(entry.decision()),
+            // The raw decision, not `decision()`: an entry no line ever
+            // decided stays undecided, as the fold of the original log says.
+            decision: entry.decision,
             // The two timestamps have to be carried separately, because they
             // answer different questions and the snapshot needs both: `at`
             // places the line in the sequence, `decided_at` is what the fold
@@ -2837,20 +2839,12 @@ mod tests {
         line.into()
     }
 
-    /// Every field of every entry, in a comparable form.
-    ///
-    /// The raw `decision` is compared through `decision()`: a snapshot line
-    /// always carries a decision, so an entry no line ever decided reads
-    /// `None` before compaction and `Some(Unreviewed)` after. No reader
-    /// tells the two apart (`HarvestEntry` is not serialized, and every
-    /// caller goes through `decision()`), so this test does not either.
+    /// Every field of every entry, in a comparable form. The raw `decision`
+    /// is compared as it is: an entry no line ever decided must stay `None`.
     fn folded_view(dir: &Path) -> std::collections::BTreeMap<String, String> {
         read_harvested(dir)
             .into_iter()
-            .map(|(id, mut e)| {
-                e.decision = Some(e.decision());
-                (id, format!("{e:?}"))
-            })
+            .map(|(id, e)| (id, format!("{e:?}")))
             .collect()
     }
 
