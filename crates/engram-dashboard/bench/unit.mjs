@@ -8,7 +8,8 @@
 // imports it still loads). app.js boots at import, which is why its pure
 // parts live in route.js.
 
-import { filtered, merge } from '../web/js/graph/tally.js';
+import { filtered, merge, emptyTally } from '../web/js/graph/tally.js';
+import { kindLabel } from '../web/js/relations.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
 import { moreLink } from '../web/js/views/overview.js';
@@ -53,6 +54,20 @@ export function ok(name, cond, detail) {
   const a = { count: 1, kinds: { supports: { confirmed: 1 } } };
   merge(a, { count: 2, kinds: { supports: { confirmed: 1, proposed: 1 } } });
   eq('merge adds counts per kind and status', a, { count: 3, kinds: { supports: { confirmed: 2, proposed: 1 } } });
+
+  // E10: a kind is any string; prototype member names are counts too.
+  const weird = ['constructor', '__proto__', 'toString'];
+  const server = () => JSON.parse('{"count":3,"kinds":{"constructor":{"confirmed":1},"__proto__":{"proposed":1},"toString":{"rejected":1}}}');
+  const before = Object.getOwnPropertyNames(Object.prototype).length;
+  const m = merge(merge(emptyTally(), server()), server());
+  eq('merge: prototype-named kinds are counted', weird.map((k) => m.kinds[k] && Object.values(m.kinds[k])[0]), [2, 2, 2]);
+  eq('merge: total', m.count, 6);
+  const fw = filtered(m, { kinds: weird, proposed: true, rejected: true });
+  eq('filtered: prototype-named kinds', [fw.count, fw.proposed, ...weird.map((k) => fw.kinds[k])], [6, 2, 2, 2, 2]);
+  ok('merge and filtered add nothing to Object.prototype', Object.getOwnPropertyNames(Object.prototype).length === before && !Object.hasOwn(Object.prototype, 'confirmed') && !Object.hasOwn(Object, 'confirmed'));
+  eq('kindLabel(constructor)', kindLabel('constructor'), 'constructor');
+  eq('kindLabel(__proto__)', kindLabel('__proto__'), '  proto  ');
+  eq('kindLabel(derived_from)', kindLabel('derived_from'), 'Derived from');
 }
 
 // ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ import { fmt, plural } from '../format.js';
 import { scopeName, slot } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { decodeOverview } from '../graph/server-layout.js';
-import { filtered, merge, dominant } from '../graph/tally.js';
+import { filtered, merge, dominant, emptyTally } from '../graph/tally.js';
 import { projHead, secHead, alertBanner } from './common.js';
 
 /** Above this many memories (after the status filters), the graph opens on the scope overview. */
@@ -54,7 +54,7 @@ export function scopePairs(g) {
     if (row.a === row.b) continue;
     const [a, b] = row.a < row.b ? [row.a, row.b] : [row.b, row.a];
     const key = JSON.stringify([a, b]);
-    if (!pairs.has(key)) pairs.set(key, { a, b, n: 0, tally: { count: 0, kinds: {} } });
+    if (!pairs.has(key)) pairs.set(key, { a, b, n: 0, tally: emptyTally() });
     const p = pairs.get(key);
     p.n += row.count || 0;
     p.tally = merge(p.tally, row);
@@ -75,7 +75,7 @@ export function overviewLayout(g) {
   if (scopes.some((l) => !l)) throw new Error("The server's overview layout names a scope this response does not have. Reload the page.");
   const index = new Map(lay.ids.map((id, i) => [id, i]));
   const tallies = scopePairs(g);
-  const pairs = lay.pairs.map(([a, b]) => tallies.get(JSON.stringify([a, b])) || { a, b, n: 0, tally: { count: 0, kinds: {} } });
+  const pairs = lay.pairs.map(([a, b]) => tallies.get(JSON.stringify([a, b])) || { a, b, n: 0, tally: emptyTally() });
   return { lay, scopes, pairs, index };
 }
 
@@ -166,7 +166,7 @@ export function renderOverview(main, ctx, g, env) {
   const discsLayer = s('g', { class: 'so-discs' });
   const inside = new Map();
   // A scope's own relations come as up to two rows (directed and not): sum them.
-  for (const row of g.scope_edges || []) if (row.a === row.b) inside.set(row.a, merge(inside.get(row.a) || { count: 0, kinds: {} }, row));
+  for (const row of g.scope_edges || []) if (row.a === row.b) inside.set(row.a, merge(inside.get(row.a) || emptyTally(), row));
   scopes.forEach((l, i) => {
     const [x, y] = P(i);
     const lp = lay.labels[i];

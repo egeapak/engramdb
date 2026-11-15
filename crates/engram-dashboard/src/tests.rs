@@ -4300,3 +4300,38 @@ async fn hidden_relations_are_counted_by_kind_and_status() {
         "{counts}"
     );
 }
+
+/// A relation kind is any string, and the server sends it as written: a
+/// kind named like an `Object.prototype` member reaches the page's tallies
+/// (which is why tally.js keeps null-prototype maps; bench/unit.mjs).
+#[tokio::test]
+async fn a_kind_named_constructor_reaches_the_scope_tallies() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // `link` refuses a kind it does not know; a newer binary (or a hand
+    // edit) writes it into the file, as this does.
+    let mut m = memory(
+        MemoryType::Context,
+        "Names a future kind",
+        &["storage"],
+        &[],
+    );
+    let mut l = engramdb::types::Link::new(
+        fx.ids[1].clone(),
+        LinkKind::parse_lenient("constructor"),
+        LinkOrigin::Human,
+    );
+    l.status = LinkStatus::Confirmed;
+    m.links.push(l);
+    store.create(&m).await.unwrap();
+    let app = app(Some(fx.current.clone()));
+    let (s, g) = get_json(&app, &format!("/api/projects/{}/graph", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{g}");
+    let carried = g["scope_edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["kinds"]["constructor"]["confirmed"] == 1);
+    assert!(carried, "{}", g["scope_edges"]);
+}

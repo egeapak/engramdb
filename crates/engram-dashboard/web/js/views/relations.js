@@ -37,15 +37,16 @@ import { errorBox, projHead } from './common.js';
 const PAGE = 100;
 
 /** A relation in words, read from its source: "A supports B". */
-const PHRASE = {
+const PHRASE = Object.freeze({
+  __proto__: null,
   contradicts: 'contradicts',
   supersedes: 'supersedes',
   supports: 'supports',
   derived_from: 'is derived from',
   related_to: 'is related to',
   duplicates: 'duplicates',
-};
-const phrase = (kind) => PHRASE[kind] || String(kind).replace(/_/g, ' ');
+});
+const phrase = (kind) => (Object.hasOwn(PHRASE, kind) && PHRASE[kind]) || String(kind).replace(/_/g, ' ');
 
 const STATUS = [
   ['', 'Proposed and confirmed'],
