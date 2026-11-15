@@ -1095,6 +1095,101 @@ pub enum SituationModel {
     KeywordOnly,
     /// A given provider: the daemon's own loaded model, or a test stub.
     Provider(std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>),
+    /// A provider and seeds already embedded with it (the daemon's
+    /// [`SeedCache`]): only the prompt is embedded.
+    Cached {
+        provider: std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>,
+        classifier: std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>,
+    },
+}
+
+/// Built situation classifiers, kept by the daemon so a prompt embeds only
+/// itself instead of the 24 seeds and itself.
+///
+/// Keyed by what the seed vectors depend on: the model id, its width and how
+/// many seeds per class. The seeds are constants of this binary, and a new
+/// build evicts the daemon, so an entry cannot go stale. At most
+/// [`SEED_CACHE_MAX`] entries (one per embedding model the daemon serves);
+/// a failed build is not cached. Declared risk: a seed embedding the runtime
+/// mis-executed (the AVX-512 prebuilt incident) would now persist for the
+/// daemon's life instead of one prompt; the release runtime does not do that.
+#[derive(Default)]
+pub struct SeedCache {
+    entries: std::sync::Mutex<
+        std::collections::HashMap<
+            (String, usize, usize),
+            std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>,
+        >,
+    >,
+}
+
+/// Bound on [`SeedCache`] entries.
+const SEED_CACHE_MAX: usize = 4;
+
+impl SeedCache {
+    /// The cached classifier for `provider`, building (and caching) it on
+    /// first use. `None` when the build fails; the caller then classifies
+    /// with [`SituationModel::Provider`] as before.
+    async fn classifier_for(
+        &self,
+        provider: &dyn engramdb::embeddings::EmbeddingProvider,
+    ) -> Option<std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>> {
+        use engramdb::prompt_intent::{PrototypeClassifier, PrototypeParams};
+        let params = PrototypeParams::default();
+        let key = (
+            provider.model_id(),
+            provider.dimensions(),
+            params.seeds_per_class,
+        );
+        if let Some(c) = self.lock().get(&key) {
+            return Some(std::sync::Arc::clone(c));
+        }
+        // Built outside the lock: an embed must not block other prompts.
+        // Two concurrent first prompts may both build; the second insert
+        // wins, both results are equal.
+        let built = match PrototypeClassifier::build(provider, params).await {
+            Ok(c) => std::sync::Arc::new(c),
+            Err(e) => {
+                tracing::debug!("situation classifier seeds failed to embed (non-fatal): {e}");
+                return None;
+            }
+        };
+        let mut entries = self.lock();
+        if entries.len() >= SEED_CACHE_MAX && !entries.contains_key(&key) {
+            if let Some(victim) = entries.keys().next().cloned() {
+                entries.remove(&victim);
+            }
+        }
+        entries.insert(key, std::sync::Arc::clone(&built));
+        Some(built)
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<
+            (String, usize, usize),
+            std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>,
+        >,
+    > {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The situation model for `provider`: its cached classifier when one
+    /// builds, else the provider alone.
+    async fn model_for(
+        &self,
+        provider: std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>,
+    ) -> SituationModel {
+        match self.classifier_for(provider.as_ref()).await {
+            Some(classifier) => SituationModel::Cached {
+                provider,
+                classifier,
+            },
+            None => SituationModel::Provider(provider),
+        }
+    }
 }
 
 /// The embedding model alone, loaded in this process — only when its ONNX
@@ -1124,7 +1219,21 @@ async fn prompt_situation(
     if !config.hooks.situation_classifier {
         return keyword_situation(prompt);
     }
+    if let SituationModel::Cached {
+        provider,
+        classifier,
+    } = model
+    {
+        match classifier.classify_with(provider.as_ref(), prompt).await {
+            Ok(d) if d.needs_context => return d.situation,
+            Ok(_) => return keyword_situation(prompt),
+            // Another model than the seeds' (cannot happen through the
+            // cache's key) or an embed failure: classify the old way.
+            Err(e) => tracing::debug!("cached situation classifier refused: {e}"),
+        }
+    }
     let provider = match model {
+        SituationModel::Cached { provider, .. } => Some(std::sync::Arc::clone(provider)),
         SituationModel::DaemonOrInProcess => {
             let cell = engramdb::daemon::DaemonCell::new();
             match engramdb::daemon::resolve_daemon_providers(&cell, config, None)
@@ -2357,6 +2466,7 @@ pub async fn run_in_process(
 pub struct DaemonHookExecutor {
     stores: StoreCache,
     registry: engramdb::storage::FileRegistry,
+    seeds: SeedCache,
 }
 
 impl DaemonHookExecutor {
@@ -2364,6 +2474,7 @@ impl DaemonHookExecutor {
         Ok(Self {
             stores: StoreCache::default(),
             registry: engramdb::storage::FileRegistry::global()?,
+            seeds: SeedCache::default(),
         })
     }
 
@@ -2390,7 +2501,7 @@ impl DaemonHookExecutor {
         let engramdb_dir = engramdb::storage::paths::project_dir(&root);
         let initialized =
             engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
-        let situation = daemon_situation(call, &config, initialized, models).await;
+        let situation = daemon_situation(call, &config, initialized, models, &self.seeds).await;
         let usage_events = std::sync::Mutex::new(Vec::new());
         let env = HookEnv {
             stores: StoreSource::Cached(&self.stores),
@@ -2434,6 +2545,7 @@ async fn daemon_situation(
     config: &engramdb::types::EngramConfig,
     initialized: bool,
     models: &engramdb::ops::ProviderCache,
+    seeds: &SeedCache,
 ) -> SituationModel {
     if !(matches!(call, HookCall::UserPromptSubmit)
         && config.hooks.situation_classifier
@@ -2444,7 +2556,7 @@ async fn daemon_situation(
     let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
     let warm = engramdb::ops::onnx_embedding_cached(config, backend);
     match models.embedding_for_hook(config, backend, warm).await {
-        Some(p) => SituationModel::Provider(p),
+        Some(p) => seeds.model_for(p).await,
         None => SituationModel::KeywordOnly,
     }
 }
@@ -4179,6 +4291,100 @@ mod tests {
         }
         config.hooks.situation_classifier = false;
         assert_eq!(prompt_situation(prompt, &config, &model).await, None);
+    }
+
+    /// Counts every text it embeds.
+    struct CountingTexts(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl engramdb::embeddings::EmbeddingProvider for CountingTexts {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FamilyEmbedder { fail: false }.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.0
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            FamilyEmbedder { fail: false }.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            SITUATION_FAMILIES.len() + 1
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+        fn model_id(&self) -> String {
+            "family-stub".into()
+        }
+    }
+
+    /// The daemon embeds the 24 seeds once and then only each prompt, and
+    /// decides exactly as the uncached classifier does.
+    #[tokio::test]
+    async fn daemon_executor_embeds_seeds_once() {
+        let config = engramdb::types::EngramConfig::default();
+        let seeds = SeedCache::default();
+        let counting = std::sync::Arc::new(CountingTexts(std::sync::atomic::AtomicUsize::new(0)));
+        let texts = || counting.0.load(std::sync::atomic::Ordering::SeqCst);
+        let uncached = stub_model(false);
+        let seed_count = engramdb::prompt_intent::PrototypeParams::default().seeds_per_class * 4;
+
+        let model = seeds.model_for(counting.clone()).await;
+        assert!(matches!(model, SituationModel::Cached { .. }));
+        let prompt = "the tests hang forever on my machine";
+        assert_eq!(
+            prompt_situation(prompt, &config, &model).await,
+            prompt_situation(prompt, &config, &uncached).await
+        );
+        assert_eq!(texts(), seed_count + 1, "seeds and the first prompt");
+
+        let model = seeds.model_for(counting.clone()).await;
+        for prompt in ["ok thanks", "compare the tradeoff, what do you recommend"] {
+            assert_eq!(
+                prompt_situation(prompt, &config, &model).await,
+                prompt_situation(prompt, &config, &uncached).await,
+                "{prompt}"
+            );
+        }
+        assert_eq!(texts(), seed_count + 3, "only the prompts after the first");
+    }
+
+    #[tokio::test]
+    async fn seed_cache_is_bounded_and_skips_failed_builds() {
+        let seeds = SeedCache::default();
+        let failing = std::sync::Arc::new(FamilyEmbedder { fail: true });
+        assert!(matches!(
+            seeds.model_for(failing).await,
+            SituationModel::Provider(_)
+        ));
+        assert_eq!(seeds.lock().len(), 0, "a failed build is not cached");
+        for i in 0..(SEED_CACHE_MAX + 2) {
+            let p = NamedFamily(format!("family-{i}"));
+            assert!(seeds.classifier_for(&p).await.is_some());
+        }
+        assert_eq!(seeds.lock().len(), SEED_CACHE_MAX);
+    }
+
+    /// [`FamilyEmbedder`] under another model id.
+    struct NamedFamily(String);
+
+    #[async_trait::async_trait]
+    impl engramdb::embeddings::EmbeddingProvider for NamedFamily {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            FamilyEmbedder { fail: false }.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            FamilyEmbedder { fail: false }.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            SITUATION_FAMILIES.len() + 1
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+        fn model_id(&self) -> String {
+            self.0.clone()
+        }
     }
 
     #[test]
