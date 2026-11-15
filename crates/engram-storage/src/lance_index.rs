@@ -1526,6 +1526,27 @@ impl LanceIndex {
         Ok(())
     }
 
+    /// Null the `keyword_stems` column of `memory_ids`, the shape a row from
+    /// before the column was populated has. Test fixtures only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn null_keyword_stems_for_test(&self, memory_ids: &[String]) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        let list = memory_ids.iter().map(lit).collect::<Vec<_>>();
+        let filter = lancedb::expr::expr_to_sql_string(&is_in(col("id"), list))
+            .context("Failed to render keyword_stems update filter")?;
+        table
+            .update()
+            .only_if(filter)
+            .column("keyword_stems", "NULL")
+            .execute()
+            .await
+            .context("Failed to null keyword_stems")?;
+        Ok(())
+    }
+
     /// List all distinct memory_ids present in the chunks table.
     pub async fn list_chunk_memory_ids(&self) -> Result<Vec<String>> {
         let table = self.open_chunks_table().await?;

@@ -2633,6 +2633,16 @@ impl MemoryStore {
             .map_err(StorageError::index("has_chunks"))
     }
 
+    /// Null the `keyword_stems` column of these rows (a pre-0.5.0 row shape),
+    /// so a fixture can reach the query path's file fallback.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn null_keyword_stems_for_test(&self, ids: &[String]) -> Result<()> {
+        self.lance_index
+            .null_keyword_stems_for_test(ids)
+            .await
+            .map_err(StorageError::index("null_keyword_stems"))
+    }
+
     /// Write an index row directly, bypassing the file write.
     ///
     /// Test-only: production always derives the row from the file it just

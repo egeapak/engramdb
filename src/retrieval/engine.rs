@@ -7721,3 +7721,7 @@ mod graph_signal_tests {
         assert_eq!(on.total, off.total + 1);
     }
 }
+
+#[cfg(test)]
+#[path = "engine_text_query_pin.rs"]
+mod text_query_pin_tests;
