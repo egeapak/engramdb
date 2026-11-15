@@ -2382,6 +2382,19 @@ mod tests {
         (tmp, store)
     }
 
+    /// Delete the edge rows `owner` declares straight from the derived table,
+    /// leaving its file alone: what a failed edge write leaves behind.
+    async fn drop_edge_rows_owned_by(store: &MemoryStore, owner: &str) {
+        let lance = crate::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        let conn = lancedb::connect(lance.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        crate::storage::edge_index::delete_owned(&conn, &[owner.to_string()])
+            .await
+            .unwrap();
+    }
+
     async fn mem(store: &MemoryStore, summary: &str, visibility: Visibility) -> String {
         let mut m = Memory::new(
             MemoryType::Decision,
@@ -3032,6 +3045,34 @@ mod tests {
         assert_eq!(h.personal_leaks[0].src, p);
         assert_eq!(h.personal_leaks[0].dst, s);
         assert_eq!(h.table_drift, 0, "{h:?}");
+    }
+
+    /// A row the files declare but the derived table lacks is drift, and
+    /// `reindex` (the documented repair) clears it.
+    #[tokio::test]
+    async fn edge_health_counts_rows_missing_from_the_table() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        store
+            .update_with(&a, |m| {
+                m.links.push(crate::types::Link::new(
+                    b.clone(),
+                    LinkKind::Supports,
+                    crate::types::LinkOrigin::Human,
+                ));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(edge_health(&store).await.unwrap().table_drift, 0);
+
+        drop_edge_rows_owned_by(&store, &a).await;
+
+        let h = edge_health(&store).await.unwrap();
+        assert_eq!(h.table_drift, 1, "{h:?}");
+        store.reindex().await.unwrap();
+        assert_eq!(edge_health(&store).await.unwrap().table_drift, 0);
     }
 
     /// Cross-store edges against a real, openable group store: checked as

@@ -5818,6 +5818,118 @@ mod tests {
         assert_eq!(left[0].dst_id, "e-b");
     }
 
+    /// A store with two memories and one edge between them, then its edges
+    /// table broken so it lists but will not open (its `_versions` gone).
+    async fn store_with_a_broken_edges_table(tmp: &TempDir) -> MemoryStore {
+        use engram_types::{Link, LinkKind, LinkOrigin};
+        let reg = InMemoryRegistry::new();
+        let store = MemoryStore::init(tmp.path(), &reg).await.unwrap();
+        store
+            .create(&create_test_memory("w-a", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .create(&create_test_memory("w-b", Visibility::Shared))
+            .await
+            .unwrap();
+        store
+            .update_with("w-a", |m| {
+                m.links
+                    .push(Link::new("w-b", LinkKind::Supports, LinkOrigin::Human));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let versions = paths::lancedb_dir(&store.project_id)
+            .unwrap()
+            .join(format!("{}.lance", crate::edge_index::EDGES_TABLE))
+            .join("_versions");
+        assert!(versions.is_dir(), "fixture: no edges table at {versions:?}");
+        std::fs::remove_dir_all(&versions).unwrap();
+        assert!(
+            store.list_edges().await.is_err(),
+            "fixture: the edges table still opens"
+        );
+        store
+    }
+
+    fn md_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(paths::memories_dir(dir))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// The `.md` is on disk before the edges are synced, so a failed edge
+    /// write must not fail the create: failing it made a retried create write
+    /// the memory twice.
+    #[tokio::test]
+    async fn create_succeeds_once_when_the_edges_table_cannot_be_written() {
+        use engram_types::{Link, LinkKind, LinkOrigin};
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_a_broken_edges_table(&tmp).await;
+        let before = md_files(tmp.path()).len();
+
+        let mut m = create_test_memory("w-c", Visibility::Shared);
+        m.links
+            .push(Link::new("w-a", LinkKind::Supports, LinkOrigin::Human));
+        store.create(&m).await.expect("the create must succeed");
+
+        let after = md_files(tmp.path());
+        assert_eq!(after.len(), before + 1, "exactly one new file: {after:?}");
+        assert!(after.iter().all(|f| !f.contains(".tmp")), "{after:?}");
+        assert!(store.list_ids().await.unwrap().contains(&"w-c".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_succeeds_when_the_edges_table_cannot_be_written() {
+        use engram_types::{Link, LinkKind, LinkOrigin};
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_a_broken_edges_table(&tmp).await;
+
+        store
+            .update_with("w-b", |m| {
+                m.links
+                    .push(Link::new("w-a", LinkKind::RelatedTo, LinkOrigin::Agent));
+                Ok(())
+            })
+            .await
+            .expect("the update must succeed");
+        let got = store.get("w-b").await.unwrap();
+        assert_eq!(got.links.len(), 1, "the link is in the file");
+    }
+
+    /// `reindex` is the documented repair for edge-table drift, so it must
+    /// rebuild a table that will not open. It does not: the rebuild opens the
+    /// table first and fails with "Table 'edges' exists but could not be
+    /// loaded". Found by the tests above; a storage defect, reported for the
+    /// storage group to fix. Ignored, not deleted, until then.
+    #[tokio::test]
+    #[ignore = "storage defect: reindex cannot rebuild an edges table whose _versions is gone"]
+    async fn reindex_rebuilds_an_edges_table_that_will_not_open() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_a_broken_edges_table(&tmp).await;
+        store.reindex().await.expect("reindex repairs the table");
+        assert_eq!(store.list_edges().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_succeeds_when_edge_rows_cannot_be_removed() {
+        let tmp = TempDir::new().unwrap();
+        let store = store_with_a_broken_edges_table(&tmp).await;
+
+        store
+            .delete("w-a")
+            .await
+            .expect("the delete must succeed although w-a owns an edge row");
+        assert!(!store.list_ids().await.unwrap().contains(&"w-a".to_string()));
+        assert!(
+            md_files(tmp.path()).iter().all(|f| !f.contains("w-a")),
+            "the file is gone"
+        );
+    }
+
     /// The 0.7.0 schema migration (harvest provenance), against a store whose
     /// table really was written by the previous version: the memories survive
     /// intact, the `source_sessions` column appears, vectors are preserved, and

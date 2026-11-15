@@ -3341,6 +3341,67 @@ mod tests {
     use crate::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
+    /// An edge row missing from the derived table (what a failed edge write
+    /// leaves) is a Warn naming the drift, and `reindex` clears it.
+    #[tokio::test]
+    async fn doctor_reports_table_drift_and_reindex_clears_it() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let a = store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "a",
+                "c",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        let b = store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "b",
+                "c",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        store
+            .update_with(&a, |m| {
+                m.links.push(crate::types::Link::new(
+                    b.clone(),
+                    crate::types::LinkKind::Supports,
+                    crate::types::LinkOrigin::Human,
+                ));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let lance = crate::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        let conn = lancedb::connect(lance.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        crate::storage::edge_index::delete_owned(&conn, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+
+        let check = check_memory_edges(&store)
+            .await
+            .expect("a check is reported");
+        assert_eq!(check.status, Some(CheckStatus::Warn), "{check:?}");
+        assert!(
+            check.message.contains("table row(s) out of step"),
+            "{check:?}"
+        );
+
+        store.reindex().await.unwrap();
+        let check = check_memory_edges(&store).await.expect("one edge remains");
+        assert_ne!(check.status, Some(CheckStatus::Warn), "{check:?}");
+        assert_eq!(check.message, "consistent");
+    }
+
     /// Synthetic daemon check injected into `doctor_environment` in tests, so the
     /// `ops` test suite does not depend "upward" on `daemon` (the real probe is
     /// `daemon::doctor::check_daemon`, exercised from the CLI layer's tests).
