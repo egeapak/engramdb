@@ -18,6 +18,7 @@ mod output_renderers;
 mod projects;
 mod query;
 mod reindex;
+mod serve;
 mod snapshot;
 mod stats;
 mod update;

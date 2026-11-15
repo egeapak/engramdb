@@ -7350,6 +7350,103 @@ async fn failed_startup_is_reported_by_tool_calls() {
     server_handle.await.unwrap().unwrap();
 }
 
+/// What a gated request is, for the startup-gate tests below.
+#[derive(Clone, Copy)]
+enum GatedRequest {
+    ReadResource,
+    GetPrompt,
+}
+
+impl GatedRequest {
+    async fn send(
+        self,
+        peer: rmcp::service::Peer<rmcp::RoleClient>,
+    ) -> Result<(), rmcp::ServiceError> {
+        match self {
+            Self::ReadResource => peer
+                .read_resource(ReadResourceRequestParams::new("memory://index"))
+                .await
+                .map(|_| ()),
+            Self::GetPrompt => peer
+                .get_prompt(GetPromptRequestParams::new("memory-session-start"))
+                .await
+                .map(|_| ()),
+        }
+    }
+}
+
+/// With startup held, the request is still pending after a short wait; once
+/// startup is released it completes. Fails if the handler stops awaiting the
+/// startup gate.
+async fn waits_for_startup(req: GatedRequest) {
+    let (_dir, server) = setup().await;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, async move {
+        let _ = release_rx.await;
+        Ok(())
+    });
+    let client = rmcp::serve_client((), client_io).await.expect("handshake");
+
+    let mut pending = tokio::spawn(req.send(client.peer().clone()));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut pending)
+            .await
+            .is_err(),
+        "the request must wait for the startup work"
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(60), pending)
+        .await
+        .expect("the request runs once startup finishes")
+        .unwrap()
+        .expect("the request succeeds after startup");
+
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+/// A failed startup is reported by the request, as by a tool call.
+async fn reports_a_failed_startup(req: GatedRequest) {
+    let (_dir, server) = setup().await;
+    let (server_io, client_io) = tokio::io::duplex(64 * 1024);
+    let server_handle = spawn_deferred_server(server, server_io, async {
+        Err(anyhow::anyhow!("main project could not be initialized"))
+    });
+    let client = rmcp::serve_client((), client_io).await.expect("handshake");
+    let err = req
+        .send(client.peer().clone())
+        .await
+        .expect_err("a request after a failed startup must fail");
+    assert!(
+        err.to_string()
+            .contains("main project could not be initialized"),
+        "{err}"
+    );
+    client.cancel().await.unwrap();
+    server_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn read_resource_waits_for_startup() {
+    waits_for_startup(GatedRequest::ReadResource).await;
+}
+
+#[tokio::test]
+async fn get_prompt_waits_for_startup() {
+    waits_for_startup(GatedRequest::GetPrompt).await;
+}
+
+#[tokio::test]
+async fn read_resource_reports_a_failed_startup() {
+    reports_a_failed_startup(GatedRequest::ReadResource).await;
+}
+
+#[tokio::test]
+async fn get_prompt_reports_a_failed_startup() {
+    reports_a_failed_startup(GatedRequest::GetPrompt).await;
+}
+
 /// The bytes Claude Code sends to a slow server: a `server/discover` probe it
 /// has already given up on, then a legacy `initialize`, `initialized`, and a
 /// `tools/list` with no per-request `_meta`.
