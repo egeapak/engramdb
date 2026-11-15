@@ -488,11 +488,6 @@ async fn ensure_named_table(
 
 impl LanceIndex {
     /// Create or open a LanceIndex at the given path.
-    /// The embedding width this index was opened for.
-    pub fn dimensions(&self) -> usize {
-        self.dimensions
-    }
-
     pub async fn new(db_path: &Path, dimensions: usize) -> Result<Self> {
         let db_path_str = db_path
             .to_str()

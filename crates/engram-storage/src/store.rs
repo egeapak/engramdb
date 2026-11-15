@@ -1986,26 +1986,6 @@ impl MemoryStore {
         // `reindex_locked`, not `reindex_with`: the lock is already held and
         // is not reentrant.
         self.reindex_locked(true, false).await?;
-        // 0.6.0 added the `conversations` table, and its bump exists so a store
-        // created before it gets one. Only a project store: the table lives in
-        // a project's `lancedb/` (the root project's, but a store does not know
-        // whether it is a root; an empty table in a sub-project is never
-        // written and searches as empty). Best-effort: a table that is already
-        // there at another width is the conversation index's own repair
-        // (`reindex --archive-only`), and must not block every open.
-        let predates_conversations = stored
-            .as_deref()
-            .is_none_or(|v| manifest::schema_version_is_before(v, "0.6.0"));
-        if predates_conversations && !self.is_global() && !paths::is_group_id(&self.project_id) {
-            if let Err(e) = crate::conversation_index::ConversationIndex::open(
-                &self.project_id,
-                self.lance_index.dimensions(),
-            )
-            .await
-            {
-                tracing::warn!("could not create the conversations table during migration: {e:#}");
-            }
-        }
         // reindex's `update_manifest_stats` rewrote the manifest but preserved
         // the old `schema_version`; stamp the new one now that the rebuild
         // succeeded (mirrors how the embedding fingerprint is stamped only on
@@ -5813,11 +5793,14 @@ mod tests {
         );
     }
 
-    /// The 0.6.0 bump exists "only so a store created before the table gets
-    /// one" (manifest docs). A store stamped 0.5.0 with no `conversations`
-    /// table must have one after a plain open, with its memories untouched.
+    /// A store stamped 0.5.0 migrates on a plain open, keeps its memories,
+    /// and gets **no** `conversations` table. The harvest path creates that
+    /// table on first use. The migration must not: an existing table is what
+    /// `paths::holds_irreplaceable_data` retains a data dir for, so an empty
+    /// one made by every migration would keep every migrated store's data dir
+    /// from `projects prune` for good.
     #[tokio::test]
-    async fn migration_from_0_5_0_creates_the_conversations_table() {
+    async fn migration_from_0_5_0_leaves_the_conversations_table_to_harvest() {
         let tmp = TempDir::new().unwrap();
         let reg = InMemoryRegistry::new();
         MemoryStore::init(tmp.path(), &reg)
@@ -5840,8 +5823,8 @@ mod tests {
             manifest::CURRENT_SCHEMA_VERSION
         );
         assert!(
-            table_dir.exists(),
-            "the 0.6.0 migration must create the conversations table"
+            !table_dir.exists(),
+            "the migration created a conversations table, which pins the data dir"
         );
         assert_eq!(
             store.get("mig5r-mem").await.unwrap().summary,

@@ -25,8 +25,10 @@ use std::path::Path;
 /// stem index the keyword scorer reads instead of re-deriving it from every
 /// memory on every query. `0.6.0` added the `conversations` table
 /// (`storage::conversation_index`) beside `memories` and `chunks` — additive,
-/// so the migration it triggers rewrites nothing and exists only to make the
-/// new table appear in stores created before it. `0.7.0` added
+/// so the migration it triggers rewrites nothing. It does not create the
+/// table either: the harvest path creates it on first use, in old and new
+/// stores alike, and an empty one made here would keep the data dir from
+/// `projects prune` (`paths::holds_irreplaceable_data`). `0.7.0` added
 /// `source_sessions`, the harvest evidence link — the sessions a memory was
 /// extracted from, which is also what pins their transcript copies against
 /// budget eviction. `0.8.0` added `content_sha256` + `content_len`, the identity
@@ -63,12 +65,6 @@ fn default_schema_version() -> String {
 /// column set would rebuild the table without the newer columns and stamp the
 /// version backwards, silently dropping data. When ahead, we leave it untouched.
 pub fn schema_version_is_current(stored: &str) -> bool {
-    !schema_version_is_before(stored, CURRENT_SCHEMA_VERSION)
-}
-
-/// Is `stored` older than `version`? An unparseable `stored` counts as older
-/// (it needs migration), like in [`schema_version_is_current`].
-pub fn schema_version_is_before(stored: &str, version: &str) -> bool {
     fn parse(v: &str) -> Option<(u64, u64, u64)> {
         let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
         let major = it.next()??;
@@ -76,10 +72,10 @@ pub fn schema_version_is_before(stored: &str, version: &str) -> bool {
         let patch = it.next().unwrap_or(Some(0))?;
         Some((major, minor, patch))
     }
-    match (parse(stored), parse(version)) {
-        (Some(s), Some(v)) => s < v,
+    match (parse(stored), parse(CURRENT_SCHEMA_VERSION)) {
+        (Some(s), Some(c)) => s >= c,
         // Unparseable stored version → treat as needing migration.
-        _ => true,
+        _ => false,
     }
 }
 
