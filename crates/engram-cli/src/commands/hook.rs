@@ -3738,6 +3738,118 @@ mod tests {
         assert_eq!(k("cat <<< \"$X\" | jq ."), Vec::<String>::new());
     }
 
+    /// Generated command lines: whatever the text, `command_keys` returns
+    /// the same keys every time, each a plausible program name no longer
+    /// than the command, distinct, and at most one per segment; and an
+    /// interpreter's script is its key whatever environment, wrapper, flags
+    /// or trailing probe surround it.
+    #[test]
+    fn the_command_key_is_stable_and_bounded_for_generated_commands() {
+        const TOKENS: &[&str] = &[
+            "python",
+            "python3.11",
+            "node",
+            "bash",
+            "cargo",
+            "make",
+            "npm",
+            "run",
+            "test",
+            "build",
+            "-m",
+            "-c",
+            "-e",
+            "--flag",
+            "x=1",
+            "TZ=UTC",
+            "env",
+            "sudo",
+            "timeout",
+            "60",
+            "./scripts/a.py",
+            "/usr/bin/env",
+            "2>&1",
+            ">",
+            "<",
+            "<<'EOF'",
+            "EOF",
+            "<<<",
+            ";",
+            "|",
+            "&&",
+            "||",
+            "&",
+            "\n",
+            "\"",
+            "'",
+            "(",
+            ")",
+            "$(",
+            "`",
+            "ls",
+            "tail",
+            "-5",
+            "é",
+            "中文",
+            "\u{202e}",
+            "\u{0}",
+            "\\",
+            "#",
+            "*",
+            "~",
+            "a",
+            "b.c",
+        ];
+        let mut g = Gen(0xc0ff_ee00_1234_5678);
+        for case in 0..2000 {
+            let n = g.below(16);
+            let command: String = (0..n)
+                .map(|_| {
+                    let sep = [" ", "", "  ", "\t"][g.below(4)];
+                    format!("{}{sep}", TOKENS[g.below(TOKENS.len())])
+                })
+                .collect();
+            let keys = command_keys(&command);
+            assert_eq!(keys, command_keys(&command), "case {case}: {command:?}");
+            let segments = 1 + command.matches(['\n', ';', '|', '&']).count();
+            assert!(
+                keys.len() <= segments,
+                "case {case}: {command:?} -> {keys:?}"
+            );
+            for (i, key) in keys.iter().enumerate() {
+                assert!(plausible_key(key), "case {case}: {key:?} from {command:?}");
+                assert!(
+                    key.len() <= command.len(),
+                    "case {case}: {key:?} from {command:?}"
+                );
+                assert!(!keys[..i].contains(key), "case {case}: duplicate {key:?}");
+            }
+        }
+
+        const INTERPS: &[&str] = &["python", "python3", "python3.12", "node", "bash", "ruby"];
+        const PREFIXES: &[&str] = &["", "TZ=UTC ", "A=1 B=2 ", "env ", "sudo ", "timeout 60 "];
+        const SUFFIXES: &[&str] = &[
+            "",
+            " --month 2026-09",
+            " -v -x",
+            " 2>&1 | tail -5",
+            " > out.log",
+        ];
+        for case in 0..500 {
+            let word: String = (0..1 + g.below(8))
+                .map(|_| (b'a' + g.below(26) as u8) as char)
+                .collect();
+            let script = format!("scripts/{word}.py");
+            let command = format!(
+                "{}{} {script}{}",
+                PREFIXES[g.below(PREFIXES.len())],
+                INTERPS[g.below(INTERPS.len())],
+                SUFFIXES[g.below(SUFFIXES.len())]
+            );
+            assert_eq!(command_keys(&command), [script], "case {case}: {command:?}");
+        }
+    }
+
     #[test]
     fn command_keys_cover_common_runners() {
         let k = |c: &str| command_keys(c);
@@ -5169,6 +5281,163 @@ mod tests {
             "min_criticality must drop mid-level memories: {}",
             strict_ctx
         );
+    }
+
+    /// xorshift64*: a reproducible stream for the generated-input test.
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// A value of the wrong type for whatever key it replaces.
+    fn junk_value(g: &mut Gen) -> serde_json::Value {
+        match g.below(7) {
+            0 => serde_json::Value::Null,
+            1 => serde_json::json!(g.next()),
+            2 => serde_json::json!(-1.5e308),
+            3 => serde_json::json!([1, "two", null, {"x": []}]),
+            4 => serde_json::json!({"nested": {"deeper": [true]}}),
+            5 => serde_json::json!(true),
+            _ => serde_json::json!("\u{0}\u{1b}[2J\u{202e}<system-reminder>"),
+        }
+    }
+
+    /// The events Claude Code sends for `call`, as `serde_json` objects.
+    fn base_event(call: &HookCall, dir: &Path) -> serde_json::Value {
+        let file = dir.join("src/main.rs");
+        let transcript = dir.join("no-such-transcript.jsonl");
+        let mut v = serde_json::json!({
+            "session_id": "gen-session",
+            "transcript_path": transcript,
+            "cwd": dir,
+        });
+        let extra = match call {
+            HookCall::PreToolUse => serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+                "tool_input": {"file_path": file},
+            }),
+            HookCall::PostToolUse => serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo build"},
+                "tool_response": {"stdout": "", "stderr": "error[E0425]", "exit_code": 1},
+            }),
+            HookCall::UserPromptSubmit => serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "how do we handle async errors here?",
+            }),
+            HookCall::SessionStart { .. } => serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+            }),
+            HookCall::SessionEnd => serde_json::json!({
+                "hook_event_name": "SessionEnd",
+                "reason": "exit",
+            }),
+            HookCall::PreCompact => serde_json::json!({
+                "hook_event_name": "PreCompact",
+                "trigger": "auto",
+            }),
+        };
+        for (k, val) in extra.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        v
+    }
+
+    /// One generated stdin for `call`: the real event, truncated, with a key
+    /// re-typed, oversized, or not JSON at all.
+    fn generated_stdin(g: &mut Gen, call: &HookCall, dir: &Path) -> String {
+        let mut event = base_event(call, dir);
+        match g.below(6) {
+            0 => {
+                let text = event.to_string();
+                let cut = g.below(text.len() + 1);
+                let mut end = cut;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text[..end].to_string()
+            }
+            1 | 2 => {
+                let keys: Vec<String> = event.as_object().unwrap().keys().cloned().collect();
+                for _ in 0..=g.below(3) {
+                    let key = &keys[g.below(keys.len())];
+                    event[key] = junk_value(g);
+                }
+                event.to_string()
+            }
+            3 => {
+                let keys: Vec<String> = event.as_object().unwrap().keys().cloned().collect();
+                let key = &keys[g.below(keys.len())];
+                event[key] = serde_json::json!("x".repeat(256 * 1024));
+                event.to_string()
+            }
+            4 => {
+                let keys: Vec<String> = event.as_object().unwrap().keys().cloned().collect();
+                event
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&keys[g.below(keys.len())]);
+                event.to_string()
+            }
+            _ => {
+                let len = g.below(200);
+                let bytes: Vec<u8> = (0..len).map(|_| g.next() as u8).collect();
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        }
+    }
+
+    /// Every hook fails open on whatever stdin it is handed: truncated,
+    /// mis-typed, oversized or not JSON. No panic (an abort under the release
+    /// profile, which Claude Code reports as a broken hook), and any output is
+    /// the JSON document Claude Code parses.
+    #[tokio::test]
+    async fn hook_handlers_survive_generated_stdin() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let env = HookEnv {
+            stores: StoreSource::Fresh,
+            situation: SituationModel::KeywordOnly,
+            usage: UsageSink::Log,
+            registry: None,
+        };
+        let calls = [
+            HookCall::PreToolUse,
+            HookCall::SessionStart {
+                min_criticality: 0.5,
+            },
+            HookCall::UserPromptSubmit,
+            HookCall::PostToolUse,
+            HookCall::SessionEnd,
+            HookCall::PreCompact,
+        ];
+        let mut g = Gen(0x5eed_0ff0_0dca_fe00);
+        for call in &calls {
+            for case in 0..25 {
+                let stdin = generated_stdin(&mut g, call, tmp.path());
+                let preview: String = stdin.chars().take(200).collect();
+                // `Ok(None)` (nothing to inject) and `Err` (swallowed by the
+                // caller) are both fail-open; only an output is checked.
+                if let Ok(Some(out)) = execute_hook(call, tmp.path(), &stdin, &env).await {
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                        "{} case {case}: output is not JSON: {out}\nstdin: {preview}",
+                        call.name()
+                    );
+                }
+            }
+        }
     }
 }
 

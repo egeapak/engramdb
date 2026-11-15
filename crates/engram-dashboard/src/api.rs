@@ -1244,3 +1244,83 @@ async fn project_doctor(State(state): State<Arc<AppState>>, Path(id): Path<Strin
             .map(|p| p.display().to_string()),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift64*: a reproducible stream of garbage.
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// A cursor arrives in a query string, so `unhex_json` sees whatever a
+    /// client sends: odd lengths, non-hex, multibyte text, over the cap, and
+    /// valid hex of invalid JSON. None of it may panic, and none of it may be
+    /// accepted except what decodes to JSON within the cap. What `hex_json`
+    /// writes always comes back.
+    #[test]
+    fn unhex_json_rejects_generated_garbage_without_panicking() {
+        let alphabet: Vec<char> = "0123456789abcdefABCDEF+- xzé中\u{0}".chars().collect();
+        let mut g = Gen(0x1234_5678_9abc_def0);
+        for case in 0..5000 {
+            let len = g.below(80);
+            let s: String = (0..len)
+                .map(|_| alphabet[g.below(alphabet.len())])
+                .collect();
+            if let Some(v) = unhex_json::<serde_json::Value>(&s) {
+                assert!(
+                    s.len().is_multiple_of(2) && s.len() <= 4096,
+                    "case {case}: accepted {s:?} as {v}"
+                );
+            }
+        }
+        // Over the cap, even when it is valid.
+        let big = hex_json(&"x".repeat(2100));
+        assert!(big.len() > 4096);
+        assert_eq!(unhex_json::<String>(&big), None);
+        // Odd length of otherwise valid hex.
+        let ok = hex_json(&serde_json::json!({"k": [1, 2]}));
+        assert_eq!(unhex_json::<serde_json::Value>(&ok[..ok.len() - 1]), None);
+        // Valid hex, invalid JSON.
+        let not_json: String = b"{\"k\": [1, 2"
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(unhex_json::<serde_json::Value>(&not_json), None);
+        // Random bytes, hex-encoded: JSON or nothing, never a panic.
+        for case in 0..2000 {
+            let bytes: Vec<u8> = (0..g.below(64)).map(|_| g.next() as u8).collect();
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let decoded = unhex_json::<serde_json::Value>(&hex);
+            assert_eq!(
+                decoded.is_some(),
+                serde_json::from_slice::<serde_json::Value>(&bytes).is_ok(),
+                "case {case}: {hex}"
+            );
+        }
+        // Round trip.
+        for case in 0..500 {
+            let v = serde_json::json!({
+                "f": format!("{:016x}", g.next()),
+                "key": [g.next() % 1000, g.below(7)],
+                "s": "é中\u{1b}",
+            });
+            assert_eq!(
+                unhex_json::<serde_json::Value>(&hex_json(&v)),
+                Some(v),
+                "case {case}"
+            );
+        }
+    }
+}

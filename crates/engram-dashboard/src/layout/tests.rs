@@ -1270,3 +1270,79 @@ fn the_fixture_layouts_match_their_pinned_digests() {
         );
     }
 }
+
+/// xorshift64*: reproducible bytes for the cache-decoder test.
+struct Gen(u64);
+
+impl Gen {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+}
+
+/// A cache file is read back from a directory the user may point anywhere,
+/// so its payload is untrusted. Random bytes, huge length prefixes and a
+/// valid payload with any one byte flipped must each decode to nothing or to
+/// a value that re-encodes to exactly those bytes, never panic, and never
+/// allocate on a length the input cannot back.
+#[test]
+fn the_cache_decoder_rejects_generated_bytes() {
+    let check = |bytes: &[u8], what: &str| {
+        if let Some(v) = Cached::from_bytes(bytes) {
+            assert_eq!(
+                v.to_bytes(),
+                bytes,
+                "{what}: accepted bytes re-encode differently"
+            );
+        }
+    };
+    let mut g = Gen(0xdead_beef_f00d_0001);
+    for case in 0..5000 {
+        let len = (g.next() % 200) as usize;
+        let mut bytes: Vec<u8> = (0..len).map(|_| g.next() as u8).collect();
+        if let Some(first) = bytes.first_mut() {
+            *first %= 4; // mostly a known tag, sometimes not
+        }
+        check(&bytes, &format!("random case {case}"));
+    }
+    // A length prefix claiming far more than the input holds.
+    for tag in 0u8..3 {
+        for n in [u64::MAX, u64::MAX / 8, 1 << 40, 4096] {
+            let mut bytes = vec![tag];
+            bytes.extend_from_slice(&n.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 32]);
+            assert_eq!(Cached::from_bytes(&bytes), None, "tag {tag}, length {n}");
+        }
+    }
+    // Every single-byte flip of valid payloads of each kind.
+    let force = LayoutInput::Force(sample(8));
+    let key = force.digest();
+    let grid = LayoutInput::Grid(sample(8));
+    let gkey = grid.digest();
+    for (what, valid) in [
+        ("force", force.run(&key).unwrap()),
+        ("grid", grid.run(&gkey).unwrap()),
+        (
+            "overview",
+            Cached::Overview("{\"ids\":[\"a\"]}".to_string()),
+        ),
+    ] {
+        let bytes = valid.to_bytes();
+        assert_eq!(Cached::from_bytes(&bytes).as_ref(), Some(&valid), "{what}");
+        for at in 0..bytes.len() {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 1 << (g.next() % 8);
+            check(&flipped, &format!("{what} flipped at {at}"));
+        }
+        for cut in 0..bytes.len() {
+            assert_eq!(
+                Cached::from_bytes(&bytes[..cut]),
+                None,
+                "{what} cut at {cut}"
+            );
+        }
+    }
+}

@@ -89,7 +89,6 @@ pub async fn run_compress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::OutputFormatter;
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
     use engramdb::types::{Memory, MemoryType, Provenance, Status, Visibility};
     use tempfile::TempDir;

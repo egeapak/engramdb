@@ -2748,4 +2748,160 @@ mod tests {
         assert!(is_harvested(dir, "s2"));
         assert!(is_harvested(dir, "s4"));
     }
+
+    /// A tiny deterministic generator (xorshift64*), so a failing case is
+    /// reproducible from its index alone.
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn chance(&mut self, one_in: u64) -> bool {
+            self.below(one_in) == 0
+        }
+    }
+
+    /// One generated ledger line, as JSON. Timestamps are within the last
+    /// ten days (so the age window keeps them), on a coarse grid so equal
+    /// instants are common, and written in random order relative to their
+    /// time (a backwards clock).
+    fn generated_line(g: &mut Gen, base: DateTime<Utc>) -> serde_json::Value {
+        const SESSIONS: [&str; 6] = ["s-a", "s-b", "s-c", "s-d", "s-e", "s-f"];
+        let at = |g: &mut Gen| base + Duration::minutes(g.below(40) as i64 * 15);
+        let mut line = serde_json::Map::new();
+        line.insert("session_id".into(), SESSIONS[g.below(6) as usize].into());
+        line.insert("at".into(), serde_json::to_value(at(g)).unwrap());
+        if g.chance(12) {
+            line.insert("removed".into(), true.into());
+            return line.into();
+        }
+        if g.chance(2) {
+            let stage = ["collected", "indexed"][g.below(2) as usize];
+            line.insert("stage".into(), stage.into());
+        }
+        if g.chance(2) {
+            let decision = ["harvested", "skipped", "deferred", "unreviewed"][g.below(4) as usize];
+            line.insert("decision".into(), decision.into());
+        }
+        if g.chance(3) {
+            let ids: Vec<String> = (0..g.below(4)).map(|i| format!("m{i}")).collect();
+            line.insert("memory_ids".into(), ids.into());
+        }
+        if g.chance(8) {
+            line.insert("memories_created".into(), g.below(5).into());
+        }
+        match g.below(4) {
+            0 => {
+                line.insert("note".into(), serde_json::Value::Null);
+            }
+            1 => {
+                line.insert("note".into(), format!("note {}", g.below(100)).into());
+            }
+            _ => {}
+        }
+        match g.below(4) {
+            0 => {
+                line.insert("archive".into(), serde_json::Value::Null);
+            }
+            1 => {
+                let archive = crate::transcript_archive::ArchiveRef {
+                    file_name: format!("f{}.jsonl.zst", g.below(10)),
+                    bytes: g.below(1000),
+                    original_bytes: g.below(10_000),
+                    sha256: format!("{:064x}", g.next()),
+                    archived_at: at(g),
+                };
+                line.insert("archive".into(), serde_json::to_value(archive).unwrap());
+            }
+            _ => {}
+        }
+        match g.below(5) {
+            0 => {
+                line.insert("index_failed_at".into(), serde_json::Value::Null);
+            }
+            1 => {
+                line.insert(
+                    "index_failed_at".into(),
+                    serde_json::to_value(at(g)).unwrap(),
+                );
+            }
+            _ => {}
+        }
+        line.into()
+    }
+
+    /// Every field of every entry, in a comparable form.
+    ///
+    /// The raw `decision` is compared through `decision()`: a snapshot line
+    /// always carries a decision, so an entry no line ever decided reads
+    /// `None` before compaction and `Some(Unreviewed)` after. No reader
+    /// tells the two apart (`HarvestEntry` is not serialized, and every
+    /// caller goes through `decision()`), so this test does not either.
+    fn folded_view(dir: &Path) -> std::collections::BTreeMap<String, String> {
+        read_harvested(dir)
+            .into_iter()
+            .map(|(id, mut e)| {
+                e.decision = Some(e.decision());
+                (id, format!("{e:?}"))
+            })
+            .collect()
+    }
+
+    /// Compaction rewrites the log as one snapshot line per entry (plus
+    /// young tombstones). Folding the rewrite must give exactly what folding
+    /// the original gave — every field, `harvested_at` included — for any
+    /// sequence of patches: random fields, `null` clears, equal and
+    /// backwards timestamps, tombstones and re-creations. `compressed` is
+    /// left out: it drains on read by design.
+    #[test]
+    fn compaction_preserves_the_fold_for_generated_ledgers() {
+        let base = Utc::now() - Duration::days(10);
+        // Lines whose session id is refused: counted as lines (so the log
+        // qualifies for compaction), never folded.
+        let padding = format!(
+            "{}\n",
+            serde_json::json!({"session_id": "..", "at": base, "note": "x".repeat(40)})
+        )
+        .repeat(1 + COMPACT_MIN_BYTES as usize / 80);
+        let mut compacted = 0;
+        for case in 0..500u64 {
+            let mut g = Gen(0x9e37_79b9_7f4a_7c15 ^ (case + 1).wrapping_mul(0x1000_0000_01b3));
+            let tmp = TempDir::new().unwrap();
+            let dir = tmp.path();
+            std::fs::create_dir_all(dir.join(".engramdb").join("state")).unwrap();
+            let mut text = padding.clone();
+            for _ in 0..(1 + g.below(30)) {
+                text.push_str(&generated_line(&mut g, base).to_string());
+                text.push('\n');
+            }
+            std::fs::write(ledger_path(dir), &text).unwrap();
+
+            let before = folded_view(dir);
+            maybe_compact(dir);
+            let rewritten = std::fs::read_to_string(ledger_path(dir)).unwrap();
+            if rewritten.len() < text.len() {
+                compacted += 1;
+            }
+            let after = folded_view(dir);
+            assert_eq!(
+                before, after,
+                "case {case}: compaction changed the fold\n--- original ---\n{}\n--- compacted ---\n{rewritten}",
+                text.lines()
+                    .filter(|l| !l.contains(r#""session_id":"..""#))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+        assert_eq!(
+            compacted, 500,
+            "every generated log must actually be compacted"
+        );
+    }
 }
