@@ -59,6 +59,40 @@ pub(crate) fn query(raw: Option<String>) -> HashMap<String, String> {
     .unwrap_or_default()
 }
 
+/// One top-scope key from a query value (`top_scope=`, `from_scope=`, …):
+/// `-` is "no logical scope" (`""`), anything else a percent-encoded name
+/// (the page writes them with `scopes.js::scopeKey`), so a scope literally
+/// named `-`, or one holding a comma, is told apart (`%2D`, `%2C`). An
+/// unencoded name decodes to itself unless it holds a `%`.
+pub(crate) fn scope_key(raw: &str) -> Result<String, ApiError> {
+    let raw = raw.trim();
+    if raw == "-" {
+        return Ok(String::new());
+    }
+    let bad =
+        || ApiError::bad_request(format!("{raw:?} is not a valid percent-encoded scope name"));
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = b.get(i + 1..i + 3).ok_or_else(bad)?;
+            let hex = std::str::from_utf8(hex).map_err(|_| bad())?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| bad())?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| bad())
+}
+
+/// A comma-joined list of [`scope_key`]s.
+pub(crate) fn scope_keys(raw: &str) -> Result<Vec<String>, ApiError> {
+    raw.split(',').map(scope_key).collect()
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/session", get(session))
@@ -393,9 +427,7 @@ async fn list_memories(
     };
     // `top_scope=`, not `scope=`: `scope` is the older substring filter over
     // every physical and logical scope, kept as it was.
-    let top_scopes: Option<Vec<&str>> = q
-        .get("top_scope")
-        .map(|l| l.split(',').map(str::trim).collect());
+    let top_scopes: Option<Vec<String>> = q.get("top_scope").map(|l| scope_keys(l)).transpose()?;
     let scope = q.get("scope");
     let tag = q.get("tag");
     let text = q.get("q").map(|s| s.to_lowercase());
@@ -432,9 +464,8 @@ async fn list_memories(
         .filter(|e| epistemic.as_ref().is_none_or(|k| k.contains(&e.epistemic)))
         .filter(|e| {
             top_scopes.as_ref().is_none_or(|ls| {
-                // `-` names "no logical scope", so it survives a comma join.
-                let l = top_scope_of(&e.logical).unwrap_or_else(|| "-".to_string());
-                ls.contains(&l.as_str())
+                // `""` is "no logical scope" (`-` in the query).
+                ls.contains(&top_scope_of(&e.logical).unwrap_or_default())
             })
         })
         .filter(|e| {

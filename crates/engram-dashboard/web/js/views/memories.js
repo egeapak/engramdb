@@ -3,7 +3,7 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, daysSince, shortId, score } from '../format.js';
-import { badge, kindIcon, scopeName, TYPE_LABEL } from '../scopes.js';
+import { badge, kindIcon, scopeName, scopeKey, TYPE_LABEL } from '../scopes.js';
 import { projHead, statusPill, errorBox } from './common.js';
 
 const COLS = [
@@ -142,8 +142,9 @@ export async function renderMemories(main, ctx) {
   };
 
   const renderChips = (scopes) => {
-    // '-' names "no logical scope" in the URL, so an empty name survives a join.
-    const key = (name) => name || '-';
+    // `scopeKey`: `-` for no scope, else percent-encoded, so a name with a
+    // comma (or one named `-`) survives the join.
+    const key = scopeKey;
     const on = new Set(f.top_scope ? f.top_scope.split(',') : scopes.map((l) => key(l.name)));
     mount(
       chips,

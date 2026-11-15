@@ -70,7 +70,9 @@ use engramdb::storage::lance_index::IndexFilterable;
 use engramdb::types::Status;
 use serde::Serialize;
 
-use crate::api::{color_slots, finite, ok, open, query, status_str, top_scope_of, wire, ApiResult};
+use crate::api::{
+    color_slots, finite, ok, open, query, scope_keys, status_str, top_scope_of, wire, ApiResult,
+};
 use crate::layout::{
     cache::Flight, overview::OverviewInput, Cached, EdgeFacts, ForceInput, Groups, LayoutInput,
     LayoutRequest, NodeFacts,
@@ -575,9 +577,8 @@ pub(crate) async fn project_graph(
         include_rejected: flag(&q, "include_rejected", false)?,
         include_invalidated: flag(&q, "include_invalidated", false)?,
     };
-    let scopes_wanted: Option<Vec<&str>> = q
-        .get("top_scope")
-        .map(|l| l.split(',').map(str::trim).collect());
+    let scopes_wanted: Option<Vec<String>> =
+        q.get("top_scope").map(|l| scope_keys(l)).transpose()?;
     let limit: usize = match q.get("limit") {
         Some(l) => l
             .parse::<usize>()
@@ -658,10 +659,9 @@ pub(crate) async fn project_graph(
         .iter()
         .filter_map(|n| rows.get(n.id.as_str()).copied())
         .filter(|e| {
-            scopes_wanted.as_ref().is_none_or(|ls| {
-                let l = top_scope_of(&e.logical).unwrap_or_else(|| "-".to_string());
-                ls.contains(&l.as_str())
-            })
+            scopes_wanted
+                .as_ref()
+                .is_none_or(|ls| ls.contains(&top_scope_of(&e.logical).unwrap_or_default()))
         })
         .collect();
     if summary_over.is_some_and(|n| admitted.len() > n) {
@@ -933,7 +933,7 @@ pub(crate) async fn project_graph(
                     let key = input.digest();
                     match &*cached_layout(&state, &input, &key).await? {
                         Cached::Overview(text) => {
-                            let me = if ls[0] == "-" { "" } else { ls[0] };
+                            let me = ls[0].as_str();
                             let names: Vec<&str> = far.iter().map(|f| f.name.as_str()).collect();
                             crate::layout::overview_dirs(text, me, &names)
                         }

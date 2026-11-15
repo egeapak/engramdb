@@ -4335,3 +4335,107 @@ async fn a_kind_named_constructor_reaches_the_scope_tallies() {
         .any(|row| row["kinds"]["constructor"]["confirmed"] == 1);
     assert!(carried, "{}", g["scope_edges"]);
 }
+
+/// `-` names "no scope" in `top_scope=` lists, and the list is
+/// comma-joined: a scope named `-` was filtered with the scope-less
+/// memories, and one named `a,b` matched nothing. Names now travel
+/// percent-encoded (`scopes.js::scopeKey`; `%2D` for a literal `-`), and
+/// the query string encodes that once more.
+#[tokio::test]
+async fn a_scope_named_dash_or_with_a_comma_filters_alone() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let dash = memory(MemoryType::Decision, "In the dash scope", &["-"], &[]);
+    let comma = memory(MemoryType::Decision, "In the comma scope", &["a,b"], &[]);
+    let none = memory(MemoryType::Decision, "In no scope at all", &[], &[]);
+    for m in [&dash, &comma, &none] {
+        store.create(m).await.unwrap();
+    }
+    ops_links::link(
+        &store,
+        LinkParams {
+            src: dash.id.clone(),
+            kind: LinkKind::RelatedTo,
+            dst: comma.id.clone(),
+            dst_store: None,
+            confidence: Some(1.0),
+            origin: LinkOrigin::Human,
+            status: Some(LinkStatus::Confirmed),
+            note: None,
+        },
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let ids = |v: &serde_json::Value, key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for (param, want, not) in [
+        ("%252D", &dash, vec![&none, &comma]),
+        ("a%252Cb", &comma, vec![&none, &dash]),
+        ("-", &none, vec![&dash, &comma]),
+    ] {
+        let (s, p) = get_json(
+            &app,
+            &format!("/api/projects/{}/memories?top_scope={param}", fx.id),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{p}");
+        let got = ids(&p, "items");
+        assert!(got.contains(&want.id), "{param}: {got:?}");
+        for m in &not {
+            assert!(!got.contains(&m.id), "{param} listed {}", m.summary);
+        }
+        let (s, g) = get_json(
+            &app,
+            &format!("/api/projects/{}/graph?top_scope={param}", fx.id),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{g}");
+        let got = ids(&g, "nodes");
+        assert!(got.contains(&want.id), "graph {param}: {got:?}");
+        for m in &not {
+            assert!(!got.contains(&m.id), "graph {param} drew {}", m.summary);
+        }
+    }
+    // Both escaped names in one list.
+    let (_, p) = get_json(
+        &app,
+        &format!("/api/projects/{}/memories?top_scope=%252D,a%252Cb", fx.id),
+    )
+    .await;
+    let got = ids(&p, "items");
+    assert!(
+        got.contains(&dash.id) && got.contains(&comma.id) && !got.contains(&none.id),
+        "{got:?}"
+    );
+    // The Relations tab's scope filters read the same keys.
+    let listed = |v: &serde_json::Value| -> bool {
+        v["items"].as_array().unwrap().iter().any(|r| {
+            (r["src"] == dash.id.as_str() || r["dst"] == dash.id.as_str())
+                && r["kind"] == "related_to"
+        })
+    };
+    for (param, want) in [("%252D", true), ("a%252Cb", true), ("-", false)] {
+        let (s, r) = get_json(
+            &app,
+            &format!("/api/projects/{}/relations?from_scope={param}", fx.id),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        assert_eq!(listed(&r), want, "from_scope={param}: {r}");
+    }
+    // An invalid escape is the caller's mistake.
+    let (s, _) = get_json(
+        &app,
+        &format!("/api/projects/{}/memories?top_scope=%25zz", fx.id),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

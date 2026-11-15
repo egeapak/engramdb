@@ -67,7 +67,7 @@
 import { h, mount, afterPaint } from '../dom.js';
 import { api } from '../api.js';
 import { fmt, ago, plural, shortId, label, score } from '../format.js';
-import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
+import { badge, scopeName, scopeKey, scopeFromKey, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { LAYOUTS } from '../graph/layouts.js';
 import { decodeForce, decodeGrid, serverKey } from '../graph/server-layout.js';
@@ -285,7 +285,7 @@ function buildFilters(filterBox, ctx, f, g, theme, setFilters) {
     'select',
     { 'aria-label': 'Top-level scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, top_scope: ev.target.value, all: ev.target.value ? f.all : false })) },
     h('option', { value: '' }, 'All top-level scopes'),
-    g.scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
+    g.scopes.map((l) => h('option', { value: scopeKey(l.name), selected: scopeKey(l.name) === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
   );
   // Keep keyboard focus on the chip that was pressed.
   const active = document.activeElement;
@@ -420,7 +420,7 @@ export async function renderGraph(main, ctx) {
           { class: 'g-crumbs', 'aria-label': t('crumbsAria') },
           h('a', { href: hashOf(ctx, { ...f, top_scope: '', all: false }), onclick: backTo(hashOf(ctx, { ...f, top_scope: '', all: false })) }, t('crumbAll')),
           h('span', { class: 'sep', 'aria-hidden': 'true' }, ' › '),
-          h('span', { 'aria-current': 'page' }, scopeName(opened === '-' ? '' : opened)),
+          h('span', { 'aria-current': 'page' }, scopeName(scopeFromKey(opened))),
         )
       : null;
 
@@ -687,7 +687,7 @@ export async function renderGraph(main, ctx) {
       const tg = tagByName.get(sc.name);
       const ft = filtered(sc, f);
       if (!tg || !ft.count) continue;
-      tags.push({ tg, name: sc.name, count: ft.count, contradictions: ft.contradictions, aria: t('tagAria', scopeName(sc.name), ft.count, ft.contradictions), go: () => (location.hash = hashOf(ctx, { ...f, top_scope: sc.name || '-' })) });
+      tags.push({ tg, name: sc.name, count: ft.count, contradictions: ft.contradictions, aria: t('tagAria', scopeName(sc.name), ft.count, ft.contradictions), go: () => (location.hash = hashOf(ctx, { ...f, top_scope: scopeKey(sc.name) })) });
     }
     surface.setTags(tags);
   }
@@ -1427,7 +1427,7 @@ export async function renderGraph(main, ctx) {
           graphBox.focus();
         },
         onSelect: (j) => pin({ node: j }, true),
-        onOpenScope: (name) => (location.hash = hashOf(ctx, { ...f, top_scope: name || '-' })),
+        onOpenScope: (name) => (location.hash = hashOf(ctx, { ...f, top_scope: scopeKey(name) })),
         review: (e) => {
           const src = byId.has(e.src) ? g.nodes[byId.get(e.src)] : null;
           const dst = !e.dst_store && byId.has(e.dst) ? g.nodes[byId.get(e.dst)] : null;

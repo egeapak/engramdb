@@ -94,10 +94,10 @@ fn values(raw: Option<&str>, key: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// A scope name from the query: `-` is "no logical scope" (`""`).
-fn scope_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
-    q.get(key)
-        .map(|s| if s == "-" { String::new() } else { s.clone() })
+/// A scope name from the query: `-` is "no logical scope" (`""`), any
+/// other value percent-encoded ([`crate::api::scope_key`]).
+fn scope_param(q: &HashMap<String, String>, key: &str) -> Result<Option<String>, ApiError> {
+    q.get(key).map(|s| crate::api::scope_key(s)).transpose()
 }
 
 /// The parsed filters. [`Self::canonical`] is what a cursor is bound to.
@@ -152,9 +152,9 @@ impl Filter {
             statuses,
             include_rejected: flag(q, "include_rejected", false)?,
             include_invalidated: flag(q, "include_invalidated", false)?,
-            from: scope_param(q, "from_scope"),
-            to: scope_param(q, "to_scope"),
-            touches: scope_param(q, "touches"),
+            from: scope_param(q, "from_scope")?,
+            to: scope_param(q, "to_scope")?,
+            touches: scope_param(q, "touches")?,
             text: match q.get("q") {
                 Some(t) if t.chars().count() > MAX_QUERY_CHARS => {
                     return Err(ApiError::bad_request(format!(

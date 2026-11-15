@@ -27,7 +27,7 @@
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
 import { ago, fmt, label, plural, shortId, score } from '../format.js';
-import { badge, scopeName } from '../scopes.js';
+import { badge, scopeName, scopeKey, scopeFromKey } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { currentStyle } from '../graph/themes/index.js';
 import { OVERVIEW_MIN } from './graph-overview.js';
@@ -113,8 +113,9 @@ const groupKey = (end) => (end && end.group !== undefined ? keyOf(end.group) : n
 /** A cell's number in its 28 px: 1.6k past 999 (the label says it in full). */
 const compact = (n) => (n < 1000 ? String(n) : n < 10000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : Math.round(n / 1000) + 'k');
 
-const nameOf = (key) => scopeName(key === '-' ? '' : key);
-const keyOf = (name) => name || '-';
+// Keys are `scopes.js::scopeKey`s: `-` for no scope, else percent-encoded.
+const nameOf = (key) => scopeName(scopeFromKey(key));
+const keyOf = scopeKey;
 
 /** The picked cell in words, for the filter chip. */
 function pairText(f) {

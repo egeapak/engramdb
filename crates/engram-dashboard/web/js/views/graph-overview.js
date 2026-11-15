@@ -21,7 +21,7 @@
 
 import { h, s, mount } from '../dom.js';
 import { fmt, plural } from '../format.js';
-import { scopeName, slot } from '../scopes.js';
+import { scopeName, scopeKey, slot } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { decodeOverview } from '../graph/server-layout.js';
 import { filtered, merge, dominant, emptyTally } from '../graph/tally.js';
@@ -102,7 +102,7 @@ export function renderOverview(main, ctx, g, env) {
   const p = ctx.project;
   const open = (name) => {
     lastOpened.set(p.id, name);
-    location.hash = hashOf(ctx, { ...f, top_scope: name || '-', all: false });
+    location.hash = hashOf(ctx, { ...f, top_scope: scopeKey(name), all: false });
   };
   const returnTo = lastOpened.has(p.id) ? lastOpened.get(p.id) : undefined;
   lastOpened.delete(p.id);

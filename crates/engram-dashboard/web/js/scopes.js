@@ -102,3 +102,31 @@ export const TYPE_LABEL = {
   preference: 'Preference',
   relationship: 'Relationship',
 };
+
+/**
+ * A top scope as it goes into a comma-joined `top_scope=` (and
+ * `from_scope=` / `to_scope=` / `touches=`) value: `-` for no scope, else
+ * the name percent-encoded with a literal `-` written `%2D`, so a scope
+ * named `-` is not "no scope" and a comma in a name never splits the list
+ * (the server's `api::scope_key` decodes it).
+ */
+export function scopeKey(name) {
+  if (!name) return '-';
+  return encodeURIComponent(name).replace(/-/g, '%2D');
+}
+
+/** The scope name a [`scopeKey`] stands for (`''`: no scope). A key that is not valid percent-encoding reads as itself. */
+export function scopeFromKey(key) {
+  if (key === '-' || key === '' || key === null || key === undefined) return '';
+  try {
+    return decodeURIComponent(key);
+  } catch (_) {
+    return key;
+  }
+}
+
+/** A `top_scope=` list of scope names. */
+export const scopeKeys = (names) => names.map(scopeKey).join(',');
+
+/** The scope names of a `top_scope=` list. */
+export const scopesFromKeys = (raw) => (raw ? String(raw).split(',').map(scopeFromKey) : []);

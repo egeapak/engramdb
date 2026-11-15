@@ -11,6 +11,7 @@
 import { filtered, merge, emptyTally } from '../web/js/graph/tally.js';
 import { kindLabel } from '../web/js/relations.js';
 import { stepIndex } from '../web/js/graph/walk.js';
+import { scopeKey, scopeFromKey, scopeKeys, scopesFromKeys } from '../web/js/scopes.js';
 import { roundAspect, roundWidth, shortLabel, MAX_LAYOUT_WIDTH } from '../web/js/graph/input.js';
 import { fmt, plural, shortId, label, score } from '../web/js/format.js';
 import { moreLink } from '../web/js/views/overview.js';
@@ -141,6 +142,19 @@ export function ok(name, cond, detail) {
   eq('nextTopScope: membership, not size', nextTopScope(new Set(['a', 'b', 'c']), ['a', 'c', 'd']), 'a,b,c');
   eq('nextTopScope: every facet on clears', nextTopScope(new Set(['a', 'b', 'c', 'd']), ['a', 'c', 'd']), '');
   eq('nextTopScope: none on', nextTopScope(new Set(), ['a']), '\u2205');
+}
+
+// ---------------------------------------------------------------------------
+// scopes.js (E19)
+// ---------------------------------------------------------------------------
+{
+  for (const x of ['', '-', 'a,b', '50%', '\u2205', 'storage', 'a b']) eq(`scopeFromKey(scopeKey(${JSON.stringify(x)}))`, scopeFromKey(scopeKey(x)), x);
+  eq('scopeKey: no scope is -', scopeKey(''), '-');
+  eq('scopeKey: a scope named - is not "no scope"', scopeKey('-'), '%2D');
+  eq('scopeKey: commas are escaped', scopeKey('a,b'), 'a%2Cb');
+  eq('scopeKey: a plain name is unchanged', scopeKey('storage'), 'storage');
+  eq('scopeKeys / scopesFromKeys round trip', scopesFromKeys(scopeKeys(['-', '', 'a,b'])), ['-', '', 'a,b']);
+  eq('scopeFromKey: a bad escape reads as itself', scopeFromKey('%E0%A4%A'), '%E0%A4%A');
 }
 
 if (failed) {
