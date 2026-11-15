@@ -652,10 +652,16 @@ fn resolve_provider(
     // Auto / Onnx: try ONNX Runtime first when it is compiled in.
     #[cfg(feature = "onnxruntime")]
     {
-        if let Some(p) = OnnxProvider::try_with_model_intra(specs.onnx.clone(), intra_threads)
-            .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
-        {
-            return Some(p);
+        match OnnxProvider::with_model_on_intra(
+            specs.onnx.clone(),
+            engram_onnx::default_backend(),
+            intra_threads,
+        ) {
+            Ok(p) => return Some(Arc::new(p) as Arc<dyn EmbeddingProvider>),
+            // Debug, not warn: a machine without a runtime takes this path on
+            // every command (the documented fallback, which `doctor` reports),
+            // and the CLI prints WARN on stderr. `RUST_LOG=debug` shows why.
+            Err(e) => tracing::debug!("ONNX embedding model unavailable: {e:#}"),
         }
         if backend == EmbeddingBackend::Onnx {
             return None; // explicit Onnx: no fallback
