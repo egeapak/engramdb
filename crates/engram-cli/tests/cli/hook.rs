@@ -604,22 +604,59 @@ fn a_hook_is_served_by_a_running_daemon() {
         "the daemon's answer differs from the in-process one"
     );
 
-    // Proof the daemon ran it: a hook run in this process appends a line to
-    // hook_stats.jsonl; one the daemon ran is buffered in the daemon and
-    // recorded under the path "daemon", never in that file. The in-process
-    // reference run above wrote exactly one line.
-    let log = project
-        .path()
-        .join(".engramdb")
-        .join("state")
-        .join("hook_stats.jsonl");
-    let lines = std::fs::read_to_string(&log).unwrap_or_default();
+    // Proof the daemon ran it: each path records the call under its own
+    // name, `in_process` or `daemon`. The daemon buffers its events and
+    // flushes them on shutdown (and it may drain this process's JSONL line
+    // into the table meanwhile, so the file alone proves nothing); `stats`
+    // reads the table and any undrained lines together.
+    let mut stop = crate::helpers::std_cmd();
+    daemon_env(&mut stop, &socket, &empty_cache);
+    let stopped = stop
+        .args(["daemon", "stop", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let by_path = loop {
+        let out = crate::helpers::std_cmd()
+            .args(["--dir", project.path().to_str().unwrap(), "--json", "stats"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let by_path = find_by_path(&json, "session-start").unwrap_or_default();
+        let calls = |p: &str| by_path.get(p).and_then(|v| v["calls"].as_u64());
+        if calls("daemon").is_some() || Instant::now() >= deadline {
+            break by_path;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let calls = |p: &str| by_path.get(p).and_then(|v| v["calls"].as_u64());
     assert_eq!(
-        lines
-            .lines()
-            .filter(|l| l.contains("session-start"))
-            .count(),
-        1,
-        "the hook ran in-process instead of in the daemon: {lines}"
+        (calls("in_process"), calls("daemon")),
+        (Some(1), Some(1)),
+        "the reference ran in-process and the second call in the daemon: {by_path:?}"
     );
+}
+
+/// The `by_path` object of the hook named `hook` anywhere in a `stats`
+/// document.
+fn find_by_path(
+    v: &serde_json::Value,
+    hook: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(found) = map
+                .get(hook)
+                .and_then(|h| h.get("by_path"))
+                .and_then(|b| b.as_object())
+            {
+                return Some(found.clone());
+            }
+            map.values().find_map(|c| find_by_path(c, hook))
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(|c| find_by_path(c, hook)),
+        _ => None,
+    }
 }
