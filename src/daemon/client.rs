@@ -741,26 +741,33 @@ mod spawn_tests {
     /// the global config, never from the project that spawned it.
     #[test]
     fn automatic_spawn_passes_no_idle_timeout() {
-        let cmd = spawn_command(Path::new("/bin/engramdb"), Path::new("/run/d.sock"), None);
-        assert_eq!(args(&cmd), ["daemon", "run", "--socket", "/run/d.sock"]);
+        let socket = absolute("d.sock");
+        let cmd = spawn_command(Path::new("/bin/engramdb"), &socket, None);
+        assert_eq!(
+            args(&cmd),
+            ["daemon", "run", "--socket", &socket.to_string_lossy()]
+        );
+    }
+
+    /// An absolute path on every platform. `/run/d.sock` is not one on
+    /// Windows (no drive), so the spawner rightly made it absolute there.
+    fn absolute(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(name)
     }
 
     /// `daemon restart --idle-timeout N` is an explicit user value and is
     /// still forwarded.
     #[test]
     fn explicit_override_is_forwarded() {
-        let cmd = spawn_command(
-            Path::new("/bin/engramdb"),
-            Path::new("/run/d.sock"),
-            Some(90),
-        );
+        let socket = absolute("d.sock");
+        let cmd = spawn_command(Path::new("/bin/engramdb"), &socket, Some(90));
         assert_eq!(
             args(&cmd),
             [
                 "daemon",
                 "run",
                 "--socket",
-                "/run/d.sock",
+                &socket.to_string_lossy(),
                 "--idle-timeout",
                 "90"
             ]
@@ -795,10 +802,11 @@ mod spawn_tests {
     /// variable would point somewhere else in the daemon.
     #[test]
     fn relative_path_variables_are_made_absolute_for_the_daemon() {
+        let abs_config = absolute("config").to_string_lossy().into_owned();
         let kept = daemon_env(
             [
                 ("ENGRAMDB_DATA_DIR", "rel/data"),
-                ("ENGRAMDB_CONFIG_DIR", "/abs/config"),
+                ("ENGRAMDB_CONFIG_DIR", abs_config.as_str()),
                 ("ENGRAMDB_OFFLINE", "1"),
                 ("ORT_DYLIB_PATH", "lib/ort.so"),
             ]
@@ -815,7 +823,7 @@ mod spawn_tests {
             Path::new(&get("ENGRAMDB_DATA_DIR")),
             std::env::current_dir().unwrap().join("rel/data")
         );
-        assert_eq!(get("ENGRAMDB_CONFIG_DIR"), "/abs/config");
+        assert_eq!(get("ENGRAMDB_CONFIG_DIR"), abs_config);
         assert_eq!(get("ENGRAMDB_OFFLINE"), "1");
         assert_eq!(get("ORT_DYLIB_PATH"), "lib/ort.so");
     }

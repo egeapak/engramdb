@@ -711,7 +711,16 @@ mod tests {
     async fn connect_refuses_a_pipe_owned_by_another_sid() {
         let tmp = crate::daemon::private_tempdir();
         let addr = tmp.path().join("peer.sock");
-        let _listener = bind_or_yield(&addr).await.unwrap().expect("bound");
+        let listener = bind_or_yield(&addr).await.unwrap().expect("bound");
+        // A pipe has one waiting instance at a time, and the listener creates
+        // the next one only when it accepts. The refused client below takes
+        // the first instance, so accept in the background as a daemon does,
+        // or the second connect finds every instance busy.
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let _ = listener.accept().await;
+            }
+        });
         // Revision 1, one sub-authority, authority 1 (World), RID 0.
         let everyone = [1u8, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
         let err = super::windows::connect_checked(&addr, &everyone)
@@ -721,6 +730,7 @@ mod tests {
         connect(&addr)
             .await
             .expect("our own pipe passes the peer check");
+        server.abort();
     }
 
     // Unix-only permission hardening: these assert on real filesystem modes,
