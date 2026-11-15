@@ -426,3 +426,60 @@ async fn text_query_falls_back_to_the_file_for_rows_without_stems() {
     assert_eq!(r.memories[0].memory.id, id(900));
     assert_eq!(r.retrieval_quality, "keyword_only");
 }
+
+/// `skip_load` returns the unskipped result minus the skipped ids — same
+/// order, same scores, same `total` — on both the text and the scope-only
+/// path, and the text path reads none of the skipped files.
+#[tokio::test]
+async fn skip_load_keeps_rank_positions() {
+    let (_tmp, store) = fixture().await;
+    let engine = RetrievalEngine::new(store, EngramConfig::default());
+    let scope_only = RetrievalQuery {
+        mode: RetrievalMode::Rank,
+        path: Some(PATHS[0].to_string()),
+        max_results: Some(10),
+        expand_links: Some(0),
+        rank_fallback: Some(0),
+        ..Default::default()
+    };
+    for base in [text_filter("token refresh rotation", 10), scope_only] {
+        let before = files_requested();
+        let full = engine.query(&base).await.unwrap();
+        let read_full = files_requested() - before;
+        assert!(full.memories.len() >= 4, "{}", full.memories.len());
+        let skip: std::collections::HashSet<String> = [0usize, 2]
+            .iter()
+            .map(|&i| full.memories[i].memory.id.clone())
+            .collect();
+        let before = files_requested();
+        let skipped = engine
+            .query(&RetrievalQuery {
+                skip_load: Some(skip.clone()),
+                ..base.clone()
+            })
+            .await
+            .unwrap();
+        let read = files_requested() - before;
+        let expect: Vec<(String, u64)> = full
+            .memories
+            .iter()
+            .filter(|sm| !skip.contains(&sm.memory.id))
+            .map(|sm| (sm.memory.id.clone(), sm.score.to_bits()))
+            .collect();
+        let got: Vec<(String, u64)> = skipped
+            .memories
+            .iter()
+            .map(|sm| (sm.memory.id.clone(), sm.score.to_bits()))
+            .collect();
+        assert_eq!(got, expect, "a skipped id gave its place to another");
+        assert_eq!(skipped.total, full.total);
+        assert_eq!(
+            skipped.dropped_below_threshold,
+            full.dropped_below_threshold
+        );
+        if base.query.is_some() {
+            // Two fewer reads: the stem-less rows' files are read either way.
+            assert_eq!(read, read_full - 2, "skipped files were read");
+        }
+    }
+}

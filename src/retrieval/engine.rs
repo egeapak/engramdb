@@ -159,6 +159,16 @@ pub struct RetrievalQuery {
     /// signal and threshold — that is the point — and is marked with
     /// `ScoreBreakdown::via`.
     pub expand_links: Option<usize>,
+
+    /// Ids that keep their place in the ranked cut but are neither loaded
+    /// nor returned: the caller already has them (a hook's "already shown
+    /// this session"). Ranking, the `max_results` cut and `total` are those
+    /// of the same query without it, so a skipped id never lets a
+    /// lower-ranked memory into the result in its place — the result is the
+    /// unskipped result minus the skipped ids, without reading their files.
+    /// Meant for queries without link expansion (a skipped hit still
+    /// expands, and its neighbour would then be returned without it).
+    pub skip_load: Option<std::collections::HashSet<String>>,
 }
 
 /// A memory with its computed relevance score.
@@ -1786,8 +1796,18 @@ impl RetrievalEngine {
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
         let mut tail = candidates.split_off(max_results.min(candidates.len()));
-        self.load_missing(&mut memory_map, candidates.iter().map(|c| c.id.as_str()))
-            .await?;
+        // A skipped id keeps its place and its count, is never loaded, and is
+        // removed at the end (`RetrievalQuery::skip_load`).
+        let skip = query.skip_load.as_ref();
+        let skipped = |id: &str| skip.is_some_and(|s| s.contains(id));
+        self.load_missing(
+            &mut memory_map,
+            candidates
+                .iter()
+                .map(|c| c.id.as_str())
+                .filter(|id| !skipped(id)),
+        )
+        .await?;
         // A row scored from the index whose file is gone or no longer parses
         // (a drifted store) cannot be returned. Drop it, uncount it, and
         // refill from the cut tail once, with exactly as many as went
@@ -1795,15 +1815,21 @@ impl RetrievalEngine {
         // second round. Before scores came from the index such a row was
         // never scored at all, so a healthy store answers exactly as before.
         let before = candidates.len();
-        candidates.retain(|c| memory_map.contains_key(&c.id));
+        candidates.retain(|c| skipped(&c.id) || memory_map.contains_key(&c.id));
         let missing = before - candidates.len();
         if missing > 0 {
             total -= missing;
             let refill: Vec<ScoredCandidate> = tail.drain(..missing.min(tail.len())).collect();
-            self.load_missing(&mut memory_map, refill.iter().map(|c| c.id.as_str()))
-                .await?;
+            self.load_missing(
+                &mut memory_map,
+                refill
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .filter(|id| !skipped(id)),
+            )
+            .await?;
             for c in refill {
-                if memory_map.contains_key(&c.id) {
+                if skipped(&c.id) || memory_map.contains_key(&c.id) {
                     candidates.push(c);
                 } else {
                     total -= 1;
@@ -1829,12 +1855,18 @@ impl RetrievalEngine {
         // only those it did not already count as a cut candidate.
         let mut total = total + new_in_total;
         if !expanded.is_empty() {
-            self.load_missing(&mut memory_map, expanded.iter().map(|c| c.id.as_str()))
-                .await?;
+            self.load_missing(
+                &mut memory_map,
+                expanded
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .filter(|id| !skipped(id)),
+            )
+            .await?;
             // Counted either way (in the tail or by `new_in_total`), so a
             // neighbour whose file does not load is uncounted.
             let before = expanded.len();
-            expanded.retain(|c| memory_map.contains_key(&c.id));
+            expanded.retain(|c| skipped(&c.id) || memory_map.contains_key(&c.id));
             total -= before - expanded.len();
         }
         let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
@@ -1845,6 +1877,7 @@ impl RetrievalEngine {
 
         let mut scored_memories: Vec<ScoredMemory> = candidates
             .into_iter()
+            .filter(|c| !skipped(&c.id))
             .filter_map(|c| {
                 // Every candidate was loaded above; `filter_map` guards
                 // defensively without panicking.
@@ -2030,7 +2063,10 @@ impl RetrievalEngine {
         }
 
         // Materialize ONLY the survivors (and any expanded neighbours) — the
-        // whole point of this path.
+        // whole point of this path — less the ids the caller already holds.
+        if let Some(skip) = &query.skip_load {
+            candidates.retain(|c| !skip.contains(&c.id));
+        }
         let survivor_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
         let loaded: HashMap<String, Memory> = self
             .store

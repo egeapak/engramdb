@@ -44,6 +44,8 @@ where
     let n = resolved_expand_links(engine, query);
     let mut query = query.clone();
     query.expand_links = Some(n);
+    // Applied to the merged answer (see `query_memories_with_extra_stores`).
+    let skip = query.skip_load.take();
     let mut result = query_memories(engine, &query).await?;
     if include_global {
         if let Some(mut global_engine) = global_engine().await {
@@ -64,6 +66,9 @@ where
                     .saturating_sub(before - expansion_count(&result.memories));
             }
         }
+    }
+    if let Some(skip) = skip {
+        result.memories.retain(|sm| !skip.contains(&sm.memory.id));
     }
     Ok(result)
 }
@@ -431,7 +436,40 @@ const FANIN_OVERFETCH_CAP: usize = 100;
 /// band it generalizes. The combined `total` counts only *visible*
 /// (audience-passing) extra memories, so it never leaks the existence of
 /// memories hidden from the viewer.
+///
+/// [`RetrievalQuery::skip_load`] is applied to the merged answer, not per
+/// store: a store that dropped a skipped id before the merge would let
+/// another store's lower-ranked memory into the cut in its place.
 pub async fn query_memories_with_extra_stores<F, Fut>(
+    engine: &RetrievalEngine,
+    query: &RetrievalQuery,
+    viewer_ids: &HashSet<String>,
+    equalize_cross_store_scores: bool,
+    extra_engines: F,
+) -> Result<ExtraStoresResult>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, RetrievalEngine)>>,
+{
+    let mut query = query.clone();
+    let skip = query.skip_load.take();
+    let mut out = extra_stores_unskipped(
+        engine,
+        &query,
+        viewer_ids,
+        equalize_cross_store_scores,
+        extra_engines,
+    )
+    .await?;
+    if let Some(skip) = skip {
+        out.result
+            .memories
+            .retain(|sm| !skip.contains(&sm.memory.id));
+    }
+    Ok(out)
+}
+
+async fn extra_stores_unskipped<F, Fut>(
     engine: &RetrievalEngine,
     query: &RetrievalQuery,
     viewer_ids: &HashSet<String>,

@@ -26,6 +26,7 @@ use engramdb::daemon::HookCall;
 use engramdb::ops::Surface;
 use engramdb::storage::paths::relativize_path;
 use engramdb::storage::{MemoryStore, RegistryBackend};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
@@ -675,6 +676,10 @@ async fn process_hook_input_in(
     // No model providers: the query below has `query: None`, so retrieval is
     // scope_only and never embeds (see module docs).
     let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
+    // Read once: the engine skips loading these (they keep their place in
+    // the pool, so the pool is what it would be without them), and the same
+    // set drops them below.
+    let seen = already_shown(input, dir);
 
     let query = RetrievalQuery {
         mode: RetrievalMode::Rank,
@@ -682,6 +687,7 @@ async fn process_hook_input_in(
         rank_fallback: Some(0),
         // Never expand links in a hook: an edges query per tool call.
         expand_links: Some(0),
+        skip_load: (!seen.is_empty()).then(|| seen.clone()),
         path: Some(relative_path.clone()),
         logical: vec![],
         query: None,
@@ -720,7 +726,8 @@ async fn process_hook_input_in(
     // `query` still surface them.
     let current_task = session_task_for(input, dir);
     let memories = suppress_task_scoped(result.memories, current_task.as_deref());
-    let mut memories = drop_already_shown(memories, input, dir);
+    // The engine already left these out; kept as the authority.
+    let mut memories = drop_seen(memories, &seen);
     memories.sort_by_key(|sm| {
         engramdb::scope::physical::enclosing_depth(&sm.memory.physical, &relative_path)
             .unwrap_or(usize::MAX)
@@ -965,10 +972,18 @@ fn extract_context_id(input: &str) -> Option<String> {
 /// conversation still holds them, and a repeat is re-read on every later
 /// turn for nothing (see `engramdb::storage::hook_seen`).
 fn drop_already_shown(memories: Vec<ScoredMemory>, input: &str, dir: &Path) -> Vec<ScoredMemory> {
-    let Some(session_id) = extract_context_id(input) else {
-        return memories;
-    };
-    let seen = engramdb::storage::hook_seen::seen_ids(dir, &session_id);
+    drop_seen(memories, &already_shown(input, dir))
+}
+
+/// The ids this session's hooks already injected (empty without a session).
+fn already_shown(input: &str, dir: &Path) -> HashSet<String> {
+    match extract_context_id(input) {
+        Some(session_id) => engramdb::storage::hook_seen::seen_ids(dir, &session_id),
+        None => HashSet::new(),
+    }
+}
+
+fn drop_seen(memories: Vec<ScoredMemory>, seen: &HashSet<String>) -> Vec<ScoredMemory> {
     if seen.is_empty() {
         return memories;
     }
@@ -4497,6 +4512,56 @@ mod tests {
         forget_shown(&input("sess-a"), dir);
         let again = run(input("sess-a")).await.expect("after compaction");
         assert!(again.contains("Use async everywhere"), "{again}");
+    }
+
+    /// The engine skips loading the already-shown memories (`skip_load`)
+    /// but they keep their place in the pool, so each edit injects exactly
+    /// what dropping them after the query did: the next memories in order,
+    /// never one the session has, until none are left.
+    #[tokio::test]
+    async fn pre_tool_use_injects_the_same_memories_with_skip_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        let store = MemoryStore::init(dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for i in 0..(PRE_TOOL_USE_MAX_RESULTS + 3) {
+            let mut m = Memory::new(
+                MemoryType::Decision,
+                &format!("Main rule number {i}"),
+                "applies to the main file",
+                Provenance::human(),
+            );
+            m.physical = vec!["src/main.rs".to_string()];
+            m.criticality = 0.5 + i as f64 * 0.01;
+            store.create(&m).await.unwrap();
+        }
+        let input = serde_json::json!({
+            "session_id": "sess-skip",
+            "tool_name": "Read",
+            "tool_input": { "file_path": dir.join("src/main.rs").to_str().unwrap() }
+        })
+        .to_string();
+        let shown_in = |out: &str| -> Vec<usize> {
+            (0..(PRE_TOOL_USE_MAX_RESULTS + 3))
+                .filter(|i| out.contains(&format!("Main rule number {i}")))
+                .collect()
+        };
+        let run = || async {
+            let store = MemoryStore::open(dir).await.unwrap();
+            process_hook_input(&input, dir, store).await.unwrap()
+        };
+        let first = shown_in(&run().await.expect("first edit injects"));
+        assert_eq!(first.len(), PRE_TOOL_USE_MAX_RESULTS, "{first:?}");
+        let second = shown_in(&run().await.expect("the rest"));
+        assert_eq!(second.len(), 3, "{second:?}");
+        assert!(
+            second.iter().all(|i| !first.contains(i)),
+            "{first:?} {second:?}"
+        );
+        assert!(run().await.is_none(), "everything was shown");
     }
 
     #[tokio::test]

@@ -2923,6 +2923,7 @@ impl EngramDbServer {
             // rank gets marked weak matches rather than an empty answer.
             rank_fallback: None,
             expand_links,
+            skip_load: None,
         };
 
         // Cross-store read fan-in (ops::query_memories_with_extra_stores). When

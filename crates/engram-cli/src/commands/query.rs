@@ -181,6 +181,7 @@ async fn compute_query_result(
         include_invalidated: Some(params.include_invalidated),
         rank_fallback: None,
         expand_links: params.expand_links,
+        skip_load: None,
     };
 
     // When querying a shared store directly (`--global`/`--group`), there is no
