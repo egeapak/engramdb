@@ -16,6 +16,11 @@ serde_json = "1"
 # to print the failing input — so a target that outgrows 12 fields stops
 # building (see composite_score, #64).
 arbitrary = { version = "1", features = ["derive"] }
+# `daemon_frame` drives the async frame reader on a current-thread runtime;
+# `transcript_parse` and `ledger_read` need a file on disk. Both are pinned to
+# the root workspace's resolved versions (`fuzz-lockfile-parity`).
+tokio = { version = "=1.54.1", features = ["rt", "io-util"] }
+tempfile = "=3.27.0"
 
 [dependencies.engramdb]
 path = ".."
@@ -128,6 +133,34 @@ bench = false
 [[bin]]
 name = "slug"
 path = "fuzz_targets/slug.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transcript_parse"
+path = "fuzz_targets/transcript_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitize_defang"
+path = "fuzz_targets/sanitize_defang.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ledger_read"
+path = "fuzz_targets/ledger_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "daemon_frame"
+path = "fuzz_targets/daemon_frame.rs"
 test = false
 doc = false
 bench = false
