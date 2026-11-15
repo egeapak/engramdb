@@ -679,7 +679,9 @@ pub(crate) fn hex_json<T: Serialize>(v: &T) -> String {
 
 /// The inverse of [`hex_json`]; `None` for anything it did not produce.
 pub(crate) fn unhex_json<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
-    if !s.len().is_multiple_of(2) || s.len() > 4096 {
+    // Only hex digits: `from_str_radix` also takes a leading `+`, so a pair
+    // such as `+7` would decode.
+    if !s.len().is_multiple_of(2) || s.len() > 4096 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let bytes: Option<Vec<u8>> = (0..s.len())
@@ -1264,6 +1266,16 @@ mod tests {
         }
     }
 
+    /// `from_str_radix` takes a leading `+`, so `+9` decoded to a tab and
+    /// `31+9` (`1` then a tab) parsed as the JSON number 1. Only hex digits
+    /// are accepted.
+    #[test]
+    fn unhex_json_accepts_only_hex_digits() {
+        assert_eq!(unhex_json::<u32>("3109"), Some(1));
+        assert_eq!(unhex_json::<u32>("31+9"), None);
+        assert_eq!(unhex_json::<u32>("+931"), None);
+    }
+
     /// A cursor arrives in a query string, so `unhex_json` sees whatever a
     /// client sends: odd lengths, non-hex, multibyte text, over the cap, and
     /// valid hex of invalid JSON. None of it may panic, and none of it may be
@@ -1280,7 +1292,9 @@ mod tests {
                 .collect();
             if let Some(v) = unhex_json::<serde_json::Value>(&s) {
                 assert!(
-                    s.len().is_multiple_of(2) && s.len() <= 4096,
+                    s.len().is_multiple_of(2)
+                        && s.len() <= 4096
+                        && s.bytes().all(|b| b.is_ascii_hexdigit()),
                     "case {case}: accepted {s:?} as {v}"
                 );
             }
