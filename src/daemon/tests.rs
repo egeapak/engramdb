@@ -1384,29 +1384,30 @@ async fn ping_once(socket: &std::path::Path) {
     );
 }
 
-/// A heartbeat-style loop of Pings every ~330 ms keeps the daemon alive past
-/// its 1-second idle timeout.
+/// A heartbeat-style loop of Pings every 500 ms keeps the daemon alive past
+/// its 3-second idle timeout. (A 1 s idle with 330 ms pings left a 670 ms
+/// margin, which a loaded runner can eat.)
 #[tokio::test]
 async fn heartbeat_pings_keep_daemon_alive_past_idle() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("hb.sock");
 
-    // Spawn daemon with a 1-second idle timeout.
-    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    // Spawn daemon with a 3-second idle timeout.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3)));
     poll_until_connectable(&socket).await;
 
-    // Ping every ~330ms for a total of ~6 pings over ~1.98s — more than the
-    // idle timeout, but the pings should keep last_activity fresh.
+    // Ping every 500 ms for 10 pings over ~5 s — more than the idle timeout,
+    // but the pings should keep last_activity fresh.
     let sock = socket.clone();
     let hb = tokio::spawn(async move {
-        for _ in 0..6 {
+        for _ in 0..10 {
             ping_once(&sock).await;
-            tokio::time::sleep(Duration::from_millis(330)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     });
 
-    // After 1.5s (> idle_timeout) the daemon must still be alive.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // After 4.5 s (> idle_timeout) the daemon must still be alive.
+    tokio::time::sleep(Duration::from_millis(4500)).await;
     assert!(
         super::transport::connect(&socket).await.is_ok(),
         "daemon should still be alive while heartbeat pings continue"
@@ -1429,17 +1430,18 @@ async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("hbcell.sock");
 
-    // 1-second idle timeout; the daemon is already running so each `get` just
+    // 3-second idle timeout; the daemon is already running so each `get` just
     // health-checks (no spawn path is taken).
-    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3)));
     poll_until_connectable(&socket).await;
 
     let cell = DaemonCell::new();
-    // 6 resolves spaced ~330ms span ~2s, well past the 1s idle timeout.
-    for _ in 0..6 {
+    // 10 resolves spaced 500 ms span ~5 s, well past the 3 s idle timeout,
+    // with a 2.5 s margin on each gap.
+    for _ in 0..10 {
         let h = cell.get(&socket, 1, DaemonPolicy::ConnectOnly).await;
         assert!(h.is_some(), "cell.get should keep returning a live handle");
-        tokio::time::sleep(Duration::from_millis(330)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     assert!(

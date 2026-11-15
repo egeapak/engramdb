@@ -635,21 +635,18 @@ fn a_layout_that_is_not_finite_is_an_error_never_sent() {
 // Cache
 // ---------------------------------------------------------------------------
 
-fn temp_cache_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "engram-layout-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    dir.join("layouts")
+/// A fresh cache dir (not yet created: the cache makes it) under a temp dir
+/// that is removed when the returned guard drops. Keep the guard alive for
+/// the whole test.
+fn temp_cache_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+    let guard = tempfile::TempDir::new().unwrap();
+    let dir = guard.path().join("layouts");
+    (guard, dir)
 }
 
 #[test]
 fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let input = LayoutInput::Force(sample(20));
     let key = input.digest();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
@@ -721,7 +718,7 @@ fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
 
 #[test]
 fn the_disk_cache_evicts_the_oldest_past_its_cap() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     for k in 0..6 {
         let key = format!("{k:064x}");
@@ -772,7 +769,7 @@ fn prune_touches_only_the_caches_own_file_names() {
     }
     // A directory the user pointed the cache at keeps their files, however
     // old, under any cap.
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     assert!(c.dir().is_some());
     let theirs = ["notes.json", "photo.bin", "editor.tmp"];
@@ -795,7 +792,7 @@ fn prune_touches_only_the_caches_own_file_names() {
 
 #[test]
 fn a_corrupt_overview_on_disk_is_a_miss() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let key = "b".repeat(64);
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     c.fill(&key, || Ok(Cached::Overview("{\"v\":3,".into())))
@@ -893,7 +890,7 @@ async fn a_lead_waits_its_turn_for_a_computing_slot() {
 
 #[test]
 fn a_shared_cache_dir_is_refused() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     std::fs::create_dir_all(&dir).unwrap();
     #[cfg(unix)]
     {
@@ -1028,7 +1025,7 @@ fn grid_keeps_its_contract_and_is_deterministic() {
 
 #[test]
 fn a_cache_file_with_a_damaged_payload_is_recomputed() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let input = LayoutInput::Force(sample(20));
     let key = input.digest();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
@@ -1085,7 +1082,7 @@ fn a_non_finite_core_never_reads_back() {
 
 #[test]
 fn a_pre_checksum_cache_file_is_replaced() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let input = LayoutInput::Force(sample(20));
     let key = input.digest();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);

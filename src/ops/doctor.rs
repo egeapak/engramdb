@@ -3210,7 +3210,12 @@ fn check_global_gitignore() -> EnvironmentCheck {
             // Default location: $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore
             dirs::config_dir().map(|c| c.join("git").join("ignore"))
         });
+    check_global_gitignore_at(excludes_path.as_deref())
+}
 
+/// [`check_global_gitignore`] against a resolved excludes file (`None`: none
+/// configured), so tests can drive it without the machine's git config.
+fn check_global_gitignore_at(excludes_path: Option<&Path>) -> EnvironmentCheck {
     let Some(excludes_path) = excludes_path else {
         return EnvironmentCheck {
             name: "Global gitignore".to_string(),
@@ -3226,7 +3231,7 @@ fn check_global_gitignore() -> EnvironmentCheck {
         };
     };
 
-    let content = std::fs::read_to_string(&excludes_path).unwrap_or_default();
+    let content = std::fs::read_to_string(excludes_path).unwrap_or_default();
     let has_engramdb = content
         .lines()
         .any(|line| line.trim() == ".engramdb" || line.trim() == ".engramdb/");
@@ -5714,10 +5719,37 @@ mod tests {
     }
 
     #[test]
-    fn test_check_global_gitignore_runs() {
-        // Just verify it doesn't panic — actual global state varies
-        let result = check_global_gitignore();
-        assert!(result.passed);
+    fn global_gitignore_that_ignores_engramdb_is_reported() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("ignore");
+        std::fs::write(&file, "*.swp\n.engramdb/\n").unwrap();
+        let r = check_global_gitignore_at(Some(&file));
+        assert!(r.passed);
+        assert_eq!(r.message, ".engramdb ignored globally");
+        assert!(r.suggestion.is_none());
+    }
+
+    #[test]
+    fn global_gitignore_without_the_entry_passes() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("ignore");
+        std::fs::write(&file, "*.swp\n.engramdb-other\n").unwrap();
+        let r = check_global_gitignore_at(Some(&file));
+        assert!(r.passed);
+        assert_eq!(r.message, ".engramdb not in global excludes");
+        assert!(r
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains(&file.display().to_string())));
+        assert_eq!(r.status, Some(CheckStatus::Info));
+    }
+
+    #[test]
+    fn no_global_gitignore_passes() {
+        let r = check_global_gitignore_at(None);
+        assert!(r.passed);
+        assert_eq!(r.message, "no global excludes file configured");
+        assert_eq!(r.status, Some(CheckStatus::Info));
     }
 
     #[tokio::test]
