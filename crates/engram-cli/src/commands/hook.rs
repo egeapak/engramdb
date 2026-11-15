@@ -4736,7 +4736,7 @@ mod tests {
         for i in 0..(PRE_TOOL_USE_MAX_RESULTS + 3) {
             let mut m = Memory::new(
                 MemoryType::Decision,
-                &format!("Main rule number {i}"),
+                format!("Main rule number {i}"),
                 "applies to the main file",
                 Provenance::human(),
             );
