@@ -28,7 +28,7 @@ use engramdb::ops::usage::{MemoryEvent, StoreRef, Surface, UsageKind};
 use engramdb::storage::memory_file::{memory_filename, write_memory_file};
 use engramdb::storage::{paths, FileRegistry, MemoryStore};
 use engramdb::types::{
-    Challenge, Link, LinkKind, LinkOrigin, LinkStatus, Memory, MemoryType, Provenance,
+    Challenge, Link, LinkKind, LinkOrigin, LinkStatus, Memory, MemoryType, Provenance, Status,
 };
 
 /// The sizes the benches use, with their directory names.
@@ -363,5 +363,198 @@ pub async fn build(dir: &Path, n: usize) -> anyhow::Result<String> {
     }
     // Drain the log into the table, as a maintenance pass would.
     engramdb::ops::usage::maintain_memory_events(&store).await;
+    Ok(store.project_id.clone())
+}
+
+/// The fault fixture's directory name (`dashboard_bench_store -- <out> sfault`).
+pub const FAULT: &str = "sfault";
+/// The project `bench/browser/pages.mjs` moves away and back (the catalog
+/// refetch check), built next to [`FAULT`].
+pub const FAULT_AWAY: &str = "sfault-away";
+
+/// How many memories the fault store holds, by kind (pages.mjs reads these).
+pub const FAULT_LIVE: usize = 140;
+pub const FAULT_INVALIDATED: usize = 20;
+pub const FAULT_CHALLENGED: usize = 15;
+/// Proposed relations, enough for several write-enabled runs of pages.mjs.
+pub const FAULT_PROPOSED: usize = 30;
+
+fn fault_id(i: usize) -> String {
+    format!("0bfa0170-0000-7000-8000-{i:012x}")
+}
+
+/// Wrap a memory file's hidden block in a git merge conflict (both sides
+/// whole blocks), which `parse_memory_file` refuses.
+pub fn conflict_hidden_block(text: &str) -> String {
+    let start = text.find("<!-- engramdb").unwrap_or(text.len());
+    let block = &text[start..];
+    format!(
+        "{}<<<<<<< HEAD\n{block}=======\n{block}>>>>>>> topic\n",
+        &text[..start]
+    )
+}
+
+/// The fault fixture for the dashboard's page checks
+/// (`crates/engram-dashboard/bench/browser/pages.mjs`): what a real store
+/// can hold that the generated ones never do.
+///
+/// - [`FAULT_LIVE`] live memories (so the store is under the 150 overview
+///   threshold without its invalidated ones) and [`FAULT_INVALIDATED`]
+///   invalidated ones that were read before they were invalidated (and so
+///   over it with them);
+/// - [`FAULT_CHALLENGED`] challenged memories (more than the Overview lists
+///   per group);
+/// - one memory whose *index row* holds a `NaN` criticality (written
+///   through `MemoryStore::create`, which takes the value as given; the
+///   file parser reads `NaN` as absent, so only a row written before that
+///   fix holds one);
+/// - top scopes named `-` and `a,b`, and scope-less memories;
+/// - relations of kind `constructor`, rejected and dangling ones, one with
+///   an invalidated end, and [`FAULT_PROPOSED`] proposed ones (the
+///   write-enabled run reviews some);
+/// - usage events left in `.engramdb/state/memory_events.jsonl` (never
+///   drained), including reads of invalidated memories and of an id with
+///   no row;
+/// - one merge-conflicted memory file, made after the index was built (so
+///   its row stays and `doctor` lists it as unparseable).
+///
+/// Also builds [`FAULT_AWAY`], a small registered project beside it.
+pub async fn build_fault(out: &Path) -> anyhow::Result<String> {
+    let dir = out.join(FAULT);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    std::fs::create_dir_all(&dir)?;
+    let dir: PathBuf = std::fs::canonicalize(&dir)?;
+    let registry = FileRegistry::global()?;
+    let store = MemoryStore::init(&dir, &registry).await?;
+    let t0 = base_time();
+    const SCOPES: [&str; 6] = ["storage.index", "retrieval", "-", "a,b", "", "storage.lock"];
+    let n = FAULT_LIVE + FAULT_INVALIDATED;
+    let mut mems: Vec<Memory> = (0..n)
+        .map(|i| {
+            let scope = SCOPES[i % SCOPES.len()];
+            let mut m = Memory::new(
+                TYPES[i % TYPES.len()],
+                format!(
+                    "Fault memory {i} in {}",
+                    if scope.is_empty() { "no scope" } else { scope }
+                ),
+                format!("Content of fault memory {i}."),
+                Provenance::human(),
+            );
+            m.id = fault_id(i);
+            if !scope.is_empty() {
+                m.logical = vec![scope.to_string()];
+            }
+            m.criticality = ((i % 10) as f64) / 10.0;
+            let at = t0 + Duration::minutes(i as i64);
+            m.created_at = at;
+            m.updated_at = at;
+            m.accessed_at = at;
+            if i >= FAULT_LIVE {
+                m.invalidated_at = Some(at + Duration::days(3));
+            } else if i < FAULT_CHALLENGED {
+                let mut c = Challenge::new(format!("Observed otherwise in fault run {i}."));
+                c.timestamp = at + Duration::days(1);
+                m.status = Status::Challenged;
+                m.challenges.push(c);
+            }
+            m
+        })
+        .collect();
+    let link = |to: &str, kind: &str, status: LinkStatus| {
+        let mut l = Link::new(
+            to.to_string(),
+            LinkKind::parse_lenient(kind),
+            LinkOrigin::parse_lenient(if status == LinkStatus::Confirmed {
+                "human"
+            } else {
+                "nli"
+            }),
+        );
+        l.status = status;
+        l.confidence = 0.8;
+        l.at = Some(t0 + Duration::days(4));
+        l
+    };
+    // Proposed: contradictions and related_to between live memories past
+    // the challenged ones (each pair once).
+    for k in 0..FAULT_PROPOSED {
+        let (s, t) = (20 + 2 * k, 21 + 2 * k);
+        let kind = if k % 3 == 0 { "contradicts" } else { "related_to" };
+        let to = mems[t].id.clone();
+        mems[s].links.push(link(&to, kind, LinkStatus::Proposed));
+    }
+    // A kind a newer binary (or a hand edit) wrote, named like an
+    // `Object.prototype` member; rejected ones; one to an invalidated
+    // memory; one to a memory that does not exist.
+    let (a, b) = (mems[90].id.clone(), mems[91].id.clone());
+    mems[92].links.push(link(&a, "constructor", LinkStatus::Confirmed));
+    mems[93].links.push(link(&b, "__proto__", LinkStatus::Confirmed));
+    for k in 0..4 {
+        let to = mems[100 + k].id.clone();
+        mems[110 + k]
+            .links
+            .push(link(&to, "supports", LinkStatus::Rejected));
+    }
+    let inv = mems[FAULT_LIVE + 1].id.clone();
+    mems[120].links.push(link(&inv, "supports", LinkStatus::Confirmed));
+    mems[121]
+        .links
+        .push(link(&fault_id(9_999), "related_to", LinkStatus::Confirmed));
+
+    // The `NaN` row: every memory but this one arrives as a file.
+    let nan_at = 130;
+    let mdir = paths::memories_dir(&dir);
+    std::fs::create_dir_all(&mdir)?;
+    for (i, m) in mems.iter().enumerate() {
+        if i != nan_at {
+            std::fs::write(mdir.join(memory_filename(m)), write_memory_file(m)?)?;
+        }
+    }
+    let indexed = store.reindex().await?;
+    anyhow::ensure!(indexed == n - 1, "indexed {indexed} of {} memories", n - 1);
+    let mut nan = mems[nan_at].clone();
+    nan.criticality = f64::NAN;
+    store.create(&nan).await?;
+
+    // Reads, left in the JSONL log: every invalidated memory, a few live
+    // ones, and an id with no row.
+    let owner = StoreRef::of(&store);
+    let mut events = Vec::new();
+    let read = |id: &str, kind| MemoryEvent::new(id, &store.project_id, kind, Surface::Cli);
+    for m in mems.iter().skip(FAULT_LIVE) {
+        events.push(read(&m.id, UsageKind::Fetched));
+    }
+    for m in mems.iter().take(10) {
+        events.push(read(&m.id, UsageKind::Returned));
+    }
+    events.push(read(&fault_id(9_998), UsageKind::Fetched));
+    engramdb::ops::usage::write_events(&owner, &events);
+
+    // The merge conflict, after the index was built.
+    let conflicted = mdir.join(memory_filename(&mems[125]));
+    let text = std::fs::read_to_string(&conflicted)?;
+    std::fs::write(&conflicted, conflict_hidden_block(&text))?;
+
+    // The project pages.mjs moves away and back.
+    let away = out.join(FAULT_AWAY);
+    if away.exists() {
+        std::fs::remove_dir_all(&away)?;
+    }
+    std::fs::create_dir_all(&away)?;
+    let away = std::fs::canonicalize(&away)?;
+    let other = MemoryStore::init(&away, &registry).await?;
+    for i in 0..3 {
+        let mut m = Memory::new(
+            MemoryType::Context,
+            format!("Away memory {i}"),
+            "Content.".to_string(),
+            Provenance::human(),
+        );
+        m.id = format!("0bfa0a0a-0000-7000-8000-{i:012x}");
+        other.create(&m).await?;
+    }
     Ok(store.project_id.clone())
 }
