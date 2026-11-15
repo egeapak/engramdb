@@ -68,15 +68,15 @@ project's `.engramdb/config.toml`, where `[daemon]` is ignored.
 - **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
 - **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
 - **PostToolUse / PostToolUseFailure (Bash)** — notices a command that failed and later succeeded in the same session, and asks once to save the cause
-- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own. Like the other hooks it does nothing at all in a directory where EngramDB was never initialized — the plugin registers hooks machine-wide, and a project with no store gets no archive
+- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and keeps a compressed copy of the session transcript so it can still be read after Claude Code prunes its own. Like the other hooks it does nothing at all in a directory where EngramDB was never initialized — the plugin registers hooks machine-wide, and a project with no store gets no transcript copy
 
-> **What the transcript archive stores.** Claude Code prunes its own
+> **What the transcript copy holds.** Claude Code prunes its own
 > transcripts, so a session becomes unharvestable once its file is gone.
 > SessionEnd therefore keeps a zstd-compressed copy at
 > `<engramdb data dir>/projects/<root-project-id>/transcripts/` — deliberately
 > **outside** your repository, never under `.engramdb/`, which gets committed.
 > The id is the **root** of the project's hierarchy, so a git worktree's
-> archives land beside the main checkout's rather than in a directory of
+> transcript copies land beside the main checkout's rather than in a directory of
 > their own.
 >
 > It is a verbatim copy of the whole conversation: your prompts, the

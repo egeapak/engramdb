@@ -540,7 +540,7 @@ unaffected by `--group`: it stays a flat array carrying `parent_project_id`.
 
 `projects delete` removes a *registration* and reclaims the data directory
 behind it. It keeps that directory whole whenever it still holds anything with no other
-copy — personal memories, archived transcripts, or curated conversation
+copy — personal memories, transcript copies, or curated conversation
 summaries — unless `--purge` is passed — a project ID derived from a git remote is
 shared by every clone of that remote on the machine, and the registry records
 only one of them, so deleting one checkout's registration can otherwise destroy
@@ -680,7 +680,7 @@ It **never deletes anything**: personal memories are *copied* to the live data
 directory and the old one is left in place. An unregistered sibling clone of the
 same remote shares that directory and is structurally invisible to the registry,
 so no check can prove it is yours alone. `projects prune` leaves that directory alone
-entirely for as long as it holds personal memories, archived transcripts or
+entirely for as long as it holds personal memories, transcript copies or
 conversation summaries — it is kept whole, index included. Files that can't
 be read or parsed — on either side — are left alone and counted in
 `personal_skipped`; that includes a live file carrying the same memory ID that
@@ -879,19 +879,19 @@ separately embedded but never what recall depends on. A rebuild preserves it.
 offered again, and *must* be used even when a session yielded nothing —
 a zero-yield session leaves no other trace, so without a mark it is re-read
 on every future harvest. `reset` clears the review. When the session has an
-archived transcript the entry is **kept** and set back to `unreviewed` rather
-than deleted: that entry is the only route to the archive, so removing it would
+transcript copy the entry is **kept** and set back to `unreviewed` rather
+than deleted: that entry is the only route to the copy, so removing it would
 strand the file — unreachable by `harvest show`, `ledger export` and
-`ledger list` alike, while still counting against the archive budget. With no
-archive behind it the entry is removed outright, and the session is offered
+`ledger list` alike, while still counting against the copies' size budget. With no
+copy behind it the entry is removed outright, and the session is offered
 again only while Claude Code still holds the live transcript; the success
-message says which of the two happened. To delete an entry *and* its archive,
+message says which of the two happened. To delete an entry *and* its transcript copy,
 use `harvest ledger rm`. The ledger lives in
 `.engramdb/state/harvest_ledger.jsonl` under the root project, shared by
 all its worktrees and by any sub-project linked to it with
-`engramdb projects link` — the same root the archives are keyed by, since
+`engramdb projects link` — the same root the transcript copies are keyed by, since
 those projects are offered each other's sessions and prune each other's
-archives. A ledger found at a sub-project's own path (written before it was
+transcript copies. A ledger found at a sub-project's own path (written before it was
 linked) is appended to the root's the next time a harvest command runs there,
 and the old file is kept alongside as `harvest_ledger.jsonl.adopted`. Moving
 it aside is what commits the adoption, so a sub-project directory that cannot
@@ -920,11 +920,11 @@ converter cannot read is skipped with a warning naming the session, and the
 original file is your copy of it.
 
 Entries are dropped once they are **365 days** old — a fixed window, with no
-config knob — but only ones that hold no archive; an entry naming an archived
-transcript is exempt however old it is, because it is the only route to that
-file. So a `skipped` session with no archive behind it is eventually forgotten,
+config knob — but only ones that hold no transcript copy; an entry naming a
+transcript copy is exempt however old it is, because it is the only route to that
+file. So a `skipped` session with no copy behind it is eventually forgotten,
 and is offered once more if Claude Code somehow still holds the live
-transcript. Archiving (on by default) is what makes a review permanent.
+transcript. The transcript copy (on by default) is what makes a review permanent.
 
 Each entry carries two independent fields. A **decision** — what you concluded:
 `harvested` (memories saved), `skipped` (reviewed and passed over), `deferred`
@@ -947,16 +947,17 @@ its review record, so **nothing in this version writes `compressed`**; the stage
 exists only so the format does not have to change later. If something else ever
 writes it, the drain says so loudly in the log, naming every session it dropped.
 
-**Transcript archives.** With `[harvest] archive = true` (the default), the
-SessionEnd hook compresses each ending session's transcript so it can still
-be read later. `harvest show <id>` falls back to the archive automatically
+**Transcript copies.** With `[harvest] archive = true` (the default; the flags
+and config keys still say `archive`), the SessionEnd hook keeps a compressed
+copy of each ending session's transcript so it can still be read later.
+`harvest show <id>` falls back to the copy automatically
 once the live transcript is gone — but a pruned session no longer appears in
 `harvest list`, which reads live transcripts only, so find it with
 `harvest ledger list` first. This matters because Claude Code prunes its own
-transcripts: archiving at *harvest* time would protect nothing, since you
+transcripts: copying at *harvest* time would protect nothing, since you
 necessarily still hold the file then.
 
-Archives live at `<global_data_dir>/projects/<root_id>/transcripts/` —
+Transcript copies live at `<global_data_dir>/projects/<root_id>/transcripts/` —
 deliberately **not** under `.engramdb/`, which is repo-adjacent and gets
 committed. Transcripts routinely contain environment variables echoed by
 commands and keys pasted into chat; committing them to a shared repository
@@ -967,18 +968,18 @@ transcript is high-entropy tool output), so a typical session lands around
 650 KB. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, with
 oldest-first eviction) bound the total; `harvest ledger prune` reclaims space
 on demand and, like `gc` and `compress`, is a dry run until `--apply`. These
-budgets are what expire an archive: the ledger's own entry-retention window
+budgets are what expire a transcript copy: the ledger's own entry-retention window
 never does, because an entry is the only route to the file it names, so a
-session whose archive is still held keeps its record however old it is. That
-exemption is checked against the archive directory rather than against what the
+session whose copy is still held keeps its record however old it is. That
+exemption is checked against the copies' directory rather than against what the
 entry claims — an entry naming a file that `projects delete --cascade`, a
 restored backup, or an eviction on another machine took away loses the
 reference, and with it the exemption, on the next harvest command.
-`harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the archive is the only remaining copy; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
+`harvest ledger rm` deletes one — it confirms first, since once Claude Code has pruned its own transcript the stored copy is the only one left; `--force` skips the prompt and is **required** under `--format json`, which never prompts. `harvest ledger export` restores one, verifying it against the SHA-256
 recorded when it was written.
 
 A conversation lives in **three** places, and `harvest ledger rm <id>` (without
-`--archive-only`) removes all three: the ledger entry, the archived transcript,
+`--archive-only`) removes all three: the ledger entry, the transcript copy,
 and the conversation **search row** — which stores the session's first prompt
 and its curated summary verbatim, so leaving it would keep the conversation
 findable by `harvest search` after you were told the only copy was gone, with

@@ -138,7 +138,7 @@ It should. Worktrees auto-route to the main project. If they're not, run:
 If a worktree was init'd before this routing was added, you may have a stray `.engramdb/` in the worktree. EngramDB will auto-consolidate it on the next memory op; otherwise run any memory command in the worktree to trigger consolidation.
 
 **`projects prune` lists projects I want to keep.**
-Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. Memories aren't lost: prune keeps any data directory still holding personal memories, archived transcripts or conversation summaries, whole — those it lists as `retained_irreplaceable` — and reclaims only the ones that hold nothing but rebuildable data. Shared memories live in the project tree and are never touched.
+Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. Memories aren't lost: prune keeps any data directory still holding personal memories, transcript copies or conversation summaries, whole — those it lists as `retained_irreplaceable` — and reclaims only the ones that hold nothing but rebuildable data. Shared memories live in the project tree and are never touched.
 
 If `doctor` keeps reporting the same reclaimable orphan after a prune, check
 prune's `failed_to_reclaim` — a directory it could not unlink (owned by another

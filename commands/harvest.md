@@ -104,10 +104,10 @@ what you can do about it differs by cause:
   the budget is consulted. **A larger `--max-chars` returns the identical
   text.** Treat those turns as excerpts: if what you need is inside one,
   `harvest ledger export <id>` writes the full transcript to a file — but only
-  when the session was archived (`[harvest] archive`, on by default, and only
-  for sessions that ended after it was enabled). It fails with a plain message
-  when no archive is held; `harvest ledger list --with-archive` says in advance
-  which sessions have one.
+  when a copy of the session's transcript was kept (`[harvest] archive`, on by
+  default, and only for sessions that ended after it was enabled). It fails with
+  a plain message when no transcript copy is held; `harvest ledger list
+  --with-archive` says in advance which sessions have one.
 
 **When there are more than 3 sessions**, dispatch one subagent per session
 rather than reading them all yourself — the digests are large and would crowd
@@ -184,7 +184,7 @@ engramdb harvest mark <session-id> --defer --note "revisit after the refactor"
 session on each memory as the conversation it came from, and it is the only
 call where both halves are known. Two things follow from it: a memory that is
 later challenged resolves back to what was actually said, and the session's
-stored transcript copy is **pinned** — exempt from the archive retention and
+stored transcript copy is **pinned** — exempt from the transcript copies' retention and
 size budgets, which would otherwise eventually delete the evidence behind the
 memory you just saved. Omitting the ids records the decision and nothing else,
 and the omission is invisible until the copy is gone.
@@ -200,18 +200,18 @@ costs the summary and not the review. `engramdb harvest summary <session-id>
 Marking is what stops a session being re-read on every future harvest, so a
 zero-yield session must be marked too. `engramdb harvest reset <session-id>`
 (or `harvest_mark` with `clear: true`) undoes it if the user wants another
-look. An archived session stays in the ledger as `unreviewed` rather than
-disappearing — that entry is the only route to its archived transcript.
+look. A session with a transcript copy stays in the ledger as `unreviewed`
+rather than disappearing — that entry is the only route to its transcript copy.
 
 **Recovering a pruned session.** Claude Code deletes its own transcripts
-after a while. Such a session stops appearing in `harvest list`, but if it was
-archived it is still readable: `engramdb harvest ledger list` shows what is
+after a while. Such a session stops appearing in `harvest list`, but if a copy
+was kept it is still readable: `engramdb harvest ledger list` shows what is
 held, and `engramdb harvest show <session-id> --format pretty` digests it straight from the
-archive. `engramdb harvest ledger export <session-id>` writes the full
+transcript copy. `engramdb harvest ledger export <session-id>` writes the full
 original to a file — useful when a memory is later challenged and you need the
 conversation it came from; `engramdb get <memory-id> --format json` shows the
-sessions a memory cites, under `source_sessions`. Both depend on an archive
-existing: a session that ended before archiving was enabled has none, and
+sessions a memory cites, under `source_sessions`. Both depend on a transcript
+copy existing: a session that ended before copies were enabled has none, and
 export says so rather than producing an empty file. A copy a memory cites is
 never evicted by the budgets; `engramdb doctor` reports it as **evidence
 expired** if one goes anyway (a copy collected on another machine, or one
