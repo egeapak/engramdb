@@ -2704,15 +2704,7 @@ impl EngramDbServer {
 /// handler is the structural fix; until then `MCP_SESSION_ID` lets
 /// wrappers pin a stable id externally.
 fn resolve_session_id() -> String {
-    for var in ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"] {
-        if let Ok(v) = std::env::var(var) {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-    }
-    uuid::Uuid::now_v7().to_string()
+    engramdb::ops::usage::session_id_from_env().unwrap_or_else(|| uuid::Uuid::now_v7().to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -60,11 +60,15 @@ async fn config_at(root: &std::path::Path) -> EngramConfig {
         .await
 }
 
-/// The session id a CLI invocation runs under, when it knows one: the
-/// variables `task current` and the MCP server already honor. A query run
-/// from a plain terminal has none, and its `returned` events then never
-/// count toward promotion (which counts distinct sessions).
-pub fn cli_session_id() -> Option<String> {
+/// The session id the environment names, when it names one:
+/// `CLAUDE_SESSION_ID`, else `MCP_SESSION_ID`, trimmed, an empty or
+/// whitespace-only value counting as unset. The one reading of these
+/// variables: the CLI (`query`/`get` usage events, `task current`) and the
+/// MCP server (which falls back to a fresh id) all go through it, so a
+/// session maps to the same id on every surface. A query run from a plain
+/// terminal has none, and its `returned` events then never count toward
+/// promotion (which counts distinct sessions).
+pub fn session_id_from_env() -> Option<String> {
     ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"]
         .into_iter()
         .filter_map(|v| std::env::var(v).ok())
