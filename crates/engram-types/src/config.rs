@@ -69,7 +69,12 @@ pub struct ScoringWeights {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic: Option<f64>,
 
-    /// Relevance weight (criticality * decay)
+    /// Relevance weight (criticality * decay).
+    ///
+    /// Required in every weight table a config writes, and the struct has
+    /// no container serde default on purpose: the weights must sum to 1, and
+    /// filling an absent `semantic` from [`ScoringWeights::default`] would
+    /// break a valid `scope_only = { relevance = 1.0 }`.
     pub relevance: f64,
 }
 
@@ -4222,5 +4227,25 @@ weight = 0.7
             ThresholdsConfig::default().compress
         );
         assert_eq!(config.thresholds.needs_review, None);
+    }
+
+    #[test]
+    fn scoring_weights_still_require_relevance() {
+        // A container default on `ScoringWeights` would fill an absent
+        // `semantic` with 0.55 (the `with_query` default) and turn this
+        // valid table into one whose weights sum to 1.55. `relevance` stays
+        // required instead.
+        let config: EngramConfig =
+            toml::from_str("[retrieval.scoring.scope_only]\nrelevance = 1.0\n").unwrap();
+        let scope_only = &config.retrieval.scoring.scope_only;
+        assert_eq!(scope_only.semantic, None);
+        assert_eq!(scope_only.keyword, None);
+        assert_eq!(scope_only.relevance, 1.0);
+        assert!(scope_only.validate("scope_only").is_ok());
+
+        let err =
+            toml::from_str::<EngramConfig>("[retrieval.scoring.scope_only]\nsemantic = 1.0\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("relevance"), "{err}");
     }
 }
