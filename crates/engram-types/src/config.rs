@@ -549,7 +549,11 @@ impl ScoringConfig {
 }
 
 /// Trust weights by provenance source
+///
+/// `#[serde(default)]`: a partial `[trust_weights]` section keeps the
+/// default of every weight it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrustWeights {
     /// Human-created memories
     pub human: f64,
@@ -593,7 +597,11 @@ impl Default for TrustWeights {
 }
 
 /// Search-specific configuration
+///
+/// `#[serde(default)]`: a partial `[search]` section keeps the default of
+/// every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SearchConfig {
     /// Retired: read by nothing (no blend formula ever took a weight). Still
     /// parsed so a config that sets it loads; the loader warns and `doctor`
@@ -615,7 +623,11 @@ impl Default for SearchConfig {
 }
 
 /// Thresholds for various operations
+///
+/// `#[serde(default)]`: a partial `[thresholds]` section keeps the default
+/// of every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ThresholdsConfig {
     /// Retired: read by nothing (no code marks a memory needs-review from a
     /// score). Still parsed so a config that sets it loads; the loader warns
@@ -963,7 +975,11 @@ impl Default for EmbeddingsConfig {
 /// ever added, `ModelKey` / `model_demands` in `src/ops/provider_cache.rs`
 /// must be extended with the new field(s) or the cache will serve a stale
 /// model.
+///
+/// `#[serde(default)]`: a partial `[nli]` section (for example only
+/// `enabled = true`) keeps the default of every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NliConfig {
     /// Whether NLI contradiction detection is enabled
     pub enabled: bool,
@@ -1060,7 +1076,11 @@ impl Default for NliConfig {
 /// the Claude Code hook handlers use `ops::build_engine_without_providers`,
 /// which never wires a reranker regardless of this config, so hook latency is
 /// unaffected.
+///
+/// `#[serde(default)]`: a partial `[rerank]` section keeps the default of
+/// every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RerankConfig {
     /// Whether reranking is enabled (default: true)
     pub enabled: bool,
@@ -4149,5 +4169,58 @@ weight = 0.7
             config_with_search_threshold(5.0).validate().is_ok(),
             "legacy >1.0 threshold must remain tolerated"
         );
+    }
+
+    #[test]
+    fn partial_trust_weights_section_parses() {
+        let config: EngramConfig = toml::from_str("[trust_weights]\nagent = 0.5\n").unwrap();
+        let d = TrustWeights::default();
+        assert_eq!(config.trust_weights.agent, 0.5);
+        assert_eq!(config.trust_weights.human, d.human);
+        assert_eq!(config.trust_weights.inferred, d.inferred);
+        assert_eq!(config.trust_weights.imported, d.imported);
+    }
+
+    #[test]
+    fn partial_nli_section_parses() {
+        let config: EngramConfig = toml::from_str("[nli]\nenabled = true\n").unwrap();
+        let d = NliConfig::default();
+        assert!(config.nli.enabled);
+        assert_eq!(config.nli.model, d.model);
+        assert_eq!(
+            config.nli.contradiction_threshold,
+            d.contradiction_threshold
+        );
+        assert_eq!(config.nli.max_comparisons, d.max_comparisons);
+        assert_eq!(config.nli.similarity_threshold, d.similarity_threshold);
+    }
+
+    #[test]
+    fn partial_rerank_section_parses() {
+        let config: EngramConfig = toml::from_str("[rerank]\nenabled = false\n").unwrap();
+        let d = RerankConfig::default();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, d.model);
+        assert_eq!(config.rerank.top_n, d.top_n);
+        assert_eq!(config.rerank.weight, d.weight);
+    }
+
+    #[test]
+    fn partial_search_section_parses() {
+        // A section holding only the retired key used to lose `threshold`.
+        let config: EngramConfig = toml::from_str("[search]\nsemantic_weight = 0.5\n").unwrap();
+        assert_eq!(config.search.semantic_weight, Some(0.5));
+        assert_eq!(config.search.threshold, SearchConfig::default().threshold);
+    }
+
+    #[test]
+    fn partial_thresholds_section_parses() {
+        let config: EngramConfig = toml::from_str("[thresholds]\ngc = 0.1\n").unwrap();
+        assert_eq!(config.thresholds.gc, 0.1);
+        assert_eq!(
+            config.thresholds.compress,
+            ThresholdsConfig::default().compress
+        );
+        assert_eq!(config.thresholds.needs_review, None);
     }
 }
