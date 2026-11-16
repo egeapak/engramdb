@@ -939,8 +939,7 @@ fn opt_str(a: &StringArray, i: usize) -> Option<&str> {
 /// `column IN (…)` for at most [`MAX_IN_LIST`] ids (callers chunk).
 fn id_filter(column: &str, ids: &[String]) -> String {
     debug_assert!(!ids.is_empty() && ids.len() <= MAX_IN_LIST);
-    let list: Vec<String> = ids.iter().map(|s| str_literal(s)).collect();
-    format!("{column} IN ({})", list.join(", "))
+    format!("{column} IN ({})", crate::sql::sql_in_list(ids))
 }
 
 fn and(a: Option<String>, b: Option<String>) -> Option<String> {
@@ -1403,8 +1402,10 @@ async fn prune_at(store_id: &str, cutoff: DateTime<Utc>) -> Result<()> {
             );
             return Ok(());
         }
-        let list: Vec<String> = frozen.iter().map(|s| str_literal(s)).collect();
-        delete = format!("({delete}) AND memory_id NOT IN ({})", list.join(", "));
+        delete = format!(
+            "({delete}) AND memory_id NOT IN ({})",
+            crate::sql::sql_in_list(&frozen)
+        );
     }
     events
         .delete(&delete)

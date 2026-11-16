@@ -255,11 +255,10 @@ pub(crate) fn ts_literal(ts: DateTime<Utc>) -> String {
     format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
 }
 
-/// SQL string literal. Hook names come from our own writers, but a drained
-/// JSONL file is a file on disk, so quote defensively.
-pub(crate) fn str_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
+/// SQL string literal ([`crate::sql::sql_str`]). Hook names come from our
+/// own writers, but a drained JSONL file is a file on disk, so quote
+/// defensively.
+pub(crate) use crate::sql::sql_str as str_literal;
 
 /// Read the table's aggregate for the retention window: counts, errors and
 /// sums over every row, plus the newest `sample_cap` samples per group.

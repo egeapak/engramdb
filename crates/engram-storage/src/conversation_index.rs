@@ -469,10 +469,7 @@ impl ConversationIndex {
         let existed = self.fetch(session_id).await?.is_some();
         let table = self.table().await?;
         table
-            .delete(&format!(
-                "session_id = '{}'",
-                session_id.replace('\'', "''")
-            ))
+            .delete(&format!("session_id = {}", crate::sql::sql_str(session_id)))
             .await
             .context("Failed to delete a conversation row")?;
         Ok(existed)
@@ -689,10 +686,7 @@ enum Window {
 /// backup or a hand-edited store, so the quote is doubled rather than assumed
 /// absent.
 fn quoted_list(ids: &[String]) -> String {
-    ids.iter()
-        .map(|id| format!("'{}'", id.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(", ")
+    crate::sql::sql_in_list(ids)
 }
 
 /// One non-null string cell, or `None` when the column is absent or null.
