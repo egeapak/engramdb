@@ -14,6 +14,6 @@
 # `fuzz.yml` uses `cargo +nightly` for the fuzz build; `+toolchain` overrides
 # this file.
 [toolchain]
-channel = "1.97.0"
+channel = "1.100.0"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
