@@ -120,7 +120,6 @@ async-trait = "0.1"
 tracing = "0.1"
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
 
 # Atomic file writes
