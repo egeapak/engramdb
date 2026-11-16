@@ -1,7 +1,8 @@
-# Release notes draft — security settings and hardening
+# Release notes — 0.10.0: security settings and hardening
 
-> Draft for the release that moves `[security]` to the global config and
-> hardens what a cloned repository can make EngramDB do.
+> Part of [0.10.0](./release-notes-0.10.0.md). This release moves
+> `[security]` to the global config and hardens what a cloned repository can
+> make EngramDB do.
 >
 > This page is part of a larger set of changes. Every user-visible change in
 > that set, these included, is listed in

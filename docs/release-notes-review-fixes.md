@@ -1,9 +1,10 @@
-# Release notes draft — fixes from the November 2026 code review
+# Release notes — 0.10.0: fixes from the November 2026 code review
 
-> Draft for the release that ships the fixes from the November 2026 code
-> review. This page lists every change a user, an agent or a contributor can
-> notice. Read the "Breaking" section before you upgrade. The security changes
-> have their own page with the full text:
+> Part of [0.10.0](./release-notes-0.10.0.md), which has the upgrade
+> checklist. These fixes come from the November 2026 code review. This page
+> lists every change a user, an agent or a contributor can notice. Read the
+> "Breaking" section before you upgrade. The security changes have their own
+> page with the full text:
 > [release-notes-security.md](./release-notes-security.md).
 
 ## Breaking
@@ -193,7 +194,7 @@
 
 ## Contributors
 
-- **The Rust toolchain is pinned to 1.97.0** in `rust-toolchain.toml`. rustup
+- **The Rust toolchain is pinned to 1.100.0** in `rust-toolchain.toml`. rustup
   installs it on the first `cargo` call. CI and the release workflow use the
   same version. Dependabot proposes bumps.
 - **The dashboard description moved** from `.claude/CLAUDE.md` to
