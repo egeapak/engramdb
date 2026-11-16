@@ -77,3 +77,23 @@ fn the_data_and_config_dirs_are_isolated() {
         &crate::paths::global_config_dir().unwrap(),
     );
 }
+
+/// `serde_json` must be built **without** its `preserve_order` feature, so a
+/// `serde_json::Map` (every `json!{}` object) sorts its keys. CLI and MCP JSON
+/// output, the insta snapshots and the dashboard's pinned layout digests all
+/// depend on that order. Cargo unifies features across the build, so any
+/// dependency that turns the feature on changes it for every crate:
+/// lancedb 0.41 does (`serde_json = { features = ["preserve_order"] }`),
+/// which is one reason the workspace stays on lancedb 0.37. This crate depends on
+/// lancedb directly, so its test build sees the same unified features.
+#[cfg(test)]
+#[test]
+fn serde_json_maps_sort_their_keys() {
+    let map = serde_json::json!({ "b": 1, "a": 2 });
+    assert_eq!(
+        map.to_string(),
+        r#"{"a":2,"b":1}"#,
+        "serde_json's preserve_order feature is on: a dependency enabled it \
+         (find it with `cargo tree -e features -i serde_json`)"
+    );
+}
