@@ -1,8 +1,8 @@
 # engramdb: pure-Rust (tract) fallback inference backend for Intel Mac
 
-> **Status: planned, not started.** Feasibility is proven (see
-> `experiments/tract-vs-ort/`); this document is the implementation brief for a
-> future session.
+> **Status: shipped, then removed.** The tract backend was built and later
+> removed when ONNX Runtime became a separately installed library (see
+> `docs/users/installation.md`). Kept for history.
 
 ## Context
 

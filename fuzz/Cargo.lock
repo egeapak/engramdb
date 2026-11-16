@@ -1921,6 +1921,7 @@ dependencies = [
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokenizers",
@@ -1932,6 +1933,7 @@ dependencies = [
 name = "engram-onnx"
 version = "0.10.0"
 dependencies = [
+ "libc",
  "libloading",
  "ort",
 ]
@@ -2011,6 +2013,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2022,6 +2025,8 @@ dependencies = [
  "engramdb",
  "libfuzzer-sys",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

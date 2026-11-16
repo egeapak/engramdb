@@ -165,6 +165,9 @@ fn provenance_for_index(index: usize) -> Provenance {
 ///
 /// Returns the TempDir (must be kept alive) and an open MemoryStore.
 pub async fn setup_store(count: usize) -> (TempDir, MemoryStore) {
+    // Run against the per-process temp data/config dirs, never the user's
+    // (the `#[ctor]` in engram-test-support, linked by this reference).
+    engram_test_support::arm();
     let temp_dir = TempDir::new().expect("failed to create temp dir");
     let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
         .await

@@ -663,7 +663,34 @@ async fn open_or_create_named(
             None => return Err(e).with_context(|| format!("creating {name} table")),
         },
     };
-    for column in indexed {
+    ensure_indices(&table, name, indexed).await;
+    Ok(table)
+}
+
+/// Create a BTree index on each of `columns` that has none. Best-effort: a
+/// failure is a warning, and the reads work (as scans) without the index.
+///
+/// Called at table creation and again from [`optimize_memory_events`]. The
+/// second call is what makes the index reliable: creation happens once, on an
+/// empty table, and its failure was only ever a warning — so a table could
+/// live its whole life without one, and so could a table created by a binary
+/// older than the index list. Without the `memory_id` index every rollup
+/// refresh scans the raw table.
+async fn ensure_indices(table: &Table, name: &str, columns: &[&str]) {
+    let existing = match table.list_indices().await {
+        Ok(existing) => existing,
+        Err(e) => {
+            tracing::warn!("{name}: could not list indices ({e}); not creating any");
+            return;
+        }
+    };
+    for column in columns {
+        if existing
+            .iter()
+            .any(|idx| idx.columns.len() == 1 && idx.columns[0] == *column)
+        {
+            continue;
+        }
         if let Err(e) = table
             .create_index(&[*column], lancedb::index::Index::BTree(Default::default()))
             .execute()
@@ -672,23 +699,19 @@ async fn open_or_create_named(
             tracing::warn!("{name}: failed to create BTree index on {column}: {e}");
         }
     }
-    Ok(table)
 }
 
+/// `ts` serves the prune and the series; `id` the drain's merge; `memory_id`
+/// the per-memory reads and every rollup refresh.
+const EVENTS_INDEXED: &[&str] = &["ts", "id", "memory_id"];
+const USAGE_INDEXED: &[&str] = &["memory_id"];
+
 async fn events_table(conn: &Connection) -> Result<Table> {
-    // `ts` serves the prune and the series; `id` the drain's merge;
-    // `memory_id` the per-memory reads.
-    open_or_create_named(
-        conn,
-        MEMORY_EVENTS_TABLE,
-        events_schema(),
-        &["ts", "id", "memory_id"],
-    )
-    .await
+    open_or_create_named(conn, MEMORY_EVENTS_TABLE, events_schema(), EVENTS_INDEXED).await
 }
 
 async fn usage_table(conn: &Connection) -> Result<Table> {
-    open_or_create_named(conn, MEMORY_USAGE_TABLE, usage_schema(), &["memory_id"]).await
+    open_or_create_named(conn, MEMORY_USAGE_TABLE, usage_schema(), USAGE_INDEXED).await
 }
 
 /// Take the store's rollup lock. The store's data directory must exist (it
@@ -1422,8 +1445,14 @@ pub async fn optimize_memory_events(store_id: &str) -> Result<()> {
     let Some(conn) = connect_existing(store_id).await? else {
         return Ok(());
     };
-    for name in [MEMORY_EVENTS_TABLE, MEMORY_USAGE_TABLE] {
+    for (name, indexed) in [
+        (MEMORY_EVENTS_TABLE, EVENTS_INDEXED),
+        (MEMORY_USAGE_TABLE, USAGE_INDEXED),
+    ] {
         if let Some(t) = open_existing(&conn, name).await? {
+            // Before the optimize, so a just-created index is folded with
+            // the rest. See `ensure_indices` for why creation is not enough.
+            ensure_indices(&t, name, indexed).await;
             t.optimize(lancedb::table::OptimizeAction::All)
                 .await
                 .with_context(|| format!("optimizing {name} for store {store_id}"))?;
@@ -2179,5 +2208,68 @@ mod tests {
             std::fs::read_dir(&parent).unwrap().next().is_none(),
             "no lancedb/, no lock file"
         );
+    }
+
+    async fn indexed_columns(sid: &str, name: &str) -> Vec<String> {
+        let conn = connect_existing(sid).await.unwrap().unwrap();
+        let table = open_existing(&conn, name).await.unwrap().unwrap();
+        let mut cols: Vec<String> = table
+            .list_indices()
+            .await
+            .unwrap()
+            .into_iter()
+            .flat_map(|idx| idx.columns)
+            .collect();
+        cols.sort();
+        cols
+    }
+
+    /// The index is created once, on an empty table, and a failure there was
+    /// only a warning; a table from an older binary never had one. Optimize
+    /// is the pass that runs again, so it is what restores it.
+    #[tokio::test]
+    async fn optimize_creates_a_missing_memory_id_index() {
+        let sid = store().await;
+        let now = Utc::now();
+        let events: Vec<MemoryEvent> = (0..40)
+            .map(|i| ev(&sid, &format!("m{}", i % 5), UsageKind::Fetched, now, None))
+            .collect();
+        ingest_memory_events(&sid, &events, true).await.unwrap();
+
+        // As a table whose index creation failed, or that predates the list.
+        let conn = connect_existing(&sid).await.unwrap().unwrap();
+        let table = open_existing(&conn, MEMORY_EVENTS_TABLE)
+            .await
+            .unwrap()
+            .unwrap();
+        for idx in table.list_indices().await.unwrap() {
+            if idx.columns == ["memory_id"] {
+                table.drop_index(&idx.name).await.unwrap();
+            }
+        }
+        assert!(
+            !indexed_columns(&sid, MEMORY_EVENTS_TABLE)
+                .await
+                .contains(&"memory_id".to_string()),
+            "the fixture still has the index"
+        );
+
+        optimize_memory_events(&sid).await.unwrap();
+        assert_eq!(
+            indexed_columns(&sid, MEMORY_EVENTS_TABLE).await,
+            vec!["id", "memory_id", "ts"]
+        );
+        assert_eq!(
+            indexed_columns(&sid, MEMORY_USAGE_TABLE).await,
+            vec!["memory_id"]
+        );
+        // The data is untouched and a second pass creates nothing new.
+        optimize_memory_events(&sid).await.unwrap();
+        assert_eq!(
+            indexed_columns(&sid, MEMORY_EVENTS_TABLE).await,
+            vec!["id", "memory_id", "ts"]
+        );
+        let rollup = load_rollup(&sid).await.unwrap();
+        assert_eq!(rollup["m0"].counts.fetched, 8);
     }
 }

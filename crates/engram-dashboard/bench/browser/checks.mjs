@@ -1,17 +1,22 @@
 // Browser checks of the graph view's interaction and accessibility, for
 // either surface (the canvas host Plain draws through, the SVG Grid draws
-// through): what a keyboard, a screen reader and a pointer get. A developer
-// tool run by hand (README.md), like run.mjs; not embedded, not in CI.
+// through): what a keyboard, a screen reader and a pointer get. Not embedded.
+// Run by hand (README.md), and by CI's `frontend-browser` job against the
+// runner's Chrome and a debug binary.
 //
-//   NODE_PATH=$(npm root -g) node bench/browser/checks.mjs --stores /tmp/dash-bench \
+//   (cd bench/browser && npm ci)
+//   node bench/browser/checks.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--assets web] [--views s60:full,s1k:all,s10k:open]
 //     [--styles plain,grid] [--dpr 2] [--viewport 1280x860] [--json out.json]
+//     [--chrome /usr/bin/google-chrome]
 //
 // Per view and style it checks:
 //   a11y_list      one focusable element per drawn memory, with the SVG `<g>`'s
 //                  aria label (the canvas's list against Grid's SVG, in order)
 //   canvas_role    a canvas surface's picture has role="img" and a label
-//   keyboard       ] walks memories top to bottom (roving focus), Enter selects
+//   keyboard       ] walks memories top to bottom (roving focus; from the graph
+//                  box the first ] lands on the topmost memory, the first [
+//                  on the bottommost), Enter selects
 //                  (the panel's heading takes focus), ] / [ then walk the panel
 //                  rows (focus on the neighbour, the live region speaks), Escape
 //                  clears and returns focus to the graph
@@ -28,6 +33,8 @@
 //                  pans) is within antialiasing of one drawn whole (< 0.2 %
 //                  of pixels off by more than 8 levels)
 //   zoom           a wheel gesture settles (no transform left on the pane)
+//   resize_view    a 16 px narrower window (a scrollbar) keeps a zoomed,
+//                  panned view's centre and scale; at Fit the view re-fits
 //   pan            (canvas) with a memory selected, a drag moves one flattened
 //                  canvas that looks exactly like the layers it stands for, and
 //                  the layers come back when it settles
@@ -43,8 +50,6 @@
 //                  pointer cursor, a click and Enter on its link open that scope
 //   dispose        (canvas) leaving the graph empties every canvas the host held
 //   console        no page error, no console error (a CSP violation is one)
-//
-// `--dpr 2` runs every check at device scale 2.
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -53,7 +58,21 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { chromium } = require('playwright');
+// The driver: `playwright-core` pinned in ./package.json (`npm ci` here; it
+// carries no browser download), else a `playwright` found some other way (a
+// global install through NODE_PATH, as these scripts were first run).
+function loadChromium() {
+  for (const name of ['playwright-core', 'playwright']) {
+    try {
+      return require(name).chromium;
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') throw e;
+    }
+  }
+  console.error('Playwright is not installed. Run `npm ci` in crates/engram-dashboard/bench/browser (see README.md).');
+  process.exit(2);
+}
+const chromium = loadChromium();
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1] && !all[i + 1].startsWith('--') ? all[i + 1] : '1']] : acc), []),
@@ -215,7 +234,11 @@ async function check(browser, url, size, view, style) {
   const p = await ctx.newPage();
   const errors = [];
   p.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
-  p.on('console', (m) => m.type() === 'error' && errors.push('console: ' + m.text()));
+  p.on('console', (m) => {
+    if (m.type() !== 'error') return;
+    const from = m.location().url || '';
+    errors.push('console: ' + m.text() + (from ? ' @ ' + from.replace(/token=[0-9a-f]+/, 'token=…') : ''));
+  });
   await p.goto(url);
   await p.waitForSelector('.nav a[href*="/graph"]');
   await openView(p, view);
@@ -276,7 +299,16 @@ async function check(browser, url, size, view, style) {
   await p.keyboard.press('Escape');
   await p.waitForTimeout(100);
   const cleared = await p.evaluate(() => ({ box: document.activeElement === document.querySelector('.graph-box'), head: (document.querySelector('.g-card h3') || {}).textContent || '' }));
-  ok('keyboard', roving && sel.head.includes(want) && sel.focus === 'H3' && (row.rows === 0 || (row.said && row.i !== null)) && cleared.box && cleared.head === 'Select a memory or relation', { walk: walk.map((w) => w.i), ys: ys.map(Math.round), selected: sel, row, cleared });
+  // With the graph box focused (nothing selected), the first ] lands on the
+  // topmost memory and the first [ on the bottommost: the walk starts at an
+  // end rather than treating "no memory" as memory 0.
+  await p.keyboard.press('[');
+  const lastI = await p.evaluate(() => +document.activeElement.getAttribute('data-i'));
+  const yOf = (i) => (mems.find((m) => m.i === i) || { y: NaN }).y;
+  const ysAll = mems.map((m) => m.y);
+  const ends = { first: walk[0].i, firstY: yOf(walk[0].i), minY: Math.min(...ysAll), last: lastI, lastY: yOf(lastI), maxY: Math.max(...ysAll) };
+  const endsOk = Math.abs(ends.firstY - ends.minY) < 0.5 && Math.abs(ends.lastY - ends.maxY) < 0.5;
+  ok('keyboard', roving && endsOk && sel.head.includes(want) && sel.focus === 'H3' && (row.rows === 0 || (row.said && row.i !== null)) && cleared.box && cleared.head === 'Select a memory or relation', { walk: walk.map((w) => w.i), ys: ys.map(Math.round), ends, selected: sel, row, cleared });
 
   // hover: 30 memories, pointer at each centre
   await p.keyboard.press('0');
@@ -384,6 +416,39 @@ async function check(browser, url, size, view, style) {
   await p.waitForTimeout(450);
   const settled = await p.evaluate(() => document.querySelector('.g-pane').style.transform);
   ok('zoom', mid !== '' && settled === '', { mid, settled });
+
+  // resize_view: a width change (a scrollbar coming or going, 16 px) keeps
+  // a zoomed and panned view's centre and scale; at Fit it re-fits.
+  {
+    await p.keyboard.press('ArrowRight');
+    await p.keyboard.press('ArrowDown');
+    await p.waitForTimeout(250);
+    const at = async () => {
+      const box = await p.evaluate(() => { const r = document.querySelector('.graph-box').getBoundingClientRect(); return { w: r.width, h: r.height }; });
+      return { box, mems: (await p.evaluate(MEMORIES)).map((m) => ({ i: m.i, dx: m.x - box.w / 2, dy: m.y - box.h / 2 })) };
+    };
+    const near = (a) => a.mems.filter((m) => Math.abs(m.dx) < a.box.w / 4 && Math.abs(m.dy) < a.box.h / 4);
+    const moved = (a, b) => {
+      const by = new Map(b.mems.map((m) => [m.i, m]));
+      return near(a).map((m) => Math.hypot(m.dx - by.get(m.i).dx, m.dy - by.get(m.i).dy)).reduce((x, y) => Math.max(x, y), 0);
+    };
+    const z0 = await at();
+    await p.setViewportSize({ width: VIEWPORT.width - 16, height: VIEWPORT.height });
+    await p.waitForTimeout(400);
+    const z1 = await at();
+    // at Fit: the narrower box re-fits, so a later Fit moves nothing
+    await p.keyboard.press('0');
+    await p.waitForTimeout(250);
+    await p.setViewportSize(VIEWPORT);
+    await p.waitForTimeout(400);
+    const f1 = await at();
+    await p.keyboard.press('0');
+    await p.waitForTimeout(250);
+    const f2 = await at();
+    const kept = moved(z0, z1);
+    const refit = moved(f1, f2);
+    ok('resize_view', z1.box.w < z0.box.w && near(z0).length > 0 && kept < 1.5 && refit < 1.5, { width: [z0.box.w, z1.box.w], near: near(z0).length, kept, refit });
+  }
 
   if (canvas) {
     // pan with a selection: one canvas mid-gesture, the same picture moved

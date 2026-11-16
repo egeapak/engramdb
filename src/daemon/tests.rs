@@ -9,7 +9,6 @@ use super::protocol::{
     read_msg, write_msg, DaemonOp, DaemonRequest, DaemonResponse, ModelSelection,
 };
 use super::server::run_daemon;
-use crate::storage::paths::model_cache_dir;
 use crate::types::{EmbeddingBackend, EngramConfig};
 
 /// The model selection a client with a default project config sends.
@@ -99,23 +98,31 @@ async fn daemon_answers_ping() {
     }
 }
 
+/// Load the default ONNX embedding model in-process, keeping the cause of a
+/// failure, so a test gated on it says why it skipped (or, with
+/// `ENGRAMDB_TEST_REQUIRE_MODELS`, fails).
+fn default_onnx_model() -> Result<(), String> {
+    #[cfg(feature = "onnxruntime")]
+    {
+        crate::embeddings::OnnxProvider::new()
+            .map(|_| ())
+            .map_err(|e| format!("{e:#}"))
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        Err("built without the onnxruntime feature".to_string())
+    }
+}
+
 /// Full delegation: a remote embedding provider built against a real daemon
-/// produces vectors. Skipped when the embedding model isn't staged.
+/// produces vectors. Skipped when the default embedding model cannot load.
+///
+/// The gate used to look for the L6 model's files, which the default config
+/// stopped using at #77, so it skipped on every machine that had staged the
+/// default.
 #[tokio::test]
 async fn remote_embedding_end_to_end() {
-    let model = model_cache_dir()
-        .map(|d| {
-            d.join("models--Qdrant--all-MiniLM-L6-v2-onnx")
-                .join("snapshots")
-                .join("main")
-                .join("model.onnx")
-        })
-        .map(|p| p.exists())
-        .unwrap_or(false);
-    if !model {
-        eprintln!("skipping remote_embedding_end_to_end: embedding model not staged");
-        return;
-    }
+    engram_test_support::require_model!("default ONNX embedding model", default_onnx_model());
 
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("d.sock");
@@ -1377,29 +1384,30 @@ async fn ping_once(socket: &std::path::Path) {
     );
 }
 
-/// A heartbeat-style loop of Pings every ~330 ms keeps the daemon alive past
-/// its 1-second idle timeout.
+/// A heartbeat-style loop of Pings every 500 ms keeps the daemon alive past
+/// its 3-second idle timeout. (A 1 s idle with 330 ms pings left a 670 ms
+/// margin, which a loaded runner can eat.)
 #[tokio::test]
 async fn heartbeat_pings_keep_daemon_alive_past_idle() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("hb.sock");
 
-    // Spawn daemon with a 1-second idle timeout.
-    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    // Spawn daemon with a 3-second idle timeout.
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3)));
     poll_until_connectable(&socket).await;
 
-    // Ping every ~330ms for a total of ~6 pings over ~1.98s — more than the
-    // idle timeout, but the pings should keep last_activity fresh.
+    // Ping every 500 ms for 10 pings over ~5 s — more than the idle timeout,
+    // but the pings should keep last_activity fresh.
     let sock = socket.clone();
     let hb = tokio::spawn(async move {
-        for _ in 0..6 {
+        for _ in 0..10 {
             ping_once(&sock).await;
-            tokio::time::sleep(Duration::from_millis(330)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     });
 
-    // After 1.5s (> idle_timeout) the daemon must still be alive.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // After 4.5 s (> idle_timeout) the daemon must still be alive.
+    tokio::time::sleep(Duration::from_millis(4500)).await;
     assert!(
         super::transport::connect(&socket).await.is_ok(),
         "daemon should still be alive while heartbeat pings continue"
@@ -1422,17 +1430,18 @@ async fn daemon_cell_get_keeps_daemon_alive_past_idle() {
     let tmp = super::private_tempdir();
     let socket = tmp.path().join("hbcell.sock");
 
-    // 1-second idle timeout; the daemon is already running so each `get` just
+    // 3-second idle timeout; the daemon is already running so each `get` just
     // health-checks (no spawn path is taken).
-    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(1)));
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3)));
     poll_until_connectable(&socket).await;
 
     let cell = DaemonCell::new();
-    // 6 resolves spaced ~330ms span ~2s, well past the 1s idle timeout.
-    for _ in 0..6 {
+    // 10 resolves spaced 500 ms span ~5 s, well past the 3 s idle timeout,
+    // with a 2.5 s margin on each gap.
+    for _ in 0..10 {
         let h = cell.get(&socket, 1, DaemonPolicy::ConnectOnly).await;
         assert!(h.is_some(), "cell.get should keep returning a live handle");
-        tokio::time::sleep(Duration::from_millis(330)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     assert!(
@@ -1718,12 +1727,10 @@ async fn daemon_loads_the_bundle_named_by_the_request_not_by_dir() {
     use tokio::io::AsyncWriteExt;
 
     let config = EngramConfig::default();
-    let Some(local) =
-        crate::ops::resolve_engine_providers(&config, Some(EmbeddingBackend::Onnx), 1).embedding
-    else {
-        eprintln!("skipping: the default ONNX embedding model cannot load here");
-        return;
-    };
+    engram_test_support::require_model!("default ONNX embedding model", default_onnx_model());
+    let local = crate::ops::resolve_engine_providers(&config, Some(EmbeddingBackend::Onnx), 1)
+        .embedding
+        .expect("the default ONNX model loaded a moment ago");
     let expected_id = local.model_id();
     let expected_dims = local.dimensions();
     drop(local);
@@ -1799,56 +1806,7 @@ fn v4_daemon_can_parse_a_v5_ping() {
 
 // ---- hooks (protocol 6) ------------------------------------------------------
 
-/// Like [`spawn_stub`], but the reply may be `None`: drop the connection
-/// without answering (a daemon that died mid-request). Every op received is
-/// logged.
-fn spawn_recording_stub<F>(
-    socket: std::path::PathBuf,
-    reply: F,
-) -> std::sync::Arc<std::sync::Mutex<Vec<String>>>
-where
-    F: Fn(&DaemonOp) -> Option<DaemonResponse> + Send + Sync + 'static,
-{
-    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = std::sync::Arc::clone(&log);
-    tokio::spawn(async move {
-        let listener = super::transport::bind_or_yield(&socket)
-            .await
-            .unwrap()
-            .expect("stub owns the address");
-        while let Ok(stream) = listener.accept().await {
-            let (rh, mut wh) = tokio::io::split(stream);
-            let mut r = BufReader::new(rh);
-            while let Some(req) = read_msg::<_, DaemonRequest>(&mut r).await.unwrap_or(None) {
-                seen.lock().unwrap().push(format!("{:?}", req.op));
-                let Some(resp) = reply(&req.op) else {
-                    break;
-                };
-                if write_msg(&mut wh, &resp).await.is_err() {
-                    break;
-                }
-            }
-        }
-    });
-    log
-}
-
-fn current_pong() -> DaemonResponse {
-    DaemonResponse::Pong {
-        version: super::PROTOCOL_VERSION.to_string(),
-        build: Some(env!("CARGO_PKG_VERSION").to_string()),
-    }
-}
-
-async fn wait_connectable(socket: &std::path::Path) {
-    for _ in 0..200 {
-        if super::transport::connect(socket).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("nothing listening on {}", socket.display());
-}
+use super::test_support::{current_pong, spawn_recording_stub, wait_connectable};
 
 fn sent_hook(log: &std::sync::Mutex<Vec<String>>) -> bool {
     log.lock().unwrap().iter().any(|op| op.starts_with("Hook"))
@@ -1888,6 +1846,34 @@ async fn delegate_hook_never_sends_to_an_older_protocol() {
         !sent_hook(&log),
         "the hook op must not reach an older daemon"
     );
+}
+
+/// A listener that fails the client's peer check gets no hook: the connect
+/// is refused before any byte is written, so the hook runs in-process.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hook_is_not_sent_to_a_listener_that_fails_the_peer_check() {
+    use tokio::io::AsyncReadExt;
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let listener = super::transport::bind_or_yield(&socket)
+        .await
+        .unwrap()
+        .expect("bound");
+    let received = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut buf),
+        )
+        .await;
+        buf.len()
+    });
+    super::transport::set_expected_peer_uid_for_test(super::current_euid().wrapping_add(1));
+    let out = super::delegate_hook(&socket, &super::HookCall::PreCompact, tmp.path(), "{}").await;
+    assert!(matches!(out, super::HookDelegation::NotSent(_)), "{out:?}");
+    assert_eq!(received.await.unwrap(), 0, "the listener received bytes");
 }
 
 /// An older build of the current protocol would run its older handlers; the
@@ -2102,6 +2088,50 @@ async fn daemon_refuses_a_hook_from_a_different_environment() {
     }
 }
 
+/// A session that opted out of auto-maintenance must not have its hook run
+/// by a daemon that did not: the daemon would run `auto_compact` for it.
+#[tokio::test]
+async fn a_hook_with_a_different_maintenance_opt_out_is_refused() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let exec = std::sync::Arc::new(EchoExecutor {
+        project_id: "test-daemon-hook-maint-env".to_string(),
+        root: tmp.path().to_path_buf(),
+    });
+    tokio::spawn(super::run_daemon_with_hooks(
+        socket.clone(),
+        super::server::DaemonOptions::from_idle_timeout(Duration::from_secs(3600)),
+        Some(exec),
+    ));
+    wait_connectable(&socket).await;
+
+    let mut env = super::hooks::hook_env();
+    let flipped = match env.get("ENGRAMDB_DISABLE_AUTO_MAINTENANCE") {
+        Some(v) if v == "1" => "0",
+        _ => "1",
+    };
+    env.insert(
+        "ENGRAMDB_DISABLE_AUTO_MAINTENANCE".to_string(),
+        flipped.to_string(),
+    );
+    let req = DaemonRequest {
+        models: None,
+        op: DaemonOp::Hook {
+            call: super::HookCall::PreCompact,
+            dir: tmp.path().to_path_buf(),
+            stdin: "{}".to_string(),
+            env,
+        },
+    };
+    match wait_request(&socket, req).await {
+        DaemonResponse::Error { message } => assert!(
+            message.contains("ENGRAMDB_DISABLE_AUTO_MAINTENANCE"),
+            "{message}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
 /// A full batch is written in the background; a shutdown right after it
 /// must still wait for that write.
 #[tokio::test]
@@ -2211,6 +2241,43 @@ fn embed_selection(pool: usize) -> ModelSelection {
     ModelSelection::from_config(&c, Some(EmbeddingBackend::Onnx))
 }
 
+/// The daemon serves every project, and a request's `ModelSelection` is
+/// built from a project config. A selection that names an NLI repository
+/// outside the built-in list gets no NLI model from a daemon whose own
+/// global config lacks the opt-in: the loader never sees it.
+#[tokio::test]
+async fn a_custom_nli_repo_in_a_request_is_not_loaded_by_the_daemon() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let loader = spawn_fake_daemon(&socket, Duration::from_secs(60));
+    let mut c = EngramConfig::default();
+    c.nli.enabled = true;
+    c.nli.model = "attacker/repo".to_string();
+    c.rerank.enabled = false;
+    c.title.strategy = crate::title::TitleStrategy::Keyword;
+    let models = ModelSelection::from_config(&c, Some(EmbeddingBackend::Onnx));
+    assert_eq!(models.to_config().nli.model, "attacker/repo");
+
+    lease(&socket, &models).await;
+    assert!(matches!(
+        meta(&socket, &models).await,
+        DaemonResponse::Meta { .. }
+    ));
+    assert_eq!(
+        loader
+            .loads_of(|k| matches!(k, crate::ops::provider_cache::ModelKey::Embedding { .. }))
+            .len(),
+        1,
+        "the request itself was served"
+    );
+    assert!(
+        loader
+            .loads_of(|k| matches!(k, crate::ops::provider_cache::ModelKey::Nli { .. }))
+            .is_empty(),
+        "the daemon loaded an NLI repository a project config named"
+    );
+}
+
 /// The daemon unloads a model nobody used or leased for its window, keeps
 /// one whose session renews its lease with heartbeat `Ping`s, and never
 /// loads a model for a `Ping`.
@@ -2305,5 +2372,339 @@ async fn projects_share_one_pool_sized_to_the_largest_request() {
         embed_loads,
         vec![1, 4, 1],
         "load, grow, shrink — nothing else"
+    );
+}
+
+/// The accept loop's backoff: doubles from 10 ms to a 1 s cap, resets on a
+/// successful accept, and warns once per 10 s window with the count it
+/// suppressed. The real trigger (`EMFILE` on accept) cannot be reproduced in a
+/// unit test, so the policy is tested on its own.
+#[test]
+fn accept_errors_back_off() {
+    use super::server::AcceptBackoff;
+    let start = std::time::Instant::now();
+    let mut b = AcceptBackoff::default();
+    let (d, warn) = b.on_error(start);
+    assert_eq!(d, AcceptBackoff::MIN);
+    assert_eq!(warn, Some(0), "the first error of a run is warned");
+    let (d, warn) = b.on_error(start + Duration::from_millis(10));
+    assert_eq!(d, AcceptBackoff::MIN * 2);
+    assert_eq!(warn, None, "inside the window: suppressed");
+    let mut last = d;
+    for i in 0..20 {
+        let (d, _) = b.on_error(start + Duration::from_millis(20 + i));
+        assert!(d >= last && d <= AcceptBackoff::MAX);
+        last = d;
+    }
+    assert_eq!(last, AcceptBackoff::MAX);
+    let (_, warn) = b.on_error(start + AcceptBackoff::WARN_EVERY + Duration::from_secs(1));
+    assert_eq!(warn, Some(21), "the next window reports what it suppressed");
+    b.reset();
+    let (d, warn) = b.on_error(start + Duration::from_secs(60));
+    assert_eq!(d, AcceptBackoff::MIN);
+    assert_eq!(warn, Some(0));
+}
+
+/// A stand-in daemon that answers every `Ping` with `Pong { version, build }`
+/// and acks `Shutdown`. On `Shutdown` it closes its listener after
+/// `close_after` (`None`: never). Returns a counter of frames it received.
+#[cfg(unix)]
+fn spawn_version_fake(
+    socket: &std::path::Path,
+    version: &str,
+    build: &str,
+    close_after: Option<Duration>,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let frames = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let (version, build) = (version.to_string(), build.to_string());
+    let counter = Arc::clone(&frames);
+    tokio::spawn(async move {
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        loop {
+            let stream = tokio::select! {
+                _ = stop_rx.changed() => return,
+                res = listener.accept() => match res {
+                    Ok((s, _)) => s,
+                    Err(_) => return,
+                },
+            };
+            let (version, build) = (version.clone(), build.clone());
+            let counter = Arc::clone(&counter);
+            let stop_tx = stop_tx.clone();
+            tokio::spawn(async move {
+                let (r, mut w) = tokio::io::split(stream);
+                let mut reader = BufReader::new(r);
+                while let Ok(Some(req)) = read_msg::<_, DaemonRequest>(&mut reader).await {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let resp = match req.op {
+                        DaemonOp::Shutdown => {
+                            if let Some(after) = close_after {
+                                let stop_tx = stop_tx.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(after).await;
+                                    let _ = stop_tx.send(true);
+                                });
+                            }
+                            DaemonResponse::ShuttingDown
+                        }
+                        _ => DaemonResponse::Pong {
+                            version: version.clone(),
+                            build: Some(build.clone()),
+                        },
+                    };
+                    if write_msg(&mut w, &resp).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    frames
+}
+
+/// The `Shutdown` handler signals the accept loop before it persists, so a
+/// client evicting this daemon finds the socket refusing while the persist
+/// is still running (it used to keep accepting until the persist finished).
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_stops_accepting_before_persist() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    tokio::spawn(run_daemon(socket.clone(), Duration::from_secs(3600)));
+    poll_until_connectable(&socket).await;
+
+    let (entered, release) = super::server::persist_pause::arm();
+    assert!(super::request_shutdown(&socket).await.unwrap());
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the shutdown persist must start");
+    let mut refused = false;
+    for _ in 0..100 {
+        if super::transport::connect(&socket).await.is_err() {
+            refused = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    release.notify_one();
+    assert!(refused, "the socket kept accepting while the persist ran");
+}
+
+/// Evicting an older daemon waits for its socket to go before spawning: a
+/// spawn while it still listened yielded to it and left no daemon.
+#[cfg(unix)]
+#[tokio::test]
+async fn evicting_an_older_daemon_ends_with_a_current_one() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    spawn_version_fake(
+        &socket,
+        super::PROTOCOL_VERSION,
+        "0.0.1",
+        Some(Duration::from_millis(300)),
+    );
+    let outcome = super::DaemonHandle::connect_or_spawn_outcome(socket.clone(), None).await;
+    let (spawns, while_listening) = super::client::test_seam::spawns();
+    assert_eq!(spawns, 1, "a replacement must be spawned");
+    assert_eq!(
+        while_listening, 0,
+        "the replacement was spawned while the old daemon still listened"
+    );
+    // The test binary cannot be a daemon, so nothing answers afterwards.
+    assert!(matches!(outcome, super::client::SpawnOutcome::SpawnFailed));
+}
+
+/// An older daemon that keeps answering past the eviction wait is
+/// "still evicting": no spawn, and the cell backs off only the short
+/// cooldown, not the `idle/3` failure window.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_slow_eviction_uses_the_short_backoff() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    spawn_version_fake(&socket, super::PROTOCOL_VERSION, "0.0.1", None);
+    let cell = super::DaemonCell::new();
+    assert!(cell
+        .get(&socket, 3600, super::DaemonPolicy::ConnectOrSpawn)
+        .await
+        .is_none());
+    assert_eq!(
+        super::client::test_seam::spawns().0,
+        0,
+        "no spawn over a live socket"
+    );
+    assert_eq!(cell.spawn_backoff().await, Some(Duration::from_secs(10)));
+}
+
+/// A daemon of a newer build is never spawned over, and the client returns
+/// at once instead of running the post-spawn retry loop (~3.8 s).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_newer_daemon_is_never_spawned_over() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    spawn_version_fake(&socket, super::PROTOCOL_VERSION, "999.0.0", None);
+    let cell = super::DaemonCell::new();
+    let started = std::time::Instant::now();
+    assert!(cell
+        .get(&socket, 3600, super::DaemonPolicy::ConnectOrSpawn)
+        .await
+        .is_none());
+    assert_eq!(super::client::test_seam::spawns().0, 0);
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+/// Once a newer daemon is seen, the cell stops pinging it for the window:
+/// each ping refreshed its idle clock and cost a round-trip per tool call.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_incompatible_daemon_is_not_pinged_again_inside_the_window() {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let frames = spawn_version_fake(&socket, super::PROTOCOL_VERSION, "999.0.0", None);
+    let cell = super::DaemonCell::new();
+    for _ in 0..3 {
+        assert!(cell
+            .get(&socket, 3600, super::DaemonPolicy::ConnectOrSpawn)
+            .await
+            .is_none());
+    }
+    assert_eq!(frames.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// In-process fallback models are unloaded once the daemon serves the
+/// session again, and kept while it does not.
+#[tokio::test]
+async fn in_process_models_unload_once_the_daemon_serves() {
+    let loader =
+        std::sync::Arc::new(crate::ops::provider_cache::test_support::FakeLoader::default());
+    let cache = crate::ops::ProviderCache::with_loader(loader, 4);
+    let mut c = EngramConfig::default();
+    c.nli.enabled = false;
+    c.rerank.enabled = false;
+    c.title.strategy = crate::title::TitleStrategy::Keyword;
+    assert!(cache
+        .get(&c, Some(EmbeddingBackend::Onnx))
+        .await
+        .embedding
+        .is_some());
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let idle = Duration::from_millis(10);
+
+    assert_eq!(
+        super::sweep_in_process_models(&cache, false, idle).await,
+        0,
+        "daemon down: the in-process models are the session's only ones"
+    );
+    assert_eq!(cache.loaded_count().await, 1);
+    assert_eq!(super::sweep_in_process_models(&cache, true, idle).await, 1);
+    assert_eq!(cache.loaded_count().await, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Eviction side effect: who is sent `Shutdown`
+// ---------------------------------------------------------------------------
+
+/// One health check against a recording stub that answers `Ping` with
+/// `pong` and acks `Shutdown`; returns the classification and the ops the
+/// stub saw.
+async fn health_against(pong: DaemonResponse) -> (super::client::Health, Vec<String>) {
+    let tmp = super::private_tempdir();
+    let socket = tmp.path().join("d.sock");
+    let log = spawn_recording_stub(socket.clone(), move |op| match op {
+        DaemonOp::Ping => Some(pong.clone()),
+        DaemonOp::Shutdown => Some(DaemonResponse::ShuttingDown),
+        _ => None,
+    });
+    wait_connectable(&socket).await;
+    // `wait_connectable` opened (and dropped) connections without a frame;
+    // they log nothing.
+    let health = super::DaemonHandle::connect_existing(socket).health().await;
+    // `oneshot` returns once the ack is read, so the op is already logged.
+    let ops = log.lock().unwrap().clone();
+    (health, ops)
+}
+
+fn shutdown_sent(ops: &[String]) -> bool {
+    ops.iter().any(|op| op == "Shutdown")
+}
+
+/// The protocol one below ours, computed so the test survives a bump.
+fn protocol_offset(by: i64) -> String {
+    let current: i64 = super::PROTOCOL_VERSION.parse().expect("numeric protocol");
+    (current + by).to_string()
+}
+
+#[tokio::test]
+async fn check_health_asks_an_older_protocol_daemon_to_shut_down() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: protocol_offset(-1),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Evicting);
+    assert!(
+        shutdown_sent(&ops),
+        "an older protocol was not evicted: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_health_asks_an_older_build_to_shut_down() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some("0.0.1".to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Evicting);
+    assert!(
+        shutdown_sent(&ops),
+        "an older build was not evicted: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_health_never_shuts_down_a_newer_protocol_daemon() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: protocol_offset(1),
+        build: Some(env!("CARGO_PKG_VERSION").to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Incompatible);
+    assert!(
+        !shutdown_sent(&ops),
+        "a newer protocol was evicted: {ops:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_health_never_shuts_down_a_newer_build() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: super::PROTOCOL_VERSION.to_string(),
+        build: Some("99.0.0".to_string()),
+    })
+    .await;
+    assert_eq!(health, super::client::Health::Incompatible);
+    assert!(!shutdown_sent(&ops), "a newer build was evicted: {ops:?}");
+}
+
+#[tokio::test]
+async fn check_health_leaves_an_unparseable_version_alone() {
+    let (health, ops) = health_against(DaemonResponse::Pong {
+        version: "999.bogus".to_string(),
+        build: None,
+    })
+    .await;
+    assert_ne!(health, super::client::Health::Healthy);
+    assert!(
+        !shutdown_sent(&ops),
+        "a daemon of unknown version was evicted: {ops:?}"
     );
 }

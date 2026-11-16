@@ -220,7 +220,10 @@ pub async fn remote_providers(
         model_id,
     }) as Arc<dyn EmbeddingProvider>);
 
-    let nli = config.nli.enabled.then(|| {
+    // The same policy the daemon applies: for a repository it will not load,
+    // no remote NLI is wired, so the project simply has no NLI.
+    let nli_permitted = crate::ops::model_policy::permitted_nli_model(&config.nli).is_some();
+    let nli = nli_permitted.then(|| {
         Arc::new(RemoteNliProvider {
             ctx: Arc::clone(&ctx),
         }) as Arc<dyn NliProvider>

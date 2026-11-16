@@ -19,9 +19,9 @@ pub enum HookCommand {
     },
     /// Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)
     UserPromptSubmit,
-    /// Handle PostToolUse hook events (warn when an edit touches a memory's watch paths)
+    /// Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)
     PostToolUse,
-    /// Handle SessionEnd hook events (housekeeping; no context output)
+    /// Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)
     SessionEnd,
     /// Handle PreCompact hook events (store-your-memories reminder before compaction)
     PreCompact,
@@ -697,7 +697,8 @@ pub enum Command {
         #[arg(long, value_delimiter = ',')]
         audience: Vec<String>,
 
-        /// IDs of memories this one supersedes (comma-separated)
+        /// IDs of memories this one supersedes (comma-separated; full id or
+        /// unique prefix — an id that matches nothing fails the command)
         #[arg(long)]
         supersedes: Option<String>,
 
@@ -1000,7 +1001,8 @@ pub enum Command {
         #[arg(long)]
         status: Option<String>,
 
-        /// IDs of memories this one supersedes (comma-separated)
+        /// IDs of memories this one supersedes (comma-separated; full id or
+        /// unique prefix — an id that matches nothing fails the command)
         #[arg(long)]
         supersedes: Option<String>,
 
@@ -1500,7 +1502,7 @@ pub enum Command {
 
     /// Set up Claude Code integration (hooks, MCP, ENGRAM.md, CLAUDE.md)
     Setup {
-        /// Skip plugin install in global mode, write hooks and MCP directly to settings.json
+        /// Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json
         #[arg(long)]
         no_plugin: bool,
 
@@ -1550,6 +1552,30 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every visible subcommand has a `## ` heading in the CLI reference.
+    /// A heading may name several (`link` / `unlink` / `links`); every
+    /// backticked name in a level-2 heading counts.
+    #[test]
+    fn every_command_is_in_the_cli_reference() {
+        use clap::CommandFactory;
+        let doc = include_str!("../../../docs/users/cli-reference.md");
+        let documented: std::collections::HashSet<&str> = doc
+            .lines()
+            .filter_map(|l| l.strip_prefix("## "))
+            .flat_map(|h| h.split('`').skip(1).step_by(2))
+            .collect();
+        let missing: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name().to_string())
+            .filter(|name| !documented.contains(name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands without a heading in docs/users/cli-reference.md: {missing:?}"
+        );
+    }
 
     /// Epistemic-feature flag wiring: every new long flag must parse and land
     /// in the right field — a clap long-name typo ships silently otherwise.

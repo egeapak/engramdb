@@ -17,6 +17,9 @@ const SIZES: [usize; 3] = [100, 500, 2000];
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Run against the per-process temp data/config dirs, never the user's
+    // (the `#[ctor]` in engram-test-support, linked by this reference).
+    engram_test_support::arm();
     println!(
         "{:>7}  {:>12}  {:>12}  {:>10}  {:>9}",
         "memories", "full (ms)", "incr (ms)", "saved (ms)", "saved (%)"

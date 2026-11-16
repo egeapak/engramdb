@@ -101,13 +101,26 @@ pub async fn clear_content_digests(store: &crate::MemoryStore) -> crate::Result<
 /// previous version's on-disk shape rather than a stand-in for it, and it
 /// stays honest if a later version adds another column.
 pub async fn downgrade_dropping(dir: &std::path::Path, drop_cols: &[&str], version: &str) {
+    let project_id = crate::project_id::compute_project_id(dir);
+    let lance_path = crate::paths::lancedb_dir(&project_id).unwrap();
+    let manifest_path = crate::paths::project_dir(dir).join("manifest.toml");
+    downgrade_dropping_at(&lance_path, &manifest_path, drop_cols, version).await
+}
+
+/// [`downgrade_dropping`] for a store whose index is not keyed by a project
+/// directory (the global store, a group store): the `lancedb/` directory and
+/// the manifest are named directly.
+pub async fn downgrade_dropping_at(
+    lance_path: &std::path::Path,
+    manifest_path: &std::path::Path,
+    drop_cols: &[&str],
+    version: &str,
+) {
     use arrow_array::RecordBatchIterator;
     use futures_util::stream::StreamExt;
     use lancedb::query::ExecutableQuery;
     use std::sync::Arc;
 
-    let project_id = crate::project_id::compute_project_id(dir);
-    let lance_path = crate::paths::lancedb_dir(&project_id).unwrap();
     let conn = lancedb::connect(lance_path.to_str().unwrap())
         .execute()
         .await
@@ -145,16 +158,13 @@ pub async fn downgrade_dropping(dir: &std::path::Path, drop_cols: &[&str], versi
         .await
         .unwrap();
 
-    let manifest_path = crate::paths::project_dir(dir).join("manifest.toml");
-    let mut m = crate::manifest::load_manifest(&manifest_path)
-        .await
-        .unwrap();
+    let mut m = crate::manifest::load_manifest(manifest_path).await.unwrap();
     m.schema_version = version.to_string();
     // Only the schema axis may trigger: leaving the normalizer stale would
     // migrate for the wrong reason and the test would pass with the version
     // gate broken.
     m.normalizer = Some(engram_types::NORMALIZER_STAMP.to_string());
-    crate::manifest::save_manifest(&manifest_path, &m)
+    crate::manifest::save_manifest(manifest_path, &m)
         .await
         .unwrap();
 }

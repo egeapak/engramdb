@@ -30,6 +30,7 @@
 
 pub mod engine;
 pub mod filters;
+pub mod ingest_tracker;
 pub mod reranker;
 pub mod signals;
 
@@ -41,6 +42,7 @@ pub use engine::{
 pub use filters::{
     apply_index_filters, build_filter_expr, build_filter_predicate, Filterable, SearchFilters,
 };
+pub use ingest_tracker::{drain_ingests, pending_ingests};
 #[cfg(feature = "onnxruntime")]
 pub use reranker::LocalReranker;
 pub use reranker::{RerankScore, Reranker};

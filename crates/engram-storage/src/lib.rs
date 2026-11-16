@@ -40,8 +40,8 @@ pub use digest::FileDigest;
 pub use edge_index::{EdgeField, EdgeRow};
 pub use error::{Result, StorageError};
 pub use lance_index::{
-    Fragmentation, IndexFilterable, IndexForFiltering, IndexOptimizeStats, IndexSummary,
-    VectorMatch,
+    FilterProjection, Fragmentation, IndexFilterable, IndexForFiltering, IndexOptimizeStats,
+    IndexSummary, VectorMatch, WatchedEntry,
 };
 pub use manifest::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatus, Manifest};
 pub use project_id::detect_worktree_main;
@@ -50,7 +50,10 @@ pub use registry::{
     resolve_root_project_id, stale_registrations_for, subscriptions_of, FileRegistry, GroupEntry,
     InMemoryRegistry, Registry, RegistryBackend, RegistryEntry,
 };
-pub use store::{MemoryStore, ReindexCounts, SchemaState, UnparseableMemoryFile};
+pub use store::{
+    CrossDirDuplicate, CrossDirWinner, MemoryStore, ReindexCounts, SchemaState,
+    UnparseableMemoryFile,
+};
 pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 
 // Test isolation: link `engram-test-support` so its `#[ctor]` redirects
@@ -61,4 +64,15 @@ pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 #[ctor::ctor(unsafe)]
 fn arm_test_isolation() {
     engram_test_support::arm();
+}
+
+/// The `#[ctor]` above really ran in this test binary: the product resolves
+/// its data and config dirs under the temp dir, never the user's.
+#[cfg(test)]
+#[test]
+fn the_data_and_config_dirs_are_isolated() {
+    engram_test_support::assert_isolated(
+        &crate::paths::global_data_dir().unwrap(),
+        &crate::paths::global_config_dir().unwrap(),
+    );
 }

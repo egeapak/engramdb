@@ -2,7 +2,7 @@
 
 import { h, s, mount } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, stamp, plural, label, shortId } from '../format.js';
+import { fmt, ago, stamp, plural, label, shortId, score } from '../format.js';
 import { badge, slot, scopeLabel, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { smallMultiples } from '../chart.js';
 import { renderMarkdown } from '../markdown.js';
@@ -58,7 +58,7 @@ function edgeItem(e, ctx) {
       h(
         'div',
         { class: 'org' },
-        `${e.origin} · ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`,
+        `${e.origin} · ${score(e.confidence)} · ${ago(e.created_at)}`,
         e.successor ? [' · replaced by ', h('a', { href: ctx.href('detail', ctx.project.id, e.successor) }, shortId(e.successor))] : null,
       ),
       e.note ? h('div', { class: 'org clamp' }, e.note) : null,
@@ -83,7 +83,7 @@ function review(d, ctx) {
   const proposed = [...d.edges.outbound, ...d.edges.inbound].filter((e) => e.status === 'proposed' && e.kind !== 'supersedes');
   if (!proposed.length) return null;
   return [
-    secHead('Review', h('span', { class: 'faint num' }, plural(proposed.length, 'proposed relation'))),
+    secHead({ text: 'Review', id: 'review-title' }, h('span', { class: 'faint num' }, plural(proposed.length, 'proposed relation'))),
     h(
       'ul',
       { class: ['att', 'plain', 'review-list'] },
@@ -102,8 +102,8 @@ function review(d, ctx) {
           'li',
           null,
           h('div', { class: 'ttl' }, currentStyle().edgeSample(e.kind, e.status, 40), ' ', kindLabel(e.kind), ': ', e.other_summary || shortId(e.other_id)),
-          h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${Number(e.confidence).toFixed(2)} · ${ago(e.created_at)}`),
-          reviewControls(edge, ctx, { viewer: m.id, onDone: () => setTimeout(() => !ctx.isStale() && ctx.refresh(), 600) }),
+          h('div', { class: 'sub' }, `Proposed by ${e.origin} · confidence ${score(e.confidence)} · ${ago(e.created_at)}`),
+          reviewControls(edge, ctx, { viewer: m.id, onDone: () => ctx.refreshSoon(600, { focusId: 'review-title' }) }),
         );
       }),
     ),
@@ -117,8 +117,8 @@ function meta(m) {
     ['Epistemic', m.epistemic],
     ['Status', label(statusKey(m.status))],
     ['Visibility', String(m.visibility).toLowerCase()],
-    ['Criticality', Number(m.criticality).toFixed(2)],
-    ['Confidence', Number(m.confidence).toFixed(2)],
+    ['Criticality', score(m.criticality)],
+    ['Confidence', score(m.confidence)],
   ];
   if (m.logical && m.logical.length) rows.push(['Logical', h('span', { class: 'mono' }, m.logical.join(', '))]);
   if (m.physical && m.physical.length) rows.push(['Path', h('span', { class: 'mono' }, m.physical.join(', '))]);

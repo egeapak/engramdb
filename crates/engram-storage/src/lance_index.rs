@@ -16,6 +16,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use futures_util::stream::StreamExt;
+use lancedb::database::CreateTableMode;
 use lancedb::expr::{col, is_in, lit};
 use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::OptimizeAction;
@@ -226,6 +227,29 @@ pub struct IndexForFiltering {
     pub keyword_stems: Option<KeywordStems>,
 }
 
+/// One row of [`LanceIndex::list_watched`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchedEntry {
+    pub id: String,
+    pub watch_paths: Vec<String>,
+    pub invalidated_at: Option<DateTime<Utc>>,
+}
+
+/// Which columns a filtering scan projects.
+///
+/// `keyword_stems` is the one large column of the projection (a JSON object
+/// per row, parsed per row), and only a text query reads it. Every other
+/// caller asks for [`Self::NoStems`]; the rows then carry
+/// `keyword_stems: None`, the documented "no cache" value, so a text query
+/// handed one would still answer correctly by recomputing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterProjection {
+    /// Every filtering column.
+    Full,
+    /// Every filtering column but `keyword_stems`.
+    NoStems,
+}
+
 /// Filterable/displayable entry (15 columns).
 ///
 /// Contains every field needed for filtering, sorting, and display.
@@ -430,6 +454,36 @@ pub struct LanceIndex {
     table_name: String,
     chunks_table_name: String,
     dimensions: usize,
+}
+
+/// Create `name` only when it does not exist.
+///
+/// "Does not exist" is `lancedb::Error::TableNotFound` and nothing else. This
+/// used to create on **any** open error, so a transient failure (a reader
+/// racing a writer, an I/O error) answered with an attempt to create an empty
+/// table over a live one. Any other open error propagates. A create that
+/// loses a race to another process re-opens what the winner made.
+async fn ensure_named_table(
+    connection: &Connection,
+    name: &str,
+    schema: Arc<Schema>,
+) -> Result<()> {
+    match connection.open_table(name).execute().await {
+        Ok(_) => return Ok(()),
+        Err(lancedb::Error::TableNotFound { .. }) => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to open LanceDB {name} table"));
+        }
+    }
+    match connection.create_empty_table(name, schema).execute().await {
+        Ok(_) => Ok(()),
+        Err(create_err) => match connection.open_table(name).execute().await {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                Err(create_err).with_context(|| format!("Failed to create LanceDB {name} table"))
+            }
+        },
+    }
 }
 
 impl LanceIndex {
@@ -647,39 +701,16 @@ impl LanceIndex {
     }
 
     async fn ensure_table_exists(&self) -> Result<()> {
-        let table_name = self.table_name.clone();
-        let schema = self.memories_schema();
-        let connection = Arc::clone(&self.connection);
-
-        match connection.open_table(&table_name).execute().await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                connection
-                    .create_empty_table(&table_name, schema)
-                    .execute()
-                    .await
-                    .context("Failed to create LanceDB memories table")?;
-                Ok(())
-            }
-        }
+        ensure_named_table(&self.connection, &self.table_name, self.memories_schema()).await
     }
 
     async fn ensure_chunks_table_exists(&self) -> Result<()> {
-        let table_name = self.chunks_table_name.clone();
-        let schema = self.chunks_schema();
-        let connection = Arc::clone(&self.connection);
-
-        match connection.open_table(&table_name).execute().await {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                connection
-                    .create_empty_table(&table_name, schema)
-                    .execute()
-                    .await
-                    .context("Failed to create LanceDB chunks table")?;
-                Ok(())
-            }
-        }
+        ensure_named_table(
+            &self.connection,
+            &self.chunks_table_name,
+            self.chunks_schema(),
+        )
+        .await
     }
 
     async fn open_table(&self) -> Result<Table> {
@@ -798,6 +829,8 @@ impl LanceIndex {
     pub async fn count_and_logical_scopes(
         &self,
     ) -> Result<(usize, std::collections::HashSet<String>)> {
+        #[cfg(test)]
+        test_counters::STATS_SCANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let table = self.open_table().await?;
 
         let mut stream = table
@@ -890,10 +923,48 @@ impl LanceIndex {
         Ok(ids)
     }
 
+    /// Whether a row with exactly this id exists.
+    ///
+    /// An equality probe with `limit(1)`, for `create`: the prefix `LIKE`
+    /// of [`Self::find_ids_by_prefix`] answers a wider question (and cannot
+    /// use the id's scalar index the same way), and `create` only ever asks
+    /// about one whole id.
+    pub async fn id_exists(&self, id: &str) -> Result<bool> {
+        #[cfg(test)]
+        test_counters::ID_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let table = self.open_table().await?;
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .only_if_expr(col("id").eq(lit(id)))
+            .limit(1)
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for an id")?;
+        while let Some(batch_result) = stream.next().await {
+            if batch_result.context("Failed to read batch")?.num_rows() > 0 {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The memories table's current version (one per commit).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn memories_version(&self) -> Result<u64> {
+        let table = self.open_table().await?;
+        table
+            .version()
+            .await
+            .context("Failed to read table version")
+    }
+
     /// Find IDs matching a given prefix via a LanceDB WHERE clause.
     ///
     /// Returns all matching IDs; callers handle 0/1/many disambiguation.
     pub async fn find_ids_by_prefix(&self, prefix: &str) -> Result<Vec<String>> {
+        #[cfg(test)]
+        test_counters::ID_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let table = self.open_table().await?;
         // The pattern still escapes the LIKE metacharacters `%` and `_` —
         // that is pattern semantics (a literal `_` in a stem must not act as
@@ -1264,11 +1335,24 @@ impl LanceIndex {
         &self,
         predicate: Option<String>,
     ) -> Result<Vec<IndexForFiltering>> {
+        self.list_for_filtering_where_projected(predicate, FilterProjection::Full)
+            .await
+    }
+
+    /// [`Self::list_for_filtering_where`] with a chosen [`FilterProjection`].
+    pub async fn list_for_filtering_where_projected(
+        &self,
+        predicate: Option<String>,
+        proj: FilterProjection,
+    ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
-        let mut query = table
-            .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns()));
+        let mut query =
+            table
+                .query()
+                .select(lancedb::query::Select::Columns(Self::filtering_columns(
+                    proj,
+                )));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
         }
@@ -1284,6 +1368,66 @@ impl LanceIndex {
             entries.extend(batch_to_for_filtering(&batch)?);
         }
         Ok(entries)
+    }
+
+    /// Every row that watches at least one path: `(id, watch_paths,
+    /// invalidated_at)`, three columns and a pushdown instead of the whole
+    /// filtering projection.
+    ///
+    /// The PostToolUse hook's read, which runs on every edit and needs only
+    /// these. `watch_paths` is a non-nullable JSON array string, `[]` when the
+    /// memory watches nothing (the write path always serializes it), so
+    /// `watch_paths != '[]'` is exact; the caller's glob match stays the
+    /// authority on which rows apply.
+    pub async fn list_watched(&self) -> Result<Vec<WatchedEntry>> {
+        use lancedb::expr::{col, lit};
+        let table = self.open_table().await?;
+        let mut stream = table
+            .query()
+            .select(lancedb::query::Select::Columns(vec![
+                "id".into(),
+                "watch_paths".into(),
+                "invalidated_at".into(),
+            ]))
+            .only_if_expr(col("watch_paths").not_eq(lit("[]")))
+            .execute()
+            .await
+            .context("Failed to query LanceDB table for watched entries")?;
+        let mut out = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch.context("Failed to read batch")?;
+            let col_str = |name: &str| -> Result<StringArray> {
+                Ok(batch
+                    .column_by_name(name)
+                    .with_context(|| format!("Missing '{name}' column"))?
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .with_context(|| format!("Failed to cast '{name}'"))?
+                    .clone())
+            };
+            let ids = col_str("id")?;
+            let watch = col_str("watch_paths")?;
+            let invalidated = col_str("invalidated_at")?;
+            for i in 0..batch.num_rows() {
+                let watch_paths: Vec<String> = serde_json::from_str(watch.value(i))
+                    .context("Failed to parse watch_paths JSON")?;
+                let invalidated_at = if invalidated.is_null(i) {
+                    None
+                } else {
+                    Some(
+                        chrono::DateTime::parse_from_rfc3339(invalidated.value(i))
+                            .context("Failed to parse invalidated_at")?
+                            .with_timezone(&Utc),
+                    )
+                };
+                out.push(WatchedEntry {
+                    id: ids.value(i).to_string(),
+                    watch_paths,
+                    invalidated_at,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Upsert embedding chunks for a memory.
@@ -1305,6 +1449,25 @@ impl LanceIndex {
         if chunks.is_empty() {
             self.delete_chunks(memory_id).await?;
             return Ok(());
+        }
+        self.write_chunks(memory_id, chunks, embed_sha256).await?;
+        // Keep the memories-table R3 flag in sync: this memory now has chunks.
+        self.set_has_embedding(memory_id, true).await
+    }
+
+    /// The chunks-table half of [`Self::upsert_chunks`]: the vectors, without
+    /// the memories-table flag update. For the one caller that writes the row
+    /// itself right after, with `has_embedding` already true
+    /// (`MemoryStore::create_with_chunks`) — one memories-table commit
+    /// instead of two. `chunks` must not be empty.
+    pub async fn write_chunks(
+        &self,
+        memory_id: &str,
+        chunks: Vec<Vec<f32>>,
+        embed_sha256: Option<&str>,
+    ) -> Result<()> {
+        if chunks.is_empty() {
+            anyhow::bail!("write_chunks called with no chunks for memory '{memory_id}'");
         }
 
         // Validate every vector against the index's fixed width BEFORE any
@@ -1349,10 +1512,6 @@ impl LanceIndex {
         op.execute(Box::new(batches))
             .await
             .context("Failed to upsert chunks")?;
-
-        // Keep the memories-table R3 flag in sync: this memory now has chunks.
-        self.set_has_embedding(memory_id, true).await?;
-
         Ok(())
     }
 
@@ -1460,6 +1619,27 @@ impl LanceIndex {
                 .await
                 .context("Failed to batch-update has_embedding")?;
         }
+        Ok(())
+    }
+
+    /// Null the `keyword_stems` column of `memory_ids`, the shape a row from
+    /// before the column was populated has. Test fixtures only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn null_keyword_stems_for_test(&self, memory_ids: &[String]) -> Result<()> {
+        if memory_ids.is_empty() {
+            return Ok(());
+        }
+        let table = self.open_table().await?;
+        let list = memory_ids.iter().map(lit).collect::<Vec<_>>();
+        let filter = lancedb::expr::expr_to_sql_string(&is_in(col("id"), list))
+            .context("Failed to render keyword_stems update filter")?;
+        table
+            .update()
+            .only_if(filter)
+            .column("keyword_stems", "NULL")
+            .execute()
+            .await
+            .context("Failed to null keyword_stems")?;
         Ok(())
     }
 
@@ -1697,6 +1877,8 @@ impl LanceIndex {
     }
 
     pub async fn has_chunks(&self, memory_id: &str) -> Result<bool> {
+        #[cfg(test)]
+        test_counters::CHUNK_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let table = self.open_chunks_table().await?;
         let mut stream = table
             .query()
@@ -1875,7 +2057,7 @@ impl LanceIndex {
         Ok(matches)
     }
 
-    /// Drop and recreate both memories and chunks tables.
+    /// Empty both the memories and the chunks table.
     ///
     /// Destroys all embedding vectors. Only call this when the caller can
     /// re-embed everything afterwards (or explicitly wants a full wipe) —
@@ -1887,18 +2069,21 @@ impl LanceIndex {
         Ok(())
     }
 
-    /// Drop and recreate only the memories (metadata) table.
+    /// Empty only the memories (metadata) table, with the current schema.
+    ///
+    /// One overwrite commit: a new, empty version of the **same** dataset.
+    /// The table never disappears — a drop followed by a create left a
+    /// window in which a lock-free reader saw no table, and a concurrent
+    /// open created an empty one over the rebuild — and a reader that opened
+    /// earlier keeps its snapshot.
     ///
     /// Leaves the chunks (vectors) table untouched, so a reindex that
     /// rebuilds metadata from the markdown files does not destroy
     /// embeddings. Chunks are keyed by `memory_id`, not by table identity.
     pub async fn clear_memories(&self) -> Result<()> {
-        let connection = Arc::clone(&self.connection);
-
-        let _ = connection.drop_table(&self.table_name, &[]).await;
-        let memories_schema = self.memories_schema();
-        connection
-            .create_empty_table(&self.table_name, memories_schema)
+        self.connection
+            .create_empty_table(&self.table_name, self.memories_schema())
+            .mode(CreateTableMode::Overwrite)
             .execute()
             .await
             .context("Failed to recreate LanceDB memories table")?;
@@ -2009,18 +2194,56 @@ impl LanceIndex {
             }))
     }
 
-    /// Drop and recreate only the chunks (vectors) table.
+    /// [`Self::clear_chunks`], sparing the vectors of the memories in `keep`.
+    ///
+    /// For a forced re-embed when some memory files do not parse: their
+    /// vectors cannot be rebuilt from the file, and under an unchanged model
+    /// they are still right. Every other chunk row is deleted (one delete
+    /// commit) and every other row's `has_embedding` is reset (one update
+    /// commit). The predicates are `NOT IN` lists, chunked by 500 and joined
+    /// with `AND`. Requires the chunks table to exist with the right width;
+    /// a missing table or a width change goes through `clear_chunks`.
+    pub async fn clear_chunks_keeping(&self, keep: &[String]) -> Result<()> {
+        if keep.is_empty() {
+            return self.clear_chunks().await;
+        }
+        let not_kept = |column: &str| {
+            keep.chunks(500)
+                .map(|batch| !is_in(col(column), batch.iter().map(lit).collect::<Vec<_>>()))
+                .reduce(|a, b| a.and(b))
+                .expect("keep is not empty")
+        };
+        let chunks = self.open_chunks_table().await?;
+        chunks
+            .delete(&not_kept("memory_id"))
+            .await
+            .context("Failed to delete chunks outside the kept set")?;
+        let filter = lancedb::expr::expr_to_sql_string(
+            &col("has_embedding").eq(lit(true)).and(not_kept("id")),
+        )
+        .context("Failed to render the has_embedding reset filter")?;
+        self.open_table()
+            .await?
+            .update()
+            .only_if(filter)
+            .column("has_embedding", "false")
+            .execute()
+            .await
+            .context("Failed to reset has_embedding outside the kept set")?;
+        Ok(())
+    }
+
+    /// Empty only the chunks (vectors) table.
     ///
     /// Recreates the table with the currently configured dimensions, so this
     /// is also the remediation path when the embedding dimensions change.
     /// Destroys all vectors — only call when a re-embed is about to follow.
     pub async fn clear_chunks(&self) -> Result<()> {
-        let connection = Arc::clone(&self.connection);
-
-        let _ = connection.drop_table(&self.chunks_table_name, &[]).await;
-        let chunks_schema = self.chunks_schema();
-        connection
-            .create_empty_table(&self.chunks_table_name, chunks_schema)
+        // One overwrite commit, like `clear_memories`: the table is never
+        // absent.
+        self.connection
+            .create_empty_table(&self.chunks_table_name, self.chunks_schema())
+            .mode(CreateTableMode::Overwrite)
             .execute()
             .await
             .context("Failed to recreate LanceDB chunks table")?;
@@ -2265,9 +2488,10 @@ impl LanceIndex {
         "audience",
     ];
 
-    fn filtering_columns() -> Vec<String> {
+    fn filtering_columns(proj: FilterProjection) -> Vec<String> {
         Self::FILTERING_COLUMNS
             .iter()
+            .filter(|c| proj == FilterProjection::Full || **c != "keyword_stems")
             .map(|c| (*c).to_string())
             .collect()
     }
@@ -2435,10 +2659,23 @@ impl LanceIndex {
         &self,
         predicate: lancedb::expr::DfExpr,
     ) -> Result<Vec<IndexForFiltering>> {
+        self.list_for_filtering_where_expr_projected(predicate, FilterProjection::Full)
+            .await
+    }
+
+    /// [`Self::list_for_filtering_where_expr`] with a chosen
+    /// [`FilterProjection`].
+    pub async fn list_for_filtering_where_expr_projected(
+        &self,
+        predicate: lancedb::expr::DfExpr,
+        proj: FilterProjection,
+    ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
         let query = table
             .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns()))
+            .select(lancedb::query::Select::Columns(Self::filtering_columns(
+                proj,
+            )))
             .only_if_expr(predicate);
 
         let mut stream = query
@@ -3129,6 +3366,19 @@ fn parse_provenance_source(s: &str) -> Result<ProvenanceSource> {
     }
 }
 
+/// Read counters for the tests that pin how many index reads a write makes.
+/// Process-wide, which nextest's process-per-test model makes per-test.
+#[cfg(test)]
+pub(crate) mod test_counters {
+    use std::sync::atomic::AtomicUsize;
+    /// `id_exists` + `find_ids_by_prefix`.
+    pub(crate) static ID_PROBES: AtomicUsize = AtomicUsize::new(0);
+    /// `has_chunks`.
+    pub(crate) static CHUNK_PROBES: AtomicUsize = AtomicUsize::new(0);
+    /// `count_and_logical_scopes` (the full `logical` column scan).
+    pub(crate) static STATS_SCANS: AtomicUsize = AtomicUsize::new(0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3169,6 +3419,41 @@ mod tests {
             expires_at: None,
         };
         IndexEntry::without_digest(&memory)
+    }
+
+    #[tokio::test]
+    async fn no_stems_projection_matches_full_except_stems() {
+        let temp_dir = TempDir::new().unwrap();
+        let lance = LanceIndex::new(temp_dir.path(), 384).await.unwrap();
+        for n in 0..5 {
+            let mut entry = create_test_entry(&format!("p-{n}"));
+            entry.watch_paths = vec![format!("src/{n}.rs")];
+            entry.tags = vec![format!("tag{n}")];
+            lance.upsert(&entry).await.unwrap();
+        }
+        let full = lance
+            .list_for_filtering_where_projected(None, FilterProjection::Full)
+            .await
+            .unwrap();
+        let lean = lance
+            .list_for_filtering_where_projected(None, FilterProjection::NoStems)
+            .await
+            .unwrap();
+        assert_eq!(full.len(), 5);
+        assert!(full.iter().all(|e| e.keyword_stems.is_some()));
+        assert!(lean.iter().all(|e| e.keyword_stems.is_none()));
+        let without_stems = |rows: Vec<IndexForFiltering>| -> Vec<String> {
+            let mut out: Vec<String> = rows
+                .into_iter()
+                .map(|mut e| {
+                    e.keyword_stems = None;
+                    format!("{e:?}")
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        assert_eq!(without_stems(full), without_stems(lean));
     }
 
     #[tokio::test]
@@ -4244,5 +4529,42 @@ mod tests {
             .unwrap();
         let from_fm = fm.list_for_filtering_where(Some(pred)).await.unwrap();
         assert_eq!(sorted_ids(&from_plain), sorted_ids(&from_fm));
+    }
+
+    /// Only "the table does not exist" may create it. Any other open error
+    /// used to be answered with an attempt to create an empty table.
+    #[tokio::test]
+    async fn an_open_error_other_than_not_found_does_not_create_a_table() {
+        let tmp = TempDir::new().unwrap();
+        LanceIndex::new(tmp.path(), 384).await.unwrap();
+
+        // Corrupt every manifest of the memories table: it exists, and it
+        // cannot be opened.
+        let versions = tmp.path().join("memories.lance").join("_versions");
+        let mut corrupted = 0;
+        for entry in std::fs::read_dir(&versions).unwrap() {
+            std::fs::write(entry.unwrap().path(), b"not a manifest").unwrap();
+            corrupted += 1;
+        }
+        assert!(corrupted > 0);
+        let before: Vec<_> = std::fs::read_dir(&versions)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+
+        let err = LanceIndex::new(tmp.path(), 384)
+            .await
+            .err()
+            .expect("an unreadable table is an error");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("Failed to open LanceDB memories table"),
+            "the open error must propagate, not a create attempt: {text}"
+        );
+        let after: Vec<_> = std::fs::read_dir(&versions)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "no new table version was written");
     }
 }

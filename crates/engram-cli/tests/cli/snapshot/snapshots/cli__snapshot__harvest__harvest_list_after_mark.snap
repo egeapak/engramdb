@@ -13,7 +13,7 @@ exit: 0
     {
       "already_harvested": false,
       "assistant_turns": 0,
-      "bytes": 177,
+      "bytes": [BYTES],
       "cwd": "[PROJECT]",
       "ended_at": "[TIMESTAMP]",
       "first_prompt": "What is the default digest budget?",

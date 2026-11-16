@@ -114,6 +114,44 @@ fn add_one(f: &Fixture) -> String {
 // add -e
 // =====================================================================
 
+/// The draft `add -e` hands the editor is readable by its owner only. It used
+/// to be written with the umask's mode into the shared temp directory, where
+/// another local user could read it while the editor was open.
+#[test]
+fn add_editor_draft_is_owner_only() {
+    let f = Fixture::new();
+    let marker = f.path().join("draft-perms.txt");
+    let editor = f.fake_editor(
+        "perms-editor.sh",
+        &format!(
+            "find \"$1\" \\( -perm -040 -o -perm -004 \\) -print > '{}'\nexit 1\n",
+            marker.display()
+        ),
+    );
+    f.run_with_editor(&["add", "-e"], &editor_arg(&editor));
+    let found = std::fs::read_to_string(&marker).expect("the editor ran");
+    assert_eq!(found, "", "the draft is group- or world-readable: {found}");
+}
+
+/// A failed editor leaves no draft behind: the guard deletes it on every
+/// exit path, not only after a successful read-back.
+#[test]
+fn add_editor_removes_the_draft_when_the_editor_fails() {
+    let f = Fixture::new();
+    let marker = f.path().join("draft-path.txt");
+    let editor = f.fake_editor(
+        "failing-editor.sh",
+        &format!("printf '%s' \"$1\" > '{}'\nexit 1\n", marker.display()),
+    );
+    f.run_with_editor(&["add", "-e"], &editor_arg(&editor));
+    let draft = std::fs::read_to_string(&marker).expect("the editor ran");
+    assert!(!draft.is_empty(), "the editor was handed a path");
+    assert!(
+        !Path::new(&draft).exists(),
+        "the draft {draft} survived a failed editor"
+    );
+}
+
 /// The whole happy path: template written, editor fills it in, memory created.
 #[test]
 fn add_editor_saves_a_filled_in_template() {
@@ -150,7 +188,7 @@ Anything written straight to the table and not to a file is lost.",
 /// than becoming the title.
 ///
 /// The reported `$1` is `add`'s template file. It is written to
-/// `std::env::temp_dir()` under a per-run UUID name, outside every fixture
+/// `std::env::temp_dir()` under a per-run random name, outside every fixture
 /// directory, and `[ADD_TEMPLATE]` in `normalize` is what keeps it out of the
 /// snapshot.
 #[test]

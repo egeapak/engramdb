@@ -29,12 +29,11 @@ pub use challenge::Challenge;
 pub use config::{
     ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
     EngramConfig, EpistemicConfig, GlobalConfig, HarvestConfig, HooksConfig, LinksConfig,
-    LogicalBonusConfig, MaintenanceConfig, McpConfig, NliConfig, ReindexOnModelChange,
-    RerankConfig, RetrievalConfig, ScopeProximityConfig, ScoringConfig, ScoringWeights,
-    SearchConfig, SituationConfig, SituationProfile, ThresholdsConfig, TrustWeights,
-    COMPOSITION_METADATA_V1, CONTENT_SOFT_TOKEN_TARGET, DEFAULT_NLI_MODEL_REPO,
-    DEFAULT_RERANK_MODEL, DEFAULT_SUMMARY_MAX_CHARS, MAX_EXPAND_LINKS, MAX_SUPPORTS_BOOST,
-    MAX_USAGE_WEIGHT,
+    MaintenanceConfig, McpConfig, NliConfig, ReindexOnModelChange, RerankConfig, RetrievalConfig,
+    ScoringConfig, ScoringWeights, SearchConfig, SituationConfig, SituationProfile,
+    ThresholdsConfig, TrustWeights, COMPOSITION_METADATA_V1, CONTENT_SOFT_TOKEN_TARGET,
+    DEFAULT_NLI_MODEL_REPO, DEFAULT_RERANK_MODEL, DEFAULT_SUMMARY_MAX_CHARS, MAX_EXPAND_LINKS,
+    MAX_SUPPORTS_BOOST, MAX_USAGE_WEIGHT,
 };
 pub use decay::{Decay, DecayStrategy};
 pub use env::in_process_override;

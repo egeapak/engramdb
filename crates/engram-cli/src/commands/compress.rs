@@ -24,6 +24,10 @@ pub async fn run_compress(
     } else {
         MemoryStore::open(dir).await?
     };
+    // An explicit `--threshold` wins; otherwise `[thresholds] compress`.
+    let config_path = dir.join(".engramdb").join("config.toml");
+    let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+    let threshold = threshold.or(Some(config.thresholds.compress));
     let result = ops::compress_candidates(&store, scope.as_deref(), threshold).await?;
 
     // JSON mode: one parseable object (the human flow below prints the candidate
@@ -85,7 +89,6 @@ pub async fn run_compress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::OutputFormatter;
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
     use engramdb::types::{Memory, MemoryType, Provenance, Status, Visibility};
     use tempfile::TempDir;
@@ -147,19 +150,57 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_compress(temp_dir.path(), false, None, None, &formatter).await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(cap.stdout(), "No compression candidates found.\n");
     }
 
     #[tokio::test]
     async fn test_compress_with_low_criticality_memories() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_compress(temp_dir.path(), false, None, None, &formatter).await;
-        assert!(result.is_ok());
+        result.unwrap();
+        let out = cap.stdout();
+        // Only the memory under the 0.40 threshold is a candidate.
+        assert!(
+            out.contains("Compression candidates (1 memories, threshold 0.40)"),
+            "{out}"
+        );
+        assert!(out.contains("Test summary for mem-test-003-ccc"), "{out}");
+        assert!(
+            !out.contains("mem-test-001") && !out.contains("mem-test-002"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn compress_default_threshold_comes_from_config() {
+        let (temp_dir, _store) = setup_test_store().await;
+        // mem-test-002 has criticality 0.7: above the 0.4 default, under 0.8.
+        std::fs::write(
+            temp_dir.path().join(".engramdb").join("config.toml"),
+            "[thresholds]\ngc = 0.05\ncompress = 0.8\n",
+        )
+        .unwrap();
+        let (formatter, cap) = crate::testutil::capturing_json();
+        run_compress(temp_dir.path(), false, None, None, &formatter)
+            .await
+            .unwrap();
+        let out = cap.stdout();
+        assert!(out.contains("mem-test-002-bbb"), "{out}");
+        assert!(!out.contains("mem-test-001-aaa"), "{out}");
+        assert!(out.contains("0.8"), "{out}");
+
+        // An explicit threshold still wins over the config.
+        let (formatter, cap) = crate::testutil::capturing_json();
+        run_compress(temp_dir.path(), false, None, Some(0.4), &formatter)
+            .await
+            .unwrap();
+        assert!(!cap.stdout().contains("mem-test-002-bbb"));
     }
 }

@@ -66,8 +66,8 @@
 
 import { h, mount, afterPaint } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, plural, shortId, label } from '../format.js';
-import { badge, scopeName, kindIcon, TYPE_LABEL } from '../scopes.js';
+import { fmt, ago, plural, shortId, label, score } from '../format.js';
+import { badge, scopeName, scopeKey, scopeFromKey, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { LAYOUTS } from '../graph/layouts.js';
 import { decodeForce, decodeGrid, serverKey } from '../graph/server-layout.js';
@@ -82,7 +82,8 @@ import { svgSurface } from '../graph/surface-svg.js';
 import { canvasSurface, canvasSupported } from '../graph/canvas/host.js';
 import { memoryPanel } from '../graph/details.js';
 import { placeLabels } from '../graph/labels.js';
-import { projHead, secHead, alertBanner, errorBox } from './common.js';
+import { stepIndex } from '../graph/walk.js';
+import { projHead, secHead, alertBanner, errorBox, unavailable } from './common.js';
 import { reviewControls } from './review.js';
 import { OVERVIEW_MIN, renderOverview } from './graph-overview.js';
 
@@ -199,6 +200,10 @@ function filtersOf(query) {
     // A memory to select once drawn (a link from the Relations tab); taken
     // out of the hash once used, so a later click is not undone by it.
     memory: query.get('memory') || '',
+    // The top-level scope (a scopeKey) that memory is in, so a link that
+    // lands on the overview can open its scope instead (E17); dropped with
+    // `memory`.
+    memory_scope: query.get('memory_scope') || '',
   };
 }
 
@@ -212,6 +217,7 @@ function filterQuery(f) {
   if (f.all) q.set('all', '1');
   if (f.style) q.set('style', f.style);
   if (f.memory) q.set('memory', f.memory);
+  if (f.memory && f.memory_scope) q.set('memory_scope', f.memory_scope);
   return q.toString();
 }
 
@@ -284,7 +290,7 @@ function buildFilters(filterBox, ctx, f, g, theme, setFilters) {
     'select',
     { 'aria-label': 'Top-level scope shown', onchange: (ev) => (location.hash = hashOf(ctx, { ...f, top_scope: ev.target.value, all: ev.target.value ? f.all : false })) },
     h('option', { value: '' }, 'All top-level scopes'),
-    g.scopes.map((l) => h('option', { value: l.name || '-', selected: (l.name || '-') === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
+    g.scopes.map((l) => h('option', { value: scopeKey(l.name), selected: scopeKey(l.name) === f.top_scope }, `${scopeName(l.name)} (${fmt(l.count)})`)),
   );
   // Keep keyboard focus on the chip that was pressed.
   const active = document.activeElement;
@@ -327,7 +333,7 @@ export async function renderGraph(main, ctx) {
   const theme = useStyle(f.style);
   const t = makeT(theme);
   if (!p.available) {
-    mount(main, projHead('Graph', p.name, [h('span', { class: 'mono' }, p.path)]), h('div', { class: 'note warn' }, `Unavailable: ${p.unavailable_reason || 'no readable store'}.`));
+    mount(main, unavailable(p, ctx, 'Graph'));
     return;
   }
   // Ask the server for the layouts it computes (graph/server-layout.js):
@@ -366,10 +372,26 @@ export async function renderGraph(main, ctx) {
   performance.mark('graph:data');
 
   if (g.summary) {
-    // The overview draws no memory to select.
+    // The overview draws no memory to select. A link that names one (the
+    // Relations tab's Show in graph) also names its scope: open that scope
+    // instead, where the memory is drawn. The link decides by the store's
+    // size under its own filters, which this answer can disagree with (an
+    // invalidated end adds memories), so this is where it is settled.
+    if (f.memory && f.memory_scope) {
+      f.top_scope = f.memory_scope;
+      f.memory_scope = '';
+      f.all = false;
+      history.replaceState(null, '', hashOf(ctx, f));
+      ctx.refresh({ scroll: false });
+      return;
+    }
+    const memoryLost = !!f.memory;
     f.memory = '';
+    f.memory_scope = '';
+    if (memoryLost) history.replaceState(null, '', hashOf(ctx, f));
     renderOverview(main, ctx, g, {
       t,
+      memoryLost,
       f,
       hashOf,
       styleControl,
@@ -419,7 +441,7 @@ export async function renderGraph(main, ctx) {
           { class: 'g-crumbs', 'aria-label': t('crumbsAria') },
           h('a', { href: hashOf(ctx, { ...f, top_scope: '', all: false }), onclick: backTo(hashOf(ctx, { ...f, top_scope: '', all: false })) }, t('crumbAll')),
           h('span', { class: 'sep', 'aria-hidden': 'true' }, ' › '),
-          h('span', { 'aria-current': 'page' }, scopeName(opened === '-' ? '' : opened)),
+          h('span', { 'aria-current': 'page' }, scopeName(scopeFromKey(opened))),
         )
       : null;
 
@@ -686,7 +708,7 @@ export async function renderGraph(main, ctx) {
       const tg = tagByName.get(sc.name);
       const ft = filtered(sc, f);
       if (!tg || !ft.count) continue;
-      tags.push({ tg, name: sc.name, count: ft.count, contradictions: ft.contradictions, aria: t('tagAria', scopeName(sc.name), ft.count, ft.contradictions), go: () => (location.hash = hashOf(ctx, { ...f, top_scope: sc.name || '-' })) });
+      tags.push({ tg, name: sc.name, count: ft.count, contradictions: ft.contradictions, aria: t('tagAria', scopeName(sc.name), ft.count, ft.contradictions), go: () => (location.hash = hashOf(ctx, { ...f, top_scope: scopeKey(sc.name) })) });
     }
     surface.setTags(tags);
   }
@@ -843,9 +865,18 @@ export async function renderGraph(main, ctx) {
     }
     return { x: b.x + (b.w - w) / 2, y: b.y + (b.h - hh) / 2, w, h: hh };
   }
+  // The view object fit() last set: any other move makes a new one.
+  let fitted = null;
   function fit() {
     view = fitView();
+    fitted = view;
     apply();
+  }
+  /** Whether the view is what Fit shows for the box as it is now (to half a unit). */
+  function atFit() {
+    if (!view || view === fitted) return true;
+    const f = fitView();
+    return Math.abs(view.x - f.x) < 0.5 && Math.abs(view.y - f.y) < 0.5 && Math.abs(view.w - f.w) < 0.5 && Math.abs(view.h - f.h) < 0.5;
   }
   /** The view `factor` times as wide, around (cx, cy) (default: its centre). */
   function zoomedView(factor, cx, cy) {
@@ -988,13 +1019,12 @@ export async function renderGraph(main, ctx) {
   // Top to bottom, then left to right; sorted on the first step, since a
   // 2k-memory sort cost the first paint ~1.3 ms (measured).
   let walk = null;
-  let walkAt = -1;
   function stepNode(dir) {
     if (!walk) walk = [...g.nodes.keys()].sort((a, b) => lay.pos[2 * a + 1] - lay.pos[2 * b + 1] || lay.pos[2 * a] - lay.pos[2 * b]);
-    const cur = document.activeElement && document.activeElement.getAttribute ? Number(document.activeElement.getAttribute('data-i')) : NaN;
-    if (!Number.isNaN(cur)) walkAt = walk.indexOf(cur);
-    walkAt = (walkAt + dir + walk.length) % walk.length;
-    const i = walk[walkAt];
+    // -1 for the graph box itself (no memory focused): the walk starts at an end.
+    const at = stepIndex(walk, surface.nodeIndexOf(document.activeElement), dir);
+    if (at < 0) return;
+    const i = walk[at];
     const [x, y] = P(i);
     if (x < view.x || x > view.x + view.w || y < view.y || y > view.y + view.h) centerOn(x, y);
     surface.focusNode(i);
@@ -1004,10 +1034,11 @@ export async function renderGraph(main, ctx) {
     if (ev.target !== graphBox && !onNode) return;
     const step = ev.shiftKey ? 0.5 : 0.15;
     const keys = {
-      ArrowLeft: () => (view.x -= view.w * step),
-      ArrowRight: () => (view.x += view.w * step),
-      ArrowUp: () => (view.y -= view.h * step),
-      ArrowDown: () => (view.y += view.h * step),
+      // A new object, never a write into it: atFit() knows Fit's by identity.
+      ArrowLeft: () => (view = { ...view, x: view.x - view.w * step }),
+      ArrowRight: () => (view = { ...view, x: view.x + view.w * step }),
+      ArrowUp: () => (view = { ...view, y: view.y - view.h * step }),
+      ArrowDown: () => (view = { ...view, y: view.y + view.h * step }),
     };
     if (keys[ev.key]) {
       keys[ev.key]();
@@ -1051,13 +1082,33 @@ export async function renderGraph(main, ctx) {
         return;
       }
       // Layout is clean here: reading the box costs nothing.
-      boxSize.w = graphBox.clientWidth;
-      boxSize.h = graphBox.clientHeight;
-      if (Math.abs(boxSize.w - lastW) > 2) {
-        lastW = boxSize.w;
-        lastH = boxSize.h;
-        fit();
-      } else if (surface.composited && view && (boxSize.w !== lastW || boxSize.h !== lastH)) {
+      const w = graphBox.clientWidth;
+      const hh = graphBox.clientHeight;
+      if (Math.abs(w - lastW) > 2) {
+        // Asked of the old box, before boxSize moves. A view at Fit stays
+        // at Fit; a zoomed or panned one (a scrollbar coming or going, a
+        // window resize) keeps its centre and its pixels per unit, so the
+        // memory the reader was looking at stays put.
+        const wasFit = atFit();
+        const oldW = boxSize.w || w;
+        boxSize.w = w;
+        boxSize.h = hh;
+        lastW = w;
+        lastH = hh;
+        if (wasFit || !w || !hh) fit();
+        else {
+          const cx = view.x + view.w / 2;
+          const cy = view.y + view.h / 2;
+          const vw = (view.w * w) / oldW;
+          const vh = (vw * hh) / w;
+          view = { x: cx - vw / 2, y: cy - vh / 2, w: vw, h: vh };
+          apply();
+        }
+        return;
+      }
+      boxSize.w = w;
+      boxSize.h = hh;
+      if (surface.composited && view && (boxSize.w !== lastW || boxSize.h !== lastH)) {
         // A canvas keeps its own view of the box (the SVG's viewBox does
         // this itself): any other change re-fits that view to the new box,
         // or hit testing and the drawing would use the old height.
@@ -1395,7 +1446,7 @@ export async function renderGraph(main, ctx) {
           h('dt', null, 'Status'),
           h('dd', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status))),
           h('dt', null, 'Origin'),
-          h('dd', null, `${e.origin} · ${Number(e.confidence).toFixed(2)}`),
+          h('dd', null, `${e.origin} · ${score(e.confidence)}`),
           h('dt', null, 'Since'),
           h('dd', null, ago(e.created_at)),
           e.note ? [h('dt', null, 'Note'), h('dd', { class: 'clamp' }, e.note)] : null,
@@ -1427,7 +1478,7 @@ export async function renderGraph(main, ctx) {
           graphBox.focus();
         },
         onSelect: (j) => pin({ node: j }, true),
-        onOpenScope: (name) => (location.hash = hashOf(ctx, { ...f, top_scope: name || '-' })),
+        onOpenScope: (name) => (location.hash = hashOf(ctx, { ...f, top_scope: scopeKey(name) })),
         review: (e) => {
           const src = byId.has(e.src) ? g.nodes[byId.get(e.src)] : null;
           const dst = !e.dst_store && byId.has(e.dst) ? g.nodes[byId.get(e.dst)] : null;
@@ -1445,6 +1496,8 @@ export async function renderGraph(main, ctx) {
     const ks = visible();
     const shown = ks.map((k) => g.edges[k]);
     const proposed = shown.filter((e) => e.status === 'proposed');
+    // Relations to undrawn memories, under the same chips as the drawn ones.
+    const notDrawn = filtered({ kinds: (g.counts && g.counts.hidden_kinds) || {} }, f).count;
     mount(
       card,
       h('div', { class: 'eyebrow' }, 'Details'),
@@ -1463,7 +1516,7 @@ export async function renderGraph(main, ctx) {
         h('dt', null, 'Proposed'),
         h('dd', null, `${fmt(proposed.length)}${proposed.some((e) => e.kind === 'contradicts') ? ` (${fmt(proposed.filter((e) => e.kind === 'contradicts').length)} contradictions)` : ''}`),
         tagByName.size ? [h('dt', null, 'To other scopes'), h('dd', null, `${plural(g.stub_scopes.reduce((n, sc) => n + filtered(sc, f).count, 0), 'relation')} (tags around the graph)`)] : null,
-        g.counts.hidden ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(g.counts.hidden, 'relation')} to memories not drawn here (past the memory limit)`)] : null,
+        notDrawn ? [h('dt', null, 'Not drawn'), h('dd', null, `${plural(notDrawn, 'relation')} to memories not drawn here (past the memory limit)`)] : null,
       ),
     );
   }
@@ -1493,7 +1546,7 @@ export async function renderGraph(main, ctx) {
       h('td', { class: 't' }, edgeEnd(e, 'dst')),
       h('td', null, h('span', { class: ['ep', 'st-' + e.status] }, label(e.status)), e.state !== 'live' ? h('span', { class: 'faint' }, ` · ${FAR_END[e.state] || e.state}`) : null),
       h('td', null, e.origin),
-      h('td', { class: 'n' }, Number(e.confidence).toFixed(2)),
+      h('td', { class: 'n' }, score(e.confidence)),
       h('td', null, h('button', { type: 'button', class: 'btn sm', onclick: () => pin({ edge: k }, true) }, e.status === 'proposed' ? 'Review' : 'Show in graph')),
     );
   /** Rows built per idle slice when the table is built after a paint (each row draws a relation sample). */
@@ -1636,6 +1689,7 @@ export async function renderGraph(main, ctx) {
   if (f.memory) {
     const want = f.memory;
     f.memory = '';
+    f.memory_scope = '';
     history.replaceState(null, '', hashOf(ctx, f));
     if (!byId.has(want)) notesBox.append(h('div', { class: 'note', role: 'status' }, t('noteMemoryNotDrawn')));
     else if (!back) pin({ node: byId.get(want) }, true);

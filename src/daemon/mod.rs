@@ -44,8 +44,8 @@ pub use hooks::{HookExecutor, HookProject, HookRun};
 pub use protocol::{DaemonStatus, HookCall, ModelSelection, RequestCounts, PROTOCOL_VERSION};
 pub use remote::remote_providers;
 pub use resolve::{
-    resolve_daemon_providers, resolve_providers, resolve_providers_with, DaemonCell, DaemonPolicy,
-    InProcessFallback,
+    resolve_daemon_providers, resolve_providers, resolve_providers_with, sweep_in_process_models,
+    DaemonCell, DaemonPolicy, InProcessFallback,
 };
 pub use server::{run_daemon, run_daemon_with_hooks};
 
@@ -53,6 +53,8 @@ pub use server::{run_daemon, run_daemon_with_hooks};
 // seam, so they build and run on both Unix (domain sockets) and Windows (named
 // pipes). The single Unix-domain-socket-specific case (a stale regular file at
 // the socket path) is `#[cfg(unix)]`-gated within the module.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 

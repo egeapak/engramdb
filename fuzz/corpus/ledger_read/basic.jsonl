@@ -1,0 +1,2 @@
+{"session_id":"aaaa1111","at":"2026-08-07T10:11:12.131415Z","stage":"collected","archive":{"file_name":"aaaa1111.jsonl.zst","bytes":143,"original_bytes":901,"sha256":"deadbeef","archived_at":"2026-08-07T10:11:12.131400Z"}}
+{"session_id":"aaaa1111","at":"2026-08-07T11:02:00.500Z","decision":"harvested","memory_ids":["m1","m2"],"note":null}

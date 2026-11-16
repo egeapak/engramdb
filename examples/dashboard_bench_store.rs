@@ -6,6 +6,8 @@
 //! ```bash
 //! cargo run --example dashboard_bench_store -- <out dir> [sizes…]
 //! # e.g. … -- /tmp/dash-bench s1k s10k      (default: s60 s1k s2k s10k)
+//! # and the fault fixture of bench/browser/pages.mjs (named only):
+//! cargo run --example dashboard_bench_store -- <out dir> sfault
 //! ```
 //!
 //! Layout: `<out>/{data,conf,models}` is one machine (registry, global data,
@@ -29,12 +31,21 @@ use std::path::PathBuf;
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let out = PathBuf::from(args.next().ok_or_else(|| {
-        anyhow::anyhow!("usage: dashboard_bench_store <out dir> [s60|s1k|s2k|s10k …]")
+        anyhow::anyhow!("usage: dashboard_bench_store <out dir> [s60|s1k|s2k|s10k|sfault …]")
     })?);
     let wanted: Vec<String> = args.collect();
     std::fs::create_dir_all(&out)?;
     let out = std::fs::canonicalize(&out)?;
     dashboard_store::use_machine_dir(&out)?;
+    if wanted.iter().any(|w| w == dashboard_store::FAULT) {
+        let t = std::time::Instant::now();
+        let id = dashboard_store::build_fault(&out).await?;
+        println!(
+            "{}: fault fixture, project {id}, {:.1}s",
+            dashboard_store::FAULT,
+            t.elapsed().as_secs_f64()
+        );
+    }
     for (name, n) in dashboard_store::SIZES {
         if !wanted.is_empty() && !wanted.iter().any(|w| w == name) {
             continue;

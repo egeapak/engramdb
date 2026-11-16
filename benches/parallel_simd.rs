@@ -619,6 +619,7 @@ fn chunk_read_benchmarks(c: &mut Criterion) {
     for &n in &[16usize, 32, 64, 128, 256] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let (store, ids) = rt.block_on(async {
+            engram_test_support::arm();
             let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
                 .await
                 .expect("init");
@@ -691,6 +692,7 @@ fn store_batch_benchmarks(c: &mut Criterion) {
     for &n in &[16usize, 32, 64, 128] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let (store, mems) = rt.block_on(async {
+            engram_test_support::arm();
             let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
                 .await
                 .expect("init");
@@ -758,6 +760,7 @@ fn store_update_benchmarks(c: &mut Criterion) {
     for &n in &[16usize, 32, 64, 128] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let (store, ids) = rt.block_on(async {
+            engram_test_support::arm();
             let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
                 .await
                 .expect("init");

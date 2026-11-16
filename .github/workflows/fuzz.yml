@@ -2,6 +2,8 @@ name: Fuzz
 
 # Fuzzing links the whole crate (lancedb/ort native deps) and needs a nightly
 # toolchain, so it runs on a schedule and on demand rather than on every PR.
+# (ci.yml's `fuzz-check` job type-checks the targets on every pull request
+# that touches them, so a target that no longer builds is found before Monday.)
 on:
   schedule:
     - cron: "0 4 * * 1" # Mondays 04:00 UTC
@@ -29,11 +31,25 @@ jobs:
     name: Build fuzz targets
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    outputs:
+      # JSON array of every target `cargo fuzz list` knows, i.e. every
+      # `[[bin]]` in fuzz/Cargo.toml. The run legs take their matrix from it,
+      # so a new target is fuzzed without anyone editing this file. The list
+      # used to be copied by hand below, and a target missing from the copy
+      # was built every week and never run.
+      targets: ${{ steps.package.outputs.targets }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install nightly toolchain
-        run: rustup toolchain install nightly --profile minimal
+        # Nightly builds the fuzz targets (`cargo +nightly fuzz`). The second
+        # line installs the stable version rust-toolchain.toml pins: a plain
+        # `cargo` in this checkout resolves to it (`cargo install cargo-fuzz`
+        # below, and the `rustc -vV` rust-cache keys on), so install it
+        # explicitly instead of relying on rustup's implicit download.
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
@@ -42,7 +58,7 @@ jobs:
       # (ASan-instrumented nightly deps, multiple GB) would land in the 10 GB
       # repo quota CI's caches live in and evict them, and a weekly run on a
       # new nightly would barely reuse it anyway. Saved from master only.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: "fuzz -> target"
           cache-targets: false
@@ -94,14 +110,20 @@ jobs:
           du -sh fuzz/target
 
       - name: Package binaries
+        id: package
         # upload-artifact drops the executable bit, so ship a tarball.
         run: |
+          set -euo pipefail
           bin=fuzz/target/x86_64-unknown-linux-gnu/release
           targets=$(cargo +nightly fuzz list)
+          if [ -z "$targets" ]; then
+            echo "::error::cargo fuzz list printed no targets"; exit 1
+          fi
           tar -C "$bin" -czf fuzz-bins.tar.gz $targets
           ls -l fuzz-bins.tar.gz
+          echo "targets=$(printf '%s\n' $targets | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-bins
           path: fuzz-bins.tar.gz
@@ -116,25 +138,27 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - memory_file
-          - memory_file_roundtrip
-          - scope_logical
-          - scope_physical
-          - scope_proximity
-          - decay
-          - composite_score
-          - registry
-          - slug
+        target: ${{ fromJSON(needs.build.outputs.targets) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: fuzz-bins
 
+      # The target name and the dispatch input reach the scripts below through
+      # `env:`, never by `${{ }}` inside `run:`. An expression there is pasted
+      # into the script text before the shell parses it, so a value such as
+      # `300; curl ... | sh` would be executed.
       - name: Unpack ${{ matrix.target }}
-        run: mkdir -p bins && tar -C bins -xzf fuzz-bins.tar.gz ${{ matrix.target }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$TARGET" =~ ^[A-Za-z0-9_]+$ ]]; then
+            echo "::error::unexpected fuzz target name: '$TARGET'"; exit 1
+          fi
+          mkdir -p bins && tar -C bins -xzf fuzz-bins.tar.gz "$TARGET"
 
       - name: Restore fuzz corpus
         # The corpus grows as libfuzzer discovers new coverage; persist it
@@ -142,7 +166,7 @@ jobs:
         # instead of restarting from the curated seeds in git. Caches are
         # immutable, so key on run_id to save a fresh snapshot every run and
         # let restore-keys pick up the most recent previous one.
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -154,16 +178,22 @@ jobs:
         # the same artifact prefix, corpus directory and ASAN_OPTIONS.
         env:
           ASAN_OPTIONS: detect_odr_violation=0
+          TARGET: ${{ matrix.target }}
+          MAX_TOTAL_TIME: ${{ github.event.inputs.max_total_time || '300' }}
         run: |
-          t=${{ matrix.target }}
+          set -euo pipefail
+          if ! [[ "$MAX_TOTAL_TIME" =~ ^[0-9]+$ ]]; then
+            echo "::error::max_total_time must be a whole number of seconds, got '$MAX_TOTAL_TIME'"; exit 1
+          fi
+          t=$TARGET
           mkdir -p "fuzz/artifacts/$t" "fuzz/corpus/$t"
           "./bins/$t" -artifact_prefix="fuzz/artifacts/$t/" \
-            -max_total_time=${{ github.event.inputs.max_total_time || '300' }} \
+            -max_total_time="$MAX_TOTAL_TIME" \
             "fuzz/corpus/$t"
 
       - name: Upload crash artifacts
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
@@ -181,12 +211,13 @@ jobs:
       always() && github.event_name == 'schedule' &&
       (needs.build.result != 'success' || needs.fuzz.result != 'success')
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       actions: read
       issues: write
     steps:
       - name: File or update fuzz-failure issues
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const { owner, repo } = context.repo;

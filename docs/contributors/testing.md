@@ -23,7 +23,7 @@ cargo nextest run -p engramdb --lib
 cargo nextest run --workspace --all-features -E 'test(retrieval::engine::tests::)'
 
 # One specific test by exact name
-cargo nextest run --workspace --all-features -E 'test(=retrieval::engine::tests::test_search_with_real)'
+cargo nextest run --workspace --all-features -E 'test(=retrieval::engine::tests::test_search_with_real_reranker)'
 
 # Doctests (nextest doesn't run them; run separately if you have them)
 cargo test --doc
@@ -31,7 +31,13 @@ cargo test --doc
 
 See nextest's docs for the full filter-expression grammar.
 
-**Don't run `cargo test --lib`** — isolation breaks (see above). The two flaky tests under that mode (`ops::doctor::tests::test_doctor_many_memories_healthy`, `ops::projects::tests::test_get_project_info_with_memories`) are documented in CLAUDE.md as not regression signals.
+**Don't run `cargo test --lib`** — isolation breaks (see above). Under it, `ops::projects::tests::test_get_project_info_with_memories` fails: the orphan-prune tests in `ops::projects` share the process's data dir, and they delete the store data of every other test as an orphan. Under nextest each test has its own process, and it passes. CLAUDE.md lists it as not a regression signal.
+
+## CI jobs
+
+The `test`, `test-load-dynamic`, `coverage` and release `test` jobs set `ENGRAMDB_TEST_REQUIRE_MODELS=1`. Each first runs `--run-ignored only -E 'test(=staging::stage_default_models)'` to stage the models, so a missing model fails instead of skipping.
+
+`check-cross` (macOS and Windows) runs a filter that needs no model: `transport`, `paths`, `write_lock`, `volume`, `state_file`, `registry`, `harvest_state`, `layout::tests`, `engram-onnx`, `daemon::client`, `daemon::tests` without its two model tests, and the cross-process add test. On macOS it also runs `binary(cli) & test(snapshot::)`.
 
 ## ML-model tests
 
@@ -45,6 +51,8 @@ max-threads = 1
 filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real)"
 test-group = "ml-models"
 ```
+
+This excerpt is shortened. The filter in `.config/nextest.toml` is the full list: it also names single tests in the MCP server and the daemon that load a real model. `test_rerank` and `test_search_with_real` are name prefixes, not exact names.
 
 These tests:
 
@@ -62,6 +70,7 @@ For restricted-egress sandboxes (no `cdn.pyke.io` / `huggingface.co`), see the p
 |----------|------|
 | `tests` modules colocated in each source file (in `src/` and every `crates/*/src/`) | Unit tests, colocated with the code |
 | `src/daemon/tests.rs` | Daemon integration tests (in-process Unix socket) |
+| `crates/engram-dashboard/src/tests.rs` and `src/layout/tests.rs` | Dashboard security, read-only and layout property tests. The browser checks in `crates/engram-dashboard/bench/browser/` are run by hand. |
 | `crates/engram-cli/tests/cli/*.rs` | Black-box CLI tests using `assert_cmd` |
 | `crates/engram-cli/tests/cli/snapshot/` | Binary-level `insta` snapshots (tier 2, below) |
 | `crates/engram-cli/src/output.rs::tests` | Renderer `insta` snapshots (tier 1, below) |
@@ -237,6 +246,9 @@ about it are easy to get wrong:
   have, passed locally and failed on CI. `Fixture::base` now strips `claude`
   from `PATH` alongside `engramdb`, and `setup_dry_run_with_claude_cli` plants a
   stub to cover the other branch on purpose.
+- **`[SIZE]` is narrow.** Tier 2 redacts a size only on the `index:`,
+  `projects:` and `disk usage:` lines and in the disk-usage JSON message.
+  Every other size is asserted.
 - **Structural redaction has to survive JSON-lines.** What config cannot pin,
   `render_stdout` redacts by parsing — `doctor`'s ONNX Runtime row reports
   *where* `libonnxruntime` was loaded from, and the passing and failing forms
@@ -278,6 +290,8 @@ When a test needs to load a real model:
 
 1. Add it to a `tests` module in the relevant source file (e.g. `crates/engram-models/src/embeddings/onnx.rs::tests`).
 2. Make sure it's matched by the `ml-models` filter in `nextest.toml` — either by being in one of the already-matched modules, or by extending the filter expression.
-3. Skip gracefully if the model can't load (e.g. `let Some(provider) = OnnxProvider::try_new() else { return; }`). Some CI/sandboxes can't download the model on first run.
+3. Get the model with `engram_test_support::require_model!("what", loader())`. It returns the model. When the model is missing it prints `SKIPPED (model unavailable): …` and returns from the test. Under `ENGRAMDB_TEST_REQUIRE_MODELS=1` it panics instead, so CI cannot pass a model test by skipping it.
 
 The reranker/NLI tests follow this pattern — look at them for a working example.
+
+Ollama tests are `#[ignore]`d, because they need a running Ollama. Run them with `cargo nextest run -p engram-models --run-ignored only -E 'test(ollama::)'`.

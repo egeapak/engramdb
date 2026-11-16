@@ -7,7 +7,7 @@ Persistent memory for your coding agent. This plugin gives Claude Code the abili
 EngramDB must be installed and available on your PATH:
 
 ```bash
-cargo install --git https://github.com/egeapak/engramdb engram-cli
+cargo install --locked --git https://github.com/egeapak/engramdb engram-cli
 ```
 
 (The `engramdb` binary ships in the `engram-cli` workspace crate.)
@@ -40,9 +40,9 @@ engramdb --version
 
 ### MCP Server
 
-A full MCP server (`engramdb serve`) starts automatically, providing 28 tools for memory and project management:
+A full MCP server (`engramdb serve`) starts automatically, providing these tools for memory and project management:
 
-`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `link`, `unlink`, `link_status`, `task_current`, `task_complete`, `stats`, `config`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `projects_link`, `projects_unlink`, `harvest_list`, `harvest_show`, `harvest_search`, `harvest_mark`, `harvest_ledger`
+`query`, `create`, `get`, `list`, `update`, `delete`, `challenge`, `review`, `resolve`, `verify`, `link`, `unlink`, `link_status`, `task_current`, `task_complete`, `stats`, `config`, `doctor`, `gc`, `reindex`, `compress_candidates`, `compress_apply`, `projects_list`, `projects_info`, `harvest_list`, `harvest_show`, `harvest_search`, `harvest_mark`, `harvest_ledger`
 
 ### Shared embedding daemon
 
@@ -67,15 +67,16 @@ project's `.engramdb/config.toml`, where `[daemon]` is ignored.
 - **PreToolUse (Read/Write/Edit)** — surfaces relevant memories as context when the agent touches files
 - **UserPromptSubmit** — surfaces prompt-relevant memories, inferring your situation (debugging vs. design) to reweight what appears
 - **PostToolUse (Write/Edit/MultiEdit)** — warns when an edit touches a path some memory declared as its invalidation trigger
-- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and archives a compressed copy of the session transcript so it can still be read after Claude Code prunes its own. Like the other hooks it does nothing at all in a directory where EngramDB was never initialized — the plugin registers hooks machine-wide, and a project with no store gets no archive
+- **PostToolUse / PostToolUseFailure (Bash)** — notices a command that failed and later succeeded in the same session, and asks once to save the cause
+- **SessionEnd** — housekeeping: clears the session's task mapping (and optionally demotes task-scoped memories), and keeps a compressed copy of the session transcript so it can still be read after Claude Code prunes its own. Like the other hooks it does nothing at all in a directory where EngramDB was never initialized — the plugin registers hooks machine-wide, and a project with no store gets no transcript copy
 
-> **What the transcript archive stores.** Claude Code prunes its own
+> **What the transcript copy holds.** Claude Code prunes its own
 > transcripts, so a session becomes unharvestable once its file is gone.
 > SessionEnd therefore keeps a zstd-compressed copy at
 > `<engramdb data dir>/projects/<root-project-id>/transcripts/` — deliberately
 > **outside** your repository, never under `.engramdb/`, which gets committed.
 > The id is the **root** of the project's hierarchy, so a git worktree's
-> archives land beside the main checkout's rather than in a directory of
+> transcript copies land beside the main checkout's rather than in a directory of
 > their own.
 >
 > It is a verbatim copy of the whole conversation: your prompts, the
@@ -142,6 +143,6 @@ engramdb setup --global  # global
 
 **Plugin not loading:** Ensure `engramdb` is on your PATH. Run `engramdb doctor` to check.
 
-**Duplicate hooks:** If you previously used `engramdb setup` to write hooks to `settings.json` and then installed the plugin, remove the `hooks` and `mcpServers` engramdb entries from `~/.claude/settings.json` to avoid duplicates.
+**Duplicate hooks:** If you previously used `engramdb setup` to write hooks to `settings.json` and then installed the plugin, remove the engramdb `hooks` entries from `~/.claude/settings.json` and the `engramdb` server from `~/.claude.json` (project scope: `<project>/.claude/settings.json` and `<project>/.mcp.json`) to avoid duplicates.
 
 **Stale permissions:** After updating the plugin, run `engramdb setup --global` to refresh permission entries.

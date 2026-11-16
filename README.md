@@ -9,7 +9,7 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 
 ## Features
 
-- **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L6-v2 embeddings
+- **Semantic search** — vector similarity search powered by LanceDB and all-MiniLM-L12-v2 embeddings
 - **Automatic context injection** — hooks surface relevant memories when your agent touches files
 - **Contradiction detection** — NLI-based challenge system flags conflicting information
 - **Epistemic classes** — every memory is a `fact`, `observation`, or `decision`, orthogonal to its type; retrieval reweights classes by situation (observations surface while debugging, decisions while designing)
@@ -19,17 +19,28 @@ EngramDB gives your AI coding agent a memory layer that persists between convers
 - **MCP server** — full Model Context Protocol integration (stdio and SSE transports)
 - **Shared embedding daemon** — auto-spawned and self-healing; loads models once machine-wide instead of once per agent session, stays resident while sessions are connected, and is usable from the CLI too, with graceful in-process fallback
 - **Claude Code plugin** — one-command install with hooks, MCP, and permissions
-- **Offline-first** — all embeddings run locally via ONNX Runtime (or optionally Ollama)
+- **Offline-first** — all embeddings run locally via ONNX Runtime (or optionally Ollama); ONNX Runtime is installed separately
 - **Multiple output formats** — pretty, JSON, or plain text for scripting
 
 ## Quick Start
 
 ### Install
 
-Build from source (requires a recent stable Rust toolchain):
+EngramDB needs ONNX Runtime 1.24 or later on the machine. It is not bundled.
 
 ```bash
-cargo install --git https://github.com/egeapak/engramdb
+brew install onnxruntime                 # macOS / Linuxbrew
+sudo apt-get install -y libonnxruntime   # where packaged
+```
+
+Or set `ORT_DYLIB_PATH` to a library you already have. Without a runtime
+EngramDB still runs, with keyword search only. See
+[installation](docs/users/installation.md#onnx-runtime).
+
+Then build from source (needs a recent stable Rust toolchain and `protoc`):
+
+```bash
+cargo install --locked --git https://github.com/egeapak/engramdb engram-cli
 ```
 
 ### Set up Claude Code integration
@@ -44,13 +55,13 @@ The recommended way is via the plugin:
 /plugin install engram@engramdb
 ```
 
-Or set up manually with hooks and MCP in settings.json:
+Or let `engramdb setup` write the hooks (to `~/.claude/settings.json`) and the MCP entry (to `~/.claude.json`):
 
 ```bash
 engramdb setup --global
 ```
 
-For project-scoped setup (writes to `<project>/.claude/`):
+For project scope (writes `<project>/.claude/settings.json` and `<project>/.mcp.json`):
 
 ```bash
 engramdb setup
@@ -80,7 +91,7 @@ EngramDB stores memories as structured files (TOML + markdown) in `.engramdb/mem
 
 - **Type** — decision, convention, hazard, context, intent, relationship, debug, preference
 - **Epistemic class** — fact, observation, or decision (defaults from the type), with a bi-temporal validity window: memories are invalidated, not deleted
-- **Visibility** — project, team, or personal scope
+- **Visibility** — `shared` (committed with the project) or `personal` (kept outside the repository)
 - **Criticality** — 0.0 to 1.0 score that decays over time
 - **Embeddings** — vector representations stored in a LanceDB index for semantic search
 
@@ -89,8 +100,8 @@ When integrated with Claude Code:
 1. **SessionStart hook** — injects high-criticality memories into the conversation at startup
 2. **PreToolUse hook** — when the agent reads/writes/edits a file, relevant memories are surfaced as context
 3. **UserPromptSubmit hook** — surfaces memories relevant to the prompt, inferring the situation (e.g. debugging vs. design)
-4. **PostToolUse hook** — warns when an edit touches paths a memory's validity depends on
-5. **SessionEnd / PreCompact hooks** — housekeeping and a store-your-memories reminder before compaction
+4. **PostToolUse hook** — warns when an edit touches paths a memory's validity depends on; after a Bash command that failed and later succeeded, asks once to save the cause
+5. **SessionEnd / PreCompact hooks** — task housekeeping, a compressed copy of the session transcript, and a store-your-memories reminder before compaction
 6. **MCP server** — the agent can search, create, update, and manage memories through tool calls
 
 ## CLI Reference
@@ -110,17 +121,21 @@ When integrated with Claude Code:
 | `link` / `unlink` / `links` | Add, remove and list typed edges between memories (contradicts, supports, supersedes, …) |
 | `task` | Declare or complete the task this session works on (`current`/`complete`) |
 | `stats` | Show store statistics |
+| `config` | Show effective config values, thresholds, and the store's top tags |
 | `doctor` | Check environment and store health (`--fix` to repair, `validate` to test models) |
 | `gc` | Garbage collect low-relevance memories |
 | `compress` | List compression candidates |
-| `reindex` | Rebuild index and re-embed all memories |
+| `reindex` | Rebuild the index and embed memories whose vectors are not current |
 | `migrate` | Migrate memory files to latest format |
 | `rollback` | Roll back memory files to previous format |
 | `serve` | Start the MCP server |
+| `dashboard` | Open a local, read-only web dashboard of every store on this machine |
 | `daemon` | Manage the shared embedding daemon (`run`/`status`/`stop`/`restart`) |
 | `setup` | Set up Claude Code integration |
 | `hook` | Claude Code plugin hook handler |
 | `projects` | Manage registered EngramDB projects |
+| `groups` | Manage multi-project memory groups and this project's subscriptions |
+| `harvest` | Inspect past Claude Code sessions for knowledge worth remembering |
 | `completions` | Generate shell completions |
 
 `stats --daemon` shows the embedding daemon's cumulative request metrics
@@ -169,6 +184,7 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `task_current` | Declare (or read) the task this session is working on |
 | `task_complete` | Mark a task finished, demoting its task-scoped memories |
 | `stats` | Store statistics and health info |
+| `config` | Effective config values and the store's most-used tags |
 | `doctor` | Environment and store diagnostics |
 | `gc` | Garbage collect low-relevance memories |
 | `reindex` | Rebuild the vector index |
@@ -178,6 +194,11 @@ When running as an MCP server (`engramdb serve`), the following tools are availa
 | `projects_info` | Info about a specific project (id, name, path, memory count, scopes) |
 | `projects_link` | Link a registered project as a sub-project of another |
 | `projects_unlink` | Remove a project's parent link, promoting it back to a root project |
+| `harvest_list` | List past Claude Code sessions that may hold knowledge worth saving |
+| `harvest_show` | Digest one past session |
+| `harvest_mark` | Record what was decided about a session, so it is not offered again |
+| `harvest_search` | Search past conversations by meaning |
+| `harvest_ledger` | Read the review record of past sessions |
 
 ## Configuration
 
@@ -187,8 +208,8 @@ Each section is optional, but a section you *do* write must be complete: once a
 section header appears, every field in it that has no built-in default is
 required. In particular, an `[embeddings]` table must set `provider`,
 `dimensions`, and `max_tokens` (no defaults — this keeps a partial embeddings
-config from silently mismatching the index), and any `[retrieval.scoring]` or
-`[thresholds]` table must set all of its fields. The example below parses as-is;
+config from silently mismatching the index), a `[thresholds]` table must set
+`gc` and `compress`, and a `[search]` table must set `threshold`. The example below parses as-is;
 see [`docs/users/configuration.md`](docs/users/configuration.md) for the
 complete, copy-pasteable schema with every field and its default.
 
@@ -218,7 +239,7 @@ idle_timeout_secs = 900   # Daemon reaps this long after the last session discon
 ### Embedding backends
 
 - **auto** (default) — tries ONNX first, falls back to Ollama
-- **onnx** — local ONNX Runtime with all-MiniLM-L6-v2, no external dependencies
+- **onnx** — local inference with ONNX Runtime and all-MiniLM-L12-v2 (uint8). Needs ONNX Runtime installed.
 - **ollama** — uses a local Ollama instance for embeddings (requires `ollama` running)
 
 Models are cached in the system cache directory (`~/Library/Caches/engramdb/models` on macOS).

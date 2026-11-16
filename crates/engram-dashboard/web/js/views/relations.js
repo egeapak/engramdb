@@ -26,26 +26,27 @@
 
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
-import { ago, fmt, label, plural, shortId } from '../format.js';
-import { badge, scopeName } from '../scopes.js';
+import { ago, fmt, label, plural, shortId, score } from '../format.js';
+import { badge, scopeName, scopeKey, scopeFromKey } from '../scopes.js';
 import { KINDS, kindLabel } from '../relations.js';
 import { currentStyle } from '../graph/themes/index.js';
 import { OVERVIEW_MIN } from './graph-overview.js';
 import { reviewControls } from './review.js';
-import { errorBox, projHead } from './common.js';
+import { errorBox, projHead, unavailable } from './common.js';
 
 const PAGE = 100;
 
 /** A relation in words, read from its source: "A supports B". */
-const PHRASE = {
+const PHRASE = Object.freeze({
+  __proto__: null,
   contradicts: 'contradicts',
   supersedes: 'supersedes',
   supports: 'supports',
   derived_from: 'is derived from',
   related_to: 'is related to',
   duplicates: 'duplicates',
-};
-const phrase = (kind) => PHRASE[kind] || String(kind).replace(/_/g, ' ');
+});
+const phrase = (kind) => (Object.hasOwn(PHRASE, kind) && PHRASE[kind]) || String(kind).replace(/_/g, ' ');
 
 const STATUS = [
   ['', 'Proposed and confirmed'],
@@ -112,8 +113,9 @@ const groupKey = (end) => (end && end.group !== undefined ? keyOf(end.group) : n
 /** A cell's number in its 28 px: 1.6k past 999 (the label says it in full). */
 const compact = (n) => (n < 1000 ? String(n) : n < 10000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : Math.round(n / 1000) + 'k');
 
-const nameOf = (key) => scopeName(key === '-' ? '' : key);
-const keyOf = (name) => name || '-';
+// Keys are `scopes.js::scopeKey`s: `-` for no scope, else percent-encoded.
+const nameOf = (key) => scopeName(scopeFromKey(key));
+const keyOf = scopeKey;
 
 /** The picked cell in words, for the filter chip. */
 function pairText(f) {
@@ -142,10 +144,30 @@ function headName(sc, subs) {
   return subs && sc.name.includes('.') ? '.' + sc.name.split('.').slice(1).join('.') : sc.name;
 }
 
+/**
+ * The graph hash query of a row's *Show in graph* link. The graph opens on
+ * the scope overview above OVERVIEW_MIN memories, so the link opens the
+ * source memory's scope there. `memories` is this page's count, read under
+ * its own filters and at its own time; the graph counts again under the
+ * link's, so the two can fall on opposite sides of OVERVIEW_MIN.
+ * `memory_scope` always names the scope, and the graph opens it when the
+ * link lands on the overview anyway (views/graph.js).
+ */
+export function graphLink(r, memories) {
+  const top = keyOf(r.from.top_scope || '');
+  const gq = new URLSearchParams();
+  if (memories > OVERVIEW_MIN) gq.set('top_scope', top);
+  if (r.status === 'rejected') gq.set('rejected', '1');
+  if (r.from.invalidated || r.to.invalidated) gq.set('invalidated', '1');
+  gq.set('memory', r.src);
+  gq.set('memory_scope', top);
+  return gq;
+}
+
 export async function renderRelations(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, errorBox({ status: 409, message: `${p.name} is unavailable: ${p.unavailable_reason}` }));
+    mount(main, unavailable(p, ctx, 'Relations'));
     return;
   }
   const f = filtersOf(ctx.route.query);
@@ -384,14 +406,7 @@ export async function renderRelations(main, ctx) {
       e && e.summary
         ? h('span', { class: 'rel-scope' }, badge(e.top_scope, e.color_slot), h('span', { class: 'mono' }, e.scope || scopeName('')), e.invalidated ? h('span', { class: 'ep invalidated' }, 'invalidated') : null)
         : null;
-    // The graph opens on the scope overview above OVERVIEW_MIN memories,
-    // so the link opens the source memory's scope there.
-    const top = r.from.top_scope || '';
-    const gq = new URLSearchParams();
-    if (memories > OVERVIEW_MIN) gq.set('top_scope', keyOf(top));
-    if (r.status === 'rejected') gq.set('rejected', '1');
-    if (r.from.invalidated || r.to.invalidated) gq.set('invalidated', '1');
-    gq.set('memory', r.src);
+    const gq = graphLink(r, memories);
     const review = r.status === 'proposed' && writes ? reviewControls(r, ctx, { onDone: (out, text) => {
       // Named, since the relation may now be off this page.
       const cut = (x) => { const v = String(x || shortId(r.dst)); return v.length > 48 ? v.slice(0, 47) + '…' : v; };
@@ -423,7 +438,7 @@ export async function renderRelations(main, ctx) {
         { class: 'rel-meta' },
         h('span', { class: ['ep', 'st-' + r.status] }, label(r.status)),
         r.state !== 'live' ? h('span', { class: 'faint' }, FAR_END[r.state] || r.state) : null,
-        h('span', { class: 'faint' }, `${r.origin} · ${Number(r.confidence).toFixed(2)} · ${ago(r.at)}`),
+        h('span', { class: 'faint' }, `${r.origin} · ${score(r.confidence)} · ${ago(r.at)}`),
         h('a', { class: 'btn sm', href: ctx.href('graph', p.id, gq.toString()) }, 'Show in graph'),
       ),
       r.note ? h('p', { class: 'rel-note clamp' }, r.note) : null,

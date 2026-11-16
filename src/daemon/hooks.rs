@@ -76,6 +76,13 @@ pub const HOOK_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 /// own `ENGRAMDB_DATA_DIR` would have its transcript copies, registry entries
 /// and hook events written to the data dir of the session that spawned the
 /// daemon.
+///
+/// The two maintenance variables are here because a daemon-served hook runs
+/// `auto_compact` under the daemon's environment: without them a session's
+/// `ENGRAMDB_DISABLE_AUTO_MAINTENANCE=1` was ignored whenever the daemon had
+/// been started without it. Cost: such a session pays the in-process hook
+/// latency (about 28.9 vs 18.9 ms p50 for `pre-tool-use`) while the daemon's
+/// values differ.
 pub const HOOK_ENV_KEYS: &[&str] = &[
     "ENGRAMDB_DATA_DIR",
     "ENGRAMDB_CONFIG_DIR",
@@ -83,6 +90,8 @@ pub const HOOK_ENV_KEYS: &[&str] = &[
     "ENGRAMDB_MODEL_CACHE_DIR",
     "ENGRAMDB_OFFLINE",
     "ENGRAMDB_EMBEDDING_BACKEND",
+    "ENGRAMDB_DISABLE_AUTO_MAINTENANCE",
+    "ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS",
     "CLAUDE_CONFIG_DIR",
     "HOME",
     "XDG_DATA_HOME",
@@ -612,5 +621,15 @@ mod tests {
         // Variables outside the list are ignored.
         client.insert("EDITOR".to_string(), "vi".to_string());
         assert_eq!(env_mismatch(&client, &daemon), None);
+        // The maintenance opt-out is part of the hook environment: a daemon
+        // started without it must not run maintenance for a session with it.
+        client.insert(
+            "ENGRAMDB_DISABLE_AUTO_MAINTENANCE".to_string(),
+            "1".to_string(),
+        );
+        assert_eq!(
+            env_mismatch(&client, &daemon),
+            Some("ENGRAMDB_DISABLE_AUTO_MAINTENANCE")
+        );
     }
 }

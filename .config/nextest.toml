@@ -13,5 +13,24 @@ max-threads = 1
 # builders (reindex re-embed) and the daemon-less semantic-query path —
 # belongs in this serialized group.
 [[profile.default.overrides]]
-filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query) | test(=server::tests::harvest_search_all_projects_rides_the_same_gate_as_harvest_list) | test(=daemon::tests::daemon_loads_the_bundle_named_by_the_request_not_by_dir)"
+filter = "test(nli::onnx::tests::) | test(embeddings::onnx::tests::) | test(retrieval::engine::tests::test_rerank) | test(retrieval::engine::tests::test_search_with_real) | test(=server::tests::reindex_re_embeds_in_error_mode_despite_mismatch) | test(=server::tests::global_retrieve_with_semantic_query) | test(=server::tests::harvest_search_all_projects_rides_the_same_gate_as_harvest_list) | test(=daemon::tests::daemon_loads_the_bundle_named_by_the_request_not_by_dir) | test(=server::tests::shutdown_waits_for_a_pending_ingest)"
 test-group = "ml-models"
+
+# The profile CI runs (`NEXTEST_PROFILE=ci` in ci.yml and release.yml). It
+# inherits everything above: overrides under `profile.default` apply to every
+# profile, so the `ml-models` group stays serialized here.
+#
+# - `fail-fast = false`: one failing test must not hide the others in its
+#   shard; a red run should list everything that is broken.
+# - `slow-timeout`: a test is reported SLOW after 60 s and terminated after
+#   5 periods (300 s), with its name, instead of holding the runner until the
+#   job timeout with no name at all. 300 s rather than something tighter
+#   because a cold model load on a shared runner is slow; tighten it once the
+#   JUnit reports show the real slowest tests.
+# - JUnit: written to target/nextest/ci/junit.xml and uploaded by each job.
+[profile.ci]
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+[profile.ci.junit]
+path = "junit.xml"

@@ -697,4 +697,27 @@ mod tests {
         assert_eq!(h.by_path["daemon"].calls, 1);
         assert_eq!(h.p99, 30.0);
     }
+
+    /// A claimed file with one torn character failed every drain's read, so
+    /// it (and everything claimed with it) stayed on disk forever.
+    #[tokio::test]
+    async fn a_claimed_file_with_an_invalid_byte_still_drains() {
+        let (tmp, pid) = project_with_id();
+        record_hook_call(tmp.path(), "pre-tool-use", 1.0, true, Some("s")).unwrap();
+        record_hook_call(tmp.path(), "pre-tool-use", 2.0, true, Some("s")).unwrap();
+        let path = hook_stats_path(tmp.path());
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"hook\":\"caf");
+        bytes.push(0xC3);
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+        record_hook_call(tmp.path(), "pre-tool-use", 3.0, true, Some("s")).unwrap();
+
+        let report = drain_to_table_with_grace(tmp.path(), &pid, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(report.records, 3, "the three whole lines drain");
+        assert!(!path.exists());
+        assert_eq!(table_calls(&pid).await, 3);
+    }
 }

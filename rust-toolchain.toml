@@ -1,0 +1,19 @@
+# The one toolchain every build uses: CI, the release workflow, and any
+# developer machine with rustup (which reads this file and installs the named
+# version on the first `cargo` call).
+#
+# Why a pin: the workflows used to run `rustup toolchain install stable`, so a
+# new stable release could turn master red with no commit (a new clippy lint
+# under `-D warnings`), and a release binary was built by whatever compiler
+# happened to be current on tag day, not the one CI had tested.
+#
+# Bumped by Dependabot (`rust-toolchain` in .github/dependabot.yml), so a new
+# compiler arrives as a pull request that runs the whole suite. To bump by
+# hand, change `channel` and fix what clippy then reports in the same PR.
+#
+# `fuzz.yml` uses `cargo +nightly` for the fuzz build; `+toolchain` overrides
+# this file.
+[toolchain]
+channel = "1.97.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

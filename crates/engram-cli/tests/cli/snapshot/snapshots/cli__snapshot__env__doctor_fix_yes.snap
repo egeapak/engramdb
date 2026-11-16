@@ -38,6 +38,11 @@ exit: 1
           "passed": true
         },
         {
+          "message": "all 0 live memories have vectors",
+          "name": "Memory vectors",
+          "passed": true
+        },
+        {
           "message": ".engramdb/config.toml valid",
           "name": "Config file",
           "passed": true
@@ -62,8 +67,8 @@ exit: 1
         },
         {
           "details": [
-            "shared: [SIZE] (0 memories)",
-            "personal: [SIZE] (0 memories)",
+            "shared: 0 B (0 memories)",
+            "personal: 0 B (0 memories)",
             "index: [SIZE]"
           ],
           "message": "[SIZE]",
@@ -113,7 +118,7 @@ exit: 1
           "name": "Claude Code plugin",
           "passed": true,
           "status": "warn",
-          "suggestion": "Install with `claude plugin add https://github.com/egeapak/engramdb`"
+          "suggestion": "Install in Claude Code with `/plugin marketplace add egeapak/engramdb`, then `/plugin install engram@engramdb`"
         },
         {
           "message": "not configured",

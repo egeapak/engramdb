@@ -17,6 +17,13 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  # Every `cargo nextest` in this workflow (`cargo llvm-cov nextest` included)
+  # runs the `ci` profile from .config/nextest.toml: no fail-fast, a test that
+  # runs longer than 5 minutes is terminated and reported by name, and a JUnit
+  # report is written to target/nextest/ci/junit.xml. Set here, not as a
+  # `--profile ci` flag on each command, so a new nextest step cannot forget
+  # it (and `cargo llvm-cov` has a `--profile` of its own).
+  NEXTEST_PROFILE: ci
 
 # A newer push to the same PR makes the older run's result worthless; cancel
 # it instead of letting it hold ~12 runners. Pushes to master are never
@@ -50,6 +57,16 @@ permissions:
 # 41399668398, before this policy, restored nothing: by then PR saves had
 # evicted master's `test` entry, so it compiled all 584 crates in 9 min.)
 
+# Every job has a `timeout-minutes`. Without one a hung test or a stalled
+# download holds its runner for GitHub's 6-hour default. Each value is well
+# above the slowest run of that job in a 25-run sample (cold caches included;
+# medians are 3 to 10 times lower), so it cuts off a hang, not a slow day.
+
+# Toolchain: every job runs `rustup toolchain install` with no argument, which
+# installs exactly what rust-toolchain.toml pins (see that file for why). Do
+# not write `stable` here again; a job that names its own toolchain no longer
+# tests the compiler the release is built with.
+
 # Criterion benches ([[bench]] in Cargo.toml) are deliberately NOT run in CI:
 # they need the full ONNX runtime plus downloaded embedding models, and
 # shared-runner variance makes any timing threshold flaky. They are local
@@ -64,8 +81,9 @@ jobs:
   manifest-version:
     name: Manifest version parity
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check plugin.json == marketplace.json version
         run: |
           plugin_ver=$(jq -r '.version' .claude-plugin/plugin.json)
@@ -86,8 +104,9 @@ jobs:
   fuzz-lockfile-parity:
     name: Fuzz lockfile parity
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # `fuzz/` is its own workspace, so nothing in a normal build reads its
       # lockfile and nothing keeps it current — it sat untouched for months
       # while the root's moved with every dependabot batch, until `--locked`
@@ -140,11 +159,109 @@ jobs:
           print("OK: fuzz/Cargo.lock agrees with the root workspace on every shared crate")
           PY
 
+  # The fuzz targets are a separate workspace (`fuzz/`) that only fuzz.yml
+  # builds, on Mondays. A pull request that renames a function a target calls,
+  # or adds a target file without its `[[bin]]`, used to be found out a week
+  # later, by an issue. This type-checks them on the pull request: `cargo
+  # check` on the pinned stable toolchain, no nightly, no sanitizer, no run.
+  #
+  # The job always runs and decides in its first step whether the change can
+  # affect the targets. It cannot be skipped with `paths:` or a job-level
+  # `if:`: a skipped job reports `skipped`, and `CI result` fails on anything
+  # but `success`. When nothing relevant changed, the remaining steps are
+  # skipped and the job succeeds in seconds.
+  fuzz-check:
+    name: Fuzz targets type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff below needs the base commit.
+          fetch-depth: 0
+
+      - name: Did anything the fuzz targets build from change?
+        id: changed
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # What the targets are built from: their own crate, the modules they
+          # call (scope and score math, the memory-file and registry parsers,
+          # the shared types), every manifest and lockfile, the toolchain pin,
+          # and this workflow. Add a path here when a new target reaches into
+          # a new module.
+          paths='^(fuzz/|src/scoring/|src/scope/|src/ops/harvest\.rs$|src/daemon/protocol\.rs$|src/lib\.rs$|crates/engram-storage/|crates/engram-types/|Cargo\.(toml|lock)$|crates/[^/]+/Cargo\.toml$|rust-toolchain\.toml$|\.github/workflows/ci\.yml$)'
+          run=true
+          if [ "$EVENT" = "pull_request" ]; then
+            range="origin/${BASE_REF}...HEAD"
+          elif [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            range="${BEFORE}..HEAD"
+          else
+            range=""
+          fi
+          if [ -n "$range" ]; then
+            # A diff that cannot be computed means "check", never "skip".
+            if files=$(git diff --name-only "$range"); then
+              if printf '%s\n' "$files" | grep -Eq "$paths"; then
+                echo "Changed files the fuzz targets depend on:"
+                printf '%s\n' "$files" | grep -E "$paths"
+              else
+                run=false
+                echo "Nothing the fuzz targets build from changed in $range; skipping the check."
+              fi
+            else
+              echo "::warning::could not diff $range; running the check"
+            fi
+          else
+            echo "No base commit to compare with; running the check."
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        if: steps.changed.outputs.run == 'true'
+        run: rustup toolchain install
+
+      - name: Install protobuf compiler and lld linker
+        if: steps.changed.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.changed.outputs.run == 'true'
+        with:
+          workspaces: "fuzz -> target"
+          key: fuzz-check
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Every [[bin]] has its target file, and every target file its [[bin]]
+        # `cargo fuzz build` builds every `[[bin]]`, so one missing on either
+        # side breaks the whole weekly build. `cargo check` reports a missing
+        # file; nothing reports a target file nobody registered.
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          declared=$(sed -n 's/^path = "fuzz_targets\/\(.*\)\.rs"$/\1/p' fuzz/Cargo.toml | sort)
+          present=$(find fuzz/fuzz_targets -maxdepth 1 -name '*.rs' -exec basename {} .rs \; | sort)
+          if [ "$declared" != "$present" ]; then
+            echo "::error file=fuzz/Cargo.toml::[[bin]] entries and fuzz/fuzz_targets/*.rs disagree"
+            diff <(echo "$declared") <(echo "$present") || true
+            exit 1
+          fi
+          echo "OK: $(echo "$present" | wc -l) targets, each registered."
+
+      - name: Type-check the fuzz targets
+        if: steps.changed.outputs.run == 'true'
+        run: cargo check --manifest-path fuzz/Cargo.toml --locked
+
   formatter-output:
     name: CLI output goes through the formatter
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # `OutputFormatter` writes through an injectable `Sink` (real streams in
       # production, an in-memory buffer under `#[cfg(test)]`), which is what
       # makes the tier-1 renderer snapshots possible at all — a snapshot needs
@@ -165,68 +282,106 @@ jobs:
       # are the four inside `impl Sink`, which are the sink, so they are
       # allowed by their exact shape and nothing else in the file is.
       #
-      # `#[cfg(test)]` bodies are skipped: `println!` in a test is debugging
-      # output, not product output.
-      - name: No bare println!/eprintln!/print!/eprint! in engram-cli
-        run: |
-          python3 - <<'PY'
-          import pathlib, re, sys
+      # `#[cfg(test)]` module bodies are skipped: `println!` in a test is
+      # debugging output, not product output.
+      #
+      # The scanner is .github/scripts/check_print_macros.py (run it locally
+      # the same way). It replaced an inline script with three holes: it did
+      # not see `std::println!`, it stopped reading a file at the first
+      # `mod tests {` (so code after a test module was never scanned), and it
+      # knew nothing about `writeln!(io::stdout(), ..)`. Its `--self-test`
+      # feeds it one fixture per hole and per allowed shape, and runs first so
+      # a scanner that has gone blind fails the job instead of passing it.
+      #
+      # It also scans the library crates (the core and engram-{mcp,storage,
+      # models,types,onnx,dashboard}) for writes to **stdout** only: the MCP
+      # server speaks JSON-RPC there and the hooks print a protocol document,
+      # so a stray `println!` in a library corrupts both.
+      - name: The scanner detects what it is meant to detect
+        run: python3 .github/scripts/check_print_macros.py --self-test
 
-          EXEMPT = {"hook.rs"}
-          PRINT = re.compile(r"(?<![\w:])(eprintln|println|eprint|print)!\(")
-          TEST_MOD = re.compile(r"^\s*mod tests\s*\{")
-          # `Sink::Stdout => println!("{}", args),` and its three siblings.
-          SINK_WRITE = re.compile(
-              r'^\s*Sink::(Stdout|Stderr) => (eprintln|println|eprint|print)!\("\{\}", args\),$'
-          )
+      - name: No bare print macro in engram-cli, no stdout write in the library crates
+        run: python3 .github/scripts/check_print_macros.py
 
-          offenders = []
-          for path in sorted(pathlib.Path("crates/engram-cli/src").rglob("*.rs")):
-              if path.name in EXEMPT:
-                  continue
-              lines = path.read_text(encoding="utf-8").split("\n")
-              # Everything from `mod tests {` on is test code. Match the real
-              # module opener, not the first `#[cfg(test)]` — hook.rs carries
-              # that attribute on plain helper fns hundreds of lines earlier.
-              cutoff = next(
-                  (i for i, line in enumerate(lines) if TEST_MOD.match(line)), len(lines)
-              )
-              for i, line in enumerate(lines[:cutoff]):
-                  # A comment naming a print macro is prose, not output — and
-                  # output.rs's own doc comments name them constantly now that
-                  # the file is scanned. Only whole-line comments are skipped,
-                  # so a real call with a trailing comment is still caught.
-                  if line.lstrip().startswith("//"):
-                      continue
-                  if PRINT.search(line) and not SINK_WRITE.match(line):
-                      offenders.append(f"{path}:{i + 1}: {line.strip()}")
+  # The dashboard frontend is vanilla ES modules with no bundler and no build
+  # step, so no tool looked at the JavaScript before a browser did. Cheap
+  # checks, no dependencies installed:
+  #   - every module under web/js and bench parses (see the script for why it
+  #     is not a plain `node --check <file>`);
+  #   - the Plain style's relation geometry (bench/relations.mjs): no NaN in
+  #     path data, the wide end at the source, chevron direction, bounded
+  #     path length. `--no-timing` prints its timings without failing on
+  #     them; shared-runner wall-clock thresholds are flaky;
+  #   - the frontend's pure functions (bench/unit.mjs: tallies, routing,
+  #     scope keys, number formatting, link builders) and the details
+  #     panel's relation wording from both ends (bench/details.mjs).
+  # The headless browser checks are the separate `frontend-browser` job.
+  frontend:
+    name: Frontend (syntax, relation geometry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-          if offenders:
-              for entry in offenders:
-                  print(entry)
-              print(
-                  "::error::bare print macros bypass OutputFormatter's Sink and are "
-                  "invisible to the tier-1 snapshots. Use outln! / errln! / outraw! / "
-                  "errraw! from crate::output (see docs/contributors/testing.md)."
-              )
-              sys.exit(1)
-          print("OK: all engram-cli output goes through OutputFormatter")
-          PY
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Every JavaScript module parses
+        run: bash .github/scripts/check_frontend_syntax.sh
+
+      - name: Relation geometry
+        working-directory: crates/engram-dashboard
+        run: node bench/relations.mjs --no-timing
+
+      - name: Pure functions
+        working-directory: crates/engram-dashboard
+        run: node bench/unit.mjs
+
+      - name: Details panel wording
+        working-directory: crates/engram-dashboard
+        run: node bench/details.mjs
+
+  # Supply-chain gate on what a pull request itself changes: banned or
+  # wildcard crates, licenses outside deny.toml's allow-list, and crates from
+  # a registry or git source other than crates.io. All three are decided by
+  # the PR's own Cargo.lock and deny.toml, so this job cannot go red for a
+  # reason outside the PR. `advisories` is deliberately not here: it depends
+  # on a database that changes daily, and runs on master pushes and weekly in
+  # audit.yml, which files an issue when it fails.
+  #
+  # Blocking from the start: the audit run on master 5b44fc7 (2026-11-09),
+  # same deny.toml and Cargo.lock, printed `bans ok, licenses ok, sources ok`.
+  # A PR that adds a crate under a license the list does not name must add
+  # the license (or a per-crate exception) to deny.toml in the same PR.
+  deny:
+    name: cargo-deny (bans, licenses, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check bans licenses sources
 
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+        # No argument: installs the version, profile and components that
+        # rust-toolchain.toml names (rustfmt and clippy included).
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
@@ -276,15 +431,16 @@ jobs:
   check-cross:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler (macOS)
         if: runner.os == 'macOS'
@@ -294,13 +450,13 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install protoc -y
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
         # Prebuilt binary, same rationale as the `test` job below.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -321,12 +477,51 @@ jobs:
       - name: Test platform-gated IPC and filesystem code
         # `daemon::transport` exercises the Unix-socket/named-pipe transports
         # (bind/yield/reclaim/permissions), `paths::tests` the platform dir
-        # resolution, `write_lock::tests` the fs4 advisory-lock semantics.
-        # All three use only temp dirs — no models, no network (see the job
-        # comment above before adding filters).
+        # resolution, `write_lock::tests` the fs4 advisory-lock semantics,
+        # `volume::` the unplugged-drive check (its Windows tests exist only
+        # here), `state_file::` / `registry::` / `harvest_state::` the
+        # O_NOFOLLOW opens and the files they guard, `layout::tests::` that
+        # the pinned layout digests hold on every target, `engram-onnx` the
+        # runtime search order (its Windows/macOS cwd test runs nowhere
+        # else), `daemon::client::` the spawn command and environment, and
+        # `daemon::tests::` the daemon end to end. The concurrency test is
+        # the cross-process write lock. Everything here uses only temp dirs —
+        # no models, no network (see the job comment above before adding
+        # filters). The two daemon tests that load the real embedding model
+        # are excluded by exact name; never exclude a module wholesale: a
+        # test that fails off Linux is either a platform defect (report it,
+        # then exclude that one test by exact name with a comment linking the
+        # report) or a test assumption to fix.
         run: >-
           cargo nextest run --workspace --all-features --locked
-          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)'
+          -E 'test(daemon::transport) + test(paths::tests) + test(write_lock::tests)
+          + test(volume::) + test(state_file::) + test(registry::) + test(harvest_state::)
+          + test(layout::tests::) + package(engram-onnx) + test(daemon::client::)
+          + (test(daemon::tests::)
+             - test(=daemon::tests::daemon_loads_the_bundle_named_by_the_request_not_by_dir)
+             - test(=daemon::tests::remote_embedding_end_to_end))
+          + test(=concurrency::concurrent_adds_from_separate_processes_all_persist)'
+
+      - name: Test the CLI snapshots (macOS)
+        # Tier 2 spawns the binary; its fixture already forces offline mode
+        # and an empty model cache, so it is model-free. A difference here
+        # (`/private/var`, a path separator) is a redaction gap to fix in
+        # `snapshot/mod.rs::normalize`, never a platform-specific snapshot.
+        if: runner.os == 'macOS'
+        run: >-
+          cargo nextest run --workspace --all-features --locked
+          -E 'binary(cli) & test(snapshot::)'
+
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-cross-${{ matrix.os }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   # Build once, run sharded. The suite is ~26 CPU-minutes of test time that
   # nextest already spreads across all 4 cores of one runner (~6.8 min wall,
@@ -349,16 +544,17 @@ jobs:
   test-build:
     name: Test (build)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
@@ -367,7 +563,7 @@ jobs:
         # which compiles nextest from source (~7 min on a cache miss). This
         # downloads a prebuilt release in seconds, every run, regardless of
         # cache state.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -377,7 +573,7 @@ jobs:
           --archive-file nextest-all-features.tar.zst
 
       - name: Upload the test archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nextest-all-features
           path: nextest-all-features.tar.zst
@@ -390,26 +586,47 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # nextest does not run doctests, so no job ever compiled an example in
+      # a doc comment: one that no longer matches the API it documents stayed
+      # wrong. Here because the dependencies are already built in this
+      # profile. The shards wait for this job, so this step's time is added to
+      # every run; if that turns out to be minutes, move it to its own job.
+      #
+      # NOT BLOCKING YET (`continue-on-error`): doctests have never run in CI
+      # or in the sandbox this step was written in, so whether today's tree
+      # passes is unknown, and a required job must not be shipped red. A
+      # failure shows as an annotation on the run. Remove `continue-on-error`
+      # after the first green run of this step; if it is slow because each
+      # example links the LanceDB stack, mark the heavy ones `no_run` (they
+      # still compile) rather than dropping the step.
+      - name: Doctests (not blocking yet)
+        continue-on-error: true
+        run: cargo test --doc --workspace --all-features --locked
+
   test:
     name: Test (shard ${{ matrix.shard }}/3)
     needs: test-build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A model-backed test fails with the load error instead of passing by
+    # skipping (engram-test-support's `require_model!`). Only on the jobs that
+    # install a runtime and restore the model cache.
+    env:
+      ENGRAMDB_TEST_REQUIRE_MODELS: "1"
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
         # Nothing is compiled here; the toolchain is only what `cargo nextest`
         # is dispatched through.
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -419,26 +636,33 @@ jobs:
         # real shared library has to be present even though a static one is also
         # linked in. Before the runtime became external, the static link alone
         # was enough here.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       - name: Restore the ONNX model cache
         # Saved by the `coverage` job (see there); restore-only here, so three
         # shards never race to save it.
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/engramdb/models
           key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
           restore-keys: onnx-models-v1-
 
       - name: Download the test archive
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nextest-all-features
+
+      - name: Stage the models
+        # One process loads (and, on a cache miss, downloads) every model the
+        # suite loads, before the suite: no two test processes download the
+        # same files at once, and a missing model fails here, named.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-all-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --run-ignored only -E 'test(=staging::stage_default_models)'
 
       - name: Run tests (shard ${{ matrix.shard }}/3)
         # `count:` deals each binary's tests round-robin across the shards, so
@@ -449,6 +673,17 @@ jobs:
           --archive-file nextest-all-features.tar.zst
           --workspace-remap "${{ github.workspace }}"
           --partition count:${{ matrix.shard }}/3
+
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-all-features-shard-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   # `ops::compress::dot_unit` is `fearless_simd`, whose `dispatch!` normalises
   # *up* to the best SIMD level the CPU supports and offers no runtime way down.
@@ -464,6 +699,7 @@ jobs:
   simd-levels:
     name: SIMD kernel at every dispatch level
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -475,21 +711,21 @@ jobs:
           - level: sse2
             flags: "--cfg disable_dispatch_avx512 --cfg disable_dispatch_avx2 --cfg disable_dispatch_sse4_2"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: simd-${{ matrix.level }}
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -505,36 +741,50 @@ jobs:
           cargo nextest run -p engramdb --lib --locked \
             -E 'test(ops::compress::tests::dot_unit) + test(ops::compress::tests::similar_pairs)'
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-simd-${{ matrix.level }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   # `--all-features` necessarily turns `bundled-onnxruntime` back on, so the job
   # above links ONNX Runtime statically and never exercises what users actually
   # ship: default features, where the runtime is `dlopen`ed at run time. This job
-  # covers that path — including the case that used to abort the process, a
-  # *missing* runtime, which must degrade to "embeddings unavailable" instead.
+  # covers that path. The case that used to abort the process, a *missing*
+  # runtime that must degrade to "embeddings unavailable" instead, is guarded by
+  # the `missing-runtime` job below, against a binary built with
+  # `panic = "abort"`; this job only runs the probe's own unit tests.
   #
   # Split the same way as `test` (build once, three shards), and for the same
   # reason: this was the slowest Linux job (median 14.3 min: ~6 min build,
   # ~1.2 min test-target build, ~6.5 min of tests). The build-only assertions
-  # (ldd, start-up, the missing-runtime probe) stay in the build job, which
+  # (ldd, start-up, the runtime probe's unit tests) stay in the build job, which
   # deliberately never installs a runtime — so "must start with no runtime
   # installed" now really runs with none, rather than with the one the old
   # single job had already put in /usr/local/lib for its test step.
   test-load-dynamic-build:
     name: Test (default features, runtime-loaded ONNX) (build)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -568,10 +818,12 @@ jobs:
           cargo nextest archive --workspace --locked
           --archive-file nextest-default-features.tar.zst
 
-      - name: Missing runtime must degrade, not abort
-        # The regression guard for the whole change. `ort`'s own loader panics
-        # when the dylib is absent and the release profile is `panic = "abort"`,
-        # so without the pre-flight probe in `engram_onnx::runtime` this aborts.
+      - name: The runtime probe's unit tests, with no runtime installed
+        # Unit tests of `engram_onnx::runtime` only. Whether a missing runtime
+        # really degrades instead of aborting is the `missing-runtime` job's
+        # question: this profile unwinds, so a loader that skipped the probe
+        # would not abort here. (This step used to end with
+        # `cargo run ... doctor || true`, which could not fail on anything.)
         # No runtime was ever installed on this runner, so nothing to remove.
         run: |
           if ldconfig -p | grep -qi onnxruntime; then
@@ -579,11 +831,9 @@ jobs:
             exit 1
           fi
           cargo nextest run --workspace --locked -E 'test(runtime::tests::)'
-          echo "Probe reports:"
-          cargo run --quiet --locked --bin engramdb -- doctor || true
 
       - name: Upload the test archive
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nextest-default-features
           path: nextest-default-features.tar.zst
@@ -591,23 +841,229 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # What the `frontend-browser` job needs: the debug binary built above and
+      # the generator of the deterministic dashboard stores (an example of the
+      # core crate; model-free). Built here because this job already has every
+      # dependency compiled in this profile. The three steps are
+      # `continue-on-error`: `frontend-browser` is not a required job yet, so
+      # nothing it needs may fail this one, which is required. If they fail,
+      # `frontend-browser` fails at its download step and says why.
+      - name: Build the dashboard store generator
+        continue-on-error: true
+        run: cargo build --locked -p engramdb --example dashboard_bench_store
+
+      - name: Pack the binary and the generator for the browser checks
+        continue-on-error: true
+        # A tarball, because upload-artifact drops the executable bit.
+        run: >-
+          tar -C target/debug -cf dashboard-browser-bins.tar
+          engramdb examples/dashboard_bench_store
+
+      - name: Upload them
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dashboard-browser-bins
+          path: dashboard-browser-bins.tar
+          retention-days: 1
+          if-no-files-found: warn
+
+  # The regression guard for "a missing ONNX Runtime degrades, it does not kill
+  # the process". Under `load-dynamic`, `ort`'s own loader panics when the
+  # library is absent, and the shipped profile is `panic = "abort"`, so every
+  # model loader has to call `ensure_onnx_runtime()` before it touches `ort`.
+  # A loader that forgets passes every other job here: the dev profile
+  # unwinds, and a panic inside `spawn_blocking` comes back as a `JoinError`
+  # the caller turns into the fallback. Users then get SIGABRT.
+  #
+  # So this job builds the binary with the dev profile plus `panic = "abort"`
+  # (the property under test is the panic strategy; a real release build would
+  # add many minutes of LTO for nothing) and runs
+  # .github/scripts/smoke-no-runtime.sh, which drives every command that loads
+  # a model, with NLI, the reranker and T5 all enabled, and fails on any exit
+  # code a command is not allowed. release.yml runs the same script against
+  # each real release binary.
+  #
+  # The model cache is restored so the models are present and the runtime is
+  # the only missing thing: the loaders check "is the model cached" right
+  # after the runtime probe, so with an empty cache a loader that skipped the
+  # probe would fail at the download instead of reaching `ort`. (On a cold
+  # cache the script still passes; it is then a weaker test.)
+  #
+  # Its own job, not a step of `test-load-dynamic-build`: the abort build
+  # recompiles every crate (the panic strategy is part of each crate's
+  # codegen), so it gets its own runner disk and its own rust-cache entry
+  # (`key: abort`). If the 10 GB cache quota becomes a problem again, set
+  # `save-if: false` here first and accept a cold build.
+  missing-runtime:
+    name: Missing ONNX Runtime degrades, never aborts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install
+
+      - name: Install protobuf compiler and lld linker
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: abort
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      - name: Restore the ONNX model cache
+        # Saved by the `coverage` job (see there); restore-only here.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/engramdb/models
+          key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
+          restore-keys: onnx-models-v1-
+
+      - name: No ONNX Runtime may be installed on this runner
+        run: |
+          if ldconfig -p | grep -qi onnxruntime; then
+            echo "::error::an ONNX Runtime is installed on this runner; the missing-runtime checks would not test anything."
+            exit 1
+          fi
+          if [ -n "${ORT_DYLIB_PATH:-}" ]; then
+            echo "::error::ORT_DYLIB_PATH is set; the missing-runtime checks would not test anything."
+            exit 1
+          fi
+          echo "OK: no ONNX Runtime on this runner."
+
+      - name: Build the binary with panic = "abort"
+        env:
+          # The dev profile with the release profile's panic strategy. Same as
+          # `--config 'profile.dev.panic="abort"'`.
+          CARGO_PROFILE_DEV_PANIC: abort
+        run: cargo build --locked --bin engramdb
+
+      - name: Every model-loading command must survive a missing runtime
+        run: bash .github/scripts/smoke-no-runtime.sh target/debug/engramdb --require-missing-runtime
+
+  # The dashboard's interaction and accessibility checks in a real browser
+  # (crates/engram-dashboard/bench/browser/checks.mjs): the accessible list,
+  # keyboard walk, hover hit testing, click, relation pin, display filters,
+  # zoom and pan, theme switch, far-scope tags, and "no console error", for
+  # both drawing surfaces (Plain on canvas, Grid on SVG). Nothing else in CI
+  # runs the frontend; the Rust tests read it as text.
+  #
+  # NOT REQUIRED YET, on purpose: this job is not in `ci-result.needs`, so a
+  # failure here shows as a failed check but does not fail `CI result`. The
+  # pixel comparisons have only been run on developer machines (they pass
+  # there with a debug binary and Chrome); whether they hold under this
+  # runner's software rasteriser and Chrome version is what the first runs
+  # will show. After ten consecutive green master runs, add `frontend-browser`
+  # to `ci-result.needs` (one line) and delete this paragraph. If a pixel
+  # check is unstable here, fix its tolerance in checks.mjs with the
+  # measurement recorded in bench/browser/README.md; do not delete the check.
+  #
+  # No browser download: the runner image ships Google Chrome, and the driver
+  # is `playwright-core`, pinned with a lockfile in bench/browser. Stores are
+  # generated in this job (not shipped from the build job) because a store's
+  # id is derived from its absolute path.
+  frontend-browser:
+    name: Frontend (headless browser checks, not required yet)
+    needs: test-load-dynamic-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: Download the binary and the store generator
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dashboard-browser-bins
+
+      - name: Generate the dashboard stores (60 and 1,000 memories, the fault fixture)
+        # Deterministic `.md` files plus one reindex; no model, no network.
+        # 1,000 is above the overview threshold (150), so the opened-scope
+        # checks run without the 10k store. `sfault` (with its `sfault-away`
+        # sibling) is the non-graph pages' fixture: challenged and
+        # invalidated memories, proposed relations, a NaN criticality, a
+        # merge-conflicted file (examples/support/dashboard_store.rs).
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bins"
+          tar -C "$RUNNER_TEMP/bins" -xf dashboard-browser-bins.tar
+          "$RUNNER_TEMP/bins/examples/dashboard_bench_store" "$RUNNER_TEMP/dash-bench" s60 s1k sfault
+
+      - name: Install the pinned Playwright driver
+        working-directory: crates/engram-dashboard/bench/browser
+        # `--ignore-scripts`: playwright-core needs no install script, and a
+        # lockfile-pinned dependency should not get to run one here.
+        run: npm ci --ignore-scripts
+
+      - name: Run the browser checks
+        working-directory: crates/engram-dashboard
+        run: |
+          set -euo pipefail
+          chrome=$(command -v google-chrome || command -v google-chrome-stable || true)
+          if [ -z "$chrome" ]; then
+            echo "::error::no Google Chrome on this runner image; install one or pass a Chromium path"
+            exit 1
+          fi
+          "$chrome" --version
+          node bench/browser/checks.mjs \
+            --stores "$RUNNER_TEMP/dash-bench" \
+            --bin "$RUNNER_TEMP/bins/engramdb" \
+            --chrome "$chrome" \
+            --views s60:full,s1k:all,s1k:open \
+            --json "$RUNNER_TEMP/browser-checks.json"
+
+      - name: Run the page checks
+        # bench/browser/pages.mjs: Overview, Memories, Health, Relations and
+        # the review flow on `sfault`, with one read-only and one
+        # `--allow-writes` dashboard it starts itself.
+        if: always()
+        working-directory: crates/engram-dashboard
+        run: |
+          set -euo pipefail
+          chrome=$(command -v google-chrome || command -v google-chrome-stable)
+          node bench/browser/pages.mjs \
+            --stores "$RUNNER_TEMP/dash-bench" \
+            --bin "$RUNNER_TEMP/bins/engramdb" \
+            --chrome "$chrome" \
+            --json "$RUNNER_TEMP/browser-pages.json"
+
+      - name: Upload the check results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-checks
+          path: |
+            ${{ runner.temp }}/browser-checks.json
+            ${{ runner.temp }}/browser-pages.json
+          retention-days: 7
+          if-no-files-found: warn
+
   test-load-dynamic:
     name: Test (default features, runtime-loaded ONNX) (shard ${{ matrix.shard }}/3)
     needs: test-load-dynamic-build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A model-backed test fails with the load error instead of passing by
+    # skipping (engram-test-support's `require_model!`). Only on the jobs that
+    # install a runtime and restore the model cache.
+    env:
+      ENGRAMDB_TEST_REQUIRE_MODELS: "1"
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal
+        run: rustup toolchain install
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest
 
@@ -615,26 +1071,33 @@ jobs:
         # The official Microsoft build. Deliberately not the one `ort` would
         # download: that prebuilt executes quantized models incorrectly on
         # AVX-512/AMX hosts. See docs/contributors/embedding-model-alternatives.md.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       - name: Restore the ONNX model cache
         # Saved by the `coverage` job (see there); restore-only here, so three
         # shards never race to save it.
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/engramdb/models
           key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
           restore-keys: onnx-models-v1-
 
       - name: Download the test archive
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nextest-default-features
+
+      - name: Stage the models
+        # One process loads (and, on a cache miss, downloads) every model the
+        # suite loads, before the suite: no two test processes download the
+        # same files at once, and a missing model fails here, named.
+        run: >-
+          cargo nextest run
+          --archive-file nextest-default-features.tar.zst
+          --workspace-remap "${{ github.workspace }}"
+          --run-ignored only -E 'test(=staging::stage_default_models)'
 
       - name: Test with the runtime discovered from /usr/local/lib (shard ${{ matrix.shard }}/3)
         # No ORT_DYLIB_PATH: this asserts the built-in search path finds a
@@ -645,30 +1108,44 @@ jobs:
           --workspace-remap "${{ github.workspace }}"
           --partition count:${{ matrix.shard }}/3
 
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-default-features-shard-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
-    env:
-      ONNXRUNTIME_VERSION: "1.24.2"
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
         # `llvm-tools-preview` ships `llvm-profdata`/`llvm-cov`, which
         # cargo-llvm-cov shells out to for instrumentation-based coverage.
-        run: rustup toolchain install stable --profile minimal --component llvm-tools-preview
+        # `rustup component add` applies to the toolchain rust-toolchain.toml
+        # names, since that is the active one in this directory.
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools-preview
 
       - name: Install protobuf compiler and lld linker
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler lld
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
 
       - name: Install nextest and cargo-llvm-cov
         # Prebuilt binaries (same rationale as the test job): avoids a
         # ~7 min from-source compile of each tool on a cache miss.
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: nextest,cargo-llvm-cov
 
@@ -678,12 +1155,9 @@ jobs:
         # real shared library has to be present even though a static one is also
         # linked in. Before the runtime became external, the static link alone
         # was enough here.
-        run: |
-          curl -sSLO "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          tar -xzf "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}.tgz"
-          sudo cp "onnxruntime-linux-x64-${ONNXRUNTIME_VERSION}/lib/libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
-                  /usr/local/lib/libonnxruntime.so
-          sudo ldconfig
+        #
+        # The version and its SHA-256 live in the action, once.
+        uses: ./.github/actions/install-onnxruntime
 
       # The HuggingFace models the suite loads (embedding, T5, NLI, reranker)
       # live in `model_cache_dir()` = ~/.cache/engramdb/models. Without a
@@ -705,17 +1179,58 @@ jobs:
       # that model at run time, rather than writing a new entry every week.
       - name: Restore the ONNX model cache
         id: models
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/engramdb/models
           key: onnx-models-v1-${{ hashFiles('crates/engram-models/src/embeddings/onnx.rs', 'crates/engram-models/src/nli/onnx.rs', 'crates/engram-models/src/title/t5.rs', 'crates/engram-models/src/rerank.rs') }}
           restore-keys: onnx-models-v1-
 
+      - name: Stage the models
+        # See the `test` job. The cache this job saves on master is the one
+        # the staging step filled.
+        env:
+          ENGRAMDB_TEST_REQUIRE_MODELS: "1"
+        run: >-
+          cargo llvm-cov nextest -p engram-models --all-features --locked --no-report
+          --run-ignored only -E 'test(=staging::stage_default_models)'
+
       - name: Run tests under coverage instrumentation
         # Mirror the `test` job's invocation so coverage reflects the real
         # suite. `--no-report` defers report generation so we can emit
         # multiple formats from the one profdata set below.
+        env:
+          # insta appends the path of every snapshot file an assertion
+          # touches (the mechanism behind `cargo insta test --unreferenced`).
+          # Read by the "unreferenced snapshots" step below. Set on this job
+          # because it is the only one that runs the whole suite unsharded.
+          INSTA_SNAPSHOT_REFERENCES_FILE: ${{ runner.temp }}/insta-snapshot-references.txt
+          ENGRAMDB_TEST_REQUIRE_MODELS: "1"
         run: cargo llvm-cov nextest --workspace --all-features --locked --no-report
+
+      # A snapshot whose test was renamed or deleted still looks like a pinned
+      # contract and pins nothing. See the script's header.
+      #
+      # NOT BLOCKING YET (`continue-on-error`): this comparison has never run,
+      # so the tree may hold dead snapshots today, and it is not yet confirmed
+      # that the references file is written under `cargo llvm-cov nextest`.
+      # A failure shows as annotations naming each file. After the first green
+      # run of this step, remove `continue-on-error`.
+      - name: Every committed snapshot was asserted by a test (not blocking yet)
+        continue-on-error: true
+        env:
+          REFS: ${{ runner.temp }}/insta-snapshot-references.txt
+        run: bash .github/scripts/check_unreferenced_snapshots.sh "$REFS"
+
+      - name: Upload the JUnit report
+        # `if: always()`: the report matters most when a test failed or was
+        # killed by the slow-test limit.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-coverage
+          path: target/nextest/ci/junit.xml
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Report the ONNX model cache
         run: |
@@ -726,7 +1241,7 @@ jobs:
         # Only after a green run: a test that falls back when a download fails
         # could otherwise leave a model out of the saved set.
         if: github.ref == 'refs/heads/master' && steps.models.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/engramdb/models
           key: ${{ steps.models.outputs.cache-primary-key }}
@@ -734,6 +1249,15 @@ jobs:
       - name: Generate coverage reports
         # Exclude integration-test harness files and the test-isolation crate
         # from the denominator so the percentage tracks production code.
+        #
+        # No `--fail-under-lines` floor, deliberately, for now. The lcov
+        # artifacts of recent runs list only the core crate's files (52 files
+        # under src/, none under crates/), about 94.5 % of their lines. A
+        # floor on that figure would guard 52 of about 190 source files and
+        # read as if it guarded all of them. First make the report cover the workspace
+        # (confirm what these two `report` calls need for that), read the
+        # real figure from a master run, then add a floor a couple of points
+        # under it.
         env:
           IGNORE: '(/tests?/|test_support|engram-test-support|/benches/|/examples/|/fuzz/)'
         run: |
@@ -747,7 +1271,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload lcov report
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-lcov
           path: lcov.info
@@ -764,22 +1288,32 @@ jobs:
   # failed `needs` would skip this job, and GitHub counts a skipped required
   # check as passing. Anything other than success (failure, cancelled, or a
   # shard skipped because its build failed) fails it.
+  #
+  # Every job in this file is listed below, with one declared exception:
+  # `frontend-browser`, which is informational until it has proven stable on
+  # this runner (see its comment). A new job belongs in this list unless it
+  # says, like that one, why not.
   ci-result:
     name: CI result
     if: always()
     needs:
       - manifest-version
       - fuzz-lockfile-parity
+      - fuzz-check
       - formatter-output
+      - frontend
+      - deny
       - check
       - check-cross
       - test-build
       - test
       - simd-levels
       - test-load-dynamic-build
+      - missing-runtime
       - test-load-dynamic
       - coverage
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Every job succeeded
         env:

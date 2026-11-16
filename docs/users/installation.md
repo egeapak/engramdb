@@ -2,16 +2,24 @@
 
 ## Prerequisites
 
-- **Rust 1.75 or later** to build from source. Get it from <https://rustup.rs>.
+- **A recent stable Rust toolchain** to build from source. Get it from <https://rustup.rs>.
 - **protoc** (Protocol Buffers compiler) — required by LanceDB's build.
   - macOS: `brew install protobuf`
   - Debian/Ubuntu: `sudo apt-get install -y protobuf-compiler`
   - Fedora: `sudo dnf install protobuf-compiler`
-- **ONNX Runtime 1.24 or later** — EngramDB loads it at run time instead of
-  embedding it. The prebuilt release archives and the Homebrew / Scoop packages
-  supply it for you; only source builds need it installed separately. See
+- **ONNX Runtime 1.24 or later.** EngramDB loads it when it starts. It is not
+  inside the binary and not inside any release archive. The Homebrew package
+  installs it as a dependency. In every other case (release archive,
+  `cargo install`, local build) you install it yourself. See
   [ONNX Runtime](#onnx-runtime) below.
-- Outbound network access on first run to download the embedding model (~90 MB). After that, engramdb is fully offline.
+- Network access on first use, to download the models. The default embedding
+  model is about 33 MB. The reranker (about 37 MB) and the T5 title model
+  (about 77 MB) are also on by default. After that, EngramDB works offline.
+  EngramDB checks the SHA-256 of each built-in model file it downloads
+  itself (the default embedding, T5, NLI and reranker models). A file that
+  does not match is not loaded, and `engramdb doctor` names it; delete it
+  from the model cache to download it again. Models that `fastembed`
+  downloads on its own (the other embedding providers) are not checked.
 
 ### ONNX Runtime
 
@@ -19,22 +27,38 @@ EngramDB does not contain a copy of ONNX Runtime, and does not ship one:
 release archives hold the binary and nothing else. It resolves a runtime from
 your system at startup, in this order:
 
-1. `ORT_DYLIB_PATH`, if set — an explicit path to the library.
-2. The directory holding the `engramdb` binary — drop a `libonnxruntime`
-   there and it wins over everything below it.
-3. Standard package-manager locations: `/opt/homebrew/lib` and `/usr/local/lib`
-   on macOS, `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch
-   directories on Linux.
-4. The platform loader's own search path (`PATH` on Windows,
-   `LD_LIBRARY_PATH`/`ld.so.conf` on Linux).
+1. `ORT_DYLIB_PATH`, if set. It must be an absolute path to the library. A
+   relative path is used only if it exists under the directory that holds the
+   `engramdb` binary. Any other relative path is refused.
+2. The directory holding the `engramdb` binary, then `../lib` beside it. Put a
+   `libonnxruntime` there and it wins over everything below it.
+3. The directories in the platform's library-path variable: `PATH` on Windows,
+   `DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS,
+   `LD_LIBRARY_PATH` on Linux. Only absolute entries are used. Empty, `.` and
+   relative entries are skipped.
+4. Standard locations: `$HOMEBREW_PREFIX/lib`, `/opt/homebrew/lib`,
+   `/usr/local/lib`, `/opt/local/lib`, `$HOME/lib` and `/usr/lib` on macOS;
+   `/usr/local/lib`, `/usr/lib`, `/usr/lib64` and the multiarch directories on
+   Linux.
+5. On Linux only, the system loader's own search (the `ld.so` cache), so a
+   runtime in an `ld.so.conf.d` directory is found. This step is skipped when
+   `LD_LIBRARY_PATH` has an empty or relative entry.
+
+EngramDB never loads the library from the current directory. A project folder
+that contains a file named `onnxruntime.dll` or `libonnxruntime.dylib` has no
+effect. If your runtime is in a directory that is not listed above, set
+`ORT_DYLIB_PATH` to its absolute path.
 
 Installing it, if you need to:
 
 ```bash
 brew install onnxruntime          # macOS / Linuxbrew
-scoop install onnxruntime         # Windows (manifest ships with EngramDB)
 sudo apt-get install -y libonnxruntime   # where packaged
 ```
+
+Windows: download the official ONNX Runtime zip from the Microsoft releases
+page, unpack it, and set `ORT_DYLIB_PATH` to the absolute path of `onnxruntime.dll` (or put its
+`lib` folder on `PATH`). EngramDB has no published Scoop package yet.
 
 This is deliberate. The prebuilt runtime that would otherwise be compiled in
 executes quantized models incorrectly on some AVX-512/AMX CPUs — under load the
@@ -52,36 +76,51 @@ engramdb doctor      # the "ONNX Runtime" check names the library and version,
 
 ### Platform support
 
-The default build uses **ONNX Runtime**, fetched as a prebuilt binary for **Linux (x86_64/aarch64)**, **Windows (x86_64/aarch64)**, and **Apple Silicon macOS (aarch64)** — the platforms with official release binaries.
+The default build links no ONNX Runtime at build time and downloads none. The
+same rule holds on every platform: install a runtime 1.24 or later, or point
+`ORT_DYLIB_PATH` at one.
 
-**Intel Mac (`x86_64-apple-darwin`)** works like every other platform now, with one wrinkle: Microsoft dropped x86_64 macOS builds after 1.23.x, so the release archive for this target is the only one that does **not** carry a copy of the runtime. Install it yourself:
+Official Microsoft builds exist for Linux (x86_64, aarch64), Windows (x86_64,
+aarch64) and Apple Silicon macOS. Microsoft stopped building for Intel Mac
+(`x86_64-apple-darwin`) after 1.23, so on that target use Homebrew, which has
+an Intel bottle:
 
 ```bash
-brew install onnxruntime     # has an Intel bottle
+brew install onnxruntime
 ```
 
-Until you do, `engramdb` still starts and runs — `doctor` reports the missing runtime and search falls back to keyword matching.
+Without a runtime `engramdb` still starts. `engramdb doctor` reports the
+missing runtime and search falls back to keyword matching.
 
-EngramDB previously shipped a pure-Rust `tract` backend for this target, because the build had to link a runtime at build time and none existed. Loading the runtime at startup removed that constraint, so Intel Mac now uses the same ONNX path as everywhere else — the int8 model rather than tract's fp32, roughly 3× faster, with NLI and T5 titling available. A store built on the old tract backend records a different model fingerprint and will prompt a one-time `engramdb reindex --embeddings-only`.
+Older versions used a pure-Rust `tract` backend on Intel Mac. A store built
+with it records a different model fingerprint; run
+`engramdb reindex --embeddings-only` once.
 
 ## Install
 
 ### From the GitHub repository
 
 ```bash
-cargo install --git https://github.com/egeapak/engramdb
+cargo install --locked --git https://github.com/egeapak/engramdb engram-cli
 ```
 
-This builds with default features (`ollama` enabled). The binary lands in `~/.cargo/bin/engramdb`.
+The package is `engram-cli`; the binary it installs is `engramdb`. The package
+name is required, because the repository holds other packages that also have
+binaries. This builds with default features (`ollama` enabled). The binary
+lands in `~/.cargo/bin/engramdb`.
 
 ### With a package manager
 
-Both packages depend on ONNX Runtime, so there is nothing else to install:
+The Homebrew package depends on ONNX Runtime, so there is nothing else to
+install:
 
 ```bash
 brew install egeapak/tap/engramdb     # macOS / Linuxbrew
-scoop install engramdb                      # Windows
 ```
+
+There is no published Scoop package yet. On Windows, use a release archive or
+`cargo install`, and install ONNX Runtime as described
+[above](#onnx-runtime).
 
 ### Build from a local checkout
 
@@ -95,7 +134,7 @@ cargo build --release
 To install your local build onto your `PATH`:
 
 ```bash
-cargo install --path .
+cargo install --locked --path crates/engram-cli
 ```
 
 Choosing a different ONNX Runtime strategy means replacing the default one, so
@@ -114,7 +153,7 @@ cargo build --release --no-default-features \
 |------|---------|--------------|
 | `load-dynamic` | **on** | Load ONNX Runtime at run time (`dlopen`). Nothing is required at build time, and the binary works against any installed runtime >= 1.24. |
 | `bundled-onnxruntime` | off | Download and statically link a prebuilt runtime — the historical default. **Not recommended**: that prebuilt mis-executes quantized models on AVX-512/AMX hosts. Kept for platforms with no packaged runtime and for hermetic builds. Needs `--no-default-features`. |
-| `ollama` | on | Adds the Ollama embedding backend (uses `reqwest`). Turn off for a pure-ONNX, offline-only build with no extra deps: `cargo install --git ... --no-default-features`. |
+| `ollama` | on | Adds the Ollama embedding backend (uses `reqwest`). To build without it, name the other default features, because `--no-default-features` alone also turns off ONNX: `cargo install --locked --git https://github.com/egeapak/engramdb engram-cli --no-default-features --features onnxruntime,load-dynamic`. |
 | `coreml` | off | Apple Core ML execution provider for ONNX models (Neural Engine / GPU). macOS only. |
 | `xnnpack` | off | XNNPACK CPU execution provider for ONNX. Useful for A/B benchmarking. Needs a runtime built with XNNPACK; does not build together with `bundled-onnxruntime`. |
 
@@ -133,9 +172,9 @@ EngramDB writes to platform-standard locations via the `dirs` crate. Each respec
 
 | Purpose | macOS | Linux | Env override |
 |---------|-------|-------|--------------|
-| Models (embeddings, NLI, reranker) | `~/Library/Caches/engramdb/models/` | `~/.cache/engramdb/models/` | — |
+| Models (embeddings, NLI, reranker) | `~/Library/Caches/engramdb/models/` | `~/.cache/engramdb/models/` | `ENGRAMDB_MODEL_CACHE_DIR` |
 | Global config (`registry.json`, `config.toml` with `[daemon]`) | `~/Library/Application Support/engramdb/` | `~/.config/engramdb/` | `ENGRAMDB_CONFIG_DIR` |
-| Global data + project registry | `~/Library/Application Support/engramdb/` | `~/.local/share/engramdb/` | `ENGRAMDB_DATA_DIR` |
+| Global data (personal memories, vector indexes, transcript copies) | `~/Library/Application Support/engramdb/` | `~/.local/share/engramdb/` | `ENGRAMDB_DATA_DIR` |
 | Daemon folder (socket, lock, log) | `~/Library/Caches/engramdb/daemon/` | `$XDG_RUNTIME_DIR/engramdb/` (else `~/.cache/engramdb/daemon/`); a named pipe (`\\.\pipe\engramdb-<hash>`) on Windows | `ENGRAMDB_DAEMON_SOCKET` |
 
 Per-project state lives in `<project>/.engramdb/`. The vector index and personal-visibility memories live under `<global_data_dir>/projects/<project_id>/`. See [projects-and-worktrees.md](./projects-and-worktrees.md) for the full layout.
@@ -143,7 +182,7 @@ Per-project state lives in `<project>/.engramdb/`. The vector index and personal
 ## Uninstall
 
 ```bash
-cargo uninstall engramdb
+cargo uninstall engram-cli
 # Optionally also remove all data:
 rm -rf ~/.local/share/engramdb ~/.config/engramdb ~/.cache/engramdb   # Linux
 rm -rf "~/Library/Application Support/engramdb" "~/Library/Caches/engramdb"   # macOS

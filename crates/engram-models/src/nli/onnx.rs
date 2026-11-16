@@ -62,9 +62,13 @@ pub const DEFAULT_NLI_MODEL: NliModelSpec = NLI_DEBERTA_XSMALL_Q;
 /// Every NLI spec this crate knows, for callers that need to map a repo id
 /// back to a spec (e.g. attributing a cached model directory to a model).
 ///
-/// NOT a whitelist: `[nli].model` is a HuggingFace repo id and an unlisted
-/// repo is loaded as requested with generic filenames. Listing a spec here
-/// only means its ONNX/tokenizer filenames are known.
+/// This is the list of repositories a project's `[nli].model` may select.
+/// The core's model policy (`engramdb::ops::model_policy`) refuses any other
+/// repository unless the global config sets
+/// `[security] allow_custom_model_repos = true`; only then is an unlisted
+/// repo loaded, with generic filenames. This crate's loaders do not check
+/// the policy themselves (benchmarks and examples load by explicit name), so
+/// production code must reach them through `ops`.
 pub const ALL_NLI_SPECS: &[NliModelSpec] = &[NLI_DEBERTA_XSMALL, NLI_DEBERTA_XSMALL_Q];
 
 /// Model output label ordering:
@@ -237,6 +241,8 @@ fn download_model_files(
     let tokenizer_path = repo
         .get(tokenizer_file)
         .context("Failed to download NLI tokenizer")?;
+    crate::integrity::verify(model_repo, model_file, &model_path)?;
+    crate::integrity::verify(model_repo, tokenizer_file, &tokenizer_path)?;
 
     Ok((model_path, tokenizer_path))
 }
@@ -406,16 +412,13 @@ mod tests {
 
     /// Shared NLI provider across all tests in this module to avoid loading
     /// the ~400MB ONNX model once per test (which causes OOM when parallel).
-    static SHARED_PROVIDER: LazyLock<Option<OnnxNliProvider>> =
-        LazyLock::new(|| OnnxNliProvider::try_new(DEFAULT_MODEL_REPO));
+    static SHARED_PROVIDER: LazyLock<Result<OnnxNliProvider, String>> =
+        LazyLock::new(|| OnnxNliProvider::new(DEFAULT_MODEL_REPO).map_err(|e| format!("{e:#}")));
 
-    /// Returns the shared provider, or None if unavailable (for graceful skip).
+    /// Returns the shared provider, or None after saying why it is
+    /// unavailable (a failure under `ENGRAMDB_TEST_REQUIRE_MODELS`).
     fn try_provider() -> Option<&'static OnnxNliProvider> {
-        let provider = SHARED_PROVIDER.as_ref();
-        if provider.is_none() {
-            eprintln!("Skipping: NLI model not available");
-        }
-        provider
+        engram_test_support::model_or_skip("default NLI model", SHARED_PROVIDER.as_ref())
     }
 
     #[test]
@@ -445,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_provider_creation() {
-        // This test requires model download; skip gracefully if unavailable
+        // Skips (or, with models required, fails) when the model is missing.
         let _ = try_provider();
     }
 

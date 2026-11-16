@@ -10,9 +10,8 @@ use super::signals::{GraphSnapshot, UsageCache};
 use crate::embeddings::EmbeddingProvider;
 use crate::nli::{NliProvider, NliResult};
 use crate::scoring::{
-    composite_score, composite_score_ignore_decay, composite_score_target,
-    composite_score_target_ignore_decay, LinkVia, ScoreBreakdown, ScoreSignals, ScoreTarget,
-    ScoringContext,
+    composite_score_target, composite_score_target_ignore_decay, LinkVia, ScoreBreakdown,
+    ScoreSignals, ScoreTarget, ScoringContext,
 };
 use crate::storage::{MemoryStore, Result};
 use crate::types::{EngramConfig, Epistemic, KeywordStems, Memory, MemoryType, Situation};
@@ -160,6 +159,16 @@ pub struct RetrievalQuery {
     /// signal and threshold — that is the point — and is marked with
     /// `ScoreBreakdown::via`.
     pub expand_links: Option<usize>,
+
+    /// Ids that keep their place in the ranked cut but are neither loaded
+    /// nor returned: the caller already has them (a hook's "already shown
+    /// this session"). Ranking, the `max_results` cut and `total` are those
+    /// of the same query without it, so a skipped id never lets a
+    /// lower-ranked memory into the result in its place — the result is the
+    /// unskipped result minus the skipped ids, without reading their files.
+    /// Meant for queries without link expansion (a skipped hit still
+    /// expands, and its neighbour would then be returned without it).
+    pub skip_load: Option<std::collections::HashSet<String>>,
 }
 
 /// A memory with its computed relevance score.
@@ -512,6 +521,68 @@ impl RetrievalEngine {
         .await
     }
 
+    /// The vectors for a memory that is **not written yet**, so the caller can
+    /// write file, chunks and row in one [`MemoryStore::create_with_chunks`]
+    /// (one memories-table commit instead of `create` and then the chunk
+    /// upsert's `has_embedding` flip). Nothing is written here; pass the
+    /// result's `fingerprint` to [`Self::stamp_first_embed`] once the create
+    /// has committed. `Ok(None)` when no provider is configured or the memory
+    /// has no text to embed — the caller then creates without vectors.
+    pub async fn embed_unwritten(&self, memory: &Memory) -> anyhow::Result<Option<NewVectors>> {
+        let Some(provider) = &self.embedding_provider else {
+            return Ok(None);
+        };
+        let chunk_tokens =
+            effective_chunk_tokens(self.config.embeddings.max_tokens, provider.max_tokens());
+        let metadata_vector = self.config.embeddings.metadata_vector;
+        let telemetry = self.ingest_telemetry();
+        let t = std::time::Instant::now();
+        let chunks = embedding_texts(memory, chunk_tokens, metadata_vector);
+        if let Some(t_) = telemetry.as_ref() {
+            t_.record("create.chunk_text", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+        // Decided before the write, as in `embed_memory_with`: afterwards our
+        // own chunks make the store non-empty.
+        let unstamped = matches!(self.store.embedding_fingerprint().await, Ok(None))
+            && matches!(self.store.has_any_chunks().await, Ok(false));
+        let chunk_refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+        let t = std::time::Instant::now();
+        let vectors = provider.embed_batch(&chunk_refs).await?;
+        if let Some(t_) = telemetry.as_ref() {
+            t_.record("create.embed_batch", t.elapsed().as_secs_f64() * 1000.0);
+        }
+        let query = mean_direction(&vectors);
+        let embed_sha256 = embed_digest(&chunks, provider.as_ref(), metadata_vector, chunk_tokens);
+        Ok(Some(NewVectors {
+            vectors,
+            embed_sha256,
+            query,
+            fingerprint: unstamped
+                .then(|| first_embed_fingerprint(provider.as_ref(), metadata_vector)),
+        }))
+    }
+
+    /// Record the embedding model on a store whose first vectors a
+    /// [`Self::embed_unwritten`] create just wrote (see `embed_memory_with`
+    /// for why). Best-effort, like that path.
+    pub async fn stamp_first_embed(
+        &self,
+        fingerprint: Option<crate::storage::manifest::EmbeddingFingerprint>,
+    ) {
+        if let Some(fingerprint) = fingerprint {
+            if let Err(e) = self
+                .store
+                .stamp_embedding_fingerprint_if_unset(fingerprint)
+                .await
+            {
+                tracing::warn!("failed to stamp embedding fingerprint on first embed: {e}");
+            }
+        }
+    }
+
     /// [`Self::embed_memory`] for many memories: one batched inference and
     /// one batched chunk write for the whole set.
     ///
@@ -551,7 +622,7 @@ impl RetrievalEngine {
         let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let vectors = self.embed_texts(&text_refs).await;
 
-        let mut entries: Vec<crate::storage::lance_index::GuardedChunkWrite> =
+        let mut entries: Vec<crate::storage::lance_index::ChunkWrite> =
             Vec::with_capacity(memories.len());
         let mut errors: Vec<(String, String)> = Vec::new();
         for (memory, (start, end)) in memories.iter().zip(spans) {
@@ -580,11 +651,44 @@ impl RetrievalEngine {
                 metadata_vector,
                 chunk_tokens,
             );
-            entries.push((memory.id.clone(), memory.updated_at, chunks, Some(digest)));
+            entries.push((memory.id.clone(), chunks, Some(digest)));
         }
 
-        match self.store.upsert_chunks_batch(entries).await {
-            Ok(written) => (written.len(), errors),
+        // Guarded on what the vectors depend on: the memory, re-read under
+        // the write lock, must still embed to the same texts (same digest). A
+        // metadata-only write racing the embed no longer drops the vectors;
+        // a text change or a delete still does, and is reported below.
+        let sent: Vec<String> = entries.iter().map(|(id, _, _)| id.clone()).collect();
+        let guard_provider = Arc::clone(provider);
+        let still_current = move |current: &Memory, digest: Option<&str>| {
+            let texts = embedding_texts(current, chunk_tokens, metadata_vector);
+            digest.is_some_and(|d| {
+                embed_digest(
+                    &texts,
+                    guard_provider.as_ref(),
+                    metadata_vector,
+                    chunk_tokens,
+                ) == d
+            })
+        };
+        match self
+            .store
+            .upsert_chunks_batch_if(entries, still_current)
+            .await
+        {
+            Ok(written) => {
+                // Declare the loss rather than report success for vectors that
+                // were dropped (this also keeps the fingerprint unstamped).
+                let written_set: std::collections::HashSet<&str> =
+                    written.iter().map(String::as_str).collect();
+                for id in sent.iter().filter(|id| !written_set.contains(id.as_str())) {
+                    errors.push((
+                        id.clone(),
+                        "changed while it was being embedded; run reindex again".to_string(),
+                    ));
+                }
+                (written.len(), errors)
+            }
             Err(e) => {
                 errors.push(("*".to_string(), format!("batched chunk write failed: {e}")));
                 (0, errors)
@@ -678,7 +782,11 @@ impl RetrievalEngine {
         let links_config = self.config.links.clone();
         let telemetry = self.ingest_telemetry();
 
+        // Counted before the spawn, so a shutdown drain that starts right
+        // after this call already waits for it (`ingest_tracker`).
+        let guard = super::ingest_tracker::track();
         Some(tokio::spawn(async move {
+            let _guard = guard;
             let query = match embed_memory_with(
                 provider.as_ref(),
                 &store,
@@ -1164,9 +1272,16 @@ impl RetrievalEngine {
         // post-predicate rows — NOT the whole store — and can no longer be
         // used on its own to detect "the filters narrowed the candidates".
         let pushdown_applied = pushdown_predicate.is_some();
+        // Only a text query reads the stems; every other shape skips the
+        // projection's one large column and its per-row JSON parse.
+        let projection = if query.query.is_some() {
+            crate::storage::FilterProjection::Full
+        } else {
+            crate::storage::FilterProjection::NoStems
+        };
         let all_entries = self
             .store
-            .list_for_filtering_where(pushdown_predicate)
+            .list_for_filtering_where_projected(pushdown_predicate, projection)
             .await?;
         let total_entry_count = all_entries.len();
 
@@ -1300,13 +1415,25 @@ impl RetrievalEngine {
                 .await;
         }
 
-        // Step 3: Batch-load surviving memories (single dir scan). Needed on the
-        // query / Filter paths for keyword search and result materialization.
-        // The scalar-filter pushdown (Step 1) shrinks this batch when those
-        // filters are selective.
-        let ids: Vec<&str> = filtered_entries.iter().map(|e| e.id.as_str()).collect();
-        let loaded = self.store.get_batch(&ids).await?;
-        let memory_map: HashMap<String, Memory> = loaded.into_iter().collect();
+        // Step 3: Load only the files scoring cannot do without. Every scoring
+        // input is in the index projection (`score_target`), so the rows are
+        // scored from the index and only the survivors are loaded (Step 9).
+        // The one exception is a row with no stored `keyword_stems` (written
+        // before the column existed), whose stems a text query has to derive
+        // from the file. Such a row whose file does not load is left out of
+        // the keyword pass and of scoring, as every row whose file did not
+        // load used to be.
+        let mut memory_map: HashMap<String, Memory> = HashMap::new();
+        if query.query.is_some() {
+            let fallback = filtered_entries
+                .iter()
+                .filter(|e| e.keyword_stems.is_none())
+                .map(|e| e.id.as_str());
+            self.load_missing(&mut memory_map, fallback).await?;
+        }
+        let needs_file = |e: &crate::storage::IndexForFiltering| {
+            query.query.is_some() && e.keyword_stems.is_none() && !memory_map.contains_key(&e.id)
+        };
 
         // Step 4: If query text + embeddings available, get semantic scores.
         let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
@@ -1385,9 +1512,8 @@ impl RetrievalEngine {
         // The `has_embedding` column (schema v0.2.0, finding performance-3
         // Part B) carries this per memory in the index projection, so the set
         // is read straight from `filtered_entries` with **no** chunks-table
-        // scan. It covers exactly the memories being scored (memory_map's ids
-        // come from filtered_entries), which is all `embedded_ids` is consulted
-        // for. The migration keeps the column authoritative (a reindex rebuilds
+        // scan. It covers exactly the memories being scored (the entries in
+        // filtered_entries), which is all `embedded_ids` is consulted for. The migration keeps the column authoritative (a reindex rebuilds
         // it), so there is no half-migrated mis-scoring window.
         let embedded_ids: Option<std::collections::HashSet<String>> =
             if semantic_scores_map.is_some() {
@@ -1410,20 +1536,23 @@ impl RetrievalEngine {
             // Rebuilding them here is the dominant cost of keyword scoring —
             // ~17.7ms per 1000 memories — and it is identical on every query.
             //
-            // `filtered_entries` and `memory_map` cover the same ids, so either
-            // can drive the scoring; iterate the entries and fall back to the
-            // loaded memory only for rows written before the column existed, so
-            // a partially-migrated store degrades in speed and never in
-            // correctness.
+            // Iterate the entries and fall back to the loaded memory only for
+            // rows written before the column existed (Step 3 loaded exactly
+            // those), so a partially-migrated store degrades in speed and never
+            // in correctness.
+            // Borrowed from the row on the common path; owned only for the
+            // fallback it has to compute.
             fn stems_for<'a>(
                 e: &'a crate::storage::IndexForFiltering,
                 memory_map: &HashMap<String, Memory>,
-            ) -> Option<(&'a str, KeywordStems)> {
+            ) -> Option<(&'a str, std::borrow::Cow<'a, KeywordStems>)> {
                 let stems = match &e.keyword_stems {
-                    Some(s) => s.clone(),
+                    Some(s) => std::borrow::Cow::Borrowed(s),
                     None => {
                         let m = memory_map.get(&e.id)?;
-                        KeywordStems::compute(&m.summary, &m.tags, &m.content)
+                        std::borrow::Cow::Owned(KeywordStems::compute(
+                            &m.summary, &m.tags, &m.content,
+                        ))
                     }
                 };
                 Some((e.id.as_str(), stems))
@@ -1435,27 +1564,29 @@ impl RetrievalEngine {
             // the same threshold as scoring; order-preserving either way,
             // which matters here because `kw_results` indexes back into this
             // vector.
-            let scored: Vec<(&str, KeywordStems)> = if filtered_entries.len() >= PARALLEL_SCORE_MIN
-            {
-                use rayon::prelude::*;
-                filtered_entries
-                    .par_iter()
-                    .filter_map(|e| stems_for(e, &memory_map))
-                    .collect()
-            } else {
-                filtered_entries
-                    .iter()
-                    .filter_map(|e| stems_for(e, &memory_map))
-                    .collect()
-            };
-            let stems: Vec<KeywordStems> = scored.iter().map(|(_, s)| s.clone()).collect();
+            let scored: Vec<(&str, std::borrow::Cow<'_, KeywordStems>)> =
+                if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+                    use rayon::prelude::*;
+                    filtered_entries
+                        .par_iter()
+                        .filter_map(|e| stems_for(e, &memory_map))
+                        .collect()
+                } else {
+                    filtered_entries
+                        .iter()
+                        .filter_map(|e| stems_for(e, &memory_map))
+                        .collect()
+                };
+            // Split, order kept, so `kw_results` indexes both halves alike.
+            let (scored_ids, stems): (Vec<&str>, Vec<std::borrow::Cow<'_, KeywordStems>>) =
+                scored.into_iter().unzip();
             let kw_results = keyword_search_stems(q, &stems);
             let num_tokens = query_token_count(q);
             kw_results
                 .into_iter()
                 .map(|(idx, raw)| {
                     let norm = normalize_keyword_score(raw, num_tokens);
-                    (scored[idx].0.to_string(), norm)
+                    (scored_ids[idx].to_string(), norm)
                 })
                 .collect()
         } else {
@@ -1485,7 +1616,9 @@ impl RetrievalEngine {
 
         let t_score = std::time::Instant::now();
         let score_one = |entry: &crate::storage::IndexForFiltering| {
-            let memory = memory_map.get(&entry.id)?;
+            if needs_file(entry) {
+                return None;
+            }
 
             // Gather query evidence for this memory. Semantic comes from the
             // vector top-k when present; an embedded memory that missed the
@@ -1493,15 +1626,15 @@ impl RetrievalEngine {
             // no chunks at all keeps sem = None (no evidence). See Step 4.5.
             let sem_score = semantic_scores_map
                 .as_ref()
-                .and_then(|m| m.get(&memory.id))
+                .and_then(|m| m.get(&entry.id))
                 .copied()
                 .or_else(|| {
                     embedded_ids
                         .as_ref()
-                        .is_some_and(|ids| ids.contains(&memory.id))
+                        .is_some_and(|ids| ids.contains(&entry.id))
                         .then_some(0.0)
                 });
-            let kw_score = keyword_map.get(&memory.id).copied();
+            let kw_score = keyword_map.get(&entry.id).copied();
 
             // Build scoring context. In rank mode the user-supplied path and
             // logical scopes drive the scope proximity signal. In filter mode
@@ -1536,7 +1669,7 @@ impl RetrievalEngine {
                 ScoringContext::scope_only(ctx_path, ctx_logical)
             }
             .with_situation(query.situation)
-            .with_signals(signals.as_ref().and_then(|m| m.get(&memory.id)));
+            .with_signals(signals.as_ref().and_then(|m| m.get(&entry.id)));
 
             // Expired memories (only present when `include_expired` is set —
             // otherwise Step 2.5b already dropped them) are scored ignoring
@@ -1546,10 +1679,14 @@ impl RetrievalEngine {
             // of `include_expired` — a half-decayed active memory must not
             // rank as fresh just because the caller asked to also see expired
             // ones.
-            let breakdown = if memory.is_expired_at(now) {
-                composite_score_ignore_decay(memory, &context, &self.config, now)
+            // Scored from the index row (`score_target`), which carries every
+            // input `composite_score` reads from a memory; the expiry test is
+            // `Memory::is_expired_at`'s.
+            let target = score_target(entry);
+            let breakdown = if entry.expires_at.is_some_and(|exp| now > exp) {
+                composite_score_target_ignore_decay(target, &context, &self.config, now)
             } else {
-                composite_score(memory, &context, &self.config, now)
+                composite_score_target(target, &context, &self.config, now)
             };
 
             // Filter-mode sufficiency check.
@@ -1566,7 +1703,7 @@ impl RetrievalEngine {
             if query.mode == RetrievalMode::Filter {
                 let has_kw = kw_score.is_some_and(|v| v > 0.0);
                 let has_tag = query.tags.as_ref().is_some_and(|filter_tags| {
-                    !filter_tags.is_empty() && filter_tags.iter().any(|t| memory.tags.contains(t))
+                    !filter_tags.is_empty() && filter_tags.iter().any(|t| entry.tags.contains(t))
                 });
                 // `query_path` (not `query.path`): an empty-string path was
                 // normalized away in Step 1.5 and must not count as a
@@ -1578,15 +1715,15 @@ impl RetrievalEngine {
             }
 
             Some(ScoredCandidate {
-                id: memory.id.clone(),
+                id: entry.id.clone(),
                 score: breakdown.final_score,
                 breakdown,
             })
         };
 
         // Same independence argument as `rank_scope_only_from_index`: every
-        // iteration reads `memory_map` / `keyword_map` / `semantic_scores_map`
-        // and writes nothing shared. `filter_map` over an indexed parallel
+        // iteration reads `keyword_map` / `semantic_scores_map` and writes
+        // nothing shared. `filter_map` over an indexed parallel
         // iterator keeps input order, so the candidate list is identical to
         // the sequential one, not merely equivalent.
         let mut candidates: Vec<ScoredCandidate> = if filtered_entries.len() >= PARALLEL_SCORE_MIN {
@@ -1624,12 +1761,15 @@ impl RetrievalEngine {
         // class-appropriate candidates and rerank-blend semantics stay
         // untouched. Rerank runs on the full sorted candidate set BEFORE
         // truncation (identical to before);
-        // it reads memory text from `memory_map` by id, so it needs no cloned
-        // memories.
+        // it reads memory text from `memory_map` by id, so the documents it
+        // will read — the first `rerank.top_n` candidates — are loaded here.
         // Only timed when the reranker is actually configured + enabled to
         // avoid recording bogus 0ms samples for the no-op path.
         if let Some(ref q) = query.query {
             if self.reranking_available() && !candidates.is_empty() {
+                let top_n = self.config.rerank.top_n.min(candidates.len());
+                let want = candidates[..top_n].iter().map(|c| c.id.as_str());
+                self.load_missing(&mut memory_map, want).await?;
                 let t_rerank = std::time::Instant::now();
                 let rerank_result = self.apply_rerank(q, &mut candidates, &memory_map).await;
                 self.record_stage("rerank", t_rerank.elapsed().as_secs_f64() * 1000.0);
@@ -1648,19 +1788,58 @@ impl RetrievalEngine {
             Vec::new()
         };
 
-        let total = candidates.len();
+        let mut total = candidates.len();
 
-        // Step 9: Apply max_results limit, THEN materialize survivors. Cloning
-        // the memory is deferred to here so only the returned memories are
-        // cloned, not every scored candidate (finding performance-0).
+        // Step 9: Apply max_results limit, THEN load the survivors' files —
+        // the only files most text queries read (finding performance-4).
         let max_results = query
             .max_results
             .unwrap_or(self.config.retrieval.max_results);
-        let tail = candidates.split_off(max_results.min(candidates.len()));
+        let mut tail = candidates.split_off(max_results.min(candidates.len()));
+        // A skipped id keeps its place and its count, is never loaded, and is
+        // removed at the end (`RetrievalQuery::skip_load`).
+        let skip = query.skip_load.as_ref();
+        let skipped = |id: &str| skip.is_some_and(|s| s.contains(id));
+        self.load_missing(
+            &mut memory_map,
+            candidates
+                .iter()
+                .map(|c| c.id.as_str())
+                .filter(|id| !skipped(id)),
+        )
+        .await?;
+        // A row scored from the index whose file is gone or no longer parses
+        // (a drifted store) cannot be returned. Drop it, uncount it, and
+        // refill from the cut tail once, with exactly as many as went
+        // missing; a refill that fails to load is dropped too, without a
+        // second round. Before scores came from the index such a row was
+        // never scored at all, so a healthy store answers exactly as before.
+        let before = candidates.len();
+        candidates.retain(|c| skipped(&c.id) || memory_map.contains_key(&c.id));
+        let missing = before - candidates.len();
+        if missing > 0 {
+            total -= missing;
+            let refill: Vec<ScoredCandidate> = tail.drain(..missing.min(tail.len())).collect();
+            self.load_missing(
+                &mut memory_map,
+                refill
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .filter(|id| !skipped(id)),
+            )
+            .await?;
+            for c in refill {
+                if skipped(&c.id) || memory_map.contains_key(&c.id) {
+                    candidates.push(c);
+                } else {
+                    total -= 1;
+                }
+            }
+        }
 
         // Step 9.5: one-hop link expansion (opt-in). Neighbours come from the
-        // filtered candidate set only, so `memory_map` already holds them.
-        let (expanded, new_in_total) = self
+        // filtered candidate set; their files are loaded after it.
+        let (mut expanded, new_in_total) = self
             .expand_candidates(
                 query,
                 &candidates,
@@ -1671,11 +1850,26 @@ impl RetrievalEngine {
                 expansion_parents,
             )
             .await;
-        let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
         // Expanded neighbours are results the caller sees, so `total` counts
         // them ("Found 3 memories (out of 2 total)" would read as a bug) —
         // only those it did not already count as a cut candidate.
-        let total = total + new_in_total;
+        let mut total = total + new_in_total;
+        if !expanded.is_empty() {
+            self.load_missing(
+                &mut memory_map,
+                expanded
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .filter(|id| !skipped(id)),
+            )
+            .await?;
+            // Counted either way (in the tail or by `new_in_total`), so a
+            // neighbour whose file does not load is uncounted.
+            let before = expanded.len();
+            expanded.retain(|c| skipped(&c.id) || memory_map.contains_key(&c.id));
+            total -= before - expanded.len();
+        }
+        let dropped_below_threshold = dropped_minus_returned(&below_threshold, &expanded);
         if !expanded.is_empty() {
             candidates.extend(expanded);
             sort_candidates(&mut candidates);
@@ -1683,11 +1877,12 @@ impl RetrievalEngine {
 
         let mut scored_memories: Vec<ScoredMemory> = candidates
             .into_iter()
+            .filter(|c| !skipped(&c.id))
             .filter_map(|c| {
-                // Every candidate id came from `memory_map`, so the lookup
-                // always hits; `filter_map` guards defensively without panicking.
-                memory_map.get(&c.id).map(|memory| ScoredMemory {
-                    memory: memory.clone(),
+                // Every candidate was loaded above; `filter_map` guards
+                // defensively without panicking.
+                memory_map.remove(&c.id).map(|memory| ScoredMemory {
+                    memory,
                     score: c.score,
                     score_breakdown: c.breakdown,
                 })
@@ -1722,6 +1917,22 @@ impl RetrievalEngine {
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
 
         Ok(result)
+    }
+
+    /// Load into `map` the memories among `ids` it does not hold yet, in one
+    /// batch (no call when it holds them all).
+    async fn load_missing<'a>(
+        &self,
+        map: &mut HashMap<String, Memory>,
+        ids: impl Iterator<Item = &'a str>,
+    ) -> Result<()> {
+        let want: Vec<&str> = ids.filter(|id| !map.contains_key(*id)).collect();
+        if !want.is_empty() {
+            #[cfg(test)]
+            FILES_REQUESTED.fetch_add(want.len(), std::sync::atomic::Ordering::SeqCst);
+            map.extend(self.store.get_batch(&want).await?);
+        }
+        Ok(())
     }
 
     /// Rank mode's relevance cut, on candidates already sorted by score.
@@ -1787,17 +1998,7 @@ impl RetrievalEngine {
 
         let t_score = std::time::Instant::now();
         let score_entry = |e: &crate::storage::IndexForFiltering| {
-            let target = ScoreTarget {
-                created_at: e.created_at,
-                decay: &e.decay,
-                criticality: e.criticality,
-                physical: &e.physical,
-                logical: &e.logical,
-                provenance_source: e.provenance_source,
-                status: e.status,
-                epistemic: e.epistemic,
-                verified_at: e.verified_at,
-            };
+            let target = score_target(e);
             let context = ScoringContext::scope_only(ctx_path, &query.logical)
                 .with_situation(query.situation)
                 .with_signals(signals.and_then(|m| m.get(&e.id)));
@@ -1862,7 +2063,10 @@ impl RetrievalEngine {
         }
 
         // Materialize ONLY the survivors (and any expanded neighbours) — the
-        // whole point of this path.
+        // whole point of this path — less the ids the caller already holds.
+        if let Some(skip) = &query.skip_load {
+            candidates.retain(|c| !skip.contains(&c.id));
+        }
         let survivor_ids: Vec<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
         let loaded: HashMap<String, Memory> = self
             .store
@@ -2031,17 +2235,7 @@ impl RetrievalEngine {
                             // components, with its own signals and the
                             // query's situation, so the breakdown still
                             // explains — and still flags — the memory.
-                            let target = ScoreTarget {
-                                created_at: entry.created_at,
-                                decay: &entry.decay,
-                                criticality: entry.criticality,
-                                physical: &entry.physical,
-                                logical: &entry.logical,
-                                provenance_source: entry.provenance_source,
-                                status: entry.status,
-                                epistemic: entry.epistemic,
-                                verified_at: entry.verified_at,
-                            };
+                            let target = score_target(entry);
                             let ctx = ScoringContext::scope_only(None, &[])
                                 .with_situation(query.situation)
                                 .with_signals(signals.and_then(|m| m.get(nid)));
@@ -2108,6 +2302,31 @@ impl RetrievalEngine {
 /// `dropped_below_threshold` for a query: the candidates the rank threshold
 /// removed, less any link expansion brought back — a neighbour the caller is
 /// shown was not dropped.
+/// How many memory files the text-query path asked the store for, so a test
+/// can prove it reads only the survivors. Process-wide; nextest runs each test
+/// in its own process.
+#[cfg(test)]
+pub(crate) static FILES_REQUESTED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// The scoring inputs of an index row: what `ScoreTarget::from(&Memory)`
+/// takes from the loaded memory, carried in the projection (schema v0.2.0),
+/// so a row scores identically without its file
+/// (`tests::rank_from_index_matches_file_load`).
+fn score_target(e: &crate::storage::IndexForFiltering) -> ScoreTarget<'_> {
+    ScoreTarget {
+        created_at: e.created_at,
+        decay: &e.decay,
+        criticality: e.criticality,
+        physical: &e.physical,
+        logical: &e.logical,
+        provenance_source: e.provenance_source,
+        status: e.status,
+        epistemic: e.epistemic,
+        verified_at: e.verified_at,
+    }
+}
+
 fn dropped_minus_returned(dropped: &[ScoredCandidate], expanded: &[ScoredCandidate]) -> usize {
     if expanded.is_empty() || dropped.is_empty() {
         return dropped.len();
@@ -2402,28 +2621,31 @@ async fn embed_memory_with(
     // Freshness-guarded: this runs in detached ingest tasks with no ordering
     // guarantee, so an embed of an older snapshot must not overwrite newer
     // vectors, and an embed racing a delete must not re-insert orphan chunks.
+    //
+    // The guard compares what the vectors depend on — the texts this memory
+    // embeds to, under the same provider and config — not `updated_at`: a
+    // link, challenge, verify or `harvest mark --memory` write racing the
+    // embed bumps `updated_at` without changing a single vector, and used to
+    // drop them for good (nothing retries a detached ingest). Equal texts
+    // under one provider and config is exactly an equal `embed_digest`. A
+    // memory edited to other text (or to none) or deleted is still refused.
     let digest = embed_digest(&chunks, provider, metadata_vector, chunk_tokens);
     let written = store
-        .upsert_chunks_if_current(&memory.id, vectors, memory.updated_at, Some(digest))
+        .upsert_chunks_if(&memory.id, vectors, Some(digest), move |current| {
+            embedding_texts(current, chunk_tokens, metadata_vector) == chunks
+        })
         .await?;
     if !written {
-        tracing::debug!(
+        tracing::info!(
             memory_id = %memory.id,
-            "skipped chunk upsert: memory changed or was deleted since this snapshot"
+            "skipped chunk upsert: the memory's text changed, or it was deleted, since this snapshot"
         );
     }
     if let Some(t_) = telemetry {
         t_.record("create.upsert_chunks", t.elapsed().as_secs_f64() * 1000.0);
     }
     if written && stamp_first_embed {
-        let fingerprint = crate::storage::manifest::EmbeddingFingerprint {
-            model: provider.model_id(),
-            dimensions: provider.dimensions(),
-            // Mirrors `EmbeddingsConfig::composition_id` — `metadata_vector`
-            // here IS `config.embeddings.metadata_vector` at every call site.
-            composition: metadata_vector
-                .then(|| crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
-        };
+        let fingerprint = first_embed_fingerprint(provider, metadata_vector);
         // Conditional, not `set_embedding_fingerprint`: `stamp_first_embed`
         // was decided before the embed and the upsert, and the store may have
         // been stamped since (a reindex for a new model, a concurrent first
@@ -2439,6 +2661,32 @@ async fn embed_memory_with(
         }
     }
     Ok(query)
+}
+
+/// What [`RetrievalEngine::embed_unwritten`] computed for a memory that is
+/// not written yet: its chunk vectors, their `embed_sha256`, the ingest's
+/// search vector, and the fingerprint to stamp if these are the store's first
+/// vectors.
+pub struct NewVectors {
+    pub vectors: Vec<Vec<f32>>,
+    pub embed_sha256: String,
+    pub query: Option<Vec<f32>>,
+    pub fingerprint: Option<crate::storage::manifest::EmbeddingFingerprint>,
+}
+
+/// The fingerprint a first embed records for `provider`.
+fn first_embed_fingerprint(
+    provider: &dyn EmbeddingProvider,
+    metadata_vector: bool,
+) -> crate::storage::manifest::EmbeddingFingerprint {
+    crate::storage::manifest::EmbeddingFingerprint {
+        model: provider.model_id(),
+        dimensions: provider.dimensions(),
+        // Mirrors `EmbeddingsConfig::composition_id` — `metadata_vector`
+        // here IS `config.embeddings.metadata_vector` at every call site.
+        composition: metadata_vector
+            .then(|| crate::storage::manifest::COMPOSITION_METADATA_V1.to_string()),
+    }
 }
 
 /// The unit-length mean of a memory's chunk vectors: the search vector an
@@ -2677,6 +2925,7 @@ async fn classify_among(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scoring::{composite_score, composite_score_ignore_decay};
     use crate::storage::InMemoryRegistry;
 
     // Finding #4: the Filter-mode threshold must be bounded to [0, 1] regardless
@@ -3020,14 +3269,22 @@ mod tests {
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
         use crate::retrieval::reranker::LocalReranker;
         use std::sync::LazyLock;
-        static SHARED_RERANKER: LazyLock<Option<Arc<dyn Reranker>>> =
-            LazyLock::new(|| LocalReranker::load(crate::types::DEFAULT_RERANK_MODEL).ok());
-        SHARED_RERANKER.clone()
+        // The cause is kept so a skip says why, and a run with
+        // ENGRAMDB_TEST_REQUIRE_MODELS fails with it.
+        static SHARED_RERANKER: LazyLock<std::result::Result<Arc<dyn Reranker>, String>> =
+            LazyLock::new(|| {
+                LocalReranker::load(crate::types::DEFAULT_RERANK_MODEL)
+                    .map_err(|e| format!("{e:#}"))
+            });
+        engram_test_support::model_or_skip("default reranker", SHARED_RERANKER.clone())
     }
 
     #[cfg(not(feature = "onnxruntime"))]
     fn try_reranker() -> Option<Arc<dyn Reranker>> {
-        None
+        engram_test_support::model_or_skip(
+            "default reranker",
+            Err::<Arc<dyn Reranker>, _>("built without the onnxruntime feature"),
+        )
     }
 
     /// Filter-mode query with only a text query set, mirroring the shape
@@ -4727,14 +4984,14 @@ mod tests {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
-        let Some(embedding) = OnnxProvider::try_new() else {
-            eprintln!("skipping: ONNX embedding model unavailable");
-            return;
-        };
-        let Some(nli) = OnnxNliProvider::try_new("cross-encoder/nli-deberta-v3-xsmall") else {
-            eprintln!("skipping: NLI model unavailable");
-            return;
-        };
+        let embedding = engram_test_support::require_model!(
+            "default ONNX embedding model",
+            OnnxProvider::new()
+        );
+        let nli = engram_test_support::require_model!(
+            "NLI model cross-encoder/nli-deberta-v3-xsmall",
+            OnnxNliProvider::new("cross-encoder/nli-deberta-v3-xsmall")
+        );
 
         let temp_dir = TempDir::new().unwrap();
         let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
@@ -4815,10 +5072,10 @@ mod tests {
         use crate::types::{EngramConfig, Memory, MemoryType, Provenance, Visibility};
         use tempfile::TempDir;
 
-        let Some(embedding) = OnnxProvider::try_new() else {
-            eprintln!("skipping: ONNX embedding model unavailable");
-            return;
-        };
+        let embedding = engram_test_support::require_model!(
+            "default ONNX embedding model",
+            OnnxProvider::new()
+        );
 
         // NLI shouldn't be called — we route through the similarity
         // threshold gate first. Use a dummy provider that panics if hit.
@@ -6446,6 +6703,148 @@ mod tests {
         }
     }
 
+    /// [`ConstantEmbedding`] whose `embed_batch` signals that it started and
+    /// then waits to be released: a pause point inside a detached ingest.
+    struct PausingEmbedding {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl PausingEmbedding {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for PausingEmbedding {
+        async fn embed(&self, t: &str) -> anyhow::Result<Vec<f32>> {
+            ConstantEmbedding.embed(t).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            ConstantEmbedding.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/constant-stub".to_string()
+        }
+    }
+
+    /// Start a detached ingest of a fresh memory, pause it inside the embed,
+    /// apply `write` to the memory, release, and return the store.
+    async fn ingest_racing_a_write(
+        write: impl FnOnce(&mut Memory) + Send + 'static,
+    ) -> (tempfile::TempDir, MemoryStore, String) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(
+            MemoryType::Decision,
+            "racing summary",
+            "racing body",
+            crate::types::Provenance::human(),
+        );
+        store.create(&m).await.unwrap();
+        let provider = PausingEmbedding::new();
+        let dyn_provider: Arc<dyn EmbeddingProvider> = provider.clone();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(dyn_provider);
+        let handle = engine.spawn_ingest(m.clone(), None).unwrap();
+        provider.entered.notified().await;
+        store
+            .update_with(&m.id, move |mem| {
+                write(mem);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        provider.release.notify_one();
+        handle.await.unwrap();
+        (temp_dir, store, m.id)
+    }
+
+    /// A metadata-only write (here a link) between the snapshot and the
+    /// chunk write bumps `updated_at` but changes no vector: the vectors must
+    /// still be written. The `updated_at` guard dropped them.
+    #[tokio::test]
+    async fn embed_survives_a_metadata_write_during_ingest() {
+        let (_t, store, id) = ingest_racing_a_write(|m| {
+            m.links.push(crate::types::Link::new(
+                "some-other-memory",
+                crate::types::LinkKind::RelatedTo,
+                crate::types::LinkOrigin::Human,
+            ));
+        })
+        .await;
+        assert!(store.has_chunks_for(&id).await.unwrap(), "vectors kept");
+        let row = store
+            .list_for_filtering()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert!(row.has_embedding);
+    }
+
+    /// A detached ingest is counted from the moment `spawn_ingest` returns
+    /// until its task ends, so the MCP shutdown drain can wait for it.
+    #[tokio::test]
+    async fn spawn_ingest_is_counted_until_it_finishes() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(
+            MemoryType::Decision,
+            "counted",
+            "body",
+            crate::types::Provenance::human(),
+        );
+        store.create(&m).await.unwrap();
+        let provider = PausingEmbedding::new();
+        let dyn_provider: Arc<dyn EmbeddingProvider> = provider.clone();
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(dyn_provider);
+        let before = super::super::pending_ingests();
+        let handle = engine.spawn_ingest(m.clone(), None).unwrap();
+        assert_eq!(super::super::pending_ingests(), before + 1);
+        provider.entered.notified().await;
+        assert_eq!(super::super::pending_ingests(), before + 1);
+        provider.release.notify_one();
+        assert_eq!(
+            super::super::drain_ingests(std::time::Duration::from_secs(30)).await,
+            0
+        );
+        handle.await.unwrap();
+        assert_eq!(super::super::pending_ingests(), before);
+        assert!(store.has_chunks_for(&m.id).await.unwrap());
+    }
+
+    /// A real text change in between still refuses the stale vectors.
+    #[tokio::test]
+    async fn embed_is_dropped_when_the_text_changed_during_ingest() {
+        let (_t, store, id) = ingest_racing_a_write(|m| {
+            m.content = "a different body".to_string();
+        })
+        .await;
+        assert!(
+            !store.has_chunks_for(&id).await.unwrap(),
+            "stale vectors must not be written"
+        );
+    }
+
     async fn ingest_fixture(
         provider: Arc<CountingEmbedding>,
         similar_candidates: usize,
@@ -7532,3 +7931,7 @@ mod graph_signal_tests {
         assert_eq!(on.total, off.total + 1);
     }
 }
+
+#[cfg(test)]
+#[path = "engine_text_query_pin.rs"]
+mod text_query_pin_tests;

@@ -48,7 +48,7 @@ function draw(box, o) {
   for (const k of ticks) {
     const tx = PL + k * step + step / 2;
     const anchor = k === n - 1 ? 'end' : k === 0 ? 'start' : 'middle';
-    nodes.push(s('text', { class: 'axis', x: tx.toFixed(1), y: H - 4, 'text-anchor': anchor }, k === n - 1 ? 'Today' : dayLabel(o.days[k])));
+    nodes.push(s('text', { class: 'axis', x: tx.toFixed(1), y: H - 4, 'text-anchor': anchor }, k === n - 1 ? 'Today (UTC)' : dayLabel(o.days[k])));
   }
   if (rows.every((row) => row.v.every((x) => !x))) {
     nodes.push(s('text', { class: 'empty', x: PL + iw / 2, y: (H - AXIS) / 2, 'text-anchor': 'middle' }, 'No activity in the last 30 days'));
@@ -66,7 +66,7 @@ function draw(box, o) {
   mount(box, svg, tip, table(o));
   hits.forEach((r, k) => {
     r.addEventListener('mouseenter', () => {
-      mount(tip, h('b', null, k === n - 1 ? 'Today' : dayLabel(o.days[k])), rows.map((row) => [h('br'), `${row.name}: ${fmt(row.v[k])}`]));
+      mount(tip, h('b', null, k === n - 1 ? 'Today (UTC)' : dayLabel(o.days[k])), rows.map((row) => [h('br'), `${row.name}: ${fmt(row.v[k])}`]));
       tip.hidden = false;
       const px = PL + k * step + step / 2, tw = tip.offsetWidth;
       // CSSOM writes are allowed under the CSP; only style *attributes* are not.

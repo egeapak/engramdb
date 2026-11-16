@@ -22,10 +22,15 @@
 //! scope) and the digest, no memory text. `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0`
 //! turns both caches off (the browser bench's cold figure).
 //!
-//! **Format.** `EDLC`, the [`super::LAYOUT_VERSION`] (u32 LE), the 64-byte
+//! **Format.** `EDL2`, the [`super::LAYOUT_VERSION`] (u32 LE), the 64-byte
 //! hex digest, then [`super::Cached::to_bytes`]: scope-force's width-free
 //! core as raw little-endian doubles (exact, unlike a JSON parse), the
-//! overview as its encoded JSON text.
+//! overview as its encoded JSON text; last, the SHA-256 of everything
+//! before it. A file whose checksum does not match is a miss, and so is a
+//! scope-force core with a number that is not finite
+//! ([`super::ForceCore::is_finite`]): a damaged value is recomputed, never
+//! served. A core that does not fit the request's graph is refused when it
+//! is rendered, and [`LayoutCache::forget`] drops it.
 //!
 //! **Bounded.** At most [`MEM_ENTRIES`] layouts in memory and
 //! [`DISK_BYTES`] on disk; past that the least recently used go (a disk hit
@@ -44,8 +49,10 @@
 //! and is not cached, so the next request computes it again.
 //!
 //! **Loss paths, all harmless for a cache and all declared here:** a file
-//! that does not parse, carries another digest or another version is
-//! ignored and overwritten by the next write; files of an older format
+//! that does not parse, fails its checksum, carries another digest or
+//! another version is ignored and overwritten by the next write; files of
+//! the format before the checksum (`EDLC`) are read as foreign, so every
+//! layout cached by an older dashboard is computed once more; files of an older format
 //! (`*.json`, layout version 1) are deleted by the next prune; two dashboards
 //! pruning at once may delete more than needed; a read that races a prune
 //! or a rename misses and recomputes; a write that fails (disk full,
@@ -60,6 +67,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::{watch, OwnedSemaphorePermit, Semaphore};
 
 use super::Cached;
@@ -81,7 +89,11 @@ const MAX_FILE: u64 = 16 * 1024 * 1024;
 /// A temp file older than this is a crash's leftover.
 const STALE_TMP: Duration = Duration::from_secs(600);
 /// A cache file's first bytes.
-const MAGIC: &[u8; 4] = b"EDLC";
+/// A cache file's first bytes. `EDLC` files (no checksum) read as foreign
+/// and are replaced.
+const MAGIC: &[u8; 4] = b"EDL2";
+/// The SHA-256 a file ends with.
+const SUM: usize = 32;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -283,6 +295,19 @@ impl LayoutCache {
         Ok(v)
     }
 
+    /// Drop `key` from memory and disk: what the cache held for it could not
+    /// be sent ([`super::LayoutInput::render`]), so the next request
+    /// computes it again.
+    pub fn forget(&self, key: &str) {
+        self.mem
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(k, _)| k != key);
+        if let Some(path) = self.file_of(key) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     fn file_of(&self, key: &str) -> Option<PathBuf> {
         // Digests are 64 hex digits; anything else never names a file.
         if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -301,7 +326,13 @@ impl LayoutCache {
         }
         let mut bytes = Vec::with_capacity(meta.len() as usize);
         f.read_to_end(&mut bytes).ok()?;
-        let body = bytes.strip_prefix(MAGIC.as_slice())?;
+        // The checksum first: a damaged number can still be finite, and a
+        // damaged JSON text can still parse.
+        let (signed, sum) = bytes.split_at_checked(bytes.len().checked_sub(SUM)?)?;
+        if Sha256::digest(signed).as_slice() != sum {
+            return None;
+        }
+        let body = signed.strip_prefix(MAGIC.as_slice())?;
         let (version, body) = body.split_at_checked(4)?;
         let (stored, body) = body.split_at_checked(64)?;
         if version != super::LAYOUT_VERSION.to_le_bytes() || stored != key.as_bytes() {
@@ -327,6 +358,8 @@ impl LayoutCache {
         bytes.extend_from_slice(&super::LAYOUT_VERSION.to_le_bytes());
         bytes.extend_from_slice(key.as_bytes());
         bytes.extend_from_slice(&v.to_bytes());
+        let sum = Sha256::digest(&bytes);
+        bytes.extend_from_slice(&sum);
         let tmp = dir.join(format!(
             ".{key}.{}.{}.tmp",
             std::process::id(),

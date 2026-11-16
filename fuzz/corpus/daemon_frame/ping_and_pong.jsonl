@@ -1,0 +1,4 @@
+{"dir":"","models":null,"op":{"kind":"ping"}}
+{"status":"pong","version":"6","build":"0.10.0"}
+
+{"dir":"","models":null,"op":{"kind":"embed","texts":["a","b"]}}

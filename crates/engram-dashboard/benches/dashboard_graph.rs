@@ -20,6 +20,11 @@
 //! scratch: their difference from the same case without `layout=` is the
 //! layout's cost. `*_layout_cached` is the same request with the cache on
 //! (a memory hit after the first).
+//!
+//! `overview_layout/<m>` times the scope overview's layout alone
+//! (`layout::overview::layout`) at 1k, 5k and 20k top scopes, a store no
+//! generated one reaches: its work grows with the scope count, which has
+//! no cap. `DASHBOARD_BENCH_SCOPES=1000,5000` picks the counts.
 
 #[path = "../../../examples/support/dashboard_store.rs"]
 mod dashboard_store;
@@ -140,5 +145,52 @@ fn bench(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench);
+/// The overview's input for `m` top scopes: counts falling off like a real
+/// store's, a relation between neighbours in rank order.
+fn overview_input(m: usize) -> engram_dashboard::layout::overview::OverviewInput {
+    use engram_dashboard::layout::overview::{OverviewEdge, OverviewInput, OverviewNode};
+    OverviewInput {
+        nodes: (0..m)
+            .map(|i| OverviewNode {
+                id: format!("scope-{i}"),
+                count: (1 + 5000 / (i + 1)) as f64,
+                full_len: 14,
+                short_len: 7,
+            })
+            .collect(),
+        edges: (1..m)
+            .map(|i| OverviewEdge {
+                s: i - 1,
+                t: i,
+                n: (i % 9 + 1) as f64,
+            })
+            .collect(),
+        aspect: 0.6,
+        width: 1280.0,
+    }
+}
+
+fn bench_overview(c: &mut Criterion) {
+    let only = std::env::var("DASHBOARD_BENCH_SCOPES").ok();
+    let mut group = c.benchmark_group("overview_layout");
+    group
+        .sample_size(10)
+        .measurement_time(Duration::from_secs(10))
+        .warm_up_time(Duration::from_secs(1));
+    for m in [1000usize, 5000, 20000] {
+        if only
+            .as_deref()
+            .is_some_and(|o| !o.split(',').any(|s| s == m.to_string()))
+        {
+            continue;
+        }
+        let input = overview_input(m);
+        group.bench_function(m.to_string(), |b| {
+            b.iter(|| engram_dashboard::layout::overview::layout(&input))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench, bench_overview);
 criterion_main!(benches);

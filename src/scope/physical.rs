@@ -25,7 +25,7 @@
 
 use globset::{Glob, GlobMatcher};
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Upper bound on distinct patterns retained by [`cached_matcher`].
 ///
@@ -34,7 +34,7 @@ use std::sync::{Mutex, OnceLock};
 /// vocabulary, while staying finite for input that is not.
 const MAX_CACHED_MATCHERS: usize = 4096;
 
-type MatcherCache = OnceLock<Mutex<HashMap<String, Option<GlobMatcher>>>>;
+type MatcherCache = OnceLock<Mutex<HashMap<String, Option<Arc<GlobMatcher>>>>>;
 static CACHE: MatcherCache = OnceLock::new();
 
 /// Process-wide cache of compiled glob matchers, keyed by pattern string.
@@ -46,9 +46,14 @@ static CACHE: MatcherCache = OnceLock::new();
 /// processes amortize this to one compile per distinct pattern. Invalid
 /// patterns cache as `None` so they are not re-parsed either.
 ///
+/// Only real globs reach it: a literal path is compared directly (see
+/// [`needs_matcher`]), so the cached vocabulary is the store's *glob*
+/// scopes, not one entry per file a memory names. A hit clones an `Arc`,
+/// not a compiled matcher, so the lock is held for one refcount.
+///
 /// Capped at [`MAX_CACHED_MATCHERS`]. Patterns come from on-disk memory
 /// files, which are user-editable and arrive with cloned repos, and nothing
-/// validates their number or length — so "distinct scopes the process
+/// validates their number or length — so "distinct glob scopes the process
 /// touches" is an assumption, not an invariant. Left uncapped this grew
 /// without bound until the process died; fuzzing hit the 2 GB ceiling that
 /// way (#63/#69), and a long-lived daemon would too, just slower.
@@ -59,11 +64,16 @@ static CACHE: MatcherCache = OnceLock::new();
 /// below into a write under the same mutex. Real pattern vocabularies are
 /// small and stable, so the cap is only ever reached under adversarial input
 /// — where evicting the wrong entry costs a recompile, not correctness.
-fn cached_matcher(pattern: &str) -> Option<GlobMatcher> {
+fn cached_matcher(pattern: &str) -> Option<Arc<GlobMatcher>> {
+    let compile = || {
+        Glob::new(pattern)
+            .ok()
+            .map(|g| Arc::new(g.compile_matcher()))
+    };
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let Ok(mut guard) = cache.lock() else {
         // Poisoned lock: fall back to a one-off compile.
-        return Glob::new(pattern).ok().map(|g| g.compile_matcher());
+        return compile();
     };
     // Fast path first: `entry()` would allocate an owned key on EVERY call
     // (hit or miss), and this runs per pattern per index entry per query.
@@ -78,8 +88,21 @@ fn cached_matcher(pattern: &str) -> Option<GlobMatcher> {
     }
     guard
         .entry(pattern.to_string())
-        .or_insert_with(|| Glob::new(pattern).ok().map(|g| g.compile_matcher()))
+        .or_insert_with(compile)
         .clone()
+}
+
+/// Whether `pattern` has to go through globset to be matched. A pattern with
+/// no glob metacharacter and no backslash compiles to an anchored literal,
+/// which matches exactly the one string equal to it, so `pattern == path`
+/// is the same answer without a compile or a cache entry
+/// (`matches_agrees_with_globset_reference` checks that). Two characters
+/// keep the matcher although they are no glob: a backslash is an escape to
+/// globset (`a\b` matches `ab`), and globset refuses a stray `}` as an
+/// unopened alternation, so such a pattern matches nothing — keeping it on
+/// the matcher keeps that answer.
+fn needs_matcher(pattern: &str) -> bool {
+    is_glob_pattern(pattern) || pattern.contains(['\\', '}'])
 }
 
 /// Number of entries currently held by the matcher cache. Test-only hook for
@@ -140,11 +163,16 @@ pub fn matches(patterns: &[String], path: &str) -> bool {
         }
     }
 
-    // Glob patterns, via the per-pattern matcher cache (equivalent to the
-    // old build-a-GlobSet-per-call, without recompiling every query).
-    patterns
-        .iter()
-        .any(|p| cached_matcher(p).is_some_and(|m| m.is_match(path)))
+    // Glob patterns via the per-pattern matcher cache (equivalent to the old
+    // build-a-GlobSet-per-call, without recompiling every query); a literal
+    // is compared directly, which is what its compiled matcher computes.
+    patterns.iter().any(|p| {
+        if needs_matcher(p) {
+            cached_matcher(p).is_some_and(|m| m.is_match(path))
+        } else {
+            p == path
+        }
+    })
 }
 
 /// Calculates proximity score between memory scopes and current file path.
@@ -454,6 +482,102 @@ mod tests {
             matches(std::slice::from_ref(&pattern), "src/a/evicted/x.rs"),
             "an evicted pattern must still match once recompiled"
         );
+    }
+
+    #[test]
+    fn literal_patterns_never_enter_the_matcher_cache() {
+        // A store whose memories each name one file used to hold a compiled
+        // matcher per file (~23 KB each), up to the cap.
+        let patterns: Vec<String> = (0..200).map(|i| format!("src/m{i}/file{i}.rs")).collect();
+        assert!(matches(&patterns, "src/m7/file7.rs"));
+        assert!(!matches(&patterns, "lib/other.rs"));
+        assert_eq!(cached_matcher_len(), 0, "a literal path compiled a matcher");
+        // A glob still goes through (and stays in) the cache.
+        assert!(matches(&["src/**/*.rs".to_string()], "src/x/a.rs"));
+        assert_eq!(cached_matcher_len(), 1);
+    }
+
+    /// The pre-change `matches`: every pattern that is not root, parent or
+    /// same-directory goes through a freshly compiled globset matcher.
+    fn reference_matches(patterns: &[String], path: &str) -> bool {
+        if patterns.iter().any(|p| p == "/") {
+            return true;
+        }
+        if patterns
+            .iter()
+            .any(|p| is_parent_directory(p, path) || is_same_directory(p, path))
+        {
+            return true;
+        }
+        patterns.iter().any(|p| {
+            Glob::new(p)
+                .ok()
+                .is_some_and(|g| g.compile_matcher().is_match(path))
+        })
+    }
+
+    #[test]
+    fn matches_agrees_with_globset_reference() {
+        // Deterministic xorshift, so a failure reproduces.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Characters a literal can carry that globset might treat specially
+        // outside a glob (`]`, `}`, `,`, `!`, `^`, `-`), the backslash escape,
+        // separators, dots, and multibyte text.
+        let alphabet: Vec<&str> = vec![
+            "a", "b", "src", "/", "/", ".", "..", "-", "_", "]", "}", ",", "!", "^", "\\", "é",
+            "日本", " ", "*", "?", "[ab]", "{a,b}", "**",
+        ];
+        let word = |next: &mut dyn FnMut() -> u64| -> String {
+            let n = (next() % 6) as usize;
+            (0..n)
+                .map(|_| alphabet[(next() % alphabet.len() as u64) as usize])
+                .collect()
+        };
+        let mut checked = 0usize;
+        for _ in 0..20_000 {
+            let pattern = word(&mut next);
+            // Half the paths are the pattern itself (or it with the glob
+            // characters stripped), so equality is exercised, not just misses.
+            let path = match next() % 4 {
+                0 => pattern.clone(),
+                1 => pattern.replace(['*', '?', '[', ']', '{', '}', ','], ""),
+                _ => word(&mut next),
+            };
+            let patterns = vec![pattern.clone()];
+            assert_eq!(
+                matches(&patterns, &path),
+                reference_matches(&patterns, &path),
+                "pattern {pattern:?} path {path:?}"
+            );
+            checked += 1;
+        }
+        // Fixed cases: escapes and unicode, matched and not.
+        for (p, path) in [
+            ("a\\b", "ab"),
+            ("a\\b", "a\\b"),
+            ("a\\*", "a*"),
+            ("src/日本.rs", "src/日本.rs"),
+            ("src/日本.rs", "src/日本.r"),
+            ("x}", "x}"),
+            ("x]", "x]"),
+            ("", ""),
+            ("a,b", "a,b"),
+        ] {
+            let patterns = vec![p.to_string()];
+            assert_eq!(
+                matches(&patterns, path),
+                reference_matches(&patterns, path),
+                "pattern {p:?} path {path:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 20_000);
     }
 
     // Helper to compare floats within tolerance

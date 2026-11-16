@@ -95,6 +95,12 @@ fn make_linked_worktree(main: &Path, worktree: &Path, name: &str) {
         format!("gitdir: {}\n", gitdir.display()),
     )
     .unwrap();
+    // git's back-link from the per-worktree gitdir to the worktree's `.git`.
+    std::fs::write(
+        gitdir.join("gitdir"),
+        format!("{}\n", worktree.join(".git").display()),
+    )
+    .unwrap();
 }
 
 /// Locate the archive written for `session`, if any.

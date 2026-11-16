@@ -1,6 +1,31 @@
 use super::helpers;
 use tempfile::TempDir;
 
+/// A black-box test must never reach the developer's daemon: with no
+/// `--socket`, `daemon status` resolves the harness's socket, under its own
+/// runtime dir, not `$XDG_RUNTIME_DIR/engramdb/daemon.sock` of the machine.
+#[test]
+fn the_black_box_harness_never_resolves_the_default_daemon_socket() {
+    let out = helpers::cmd()
+        .args(["daemon", "status", "--format", "json"])
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    let socket = json["socket"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no socket in {json}"));
+    let socket = std::path::Path::new(socket);
+    let parent = std::fs::canonicalize(socket.parent().unwrap()).unwrap();
+    let runtime = std::fs::canonicalize(helpers::runtime_dir()).unwrap();
+    assert!(
+        parent.starts_with(&runtime),
+        "daemon status resolved {} outside the harness runtime dir {}",
+        socket.display(),
+        runtime.display()
+    );
+}
+
 #[test]
 fn format_json_flag_valid_json() {
     let dir = TempDir::new().unwrap();

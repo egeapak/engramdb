@@ -10,12 +10,20 @@
 //!   ENGRAMDB_DATA_DIR=… cargo run --release --example query_stage_profile -- <project-dir>
 //!
 //! `ORT_DYLIB_PATH` must resolve an ONNX Runtime, as for any embedding path.
+//! With `KEYWORD_ONLY=1` (or no runtime/model) the embedding rows are skipped
+//! and only the keyword engine runs.
+//!
+//! The last section times the engine end to end — text Filter, text Rank and
+//! the scope-only Rank a PreToolUse hook issues — with no provider, and with
+//! the ONNX provider when one loads.
 
 use anyhow::Result;
 use engramdb::embeddings::{EmbeddingProvider, OnnxProvider};
 
+use engramdb::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
 use engramdb::storage::MemoryStore;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 fn stat(label: &str, mut ms: Vec<f64>, extra: &str) {
@@ -42,9 +50,11 @@ async fn main() -> Result<()> {
     let open_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let t = Instant::now();
-    let provider = OnnxProvider::try_new().ok_or_else(|| {
-        anyhow::anyhow!("no ONNX embedding provider — check ORT_DYLIB_PATH and the model cache")
-    })?;
+    let provider = if std::env::var_os("KEYWORD_ONLY").is_some() {
+        None
+    } else {
+        OnnxProvider::try_new().map(Arc::new)
+    };
     let model_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let all = store.list_for_filtering().await?;
@@ -53,11 +63,16 @@ async fn main() -> Result<()> {
         "  {:<34} {:>11.2} ms   (once per process)",
         "store open", open_ms
     );
-    println!(
-        "  {:<34} {:>11.2} ms   (once per process; what the daemon amortizes today)",
-        "embedding model load", model_ms
-    );
+    match &provider {
+        Some(_) => println!(
+            "  {:<34} {:>11.2} ms   (once per process; what the daemon amortizes today)",
+            "embedding model load", model_ms
+        ),
+        None => println!("  embedding model: none (keyword only)"),
+    }
     println!();
+    let config_path = store.project_dir.join(".engramdb").join("config.toml");
+    let config = engramdb::storage::config::load_config_or_default(&config_path).await;
 
     let queries = [
         "how does the caching layer handle the hot path in retrieval",
@@ -66,19 +81,29 @@ async fn main() -> Result<()> {
     ];
 
     let (mut embed, mut index_scan, mut vsearch, mut getbatch) = (vec![], vec![], vec![], vec![]);
+    let mut getbatch_all = vec![];
+    let all_ids: Vec<String> = all.iter().map(|e| e.id.clone()).collect();
 
     // one warm pass so page cache and any lazy init are not in the numbers
-    let warm = provider.embed(queries[0]).await?;
-    let _ = store.vector_search(warm.clone(), 30, None).await?;
+    if let Some(provider) = &provider {
+        let warm = provider.embed(queries[0]).await?;
+        let _ = store.vector_search(warm, 30, None).await?;
+    }
     let warm_ids: Vec<String> = all.iter().take(30).map(|e| e.id.clone()).collect();
     let _ = store.get_batch(&warm_ids).await?;
 
     for i in 0..reps {
         let q = queries[i % queries.len()];
 
-        let t = Instant::now();
-        let vector = provider.embed(q).await?;
-        embed.push(t.elapsed().as_secs_f64() * 1000.0);
+        let vector = match &provider {
+            Some(provider) => {
+                let t = Instant::now();
+                let v = provider.embed(q).await?;
+                embed.push(t.elapsed().as_secs_f64() * 1000.0);
+                Some(v)
+            }
+            None => None,
+        };
 
         // Stage 1: the whole post-predicate index projection streamed into Rust.
         let t = Instant::now();
@@ -86,33 +111,50 @@ async fn main() -> Result<()> {
         index_scan.push(t.elapsed().as_secs_f64() * 1000.0);
 
         // Stage 4: k-NN over the chunks table.
-        let t = Instant::now();
-        let _ = store.vector_search(vector, 30, None).await?;
-        vsearch.push(t.elapsed().as_secs_f64() * 1000.0);
+        if let Some(vector) = vector {
+            let t = Instant::now();
+            let _ = store.vector_search(vector, 30, None).await?;
+            vsearch.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
 
         // Stage 3: two dirent scans + one file read+parse per candidate.
         let ids: Vec<String> = rows.iter().take(30).map(|e| e.id.clone()).collect();
         let t = Instant::now();
         let _ = store.get_batch(&ids).await?;
         getbatch.push(t.elapsed().as_secs_f64() * 1000.0);
+
+        // What a text query really loaded before it scored from the index:
+        // every candidate that passed the hard filters, i.e. all of them.
+        let t = Instant::now();
+        let _ = store.get_batch(&all_ids).await?;
+        getbatch_all.push(t.elapsed().as_secs_f64() * 1000.0);
     }
 
     println!("per-query stages ({reps} reps, {} rows):", all.len());
-    stat(
-        "embed (ONNX forward pass)",
-        embed,
-        "daemon amortizes the LOAD, not this",
-    );
+    if !embed.is_empty() {
+        stat(
+            "embed (ONNX forward pass)",
+            embed,
+            "daemon amortizes the LOAD, not this",
+        );
+    }
     stat(
         "list_for_filtering (index scan)",
         index_scan,
         "<- a cache eliminates",
     );
-    stat("vector_search (k-NN)", vsearch, "");
+    if !vsearch.is_empty() {
+        stat("vector_search (k-NN)", vsearch, "");
+    }
     stat(
         "get_batch(30) (read+parse .md)",
         getbatch,
         "<- a cache eliminates",
+    );
+    stat(
+        "get_batch(all ids)",
+        getbatch_all,
+        "what a text query loaded",
     );
 
     // How get_batch scales, since it is the stage a cache targets.
@@ -178,7 +220,12 @@ async fn main() -> Result<()> {
         ms[ms.len() / 2]
     );
 
+    engine_rows(&store, &config, provider.as_ref(), &queries, reps).await?;
+
     // Does the vector search cost scale with the restrict list, or is it fixed?
+    let Some(provider) = provider else {
+        return Ok(());
+    };
     let vector = provider.embed(queries[0]).await?;
     for (label, restrict) in [
         ("vector_search(restrict=None)", None),
@@ -199,5 +246,70 @@ async fn main() -> Result<()> {
         println!("  {label:<40} p50 {:>8.2} ms", ms[ms.len() / 2]);
     }
 
+    Ok(())
+}
+
+/// End-to-end `engine.query` for the three shapes the front ends issue.
+async fn engine_rows(
+    store: &MemoryStore,
+    config: &engramdb::types::EngramConfig,
+    provider: Option<&Arc<OnnxProvider>>,
+    queries: &[&str],
+    reps: usize,
+) -> Result<()> {
+    // A path some memories are scoped to, for the PreToolUse shape.
+    let path = store
+        .list_for_filtering()
+        .await?
+        .iter()
+        .find_map(|e| e.physical.first().cloned())
+        .unwrap_or_else(|| "src/main.rs".to_string());
+    let mut engines: Vec<(&str, RetrievalEngine)> = vec![(
+        "keyword",
+        RetrievalEngine::new(store.clone(), config.clone()),
+    )];
+    if let Some(p) = provider {
+        engines.push((
+            "onnx",
+            RetrievalEngine::new(store.clone(), config.clone()).with_embedding_provider(p.clone()),
+        ));
+    }
+    println!("\nengine.query end to end ({reps} reps):");
+    for (name, engine) in &engines {
+        for (label, mode) in [
+            ("text Filter", RetrievalMode::Filter),
+            ("text Rank", RetrievalMode::Rank),
+        ] {
+            let mut ms = vec![];
+            for i in 0..=reps {
+                let q = RetrievalQuery {
+                    mode,
+                    query: Some(queries[i % queries.len()].to_string()),
+                    ..Default::default()
+                };
+                let t = Instant::now();
+                let _ = engine.query(&q).await?;
+                if i > 0 {
+                    ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+            stat(&format!("{label} ({name})"), ms, "");
+        }
+    }
+    let engine = &engines[0].1;
+    let mut ms = vec![];
+    for i in 0..=reps {
+        let q = RetrievalQuery {
+            mode: RetrievalMode::Rank,
+            path: Some(path.clone()),
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let _ = engine.query(&q).await?;
+        if i > 0 {
+            ms.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    stat("scope-only Rank (path)", ms, "the PreToolUse shape");
     Ok(())
 }

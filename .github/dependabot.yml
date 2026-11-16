@@ -1,9 +1,9 @@
 version: 2
 
-# Keeps the committed Cargo.lock moving on its own. CI builds with `--locked`
-# and the only supply-chain gate (.github/workflows/audit.yml) runs cargo-deny
-# weekly with `continue-on-error: true`, so without this a published advisory
-# is *reported* but never *fixed* until someone runs `cargo update` by hand.
+# Keeps the committed Cargo.lock moving on its own. CI builds with `--locked`,
+# and the advisory check (.github/workflows/audit.yml) only reports: it files
+# an issue when its weekly run fails. Without this a published advisory is
+# *reported* but never *fixed* until someone runs `cargo update` by hand.
 updates:
   - package-ecosystem: cargo
     directory: "/"
@@ -82,8 +82,33 @@ updates:
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
 
-  - package-ecosystem: github-actions
+  # The one npm dependency in the repository: `playwright-core`, the driver of
+  # the dashboard's browser checks (never embedded, never shipped). Pinned by
+  # a lockfile that CI installs with `npm ci --ignore-scripts`.
+  - package-ecosystem: npm
+    directory: "/crates/engram-dashboard/bench/browser"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(deps)"
+
+  # rust-toolchain.toml pins the exact stable release CI and the release
+  # workflow build with. Without this entry the pin would only ever move by
+  # hand; with it a new compiler arrives as a PR that runs the whole suite.
+  - package-ecosystem: rust-toolchain
     directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(toolchain)"
+
+  # Every `uses:` is pinned to a commit SHA with the version in a trailing
+  # comment; Dependabot updates both. "/" covers .github/workflows; a composite
+  # action's own `uses:` lines are only seen when its directory is listed.
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/.github/actions/install-onnxruntime"
     schedule:
       interval: monthly
     commit-message:

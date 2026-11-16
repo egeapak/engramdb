@@ -314,6 +314,20 @@ pub async fn reindex(
                 }
             ));
         }
+        for (id, loser) in &counts.shadowed {
+            warnings.push(format!(
+                "memory {id} has a file in both the shared and the personal directory; \
+                 the other copy was indexed and {} was left on disk, shadowed — delete the \
+                 copy you do not want",
+                loser.display()
+            ));
+        }
+        for (id, path) in &counts.renamed {
+            warnings.push(format!(
+                "renamed the file of memory {id} to {}: its old name did not carry its id",
+                path.display()
+            ));
+        }
         unparseable = counts.unparseable;
         if let Some(other) = &foreign_checkout {
             warnings.push(format!(
@@ -375,15 +389,15 @@ pub async fn reindex(
             // skipping is live, the surviving vectors ARE the result, so
             // clearing them would delete precisely what the skip predicate is
             // about to decide to keep. Nothing is leaked by not clearing:
-            // `upsert_chunks_batch` replaces a memory's chunks atomically and
+            // `upsert_chunks_batch_if` replaces a memory's chunks atomically and
             // drops surplus ones, and the metadata rebuild above prunes chunks
             // orphaned by deleted memories.
             //
             // Suppressed under a checkout conflict either way: the other
-            // clone's vectors live in this same table and must survive.
-            if full_rebuild && foreign_checkout.is_none() {
-                store.clear_chunks().await?;
-            }
+            // clone's vectors live in this same table and must survive. The
+            // clear itself happens below, once the memories are loaded: a
+            // file that does not parse cannot be re-embedded, so its vectors
+            // are kept when they are still the right model's.
 
             // Under a checkout conflict the shared index also lists the other
             // clone's memories, whose files are not visible here. Re-embed
@@ -409,10 +423,103 @@ pub async fn reindex(
                 .map_err(|e| anyhow::anyhow!("batch load failed: {}", e))?;
             let mut by_id: std::collections::HashMap<String, _> = loaded.into_iter().collect();
             let mut to_embed: Vec<crate::types::Memory> = Vec::with_capacity(ids.len());
+            let mut not_loaded: Vec<String> = Vec::new();
             for id in &ids {
                 match by_id.remove(id) {
                     Some(memory) => to_embed.push(memory),
-                    None => errors.push(format!("{}: memory file not found", id)),
+                    None => not_loaded.push(id.clone()),
+                }
+            }
+            // An id that did not load is either gone (its file was deleted:
+            // an error, as before) or present but unparseable. The latter is
+            // not this run's failure — it is reported, its vectors are kept
+            // where they are still valid, and it does not hold back the
+            // fingerprint stamp the parseable memories earn.
+            let on_disk = if not_loaded.is_empty() {
+                std::collections::HashSet::new()
+            } else {
+                store
+                    .batch_exists(&not_loaded)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("batch existence check failed: {}", e))?
+            };
+            let (broken, gone): (Vec<String>, Vec<String>) = not_loaded
+                .into_iter()
+                .partition(|id| on_disk.contains(id.as_str()));
+            for id in &gone {
+                errors.push(format!("{}: memory file not found", id));
+            }
+
+            if full_rebuild && foreign_checkout.is_none() {
+                // Kept only when the vectors are in the live model's space:
+                // the stored fingerprint equals the live one and the width did
+                // not change (plain `--force`, `doctor --fix`). After a model
+                // or composition change a kept vector would answer new-model
+                // queries with noise, which is worse than none.
+                let same_model = !dimension_change
+                    && stored_dims.is_some()
+                    && engine.embedding_fingerprint().is_some()
+                    && store.embedding_fingerprint().await.ok().flatten()
+                        == engine.embedding_fingerprint();
+                if same_model && !broken.is_empty() {
+                    store.clear_chunks_keeping(&broken).await?;
+                } else {
+                    store.clear_chunks().await?;
+                }
+                for id in &broken {
+                    warnings.push(if same_model {
+                        format!(
+                            "{id}: file does not parse; its vectors were kept — fix the file \
+                             and reindex"
+                        )
+                    } else {
+                        format!(
+                            "{id}: file does not parse; its vectors, if any, were dropped (the \
+                             embedding model changed or was never recorded) and it has none until \
+                             the file is fixed and reindexed"
+                        )
+                    });
+                }
+            } else if embeddings_only {
+                // (A metadata rebuild already warned about these files, and
+                // nothing here touched their vectors.)
+                for id in &broken {
+                    warnings.push(format!(
+                        "{id}: file does not parse; it was not re-embedded and its vectors were \
+                         left as they were — fix the file and reindex"
+                    ));
+                }
+            }
+            // A metadata rebuild above already listed these files in
+            // `unparseable`; an embeddings-only run lists them here.
+            if embeddings_only {
+                for id in &broken {
+                    let path = match crate::storage::paths::find_memory_in_dir(
+                        &crate::storage::paths::memories_dir(&store.project_dir),
+                        id,
+                    )
+                    .await
+                    {
+                        Some(p) => Some(p),
+                        None => {
+                            match crate::storage::paths::personal_memories_dir(&store.project_id) {
+                                Ok(dir) => {
+                                    crate::storage::paths::find_memory_in_dir(&dir, id).await
+                                }
+                                Err(_) => None,
+                            }
+                        }
+                    };
+                    let error = match store.get(id).await {
+                        Err(e) => e.to_string(),
+                        Ok(_) => "did not load".to_string(),
+                    };
+                    unparseable.push(crate::storage::UnparseableMemoryFile {
+                        path: path.unwrap_or_default(),
+                        id: Some(id.clone()),
+                        error,
+                        preserved: true,
+                    });
                 }
             }
             // Drop the memories whose vectors are provably already current.
@@ -432,7 +539,7 @@ pub async fn reindex(
             //
             // Read outside the write lock, which is safe in the only direction
             // that matters: a memory updated between this read and the write is
-            // caught by `upsert_chunks_batch`'s re-read under the lock, so the
+            // caught by `upsert_chunks_batch_if`'s re-read under the lock, so the
             // worst case is embedding something that did not need it.
             if !full_rebuild {
                 let stored = store.embed_digests().await?;
@@ -634,6 +741,258 @@ mod tests {
         fn model_id(&self) -> String {
             self.model.clone()
         }
+    }
+
+    /// [`StubEmbeddingProvider`] that rewrites one memory's content during
+    /// its first `embed_batch`: a write racing the batched embed.
+    struct EditingProvider {
+        store: MemoryStore,
+        victim: String,
+        done: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for EditingProvider {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5f32; 384])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.store
+                    .update_with(&self.victim, |m| {
+                        m.content = "edited while embedding".to_string();
+                        Ok(())
+                    })
+                    .await?;
+            }
+            Ok(texts.iter().map(|_| vec![0.5f32; 384]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/stub-model".to_string()
+        }
+    }
+
+    /// A memory whose text changes while the batch embeds is not written
+    /// (its vectors would be stale) and the reindex says so instead of
+    /// reporting success for vectors it dropped.
+    #[tokio::test]
+    async fn reindex_reports_a_memory_changed_mid_embed() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 3).await;
+        let provider = EditingProvider {
+            store: store.clone(),
+            victim: ids[1].clone(),
+            done: Default::default(),
+        };
+        let engine = RetrievalEngine::new(store.clone(), EngramConfig::default())
+            .with_embedding_provider(Arc::new(provider));
+        let r = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            reindex(
+                &store,
+                Some(&engine),
+                ReindexOptions {
+                    embeddings_only: true,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+        .expect("no deadlock")
+        .unwrap();
+        assert_eq!(r.embedded, 2, "{r:?}");
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains(&ids[1]) && e.contains("changed while it was being embedded")),
+            "{:?}",
+            r.errors
+        );
+        assert!(!store.has_chunks_for(&ids[1]).await.unwrap());
+    }
+
+    /// Write a memory whose hidden block is then broken by a merge conflict,
+    /// so its file no longer parses. Returns its id.
+    async fn add_conflicted(store: &MemoryStore) -> String {
+        let mut mem = Memory::new(
+            MemoryType::Decision,
+            "conflicted",
+            "conflicted body",
+            Provenance::human(),
+        );
+        mem.supersedes = vec!["old-1".into()];
+        store.create(&mem).await.unwrap();
+        mem.id
+    }
+
+    fn conflict(tmp: &TempDir, id: &str) {
+        let path = tmp
+            .path()
+            .join(".engramdb/memories")
+            .join(format!("{id}.md"));
+        let clean = std::fs::read_to_string(&path).unwrap();
+        let broken = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, broken);
+        std::fs::write(&path, broken).unwrap();
+    }
+
+    fn force() -> ReindexOptions {
+        ReindexOptions {
+            force: true,
+            ..Default::default()
+        }
+    }
+
+    /// Copy memory `id`'s shared file into the personal directory, so the id
+    /// has a file in both.
+    pub(super) fn duplicate_into_personal(tmp: &TempDir, store: &MemoryStore, id: &str) {
+        let shared = std::fs::read_dir(tmp.path().join(".engramdb/memories"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(id))
+            .unwrap();
+        let personal = crate::storage::paths::personal_memories_dir(&store.project_id).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::copy(&shared, personal.join(shared.file_name().unwrap())).unwrap();
+    }
+
+    /// The copy that lost an id's shared/personal duplicate is kept on disk
+    /// and named in the result, not left to a log line.
+    #[tokio::test]
+    async fn reindex_names_a_shadowed_duplicate() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 2).await;
+        duplicate_into_personal(&tmp, &store, &ids[0]);
+        let r = reindex(&store, None, ReindexOptions::default())
+            .await
+            .unwrap();
+        let shadowed: Vec<&String> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("shadowed"))
+            .collect();
+        assert_eq!(shadowed.len(), 1, "{:?}", r.warnings);
+        assert!(shadowed[0].contains(&ids[0]), "{}", shadowed[0]);
+        assert_eq!(r.indexed, 2);
+    }
+
+    #[tokio::test]
+    async fn force_reindex_keeps_vectors_of_an_unparseable_file() {
+        let tmp = TempDir::new().unwrap();
+        let (store, ids) = seeded_store(&tmp, 2).await;
+        let broken = add_conflicted(&store).await;
+        let engine = engine_with(store.clone(), CountingProvider::new());
+        let r = reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(store.has_chunks_for(&broken).await.unwrap());
+
+        conflict(&tmp, &broken);
+        let r = reindex(&store, Some(&engine), force()).await.unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            store.has_chunks_for(&broken).await.unwrap(),
+            "same model: the unparseable file's vectors are kept"
+        );
+        for id in &ids {
+            assert!(store.has_chunks_for(id).await.unwrap());
+        }
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains(&broken) && w.contains("vectors were kept")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn force_reindex_stamps_the_fingerprint_despite_an_unparseable_file() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _ids) = seeded_store(&tmp, 2).await;
+        let broken = add_conflicted(&store).await;
+        conflict(&tmp, &broken);
+        assert!(store.embedding_fingerprint().await.unwrap().is_none());
+
+        let engine = engine_with(store.clone(), CountingProvider::new());
+        let r = reindex(&store, Some(&engine), force()).await.unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            engine.embedding_fingerprint(),
+            "every parseable memory embedded, so the store is stamped"
+        );
+    }
+
+    #[tokio::test]
+    async fn embeddings_only_reports_unparseable_not_missing() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _ids) = seeded_store(&tmp, 2).await;
+        let broken = add_conflicted(&store).await;
+        conflict(&tmp, &broken);
+        let engine = engine_with(store.clone(), CountingProvider::new());
+        let r = reindex(
+            &store,
+            Some(&engine),
+            ReindexOptions {
+                embeddings_only: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            !r.errors.iter().any(|e| e.contains("not found")),
+            "{:?}",
+            r.errors
+        );
+        assert_eq!(r.unparseable.len(), 1, "{:?}", r.unparseable);
+        assert_eq!(r.unparseable[0].id.as_deref(), Some(broken.as_str()));
+        assert!(r.unparseable[0].path.ends_with(format!("{broken}.md")));
+    }
+
+    #[tokio::test]
+    async fn model_change_drops_unparseable_vectors_and_says_so() {
+        let tmp = TempDir::new().unwrap();
+        let (store, _ids) = seeded_store(&tmp, 2).await;
+        let broken = add_conflicted(&store).await;
+        let engine = engine_with(store.clone(), CountingProvider::new());
+        reindex(&store, Some(&engine), ReindexOptions::default())
+            .await
+            .unwrap();
+        conflict(&tmp, &broken);
+
+        let engine_b = engine_with(
+            store.clone(),
+            CountingProvider::new().with_model("onnx/other"),
+        );
+        let r = reindex(&store, Some(&engine_b), force()).await.unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(
+            !store.has_chunks_for(&broken).await.unwrap(),
+            "old-model vectors must not be kept"
+        );
+        assert!(
+            r.warnings
+                .iter()
+                .any(|w| w.contains(&broken) && w.contains("dropped")),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(
+            store.embedding_fingerprint().await.unwrap(),
+            engine_b.embedding_fingerprint()
+        );
     }
 
     fn calls(c: &Arc<std::sync::atomic::AtomicUsize>) -> usize {

@@ -39,12 +39,16 @@ impl ApiError {
     }
 
     /// Map a storage error from a store read: a missing memory is a 404, an
-    /// ambiguous prefix or bad input a 400, anything else a 500.
+    /// ambiguous prefix or bad input a 400, anything else — an index
+    /// (`StorageError::Index`) or I/O failure — a 500.
     pub fn from_storage(e: engramdb::storage::StorageError) -> Self {
         use engramdb::storage::StorageError;
         match e {
             StorageError::NotFound(id) => {
                 Self::not_found("unknown_memory", format!("no memory {id} in this store"))
+            }
+            e @ StorageError::AmbiguousId { .. } => {
+                Self::new(StatusCode::BAD_REQUEST, "ambiguous_id", e.to_string())
             }
             StorageError::Validation(msg) => Self::new(StatusCode::BAD_REQUEST, "invalid", msg),
             other => Self::internal(other),
@@ -75,5 +79,49 @@ impl IntoResponse for ApiError {
             );
         }
         r
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engramdb::storage::StorageError;
+
+    /// The variant decides the status, never the message text.
+    #[test]
+    fn a_typed_index_error_is_a_500_and_an_ambiguous_id_a_400() {
+        let index = ApiError::from_storage(StorageError::index("list_summary")(anyhow::anyhow!(
+            "Ambiguous ID prefix in a LanceDB message"
+        )));
+        assert_eq!(
+            (index.status, index.code),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+        );
+
+        let ambiguous = ApiError::from_storage(StorageError::AmbiguousId {
+            prefix: "0192".into(),
+            matches: 2,
+        });
+        assert_eq!(
+            (ambiguous.status, ambiguous.code),
+            (StatusCode::BAD_REQUEST, "ambiguous_id")
+        );
+        assert_eq!(
+            ambiguous.message,
+            "Ambiguous ID prefix '0192': matches 2 memories"
+        );
+
+        let invalid = ApiError::from_storage(StorageError::Validation("bad filter".into()));
+        assert_eq!(
+            (invalid.status, invalid.code),
+            (StatusCode::BAD_REQUEST, "invalid")
+        );
+
+        // Through an ops `anyhow` chain too.
+        let wrapped = ApiError::from_anyhow(
+            anyhow::Error::from(StorageError::index("edges read")(anyhow::anyhow!("io")))
+                .context("loading the graph"),
+        );
+        assert_eq!(wrapped.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

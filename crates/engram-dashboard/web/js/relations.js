@@ -4,14 +4,16 @@
 // only names things, so the memory page, the overview and the review
 // controls read the same words whatever style is picked.
 
-export const KIND_LABEL = {
+/** No prototype: `KIND_LABEL.constructor` must not be a function's source text. */
+export const KIND_LABEL = Object.freeze({
+  __proto__: null,
   contradicts: 'Contradicts',
   supersedes: 'Supersedes',
   supports: 'Supports',
   derived_from: 'Derived from',
   related_to: 'Related to',
   duplicates: 'Duplicates',
-};
+});
 
 export const KINDS = ['contradicts', 'supersedes', 'supports', 'derived_from', 'related_to', 'duplicates'];
 
@@ -26,7 +28,7 @@ export const DIRECTED = Object.freeze({ __proto__: null, supersedes: true, suppo
 export const isDirected = (k) => Object.hasOwn(DIRECTED, k);
 
 export function kindLabel(k) {
-  return KIND_LABEL[k] || String(k).replace(/_/g, ' ');
+  return (Object.hasOwn(KIND_LABEL, k) && KIND_LABEL[k]) || String(k).replace(/_/g, ' ');
 }
 
 /** A drawn relation's classes: kind, status and far-end state. */

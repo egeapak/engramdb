@@ -371,7 +371,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         // No prompts needed since the list is empty
         let prompter = MockPrompter::new(vec![]);
@@ -389,7 +389,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(cap.stdout(), "No memories need review.\n");
     }
 
     // =================================================================

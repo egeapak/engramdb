@@ -80,8 +80,6 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
     "compress_apply",
     "projects_list",
     "projects_info",
-    "projects_link",
-    "projects_unlink",
     "harvest_list",
     "harvest_show",
     "harvest_search",
@@ -94,6 +92,15 @@ const MCP_TOOL_SUFFIXES: &[&str] = &[
 /// stale allowlist entries under the old names silently stop matching the
 /// current tools and the user gets a permission prompt every invocation.
 const STALE_MCP_TOOL_SUFFIXES: &[&str] = &["search", "retrieve"];
+
+/// MCP tools that still exist but are no longer approved automatically, so
+/// an approval written by an earlier `setup` is removed.
+///
+/// `projects_link` / `projects_unlink` change which projects share past
+/// conversations. That is a rare decision and the user's: with these gone
+/// from the allow list, Claude Code asks before an agent links a project.
+/// Kept apart from [`STALE_MCP_TOOL_SUFFIXES`], whose tools no longer exist.
+const NO_LONGER_AUTO_APPROVED_SUFFIXES: &[&str] = &["projects_link", "projects_unlink"];
 
 /// Tool prefix when engramdb is installed as a Claude Code plugin.
 const PLUGIN_MCP_PREFIX: &str = "mcp__plugin_engram_memory__";
@@ -248,6 +255,28 @@ fn is_plugin_installed_in(plugins_dir: Option<&Path>) -> bool {
         .any(|key| key.starts_with("engramdb@") || key.starts_with("engram@"))
 }
 
+/// What the fallback does: hooks go to settings.json, but the MCP server entry
+/// goes to `~/.claude.json` (Claude Code reads a user-scope server nowhere
+/// else). Only `setup --global` tries the plugin, so the fallback is user scope.
+const FALLBACK_NO_CLI: &str = "Claude CLI not found, falling back to writing the hooks to settings.json and the MCP server entry to ~/.claude.json.";
+
+/// The plugin-install failure line, with the CLI's first stderr line (it used
+/// to be swallowed, hiding why the fallback ran).
+fn install_failed_message(reason: Option<&str>) -> String {
+    let reason = reason
+        .map(|r| {
+            engramdb::storage::transcripts::sanitize_one_line(r.trim())
+                .chars()
+                .take(200)
+                .collect::<String>()
+        })
+        .filter(|r| !r.is_empty());
+    let reason = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+    format!(
+        "Plugin install failed{reason}, falling back to writing the hooks to settings.json and the MCP server entry to ~/.claude.json."
+    )
+}
+
 /// Try to install the engramdb plugin via `claude plugin add`.
 /// Returns true if successful, false if claude CLI is unavailable or the command fails.
 fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
@@ -258,7 +287,7 @@ fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
         .unwrap_or(false);
 
     if !claude_available {
-        formatter.print_message("Claude CLI not found, falling back to settings.json.");
+        formatter.print_message(FALLBACK_NO_CLI);
         return false;
     }
 
@@ -282,12 +311,12 @@ fn try_install_plugin(dry_run: bool, formatter: &OutputFormatter) -> bool {
                 formatter.print_message("Plugin already installed.");
                 true
             } else {
-                formatter.print_message("Plugin install failed, falling back to settings.json.");
+                formatter.print_message(&install_failed_message(stderr.lines().next()));
                 false
             }
         }
-        Err(_) => {
-            formatter.print_message("Plugin install failed, falling back to settings.json.");
+        Err(e) => {
+            formatter.print_message(&install_failed_message(Some(&e.to_string())));
             false
         }
     }
@@ -332,19 +361,37 @@ fn is_semantically_empty(value: &Value) -> bool {
 }
 
 /// Read and parse settings.json, validating that the top level is a JSON
-/// object we can merge into. A missing file yields an empty object.
-fn read_settings(settings_path: &Path) -> Result<Value> {
-    let settings: Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(settings_path)
-            .with_context(|| format!("failed to read {}", settings_path.display()))?;
-        serde_json::from_str(&content).with_context(|| {
-            format!(
-                "{}: not valid JSON — fix the file and re-run engramdb setup",
-                settings_path.display()
-            )
-        })?
-    } else {
-        json!({})
+/// object we can merge into. A missing file yields an empty object. Also
+/// returns the exact bytes parsed (`None`: no file), so a write can tell
+/// whether another program changed the file meanwhile.
+fn read_settings_snapshot(settings_path: &Path) -> Result<(Value, Option<Vec<u8>>)> {
+    let raw = read_raw(settings_path)?;
+    Ok((parse_settings(settings_path, raw.as_deref())?, raw))
+}
+
+/// The file's bytes, `None` when it does not exist (a dangling symlink
+/// included; [`write_atomic`] refuses that one).
+fn read_raw(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn parse_settings(settings_path: &Path, raw: Option<&[u8]>) -> Result<Value> {
+    let settings: Value = match raw {
+        Some(bytes) => {
+            let content = std::str::from_utf8(bytes)
+                .with_context(|| format!("failed to read {}", settings_path.display()))?;
+            serde_json::from_str(content).with_context(|| {
+                format!(
+                    "{}: not valid JSON — fix the file and re-run engramdb setup",
+                    settings_path.display()
+                )
+            })?
+        }
+        None => json!({}),
     };
 
     if !settings.is_object() {
@@ -414,25 +461,176 @@ fn ensure_array_entry<'a>(
 /// Atomically replace `path` with `contents`: write a temp file in the same
 /// directory, then rename it over the target. A crash mid-write can therefore
 /// never leave a truncated or corrupt settings.json behind.
+///
+/// - **Symlinks are followed**: a `settings.json` or `~/.claude.json` that is
+///   a link (a dotfiles checkout) has its *target* replaced, and the link
+///   stays a link. A dangling link is an error naming both paths; it is never
+///   replaced by a regular file.
+/// - **The mode is kept**: the temp file is created `0600` and given the
+///   existing target's permissions before the rename, so a `0600`
+///   `~/.claude.json` (it holds other tools' tokens) stays `0600`. A new file
+///   is `0600` when it is `.claude.json`, else `0644`. Ownership is not
+///   copied: `setup` runs as the user who owns these files, and a root-run
+///   `setup` over another user's home is out of scope.
 fn write_atomic(path: &Path, contents: &str) -> Result<()> {
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
+    let target = write_target(path)?;
+    let dir = match target.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
     };
-    let file_name = path
+    let file_name = target
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("settings.json");
-    let tmp_path = dir.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        .unwrap_or("settings.json")
+        .to_string();
+    // The pid alone collides across retries in one process; the suffix makes
+    // `create_new` the only thing that can fail on a name clash.
+    let suffix = {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default(),
+        );
+        h.finish()
+    };
+    let tmp_path = dir.join(format!(
+        ".{file_name}.{}.{suffix:016x}.tmp",
+        std::process::id()
+    ));
+    let existing = std::fs::metadata(&target).ok().map(|m| m.permissions());
 
-    let result = std::fs::write(&tmp_path, contents)
-        .and_then(|()| std::fs::rename(&tmp_path, path))
-        .with_context(|| format!("failed to write {}", path.display()));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = create_private(&tmp_path)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        match existing {
+            Some(perms) => std::fs::set_permissions(&tmp_path, perms)?,
+            None => set_new_file_mode(&tmp_path, &file_name)?,
+        }
+        std::fs::rename(&tmp_path, &target)
+    })()
+    .with_context(|| format!("failed to write {}", target.display()));
     if result.is_err() {
         // Best-effort cleanup; never leave a temp file lying around.
         let _ = std::fs::remove_file(&tmp_path);
     }
     result
+}
+
+/// The file a write to `path` must replace: `path` itself, or what it links
+/// to. A dangling link is an error.
+fn write_target(path: &Path) -> Result<PathBuf> {
+    if !path.is_symlink() {
+        return Ok(path.to_path_buf());
+    }
+    std::fs::canonicalize(path).map_err(|_| {
+        let to = std::fs::read_link(path)
+            .map(|t| t.display().to_string())
+            .unwrap_or_else(|_| "?".to_string());
+        anyhow!(
+            "{} is a symlink to {to}, which does not exist — create the target or remove the link, then re-run engramdb setup",
+            path.display()
+        )
+    })
+}
+
+/// Create `path` new (never through an existing file or link), `0600` on Unix.
+fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// The mode of a file `setup` creates: `0600` for `.claude.json`, else `0644`.
+fn set_new_file_mode(path: &Path, file_name: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if file_name == ".claude.json" {
+            0o600
+        } else {
+            0o644
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, file_name);
+        Ok(())
+    }
+}
+
+/// Write `value` (merged from the bytes `seen`) to `path`, unless another
+/// program changed the file since `seen` was read: then redo the merge once
+/// from the current contents (`remerge`, returning whether it changed
+/// anything). A second change is an error.
+///
+/// This narrows the lost-update race to the moment between the last re-read
+/// and the rename; it cannot remove it, because Claude Code takes no lock this
+/// process could share.
+fn write_merged(
+    path: &Path,
+    seen: Option<Vec<u8>>,
+    value: Value,
+    remerge: impl Fn(&mut Value) -> Result<bool>,
+) -> Result<()> {
+    let (mut seen, mut value) = (seen, value);
+    for attempt in 0..2 {
+        #[cfg(test)]
+        test_hooks::before_commit(path);
+        let now = read_raw(path)?;
+        if now == seen {
+            return write_atomic(path, &serde_json::to_string_pretty(&value)?);
+        }
+        if attempt == 1 {
+            break;
+        }
+        let mut fresh = parse_settings(path, now.as_deref())?;
+        if !remerge(&mut fresh)? {
+            // The other program's version already has everything we add.
+            return Ok(());
+        }
+        (seen, value) = (now, fresh);
+    }
+    Err(anyhow!(
+        "{} is being modified by another program; re-run `engramdb setup`",
+        path.display()
+    ))
+}
+
+/// A hook run before each re-read in [`write_merged`], so a test can change
+/// the file underneath a write.
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Hook = Box<dyn FnMut(&Path)>;
+    thread_local! {
+        static BEFORE_COMMIT: RefCell<Option<Hook>> = RefCell::new(None);
+    }
+
+    pub(super) fn set(hook: impl FnMut(&Path) + 'static) {
+        BEFORE_COMMIT.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    pub(super) fn before_commit(path: &Path) {
+        BEFORE_COMMIT.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook(path);
+            }
+        });
+    }
 }
 
 /// Write hook config into settings.json (merge strategy).
@@ -450,13 +648,35 @@ fn install_settings_fallback(
 ) -> Result<bool> {
     let settings_path = claude_dir.join("settings.json");
 
-    let mut settings = read_settings(&settings_path)?;
+    let (mut settings, seen) = read_settings_snapshot(&settings_path)?;
+    let changed = merge_hooks(&mut settings, &settings_path)?;
 
+    if !changed {
+        formatter.print_message("Hooks already configured in settings.json.");
+        return Ok(false);
+    }
+
+    if dry_run {
+        formatter.print_message("Would add hooks to settings.json.");
+        return Ok(true);
+    }
+
+    std::fs::create_dir_all(claude_dir)?;
+    write_merged(&settings_path, seen, settings, |fresh| {
+        merge_hooks(fresh, &settings_path)
+    })?;
+    formatter.print_success("Added hooks to settings.json.");
+    Ok(true)
+}
+
+/// Add every hook entry `setup` writes to `settings`, and drop the stale MCP
+/// entry an older setup wrote there. Returns whether anything changed.
+fn merge_hooks(settings: &mut Value, settings_path: &Path) -> Result<bool> {
     let mut changed = false;
 
     // --- Hooks ---
-    let root = settings_object_mut(&mut settings, &settings_path)?;
-    let hooks = ensure_object_entry(root, "hooks", "hooks", &settings_path)?;
+    let root = settings_object_mut(settings, settings_path)?;
+    let hooks = ensure_object_entry(root, "hooks", "hooks", settings_path)?;
 
     changed |= ensure_hook_entry(
         hooks,
@@ -469,7 +689,7 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook pre-tool-use",
-        &settings_path,
+        settings_path,
     )?;
 
     changed |= ensure_hook_entry(
@@ -482,7 +702,7 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook session-start",
-        &settings_path,
+        settings_path,
     )?;
 
     changed |= ensure_hook_entry(
@@ -495,7 +715,7 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook user-prompt-submit",
-        &settings_path,
+        settings_path,
     )?;
 
     changed |= ensure_hook_entry(
@@ -509,7 +729,7 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook post-tool-use",
-        &settings_path,
+        settings_path,
     )?;
     // Installs from before the retried-command prompt matched only file edits.
     changed |= ensure_matcher_includes(hooks, "PostToolUse", "engramdb hook post-tool-use", "Bash");
@@ -525,7 +745,7 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook post-tool-use",
-        &settings_path,
+        settings_path,
     )?;
 
     changed |= ensure_hook_entry(
@@ -538,7 +758,7 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook session-end",
-        &settings_path,
+        settings_path,
     )?;
 
     changed |= ensure_hook_entry(
@@ -551,27 +771,13 @@ fn install_settings_fallback(
             }]
         }),
         "engramdb hook pre-compact",
-        &settings_path,
+        settings_path,
     )?;
 
     // --- Migrate away a stale MCP entry this tool used to write here ---
-    changed |= remove_stale_mcp_server(&mut settings);
+    changed |= remove_stale_mcp_server(settings);
 
-    if !changed {
-        formatter.print_message("Hooks already configured in settings.json.");
-        return Ok(false);
-    }
-
-    if dry_run {
-        formatter.print_message("Would add hooks to settings.json.");
-        return Ok(true);
-    }
-
-    std::fs::create_dir_all(claude_dir)?;
-    let formatted = serde_json::to_string_pretty(&settings)?;
-    write_atomic(&settings_path, &formatted)?;
-    formatter.print_success("Added hooks to settings.json.");
-    Ok(true)
+    Ok(changed)
 }
 
 /// The MCP server entry `engramdb setup` registers.
@@ -609,14 +815,10 @@ fn install_mcp_json(
     dry_run: bool,
     formatter: &OutputFormatter,
 ) -> Result<bool> {
-    let mut root = read_settings(mcp_json_path)?;
-
-    let root_map = settings_object_mut(&mut root, mcp_json_path)?;
-    let mcp_servers = ensure_object_entry(root_map, "mcpServers", "mcpServers", mcp_json_path)?;
-    if mcp_servers.get("engramdb").is_some() {
+    let (mut root, seen) = read_settings_snapshot(mcp_json_path)?;
+    if !merge_mcp_entry(&mut root, mcp_json_path)? {
         return Ok(false);
     }
-    mcp_servers.insert("engramdb".to_string(), engramdb_mcp_entry());
 
     if dry_run {
         formatter.print_message(&format!(
@@ -631,12 +833,25 @@ fn install_mcp_json(
             std::fs::create_dir_all(parent)?;
         }
     }
-    let formatted = serde_json::to_string_pretty(&root)?;
-    write_atomic(mcp_json_path, &formatted)?;
+    write_merged(mcp_json_path, seen, root, |fresh| {
+        merge_mcp_entry(fresh, mcp_json_path)
+    })?;
     formatter.print_success(&format!(
         "Registered the engramdb MCP server in {}.",
         mcp_json_path.display()
     ));
+    Ok(true)
+}
+
+/// Insert the engramdb MCP server entry unless one (even user-modified) is
+/// there. Returns whether it was inserted.
+fn merge_mcp_entry(root: &mut Value, mcp_json_path: &Path) -> Result<bool> {
+    let root_map = settings_object_mut(root, mcp_json_path)?;
+    let mcp_servers = ensure_object_entry(root_map, "mcpServers", "mcpServers", mcp_json_path)?;
+    if mcp_servers.get("engramdb").is_some() {
+        return Ok(false);
+    }
+    mcp_servers.insert("engramdb".to_string(), engramdb_mcp_entry());
     Ok(true)
 }
 
@@ -720,11 +935,50 @@ fn ensure_mcp_permissions(
 ) -> Result<bool> {
     let settings_path = claude_dir.join("settings.json");
 
-    let mut settings = read_settings(&settings_path)?;
+    let (mut settings, seen) = read_settings_snapshot(&settings_path)?;
+    let (added, removed) = merge_permissions(&mut settings, &settings_path, prefix)?;
 
-    let root = settings_object_mut(&mut settings, &settings_path)?;
-    let permissions = ensure_object_entry(root, "permissions", "permissions", &settings_path)?;
-    let allow_arr = ensure_array_entry(permissions, "allow", "permissions.allow", &settings_path)?;
+    if added == 0 && removed == 0 {
+        formatter.print_message("MCP permissions already configured.");
+        return Ok(false);
+    }
+
+    if dry_run {
+        if removed > 0 {
+            formatter.print_message(&format!(
+                "Would remove {removed} stale MCP permission entries and add new ones."
+            ));
+        } else {
+            formatter.print_message("Would add MCP tool permissions to settings.json.");
+        }
+        return Ok(true);
+    }
+
+    std::fs::create_dir_all(claude_dir)?;
+    write_merged(&settings_path, seen, settings, |fresh| {
+        let (added, removed) = merge_permissions(fresh, &settings_path, prefix)?;
+        Ok(added + removed > 0)
+    })?;
+    if removed > 0 {
+        formatter.print_success(&format!(
+            "Updated MCP tool permissions in settings.json (removed {removed} stale, added {added})."
+        ));
+    } else {
+        formatter.print_success("Added MCP tool permissions to settings.json.");
+    }
+    Ok(true)
+}
+
+/// Strip stale engramdb MCP permissions from `settings` and add the current
+/// ones under `prefix`. Returns `(added, removed)`.
+fn merge_permissions(
+    settings: &mut Value,
+    settings_path: &Path,
+    prefix: &str,
+) -> Result<(usize, usize)> {
+    let root = settings_object_mut(settings, settings_path)?;
+    let permissions = ensure_object_entry(root, "permissions", "permissions", settings_path)?;
+    let allow_arr = ensure_array_entry(permissions, "allow", "permissions.allow", settings_path)?;
 
     // Remove stale entries for tools that have been renamed or removed. Stale
     // entries silently fail to match the new tool names and cause a permission
@@ -732,6 +986,7 @@ fn ensure_mcp_permissions(
     // prefixes so the cleanup works regardless of which layout the user has.
     let stale_names: std::collections::HashSet<String> = STALE_MCP_TOOL_SUFFIXES
         .iter()
+        .chain(NO_LONGER_AUTO_APPROVED_SUFFIXES)
         .flat_map(|suffix| {
             [
                 format!("{PLUGIN_MCP_PREFIX}{suffix}"),
@@ -760,33 +1015,7 @@ fn ensure_mcp_permissions(
         }
     }
 
-    if added == 0 && removed == 0 {
-        formatter.print_message("MCP permissions already configured.");
-        return Ok(false);
-    }
-
-    if dry_run {
-        if removed > 0 {
-            formatter.print_message(&format!(
-                "Would remove {removed} stale MCP permission entries and add new ones."
-            ));
-        } else {
-            formatter.print_message("Would add MCP tool permissions to settings.json.");
-        }
-        return Ok(true);
-    }
-
-    std::fs::create_dir_all(claude_dir)?;
-    let formatted = serde_json::to_string_pretty(&settings)?;
-    write_atomic(&settings_path, &formatted)?;
-    if removed > 0 {
-        formatter.print_success(&format!(
-            "Updated MCP tool permissions in settings.json (removed {removed} stale, added {added})."
-        ));
-    } else {
-        formatter.print_success("Added MCP tool permissions to settings.json.");
-    }
-    Ok(true)
+    Ok((added, removed))
 }
 
 /// Write ENGRAM.md in the target directory.
@@ -1691,21 +1920,128 @@ mod tests {
         }
     }
 
-    /// `MCP_TOOL_SUFFIXES` must cover exactly the tools the MCP server
-    /// exposes: a missing suffix means a permission prompt on every
-    /// invocation of that tool, an extra one is a stale allowlist entry.
+    /// `MCP_TOOL_SUFFIXES` plus the deliberately unapproved tools must cover
+    /// exactly the tools the MCP server exposes: a missing suffix means a
+    /// permission prompt on every invocation of that tool, an extra one is a
+    /// stale allowlist entry.
     /// `engram-cli` depends on `engram-mcp`, so this pins directly against
     /// the server's tool router instead of a hand-maintained count.
     #[test]
     fn mcp_tool_suffixes_match_server_tools() {
         let mut server_tools = engram_mcp::EngramDbServer::tool_names();
         server_tools.sort();
-        let mut suffixes: Vec<String> = MCP_TOOL_SUFFIXES.iter().map(|s| s.to_string()).collect();
+        let mut suffixes: Vec<String> = MCP_TOOL_SUFFIXES
+            .iter()
+            .chain(NO_LONGER_AUTO_APPROVED_SUFFIXES)
+            .map(|s| s.to_string())
+            .collect();
         suffixes.sort();
         assert_eq!(
             suffixes, server_tools,
             "MCP_TOOL_SUFFIXES (setup.rs) drifted from the MCP server's tool surface"
         );
+    }
+
+    /// Every tool the server exposes has a heading in the agent-facing tool
+    /// reference, so a new tool cannot ship undocumented.
+    #[test]
+    fn every_mcp_tool_is_in_the_tool_reference() {
+        let doc = include_str!("../../../../docs/agents/mcp-tools.md");
+        let headings: Vec<&str> = doc.lines().filter(|l| l.starts_with("### ")).collect();
+        let missing: Vec<String> = engram_mcp::EngramDbServer::tool_names()
+            .into_iter()
+            .filter(|name| {
+                let wanted = format!("### `{name}`");
+                !headings
+                    .iter()
+                    .any(|h| *h == wanted || h.starts_with(&format!("{wanted} ")))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "MCP tools without a heading in docs/agents/mcp-tools.md: {missing:?}"
+        );
+    }
+
+    /// Linking projects shares past conversations between them, so the agent
+    /// must ask: `setup` approves neither link tool.
+    #[tokio::test]
+    async fn setup_no_longer_auto_approves_projects_link() {
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join("claude");
+        let plugins_dir = fake_plugins_dir_with_engram(&tmp);
+        let f = test_formatter();
+        run_setup_inner(
+            tmp.path(),
+            false,
+            false,
+            false,
+            Some(&claude_dir),
+            Some(&plugins_dir),
+            &f,
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+        assert!(!content.contains("projects_link"), "{content}");
+        assert!(!content.contains("projects_unlink"), "{content}");
+        assert!(content.contains("projects_list"), "{content}");
+        for tool in NO_LONGER_AUTO_APPROVED_SUFFIXES {
+            assert!(!MCP_TOOL_SUFFIXES.contains(tool), "{tool}");
+        }
+    }
+
+    /// An approval written by an earlier `setup` is removed by the next one,
+    /// under both prefixes; other entries stay.
+    #[tokio::test]
+    async fn setup_strips_a_previous_projects_link_approval() {
+        let tmp = TempDir::new().unwrap();
+        let claude_dir = tmp.path().join("claude");
+        let plugins_dir = fake_plugins_dir_with_engram(&tmp);
+        let f = test_formatter();
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let preexisting = serde_json::json!({
+            "permissions": {
+                "allow": [
+                    format!("{PLUGIN_MCP_PREFIX}projects_link"),
+                    format!("{PLUGIN_MCP_PREFIX}projects_unlink"),
+                    format!("{SETTINGS_MCP_PREFIX}projects_link"),
+                    format!("{PLUGIN_MCP_PREFIX}projects_list"),
+                    "Bash(ls:*)",
+                ]
+            }
+        });
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            serde_json::to_string_pretty(&preexisting).unwrap(),
+        )
+        .unwrap();
+        run_setup_inner(
+            tmp.path(),
+            false,
+            false,
+            false,
+            Some(&claude_dir),
+            Some(&plugins_dir),
+            &f,
+        )
+        .await
+        .unwrap();
+
+        let content = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+        let settings: Value = serde_json::from_str(&content).unwrap();
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        let perms: Vec<&str> = allow.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !perms
+                .iter()
+                .any(|p| p.ends_with("projects_link") || p.ends_with("projects_unlink")),
+            "{perms:?}"
+        );
+        assert!(perms.contains(&"Bash(ls:*)"), "{perms:?}");
+        let list = format!("{PLUGIN_MCP_PREFIX}projects_list");
+        assert!(perms.contains(&list.as_str()), "{perms:?}");
     }
 
     #[tokio::test]
@@ -2069,5 +2405,119 @@ mod tests {
         );
         // No temp file left behind.
         assert_eq!(std::fs::read_dir(&claude_dir).unwrap().count(), 0);
+    }
+
+    // ── write_atomic / write_merged (D6) ────────────────────────────────
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_keeps_an_existing_0600_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&path, "{\"a\": 1}").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\": 1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_writes_through_a_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("dotfiles").join("settings.json");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "{}").unwrap();
+        let link = tmp.path().join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        write_atomic(&link, "{\"a\": 1}").unwrap();
+
+        assert!(link.is_symlink(), "the link must stay a link");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{\"a\": 1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_refuses_a_dangling_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let link = tmp.path().join("settings.json");
+        std::os::unix::fs::symlink(tmp.path().join("gone.json"), &link).unwrap();
+        let err = write_atomic(&link, "{}").unwrap_err().to_string();
+        assert!(err.contains("gone.json"), "{err}");
+        assert!(link.is_symlink(), "a dangling link is never replaced");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_claude_json_is_created_0600() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".claude.json");
+        let changed = install_mcp_json(&path, false, &test_formatter()).unwrap();
+        assert!(changed);
+        assert_eq!(mode_of(&path), 0o600);
+        // Any other new file keeps the ordinary 0644.
+        let other = tmp.path().join(".mcp.json");
+        install_mcp_json(&other, false, &test_formatter()).unwrap();
+        assert_eq!(mode_of(&other), 0o644);
+    }
+
+    #[test]
+    fn install_mcp_json_remerges_when_the_file_changed_underneath() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".claude.json");
+        std::fs::write(&path, r#"{"theirs": 1}"#).unwrap();
+        // Another program rewrites the file between our read and our write.
+        let mut fired = false;
+        test_hooks::set(move |p| {
+            if !fired {
+                fired = true;
+                std::fs::write(p, r#"{"theirs": 1, "added_meanwhile": true}"#).unwrap();
+            }
+        });
+
+        assert!(install_mcp_json(&path, false, &test_formatter()).unwrap());
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            v["added_meanwhile"],
+            json!(true),
+            "the other program's key survives"
+        );
+        assert_eq!(v["theirs"], json!(1));
+        assert_eq!(v["mcpServers"]["engramdb"], engramdb_mcp_entry());
+    }
+
+    #[test]
+    fn write_merged_gives_up_after_a_second_change() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".mcp.json");
+        std::fs::write(&path, "{}").unwrap();
+        let mut n = 0;
+        test_hooks::set(move |p| {
+            n += 1;
+            std::fs::write(p, format!(r#"{{"rev": {n}}}"#)).unwrap();
+        });
+        let err = install_mcp_json(&path, false, &test_formatter())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("being modified by another program"), "{err}");
+    }
+
+    #[test]
+    fn install_failure_names_the_cli_error_and_where_the_fallback_writes() {
+        let msg = install_failed_message(Some("  error: unknown plugin 'engramdb'\x1b[0m  "));
+        assert!(msg.contains("(error: unknown plugin 'engramdb'"), "{msg}");
+        assert!(!msg.contains('\x1b'), "{msg}");
+        assert!(msg.contains("~/.claude.json"), "{msg}");
+        assert!(!install_failed_message(None).contains("()"));
+        assert!(!install_failed_message(Some("  ")).contains("()"));
     }
 }

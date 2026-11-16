@@ -93,7 +93,7 @@ source_file = "..."
 - **`id`** — UUID v7 (time-sortable). Auto-assigned. Don't pass `id` on `create`.
 - **`created_at`** — set on create. Immutable.
 - **`updated_at`** — set on every `update`.
-- **`accessed_at`** — set on every query that returns this memory. Used by the daemon for stats.
+- **`accessed_at`** — deprecated. It is set when the memory is created and never updated. Usage is recorded separately; see `stats` with `memory_id`.
 - **`verified_at`** — set when someone (human or agent) confirmed this memory is still correct (the `verify` tool stamps it; `resolve action: keep` also re-affirms). Old `verified_at` is a signal that the memory might be stale. For fact-class memories, decay is anchored here (see below), so verifying refreshes their score.
 - **`expires_at`** — optional absolute deadline. After this time the memory is considered expired and filtered out by default (unless `include_expired: true`).
 
@@ -102,7 +102,7 @@ source_file = "..."
 - **`summary`** — the most-searched field. **Make it read like a search query**, not a sentence. Subject + verb + object, ~10 words. Bad: "I think we decided to use PostgreSQL because of concurrent writes." Good: "Use PostgreSQL over SQLite for concurrent writes".
 - **`content`** — the body. ~500 tokens. What you'd tell a teammate in one paragraph.
 - **`details`** — optional extended details. **Lazy-loaded** — not returned by default in `query` unless you set `detail_level: "full"`. Use for things like full code snippets, links, or extended rationale that's only occasionally needed.
-- **`title`** — optional short label that engramdb uses for the on-disk filename (`<slug>_<uuid>.md` if set; just `<uuid>.md` otherwise). Doesn't affect retrieval.
+- **`title`** — optional short label that engramdb uses for the on-disk filename (`<slug>_<uuid>.md` if set; just `<uuid>.md` otherwise; a hand-authored non-UUID id is always `<id>.md`, since the slug can only be told from a UUID-shaped id). Doesn't affect retrieval.
 
 ### Scope: `physical` and `logical`
 
@@ -113,8 +113,8 @@ These are the two scoring axes that connect a memory to the code it's about.
 
 Scoring contribution:
 
-- Physical: exponential depth decay. `exact_file: 1.0, same_directory: 0.85, same_module: 0.6, project_root: 0.4` (defaults from config).
-- Logical bonus: `exact: 0.3, parent: 0.2, sibling: 0.15`. Stacks on top, capped at 1.0.
+- Physical: the score falls with directory distance. It is `depth_decay_base ^ depth` (default base 0.82), never below `depth_decay_floor` (default 0.3). An exact file match scores 1.0.
+- Logical bonus: 0.30 for the same scope, 0.20 for a parent or child, 0.15 for a sibling, less for more distant relatives, 0 for unrelated scopes. It is added to the physical score, and the sum is capped at 1.0. These numbers are fixed; no config key sets them.
 
 Set `physical` and `logical` accurately — they're how PreToolUse hooks find relevant memories when an agent touches a file.
 
@@ -154,7 +154,7 @@ You don't set `source` directly when calling `create` via MCP — the server set
 ### `status`
 
 - **`active`** — normal.
-- **`needsreview`** — composite score fell below `[thresholds].needs_review` (default 0.3) or someone explicitly set it. Surfaced by `review --stale-only`.
+- **`needsreview`** — set by `doctor` with `fix` when a watched path changed or a `derived_from` source is gone, or set explicitly. `verify` clears it. Surfaced by `review --stale-only`.
 - **`challenged`** — someone called `challenge`. Surfaced by `review --challenged-only`. Suppressed in scoring by `challenge_penalty`.
 
 You generally don't set status directly. Use `challenge` (sets `challenged`) and `resolve` (sets `active`).

@@ -1,7 +1,9 @@
 # Dashboard browser bench
 
-A developer tool, run by hand: it is outside `web/` (never embedded, never
-scanned by the frontend tests) and no CI job runs it. It starts
+A developer tool, outside `web/` (never embedded, never scanned by the
+frontend tests). The timing benches (`run.mjs`, `views.mjs`) are run by hand
+only; `checks.mjs` is also run by CI's `frontend-browser` job (see "In CI"
+below). It starts
 `engramdb dashboard --no-open` on each benchmark store, drives Chromium with
 Playwright and reads the page's own `performance.mark` points plus
 `requestAnimationFrame` frame times. Budgets, method and the latest results:
@@ -14,9 +16,14 @@ cargo run --example dashboard_bench_store -- /tmp/dash-bench
 # 2. A release binary (the budgets are release figures)
 cargo build --release --bin engramdb
 
-# 3. The bench (Playwright installed globally: npm i -g playwright && npx playwright install chromium)
+# 3. The driver, pinned in bench/browser/package.json (playwright-core: no
+#    browser download), and a browser: either pass --chrome <path> to a system
+#    Chrome, or install Playwright's Chromium once.
 cd crates/engram-dashboard
-NODE_PATH=$(npm root -g) node bench/browser/run.mjs --stores /tmp/dash-bench \
+(cd bench/browser && npm ci && npx playwright-core install chromium)
+
+# 4. The bench
+node bench/browser/run.mjs --stores /tmp/dash-bench \
   --bin ../../target/release/engramdb --json /tmp/dash-bench/results.json
 ```
 
@@ -82,7 +89,7 @@ show all, `open` the largest scope) and times what the surface costs, so two
 versions of `web/` can be compared on one binary (`--assets`, `--label`):
 
 ```bash
-NODE_PATH=$(npm root -g) node bench/browser/views.mjs --stores /tmp/dash-bench \
+node bench/browser/views.mjs --stores /tmp/dash-bench \
   --assets web --label after --json /tmp/dash-bench/views-after.json
 ```
 
@@ -103,7 +110,7 @@ script time), `zoom_fps`, `pan_fps`, `hover_frame_ms` (p50 of 30), and
 Not a timing: pass / fail per view and style, exit 1 on any failure.
 
 ```bash
-NODE_PATH=$(npm root -g) node bench/browser/checks.mjs --stores /tmp/dash-bench --assets web
+node bench/browser/checks.mjs --stores /tmp/dash-bench --assets web
 ```
 
 Per view (`s60:full`, `s1k:all`, `s10k:open`) and style (`plain` on the
@@ -114,6 +121,65 @@ roving focus, Enter selects (card heading), a panel row is announced,
 Escape clears; hovering 30 memories at their centres hits each one (the
 tooltip names it, the cursor is a pointer); a click opens the panel; a
 relation pinned from the table is centred and the pointer there hits it;
-a display filter moves no memory; a zoom gesture settles; a light / dark
-switch repaints the canvas; no console error or CSP violation; and the
-canvas lists the same memories, with the same words, as the SVG surface.
+a display filter moves no memory; a zoom gesture settles; a 16 px
+narrower window (a scrollbar) keeps a zoomed and panned view's centre and
+scale, and a view at Fit re-fits (`resize_view`); a light / dark switch
+repaints the canvas; no console error or CSP violation; and the canvas
+lists the same memories, with the same words, as the SVG surface.
+
+## `pages.mjs`: the other pages
+
+Pass / fail, exit 1 on any failure. It starts two dashboards of its own on
+the `sfault` fixture (`dashboard_bench_store <dir> sfault`, which also
+writes `sfault-away`), one read-only and one with `--allow-writes`:
+
+```bash
+target/debug/examples/dashboard_bench_store /tmp/dash-bench sfault
+node bench/browser/pages.mjs --stores /tmp/dash-bench --bin target/debug/engramdb \
+  [--assets web] [--chrome <path>] [--json out.json]
+```
+
+Read-only: the Overview's tiles count the store (challenged, memories in
+use, "and N more"), its chart says its days are UTC; the Memories table
+pages past a NaN criticality and keeps a type filter the status hides;
+Health lists the merge-conflicted file; *Show in graph* selects its memory
+on either side of the overview threshold; a malformed link says it is not
+valid; a project that was unavailable comes back with *Try again*. With
+writes: a review refresh returns focus to its heading and does not run
+after the user left, and a relation reviewed in another page ends as
+*Already reviewed elsewhere*. Every page: no console or page error. The
+write checks consume proposed relations, so generate `sfault` again before
+a second run.
+
+## In CI
+
+`ci.yml`'s `frontend-browser` job runs `checks.mjs`, then `pages.mjs` on
+the `sfault` store it also generates, on every pull request:
+
+```bash
+(cd bench/browser && npm ci --ignore-scripts)
+node bench/browser/checks.mjs --stores "$STORES" --bin "$BIN" \
+  --chrome "$(command -v google-chrome)" \
+  --views s60:full,s1k:all,s1k:open
+```
+
+- The binary is the debug build of the `test-load-dynamic-build` job, and the
+  stores (`s60`, `s1k`) are generated in the job by the `dashboard_bench_store`
+  example built there. `s1k` is above the overview threshold (150), so the
+  opened-scope checks run without the 10k store.
+- The browser is the runner's Google Chrome (`--chrome`), so nothing is
+  downloaded. Playwright starts it without Chrome's sandbox, as it does its
+  own Chromium.
+- The dashboard declares its icon (`favicon.svg`, linked from `index.html`),
+  so a full Chrome no longer asks for `/favicon.ico` and logs a 404; the
+  `--allow-missing-favicon` flag that dropped that one console error is gone.
+- The job is **not** part of `CI result` yet: the pixel checks (filters undo
+  < 0.05 %, copies < 0.2 %, theme round trip identical) have only been run on
+  developer machines. Six views pass with a debug binary and Chrome in about
+  a minute locally. Once it has been green on ten consecutive master runs, add
+  `frontend-browser` to `ci-result.needs`. If a pixel check proves unstable on
+  the runner, change its tolerance here with the measurement written down;
+  do not delete the check.
+- A run on a machine with a full disk fails in `page.goto` ("browser has been
+  closed"): Chrome cannot create its profile. That is the environment, not the
+  page.

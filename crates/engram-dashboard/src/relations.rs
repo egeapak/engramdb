@@ -65,7 +65,9 @@ use engramdb::ops::links::{GraphEdge, GraphFilter, LinkKind, LinkOrigin, LinkSta
 use engramdb::storage::lance_index::IndexFilterable;
 use serde::{Deserialize, Serialize};
 
-use crate::api::{color_slots, hex_json, ok, open, query, top_scope_of, unhex_json, ApiResult};
+use crate::api::{
+    color_slots, finite, hex_json, ok, open, query, top_scope_of, unhex_json, ApiResult,
+};
 use crate::graph::{flag, foreign_states, sub_scope_of, Tally};
 use crate::{ApiError, AppState};
 
@@ -92,10 +94,10 @@ fn values(raw: Option<&str>, key: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// A scope name from the query: `-` is "no logical scope" (`""`).
-fn scope_param(q: &HashMap<String, String>, key: &str) -> Option<String> {
-    q.get(key)
-        .map(|s| if s == "-" { String::new() } else { s.clone() })
+/// A scope name from the query: `-` is "no logical scope" (`""`), any
+/// other value percent-encoded ([`crate::api::scope_key`]).
+fn scope_param(q: &HashMap<String, String>, key: &str) -> Result<Option<String>, ApiError> {
+    q.get(key).map(|s| crate::api::scope_key(s)).transpose()
 }
 
 /// The parsed filters. [`Self::canonical`] is what a cursor is bound to.
@@ -150,9 +152,9 @@ impl Filter {
             statuses,
             include_rejected: flag(q, "include_rejected", false)?,
             include_invalidated: flag(q, "include_invalidated", false)?,
-            from: scope_param(q, "from_scope"),
-            to: scope_param(q, "to_scope"),
-            touches: scope_param(q, "touches"),
+            from: scope_param(q, "from_scope")?,
+            to: scope_param(q, "to_scope")?,
+            touches: scope_param(q, "touches")?,
             text: match q.get("q") {
                 Some(t) if t.chars().count() > MAX_QUERY_CHARS => {
                     return Err(ApiError::bad_request(format!(
@@ -563,7 +565,7 @@ pub(crate) async fn project_relations(
                 symmetric: e.symmetric,
                 status: e.status.clone(),
                 origin: e.origin.clone(),
-                confidence: e.confidence,
+                confidence: finite(e.confidence),
                 at: e.created_at,
                 note: e.note.clone(),
                 state,

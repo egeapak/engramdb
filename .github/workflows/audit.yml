@@ -1,14 +1,26 @@
 name: Audit
 
-# Supply-chain gate: RustSec advisories, license allow-list, duplicate/banned
-# crates, and source provenance via cargo-deny (config: deny.toml at the repo
-# root). Runs on PRs/pushes so new dependencies get checked when introduced,
-# and on a weekly schedule so advisories published *after* a dependency was
-# merged still surface without waiting for the next PR.
+# The full cargo-deny pass (config: deny.toml at the repo root): RustSec
+# advisories, license allow-list, duplicate/banned crates, source provenance.
+#
+# Two places run cargo-deny, split by what can change the answer:
+#   * ci.yml's `deny` job checks `bans licenses sources` on every pull request
+#     and is part of `CI result`. Those three depend only on the PR's own
+#     Cargo.lock and deny.toml, so they fail only for something the PR did.
+#   * this workflow adds `advisories`, which depends on a database that
+#     changes daily. It runs on master pushes and weekly, so an advisory
+#     published *after* a dependency was merged still surfaces, and it is
+#     deliberately not a pull-request gate: a new RUSTSEC entry would
+#     otherwise turn every open PR red for a reason none of them caused.
+#     A failed scheduled run files (or updates) an issue instead.
+#
+# This job used to be `continue-on-error: true`, pending "a green scheduled
+# run" to confirm the license allow-list. The scheduled run of 2026-11-09
+# printed `advisories ok, bans ok, licenses ok, sources ok`, so the flag is
+# gone and a failure here is now a red run.
 on:
   push:
     branches: [master]
-  pull_request:
   schedule:
     - cron: "0 5 * * 1" # Mondays 05:00 UTC (after the fuzz run)
   workflow_dispatch:
@@ -20,16 +32,63 @@ jobs:
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
-    # Advisory-only for now: the license allow-list in deny.toml was written
-    # from the known ecosystem (Rust/Arrow/DataFusion/ONNX), not confirmed by
-    # a full `cargo deny` pass over the resolved dependency tree, so an
-    # unlisted-but-permissive license must not block unrelated PRs. Remove
-    # this flag once a green scheduled run confirms the list is complete.
-    continue-on-error: true
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v2
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check advisories licenses bans sources
+
+  # A scheduled run has no author to notify and nobody watches the Actions
+  # tab on a Monday morning, so a failed one opens an issue (or comments on
+  # the open one). On a fresh runner after the check, like fuzz.yml's report
+  # job, so it still runs when the check job was killed. Pushes and manual
+  # runs already notify whoever triggered them.
+  report:
+    name: Report a failed scheduled audit
+    needs: cargo-deny
+    if: always() && github.event_name == 'schedule' && needs.cargo-deny.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: File or update the audit-failure issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RESULT: ${{ needs.cargo-deny.result }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const label = 'audit-failure';
+            const title = 'cargo-deny: scheduled audit failed';
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            try {
+              await github.rest.issues.createLabel({
+                owner, repo, name: label, color: 'b60205',
+                description: 'The scheduled cargo-deny audit failed',
+              });
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = label already exists
+            }
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: label, per_page: 100,
+            });
+            const body = [
+              `The scheduled cargo-deny run ended with \`${process.env.RESULT}\`.`,
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'The job log names the advisory, license, banned crate or source.',
+              'Reproduce with `cargo deny check`. Fix by updating the dependency;',
+              'if there is no fix, add an `ignore` entry to deny.toml with the',
+              'reason and the condition for removing it, as the existing ones do.',
+            ].join('\n');
+            const existing = open.find((i) => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({ owner, repo, title, labels: [label], body });
+            }

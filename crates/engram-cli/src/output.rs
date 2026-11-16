@@ -420,6 +420,16 @@ impl OutputFormatter {
         Self::capturing_inner(format, true)
     }
 
+    /// This formatter with both sinks swapped for buffers, keeping the format
+    /// and colour [`OutputFormatter::new`] resolved — so a test can check that
+    /// resolution by the bytes it produces.
+    #[cfg(test)]
+    pub(crate) fn into_capturing(self) -> (Self, Capture) {
+        let (mut captured, capture) = Self::capturing_inner(self.format, self.use_color);
+        captured.silent = self.silent;
+        (captured, capture)
+    }
+
     #[cfg(test)]
     fn capturing_inner(format: OutputFormat, use_color: bool) -> (Self, Capture) {
         let out = Arc::new(Mutex::new(String::new()));
@@ -2750,17 +2760,24 @@ mod tests {
 
     #[test]
     fn test_formatter_json_flag_overrides() {
-        let formatter = OutputFormatter::new(Some(OutputFormat::Pretty), true, false);
-        // Verify JSON format by checking that print_message produces JSON output
-        // We can't easily capture stdout, but we can verify the formatter doesn't panic
+        // `--json` wins over an explicit `--format pretty`.
+        let (formatter, cap) =
+            OutputFormatter::new(Some(OutputFormat::Pretty), true, false).into_capturing();
         formatter.print_message("test");
+        let out = cap.stdout();
+        let parsed: serde_json::Value = serde_json::from_str(out.trim())
+            .unwrap_or_else(|e| panic!("--json must render JSON ({e}): {out:?}"));
+        assert_eq!(parsed, serde_json::json!({ "message": "test" }));
+        assert_eq!(cap.stderr(), "");
     }
 
     #[test]
     fn test_formatter_explicit_format() {
-        let formatter = OutputFormatter::new(Some(OutputFormat::Plain), false, false);
-        // Verify it doesn't panic with plain format
+        let (formatter, cap) =
+            OutputFormatter::new(Some(OutputFormat::Plain), false, false).into_capturing();
         formatter.print_message("test");
+        assert_eq!(cap.stdout(), "test\n");
+        assert_eq!(cap.stderr(), "");
     }
 
     // ========================================

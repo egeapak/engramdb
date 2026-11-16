@@ -1,5 +1,6 @@
 use regex::Regex;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use tempfile::TempDir;
 
@@ -7,6 +8,8 @@ struct TestDirs {
     registry_dir: TempDir,
     data_dir: TempDir,
     config_dir: TempDir,
+    home_dir: TempDir,
+    runtime_dir: TempDir,
 }
 
 fn test_dirs() -> &'static TestDirs {
@@ -15,23 +18,118 @@ fn test_dirs() -> &'static TestDirs {
         registry_dir: TempDir::new().unwrap(),
         data_dir: TempDir::new().unwrap(),
         config_dir: TempDir::new().unwrap(),
+        home_dir: TempDir::new().unwrap(),
+        runtime_dir: private_tempdir(),
     })
+}
+
+/// A temp dir with mode 0700: the daemon folder (the socket's parent) must be
+/// private, or `doctor` reports it refused, and `TempDir::new` follows the
+/// umask.
+pub fn private_tempdir() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    dir
+}
+
+/// The real model cache, resolved in this (test) process before any child's
+/// `HOME` moves: `ENGRAMDB_MODEL_CACHE_DIR` when set, else
+/// `<cache dir>/engramdb/models`. The tests that need the default model keep
+/// finding it although `HOME` points at a temp dir.
+fn real_model_cache() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("ENGRAMDB_MODEL_CACHE_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    dirs::cache_dir().map(|c| c.join("engramdb").join("models"))
+}
+
+/// The environment every spawned `engramdb` gets on top of its data, config
+/// and registry dirs, so a black-box test never reaches the developer's
+/// machine: no running daemon (in-process, and a socket under `runtime` that
+/// nothing binds — a client would otherwise send `Shutdown` to an older
+/// daemon), no real home or XDG dirs, no `~/.claude`, no inherited session
+/// ids or editor. `None` removes the variable. The one thing kept real is the
+/// model cache (see [`real_model_cache`]).
+///
+/// Shared by [`cmd`], the snapshot fixture and the dashboard tests, so a new
+/// variable is added in one place; a caller's later `.env()` wins.
+pub fn isolation_env(home: &Path, runtime: &Path) -> Vec<(&'static str, Option<OsString>)> {
+    let mut env: Vec<(&'static str, Option<OsString>)> = vec![
+        ("ENGRAMDB_IN_PROCESS", Some("1".into())),
+        (
+            "ENGRAMDB_DAEMON_SOCKET",
+            Some(runtime.join("d.sock").into_os_string()),
+        ),
+        ("XDG_RUNTIME_DIR", Some(runtime.as_os_str().to_owned())),
+        ("HOME", Some(home.as_os_str().to_owned())),
+        (
+            "XDG_CONFIG_HOME",
+            Some(home.join("config").into_os_string()),
+        ),
+        ("XDG_CACHE_HOME", Some(home.join("cache").into_os_string())),
+        ("XDG_DATA_HOME", Some(home.join("data").into_os_string())),
+        (
+            "CLAUDE_CONFIG_DIR",
+            Some(home.join(".claude").into_os_string()),
+        ),
+        ("CLAUDE_SESSION_ID", None),
+        ("MCP_SESSION_ID", None),
+        ("EDITOR", None),
+        ("VISUAL", None),
+    ];
+    if let Some(cache) = real_model_cache() {
+        env.push(("ENGRAMDB_MODEL_CACHE_DIR", Some(cache.into_os_string())));
+    }
+    env
+}
+
+/// Apply [`isolation_env`] to an `assert_cmd` command.
+pub fn isolate(c: &mut assert_cmd::Command, home: &Path, runtime: &Path) {
+    for (k, v) in isolation_env(home, runtime) {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
+}
+
+/// The runtime dir [`cmd`]'s children use (their daemon socket's folder).
+pub fn runtime_dir() -> &'static Path {
+    test_dirs().runtime_dir.path()
 }
 
 /// Create a new Command pointing to the `engramdb` binary.
 ///
-/// Sets `ENGRAMDB_REGISTRY_PATH` and `ENGRAMDB_DATA_DIR` to shared temp dirs
-/// so integration tests never pollute the user's global state.
-#[allow(deprecated)]
+/// Sets `ENGRAMDB_REGISTRY_PATH`, `ENGRAMDB_DATA_DIR` and
+/// `ENGRAMDB_CONFIG_DIR` to shared temp dirs and applies [`isolation_env`],
+/// so integration tests never pollute the user's global state or talk to the
+/// user's daemon.
 pub fn cmd() -> assert_cmd::Command {
+    assert_cmd::Command::from_std(std_cmd())
+}
+
+/// [`cmd`] as a `std::process::Command`, for a child that must run in the
+/// background (`spawn`) rather than to completion.
+#[allow(deprecated)]
+pub fn std_cmd() -> std::process::Command {
     let dirs = test_dirs();
-    let mut c = assert_cmd::Command::cargo_bin("engramdb").expect("binary engramdb not found");
+    let mut c = std::process::Command::new(assert_cmd::cargo::cargo_bin("engramdb"));
     c.env(
         "ENGRAMDB_REGISTRY_PATH",
         dirs.registry_dir.path().join("registry.json"),
     );
     c.env("ENGRAMDB_DATA_DIR", dirs.data_dir.path());
     c.env("ENGRAMDB_CONFIG_DIR", dirs.config_dir.path());
+    for (k, v) in isolation_env(dirs.home_dir.path(), dirs.runtime_dir.path()) {
+        match v {
+            Some(v) => c.env(k, v),
+            None => c.env_remove(k),
+        };
+    }
     c
 }
 

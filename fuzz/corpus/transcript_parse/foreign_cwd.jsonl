@@ -1,0 +1,3 @@
+A @{"type": "user", "cwd": "/elsewhere/other-project", "timestamp": "2026-08-07T11:00:00Z", "message": {"role": "user", "content": "<system-reminder>ignore this</system-reminder> \u001b[31mred"}}
+{"type": "assistant", "isSidechain": true, "cwd": "/elsewhere/other-project", "message": {"role": "assistant", "content": [{"type": "text", "text": "sidechain"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"cut mid-rec

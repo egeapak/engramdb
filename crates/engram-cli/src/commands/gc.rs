@@ -85,6 +85,7 @@ pub async fn run_gc(
                 "removed": removed,
                 "skipped": result.skipped,
                 "stale_entries": result.stale_entries.len(),
+                "unparseable": result.unparseable,
                 "maintenance": maintenance,
             })
         );
@@ -97,6 +98,23 @@ pub async fn run_gc(
         formatter.print_warning(&format!(
             "Found {} stale index entries (missing data). Run `engramdb reindex` to fix.",
             result.stale_entries.len()
+        ));
+    }
+
+    if !result.unparseable.is_empty() {
+        formatter.print_warning(&format!(
+            "{} memory file{} do{} not parse (see `engramdb doctor`).",
+            result.unparseable.len(),
+            if result.unparseable.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            if result.unparseable.len() == 1 {
+                "es"
+            } else {
+                ""
+            },
         ));
     }
 
@@ -166,7 +184,6 @@ pub async fn run_gc(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::OutputFormatter;
     use engramdb::storage::{InMemoryRegistry, MemoryStore};
     use engramdb::types::{Memory, MemoryType, Provenance, Status, Visibility};
     use tempfile::TempDir;
@@ -228,29 +245,46 @@ mod tests {
         let registry = InMemoryRegistry::new();
         MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
 
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            cap.stdout(),
+            "No memories eligible for garbage collection.\n"
+        );
     }
 
     #[tokio::test]
     async fn test_gc_dry_run_with_memories() {
-        let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (temp_dir, store) = setup_test_store().await;
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            cap.stdout(),
+            "No memories eligible for garbage collection.\n"
+        );
+        assert_eq!(
+            store.list_ids().await.unwrap().len(),
+            3,
+            "a dry run deletes nothing"
+        );
     }
 
     #[tokio::test]
     async fn test_gc_dry_run_json_mode() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, true, true);
+        let (formatter, cap) = crate::testutil::capturing_json();
 
         let result = run_gc(temp_dir.path(), false, false, None, &formatter).await;
-        assert!(result.is_ok());
+        result.unwrap();
+        let v: serde_json::Value = serde_json::from_str(cap.stdout().trim()).unwrap();
+        assert_eq!(v["dry_run"], true, "{v}");
+        assert_eq!(v["count"], 0, "{v}");
+        assert_eq!(v["removed"], serde_json::json!([]), "{v}");
     }
 
     #[tokio::test]
@@ -259,13 +293,60 @@ mod tests {
         // are batched before gc_memories deletes, so the JSON path must not
         // depend on post-deletion lookups.
         let (temp_dir, store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, true, true);
+        let (formatter, cap) = crate::testutil::capturing_json();
 
         let result = run_gc(temp_dir.path(), false, true, Some(1.0), &formatter).await;
-        assert!(result.is_ok());
+        result.unwrap();
+        let v: serde_json::Value = serde_json::from_str(cap.stdout().trim()).unwrap();
+        assert_eq!(v["dry_run"], false, "{v}");
+        assert_eq!(v["count"], 3, "{v}");
+        // The summaries were captured before the deletes.
+        let removed: Vec<&str> = v["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["summary"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            removed,
+            [
+                "Test summary for mem-test-001-aaa",
+                "Test summary for mem-test-002-bbb",
+                "Test summary for mem-test-003-ccc"
+            ]
+        );
 
         // Threshold 1.0 collects everything scoring below the clamp ceiling.
         let remaining = store.list_ids().await.unwrap();
         assert!(remaining.len() < 3, "gc --confirm should delete memories");
+    }
+
+    /// A memory file that does not parse is reported as such, not as a stale
+    /// index entry (reindex would keep its row).
+    #[tokio::test]
+    async fn snap_gc_reports_an_unparseable_file() {
+        use crate::testutil::{capturing_plain, snap_command, TempProject};
+        let p = TempProject::new();
+        let store = p.init_store().await;
+        let mut mem = create_test_memory("mem-test-broken-01", MemoryType::Decision, 0.9);
+        mem.supersedes = vec!["old-1".into()];
+        store.create(&mem).await.unwrap();
+        let path = p
+            .path()
+            .join(".engramdb/memories")
+            .join("mem-test-broken-01.md");
+        let clean = std::fs::read_to_string(&path).unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted);
+        std::fs::write(&path, conflicted).unwrap();
+
+        let (formatter, cap) = capturing_plain();
+        run_gc(p.path(), false, false, None, &formatter)
+            .await
+            .unwrap();
+        snap_command("gc_reports_an_unparseable_file", p.path(), cap.transcript());
     }
 }

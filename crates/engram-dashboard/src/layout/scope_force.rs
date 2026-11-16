@@ -1148,15 +1148,19 @@ pub fn layout_core(input: &ForceInput) -> ForceCore {
             }
         }
         let pad = S * 0.6;
-        let mut top_aff = vec![0.0f64; n_top * n_top];
-        for e in 0..ea.len() {
-            let ta = top_of[ea[e]];
-            let tb = top_of[eb[e]];
-            if ta != tb {
-                top_aff[ta * n_top + tb] += 1.0;
-                top_aff[tb * n_top + ta] += 1.0;
+        // Read by `pack` only up to PACK_MAX top scopes (as in overview.rs).
+        let top_aff = (n_top <= PACK_MAX).then(|| {
+            let mut top_aff = vec![0.0f64; n_top * n_top];
+            for e in 0..ea.len() {
+                let ta = top_of[ea[e]];
+                let tb = top_of[eb[e]];
+                if ta != tb {
+                    top_aff[ta * n_top + tb] += 1.0;
+                    top_aff[tb * n_top + ta] += 1.0;
+                }
             }
-        }
+            top_aff
+        });
         for t in tops.iter_mut() {
             let m = t.groups.len();
             t.aff = (m > 1).then(|| vec![0.0f64; m * m]);
@@ -1213,7 +1217,7 @@ pub fn layout_core(input: &ForceInput) -> ForceCore {
             t.rad = reach;
         }
         let top_rad: Vec<f64> = tops.iter().map(|t| t.rad).collect();
-        let centres = pack(&top_rad, Some(&top_aff), aspect, pad);
+        let centres = pack(&top_rad, top_aff.as_deref(), aspect, pad);
         for (ti, t) in tops.iter_mut().enumerate() {
             let tx = centres[2 * ti];
             let ty = centres[2 * ti + 1];

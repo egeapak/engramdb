@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/harvest.rs
+expression: "f.run(&[\"harvest\", \"ledger\", \"prune\", \"--older-than\", \"0d\"])"
+---
+$ engramdb --no-maintenance --dir [PROJECT] harvest ledger prune --older-than 0d
+exit: 1
+--- stdout ---
+--- stderr ---
+Error: invalid --older-than value '0d': 0 would evict every transcript copy at once. To drop every unpinned copy on purpose, use `--max-bytes 1 --apply` (0 means no size limit); pinned copies need `harvest ledger rm <id> --unpin`.

@@ -202,6 +202,113 @@ pub fn hf_repo_cached(repo_id: &str) -> bool {
     }
 }
 
+/// Create a per-store data directory owner-only, or tighten an existing one.
+///
+/// `<data>/projects/<id>/`, `<data>/groups/<id>/` and `<data>/global/` hold
+/// conversation-derived data: personal memories, the `conversations` table
+/// (first prompts and summaries verbatim), the usage tables and the
+/// transcript copies. Created with the umask default they were readable by
+/// every local account; only `transcripts/` inside was ever restricted.
+///
+/// - Missing: created `0700` (parents with the default mode — the data-dir
+///   root is deliberately left alone, `ENGRAMDB_DATA_DIR` may point at a
+///   directory the user keeps for other reasons).
+/// - Exists, owned by this user, with group/other bits: tightened to `0700`.
+///   A failure to tighten is a warning, never an error.
+/// - Owned by someone else, or not a directory: left as it is. The opens that
+///   follow report whatever is wrong with it.
+///
+/// Only the writable opens and the write lock call this; a read-only open
+/// changes no mode. One `lstat` when there is nothing to do. No-op off unix.
+pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) => {
+                let loose = meta.mode() & 0o077 != 0;
+                // SAFETY: `geteuid` has no preconditions and cannot fail.
+                let ours = meta.uid() == unsafe { libc::geteuid() };
+                if meta.is_dir() && loose && ours {
+                    if let Err(e) =
+                        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                    {
+                        tracing::warn!(
+                            "could not restrict {} to its owner ({e}); it stays mode {:o}",
+                            path.display(),
+                            meta.mode() & 0o777
+                        );
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                match std::fs::DirBuilder::new().mode(0o700).create(path) {
+                    Ok(()) => {}
+                    // Lost a race with another process creating it: check it.
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return ensure_private_dir(path);
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+/// [`ensure_private_dir`] on the parent of `path` (a store's `lancedb/`
+/// directory, whose parent is the store's data directory in every layout).
+pub fn ensure_private_parent(path: &Path) -> Result<()> {
+    match path.parent() {
+        Some(parent) => ensure_private_dir(parent),
+        None => Ok(()),
+    }
+}
+
+/// What is wrong with a per-store data directory's permissions, if anything.
+///
+/// Read-only, for `doctor`: `None` when the directory is missing (nothing to
+/// protect yet) or owner-only. Never changes a mode.
+pub fn private_dir_problem(path: &Path) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path).ok()?;
+        if !meta.is_dir() {
+            return Some(format!("{} is not a directory", path.display()));
+        }
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        if meta.uid() != me {
+            return Some(format!(
+                "{} is owned by uid {}, not by the current user (uid {me})",
+                path.display(),
+                meta.uid()
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            return Some(format!(
+                "{} is accessible by other accounts (mode {:o}); it holds personal memories, \
+                 conversation summaries and transcript copies and should be 0700",
+                path.display(),
+                meta.mode() & 0o777
+            ));
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Returns the personal project directory for a given project ID
 pub fn personal_dir(project_id: &str) -> Result<PathBuf> {
     Ok(global_data_dir()?
@@ -438,6 +545,16 @@ pub async fn find_memory_in_dir(dir: &Path, id: &str) -> Option<PathBuf> {
 /// can never clear. **Anything added under `<data>/projects/<id>/` that is not
 /// rebuildable from the project tree has to be added here too**, or the next
 /// sweep silently eats it.
+///
+/// **Declared loss.** The telemetry tables under `lancedb/` (`memory_events`,
+/// the `memory_usage` rollup, `hook_events`) are *not* protected, by decision:
+/// retaining them would keep the data directory of every abandoned project
+/// that ever recorded a hook. So an initialized project that drops out of the
+/// registry loses its usage counts and hook stats to the sweep, for good. The
+/// memories index itself is rebuilt from the `.md` files: the maintenance
+/// pass and the MCP startup reindex a store whose index came back empty
+/// (`ops::maintenance::rebuild_empty_index`), and its vectors are named by
+/// doctor's "Memory vectors" check until `reindex --embeddings-only` runs.
 pub async fn holds_irreplaceable_data(dir: &Path) -> bool {
     holds_files_with_extension(&dir.join("personal").join("memories"), "md").await
         || holds_files_with_extension(&dir.join("transcripts"), transcript_archive::ARCHIVE_EXT)
@@ -451,7 +568,7 @@ pub async fn holds_irreplaceable_data(dir: &Path) -> bool {
 ///
 /// A read error other than "not found" counts as `true`: EACCES or a dead
 /// mount must not read as "nothing of value here".
-async fn holds_files_with_extension(dir: &Path, ext: &str) -> bool {
+pub(crate) async fn holds_files_with_extension(dir: &Path, ext: &str) -> bool {
     match tokio::fs::read_dir(dir).await {
         Ok(mut entries) => {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -943,5 +1060,61 @@ mod tests {
         // Should return the exact match despite prefix matches existing
         let result = find_memory_in_dir(temp_dir.path(), "abc").await;
         assert_eq!(result, Some(exact_file));
+    }
+
+    #[cfg(unix)]
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_creates_owner_only_and_leaves_the_parent_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = root.join("projects").join("0123456789abcdef");
+
+        assert_eq!(private_dir_problem(&dir), None, "missing is not a problem");
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+        assert_eq!(
+            mode_of(&root),
+            0o755,
+            "the data-dir root is not ours to change"
+        );
+        assert_eq!(private_dir_problem(&dir), None);
+
+        // An existing loose one is reported, then tightened.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let problem = private_dir_problem(&dir).unwrap();
+        // The message names the owner's uid too; the assertion does not
+        // print it (CodeQL reads a printed uid as sensitive data in a log).
+        assert!(problem.contains("755"), "the problem names the loose mode");
+        assert_eq!(
+            mode_of(&dir),
+            0o755,
+            "the doctor helper never changes a mode"
+        );
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(mode_of(&dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_does_not_follow_or_chmod_a_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+
+        ensure_private_dir(&link).unwrap();
+        assert_eq!(mode_of(&elsewhere), 0o755);
     }
 }

@@ -29,7 +29,7 @@ historical module paths (`engramdb::storage`, `::embeddings`, `::types`, …) so
 ## The crates, in dependency order
 
 Dependency edges only point inward — the leaf crates never `use` the core, and
-`engram-cli` / `engram-mcp` are front-ends that depend on the core (never
+`engram-cli`, `engram-mcp` and `engram-dashboard` are front-ends that depend on the core (never
 re-exported from it).
 
 | Crate | Lib name | What lives there |
@@ -41,7 +41,8 @@ re-exported from it).
 | `engram-test-support` | `engram_test_support` | The `#[ctor]` test-isolation arm (dev-only). |
 | `engramdb` (root) | `engramdb` | The core: `daemon`, `ops`, `retrieval`, `scope`, `scoring`, `search`. |
 | `engram-mcp` | `engram_mcp` | The `rmcp` MCP server surface. Depends on the core. |
-| `engram-cli` | `engram_cli` | Clap CLI + the `engramdb` binary. Depends on the core and `engram-mcp`. |
+| `engram-dashboard` | `engram_dashboard` | The local web dashboard (`engramdb dashboard`, axum). Depends on the core. |
+| `engram-cli` | `engram_cli` | Clap CLI + the `engramdb` binary. Depends on the core, `engram-mcp` and `engram-dashboard`. |
 
 ## Module map
 
@@ -166,6 +167,30 @@ re-exported from it).
 └── error.rs             # MCP-specific error mapping
 ```
 
+### `crates/engram-dashboard/` — local web dashboard
+
+```
+├── build.rs             # embeds web/ as a (path, bytes, mime, etag) table
+├── src/lib.rs           # crate docs, router, server start, LaunchPage
+├── src/security.rs      # request guard + response headers (token, Host, Origin, CSRF, CSP)
+├── src/stores.rs        # ReadStore: read-only store handles in a small LRU
+├── src/projects.rs      # every store on the machine; off_runtime probes
+├── src/api.rs           # the JSON API: memories, stats, colour slots, JSON helpers
+├── src/graph.rs         # GET /api/projects/{id}/graph
+├── src/relations.rs     # GET /api/projects/{id}/relations
+├── src/writes.rs        # the only writes: confirm / reject a proposed edge
+├── src/assets.rs        # serves the embedded web/ files, or --assets-dir
+├── src/error.rs         # the API's one error shape
+├── src/layout/          # server-side layouts (scope_force, grid, overview, labels), cache, property tests
+├── src/tests.rs         # router tests: security guard, no writes on GET, frontend scans
+├── web/                 # the frontend: vanilla ES modules, no bundler
+├── benches/             # Criterion: the /graph and /relations handlers
+└── bench/               # Node and browser benches, run by hand (not embedded)
+```
+
+The crate is described in [dashboard.md](./dashboard.md). Read it before you change the crate.
+Budgets and measurements are in [dashboard-performance.md](./dashboard-performance.md).
+
 ### `crates/engram-cli/src/` — CLI surface + the binary
 
 ```
@@ -201,6 +226,9 @@ Black-box CLI integration tests live in `crates/engram-cli/tests/cli/` (see
 | Change the retrieval pipeline | `src/retrieval/engine.rs` (stages) or `src/retrieval/filters.rs` (LanceDB filter mapping) |
 | Add a hook | `crates/engram-cli/src/commands/hook.rs` + `crates/engram-cli/src/app.rs::HookCommand` + plugin manifest `.claude-plugin/plugin.json` + setup writer `crates/engram-cli/src/commands/setup.rs` |
 | Add a daemon RPC | `src/daemon/protocol.rs` (wire) + `src/daemon/server.rs` (handler) + `src/daemon/remote.rs` (client) + bump `PROTOCOL_VERSION` if breaking |
+| Add a dashboard API endpoint | `crates/engram-dashboard/src/api.rs` (or a new module beside `graph.rs`) + the route in `src/lib.rs` + a test in `src/tests.rs`. A GET must write nothing. Read [dashboard.md](./dashboard.md) first. |
+| Change a dashboard layout | `crates/engram-dashboard/src/layout/` + bump `LAYOUT_VERSION` when the output changes + `src/layout/tests.rs`. See [dashboard.md](./dashboard.md#server-side-layout-and-cache). |
+| Add a graph style | See "Add a graph style" in [extending.md](./extending.md) |
 | Touch the LanceDB schema | `crates/engram-storage/src/lance_index.rs` (Arrow schema) + a migration in `crates/engram-cli/src/commands/migrate.rs` |
 
 ## Keep the DAG a DAG

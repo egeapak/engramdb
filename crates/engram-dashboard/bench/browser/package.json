@@ -1,0 +1,11 @@
+{
+  "name": "engramdb-dashboard-browser-bench",
+  "private": true,
+  "description": "Pinned Playwright driver for the dashboard's browser checks and benches. Never embedded in the binary. No browser is downloaded: the scripts take --chrome <path> or a Chromium installed with `npx playwright-core install chromium`.",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

@@ -163,17 +163,6 @@ pub fn hierarchically_related(a: &str, b: &str) -> bool {
         || ancestor_distance(b, a).is_some()
 }
 
-/// Extracts the parent scope from a dot-notation scope.
-///
-/// # Examples
-/// - "auth.oauth.google" → Some("auth.oauth")
-/// - "auth.oauth" → Some("auth")
-/// - "auth" → None (no parent)
-#[allow(dead_code)]
-fn extract_parent(scope: &str) -> Option<String> {
-    scope.rfind('.').map(|pos| scope[..pos].to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,17 +219,6 @@ mod tests {
         let memory = vec!["auth.oauth".to_string()];
         let current = vec!["database.postgres".to_string(), "auth.oauth".to_string()];
         assert_eq!(proximity(&memory, &current), 0.3);
-    }
-
-    #[test]
-    fn test_extract_parent() {
-        assert_eq!(
-            extract_parent("auth.oauth.google"),
-            Some("auth.oauth".to_string())
-        );
-        assert_eq!(extract_parent("auth.oauth"), Some("auth".to_string()));
-        assert_eq!(extract_parent("auth"), None);
-        assert_eq!(extract_parent(""), None);
     }
 
     #[test]

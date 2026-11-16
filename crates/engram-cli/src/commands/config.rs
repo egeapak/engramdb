@@ -84,11 +84,6 @@ pub async fn run_config(
     );
     outln!(
         formatter,
-        "  search semantic weight: {}",
-        view.retrieval.search_semantic_weight
-    );
-    outln!(
-        formatter,
         "  include expired:        {}",
         view.retrieval.include_expired
     );

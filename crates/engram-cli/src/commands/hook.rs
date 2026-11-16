@@ -26,6 +26,7 @@ use engramdb::daemon::HookCall;
 use engramdb::ops::Surface;
 use engramdb::storage::paths::relativize_path;
 use engramdb::storage::{MemoryStore, RegistryBackend};
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 
@@ -675,6 +676,10 @@ async fn process_hook_input_in(
     // No model providers: the query below has `query: None`, so retrieval is
     // scope_only and never embeds (see module docs).
     let engine = engramdb::ops::build_engine_without_providers(store, &config_path).await;
+    // Read once: the engine skips loading these (they keep their place in
+    // the pool, so the pool is what it would be without them), and the same
+    // set drops them below.
+    let seen = already_shown(input, dir);
 
     let query = RetrievalQuery {
         mode: RetrievalMode::Rank,
@@ -682,6 +687,7 @@ async fn process_hook_input_in(
         rank_fallback: Some(0),
         // Never expand links in a hook: an edges query per tool call.
         expand_links: Some(0),
+        skip_load: (!seen.is_empty()).then(|| seen.clone()),
         path: Some(relative_path.clone()),
         logical: vec![],
         query: None,
@@ -720,7 +726,8 @@ async fn process_hook_input_in(
     // `query` still surface them.
     let current_task = session_task_for(input, dir);
     let memories = suppress_task_scoped(result.memories, current_task.as_deref());
-    let mut memories = drop_already_shown(memories, input, dir);
+    // The engine already left these out; kept as the authority.
+    let mut memories = drop_seen(memories, &seen);
     memories.sort_by_key(|sm| {
         engramdb::scope::physical::enclosing_depth(&sm.memory.physical, &relative_path)
             .unwrap_or(usize::MAX)
@@ -786,7 +793,23 @@ async fn process_session_start(
 async fn registration_notice(dir: &Path, registry: Option<&dyn RegistryBackend>) -> Option<String> {
     let registry = registry?;
     match engramdb::ops::projects::ensure_registered(dir, registry).await {
-        Ok(check) => check.agent_notice(),
+        Ok(check) => {
+            let notice = check.agent_notice()?;
+            // A project that fell out of the registry may have had its data
+            // directory swept, which leaves an empty index beside intact
+            // memory files. The rebuild is too slow for a hook; say what to run.
+            let empty = match MemoryStore::open(dir).await {
+                Ok(store) => engramdb::ops::maintenance::empty_index_file_count(&store).await,
+                Err(_) => None,
+            };
+            Some(match empty {
+                Some(files) => format!(
+                    "{notice} Its search index is empty although it has {files} memory \
+                     file(s), so queries find nothing until the user runs `engramdb reindex`."
+                ),
+                None => notice,
+            })
+        }
         Err(e) => {
             tracing::warn!("engramdb hook: registry check failed (continuing): {e}");
             None
@@ -949,10 +972,18 @@ fn extract_context_id(input: &str) -> Option<String> {
 /// conversation still holds them, and a repeat is re-read on every later
 /// turn for nothing (see `engramdb::storage::hook_seen`).
 fn drop_already_shown(memories: Vec<ScoredMemory>, input: &str, dir: &Path) -> Vec<ScoredMemory> {
-    let Some(session_id) = extract_context_id(input) else {
-        return memories;
-    };
-    let seen = engramdb::storage::hook_seen::seen_ids(dir, &session_id);
+    drop_seen(memories, &already_shown(input, dir))
+}
+
+/// The ids this session's hooks already injected (empty without a session).
+fn already_shown(input: &str, dir: &Path) -> HashSet<String> {
+    match extract_context_id(input) {
+        Some(session_id) => engramdb::storage::hook_seen::seen_ids(dir, &session_id),
+        None => HashSet::new(),
+    }
+}
+
+fn drop_seen(memories: Vec<ScoredMemory>, seen: &HashSet<String>) -> Vec<ScoredMemory> {
     if seen.is_empty() {
         return memories;
     }
@@ -1064,6 +1095,101 @@ pub enum SituationModel {
     KeywordOnly,
     /// A given provider: the daemon's own loaded model, or a test stub.
     Provider(std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>),
+    /// A provider and seeds already embedded with it (the daemon's
+    /// [`SeedCache`]): only the prompt is embedded.
+    Cached {
+        provider: std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>,
+        classifier: std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>,
+    },
+}
+
+/// Built situation classifiers, kept by the daemon so a prompt embeds only
+/// itself instead of the 24 seeds and itself.
+///
+/// Keyed by what the seed vectors depend on: the model id, its width and how
+/// many seeds per class. The seeds are constants of this binary, and a new
+/// build evicts the daemon, so an entry cannot go stale. At most
+/// [`SEED_CACHE_MAX`] entries (one per embedding model the daemon serves);
+/// a failed build is not cached. Declared risk: a seed embedding the runtime
+/// mis-executed (the AVX-512 prebuilt incident) would now persist for the
+/// daemon's life instead of one prompt; the release runtime does not do that.
+#[derive(Default)]
+pub struct SeedCache {
+    entries: std::sync::Mutex<
+        std::collections::HashMap<
+            (String, usize, usize),
+            std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>,
+        >,
+    >,
+}
+
+/// Bound on [`SeedCache`] entries.
+const SEED_CACHE_MAX: usize = 4;
+
+impl SeedCache {
+    /// The cached classifier for `provider`, building (and caching) it on
+    /// first use. `None` when the build fails; the caller then classifies
+    /// with [`SituationModel::Provider`] as before.
+    async fn classifier_for(
+        &self,
+        provider: &dyn engramdb::embeddings::EmbeddingProvider,
+    ) -> Option<std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>> {
+        use engramdb::prompt_intent::{PrototypeClassifier, PrototypeParams};
+        let params = PrototypeParams::default();
+        let key = (
+            provider.model_id(),
+            provider.dimensions(),
+            params.seeds_per_class,
+        );
+        if let Some(c) = self.lock().get(&key) {
+            return Some(std::sync::Arc::clone(c));
+        }
+        // Built outside the lock: an embed must not block other prompts.
+        // Two concurrent first prompts may both build; the second insert
+        // wins, both results are equal.
+        let built = match PrototypeClassifier::build(provider, params).await {
+            Ok(c) => std::sync::Arc::new(c),
+            Err(e) => {
+                tracing::debug!("situation classifier seeds failed to embed (non-fatal): {e}");
+                return None;
+            }
+        };
+        let mut entries = self.lock();
+        if entries.len() >= SEED_CACHE_MAX && !entries.contains_key(&key) {
+            if let Some(victim) = entries.keys().next().cloned() {
+                entries.remove(&victim);
+            }
+        }
+        entries.insert(key, std::sync::Arc::clone(&built));
+        Some(built)
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<
+        '_,
+        std::collections::HashMap<
+            (String, usize, usize),
+            std::sync::Arc<engramdb::prompt_intent::PrototypeClassifier>,
+        >,
+    > {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The situation model for `provider`: its cached classifier when one
+    /// builds, else the provider alone.
+    async fn model_for(
+        &self,
+        provider: std::sync::Arc<dyn engramdb::embeddings::EmbeddingProvider>,
+    ) -> SituationModel {
+        match self.classifier_for(provider.as_ref()).await {
+            Some(classifier) => SituationModel::Cached {
+                provider,
+                classifier,
+            },
+            None => SituationModel::Provider(provider),
+        }
+    }
 }
 
 /// The embedding model alone, loaded in this process — only when its ONNX
@@ -1093,7 +1219,21 @@ async fn prompt_situation(
     if !config.hooks.situation_classifier {
         return keyword_situation(prompt);
     }
+    if let SituationModel::Cached {
+        provider,
+        classifier,
+    } = model
+    {
+        match classifier.classify_with(provider.as_ref(), prompt).await {
+            Ok(d) if d.needs_context => return d.situation,
+            Ok(_) => return keyword_situation(prompt),
+            // Another model than the seeds' (cannot happen through the
+            // cache's key) or an embed failure: classify the old way.
+            Err(e) => tracing::debug!("cached situation classifier refused: {e}"),
+        }
+    }
     let provider = match model {
+        SituationModel::Cached { provider, .. } => Some(std::sync::Arc::clone(provider)),
         SituationModel::DaemonOrInProcess => {
             let cell = engramdb::daemon::DaemonCell::new();
             match engramdb::daemon::resolve_daemon_providers(&cell, config, None)
@@ -1612,7 +1752,9 @@ async fn process_post_tool_use_in(
         }
     };
 
-    let entries = match store.list_for_filtering().await {
+    // Three columns of the rows that watch anything, not the whole filtering
+    // projection: this runs on every edit.
+    let entries = match store.list_watched().await {
         Ok(e) => e,
         Err(e) => {
             tracing::debug!("Hook index read failed (non-fatal): {}", e);
@@ -1624,7 +1766,8 @@ async fn process_post_tool_use_in(
     let matched_ids: Vec<&str> = entries
         .iter()
         .filter(|entry| {
-            // §2.4 validity guard: closed windows never warn (§14.14).
+            // §2.4 validity guard: closed windows never warn (§14.14). The
+            // projection's pushdown is a narrowing; this filter is the gate.
             entry.invalidated_at.is_none_or(|t| t > now)
                 && !entry.watch_paths.is_empty()
                 && engramdb::scope::physical::matches(&entry.watch_paths, &relative_path)
@@ -1871,6 +2014,22 @@ async fn archive_ending_session(
         // Evicted files must stop being advertised by the ledger, or
         // `harvest ledger show` offers an export that cannot succeed.
         Ok(outcome) => {
+            // A copy the sweep chose but could not delete stays on disk and
+            // in the ledger and still counts toward the budget; the next
+            // sweep retries it. Warn so a persistent failure (permissions, a
+            // read-only volume) is visible rather than a silent overrun.
+            if !outcome.failed.is_empty() {
+                let names: Vec<String> = outcome
+                    .failed
+                    .iter()
+                    .map(|(session, error)| format!("{session} ({error})"))
+                    .collect();
+                tracing::warn!(
+                    "SessionEnd archive: could not remove {} transcript copy(ies), kept: {}",
+                    outcome.failed.len(),
+                    names.join(", ")
+                );
+            }
             if let Err(e) =
                 engramdb::storage::harvest_state::clear_archive_refs(&ledger_dir, &outcome.removed)
             {
@@ -1937,6 +2096,19 @@ fn pre_compact(input: &str, dir: &Path) -> Result<Option<String>> {
     )?))
 }
 
+/// The warning for a hook command line clap could not parse (an unknown
+/// flag or a bad flag value: version skew between the hook wiring and the
+/// binary). Printed from here because this file is the declared raw-output
+/// surface; the hook is not run and records no stats.
+pub fn warn_unparseable_hook_args(error_line: &str) {
+    use std::io::Write as _;
+    let mut err = std::io::stderr().lock();
+    let _ = writeln!(
+        err,
+        "engramdb hook: ignoring unparseable arguments (version skew?): {error_line}"
+    );
+}
+
 /// Report a `hook` invocation this binary cannot serve, then let the caller
 /// exit 0.
 ///
@@ -1956,17 +2128,25 @@ fn pre_compact(input: &str, dir: &Path) -> Result<Option<String>> {
 /// context on exit 0, so writing there would quietly poison every prompt with
 /// a diagnostic.
 pub fn warn_unknown_hook(name: Option<&str>) {
+    use std::io::Write as _;
     let supported = crate::supported_hook_subcommands().join(", ");
-    match name {
-        Some(name) => eprintln!(
+    // `writeln!` on a locked handle, not `eprintln!`: a closed stderr must not
+    // panic a hook (the release profile aborts on panic).
+    let mut err = std::io::stderr().lock();
+    let _ = match name {
+        Some(name) => writeln!(
+            err,
             "engramdb {} does not support `hook {name}`. Your Claude Code hook \
              configuration is newer than this binary — reinstall with \
              `cargo install --git https://github.com/egeapak/engramdb --force`. \
              Supported here: {supported}. (Continuing without context; this hook is a no-op.)",
             env!("CARGO_PKG_VERSION"),
         ),
-        None => eprintln!("engramdb hook: no hook event given. Expected one of: {supported}."),
-    }
+        None => writeln!(
+            err,
+            "engramdb hook: no hook event given. Expected one of: {supported}."
+        ),
+    };
 }
 
 /// The wire form of a hook subcommand, or `None` for
@@ -2203,19 +2383,50 @@ async fn run_session_end_isolated(input: &str, dir: &Path) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("session-end thread ended without a result"))?
 }
 
+/// The most stdin a hook reads: half the daemon's 64 MiB frame cap, because
+/// the `Hook` frame carries stdin JSON-escaped and escaping can double it.
+pub const MAX_HOOK_STDIN: u64 = 32 * 1024 * 1024;
+
 /// Read the hook event from stdin. Hooks must never fail on their input, so
 /// a closed stdin reads as empty and invalid UTF-8 is replaced.
+///
+/// Bounded by [`MAX_HOOK_STDIN`]. Declared loss path: an event larger than
+/// the cap is cut, fails to parse, and the hook returns no context (a warning
+/// says so). No read timeout: Claude Code owns the hook timeout.
 pub fn read_stdin() -> String {
+    let (text, capped) = read_capped(std::io::stdin().lock(), MAX_HOOK_STDIN);
+    if capped {
+        tracing::warn!(
+            "engramdb hook: event on stdin exceeds {MAX_HOOK_STDIN} bytes; ignoring it (no context)"
+        );
+    }
+    text
+}
+
+/// Read at most `cap` bytes from `r`; `true` when more was available.
+pub(crate) fn read_capped(r: impl Read, cap: u64) -> (String, bool) {
     let mut bytes = Vec::new();
-    let _ = std::io::stdin().read_to_end(&mut bytes);
-    String::from_utf8_lossy(&bytes).into_owned()
+    // One byte over the cap tells "exactly cap" from "more than cap".
+    let _ = r.take(cap.saturating_add(1)).read_to_end(&mut bytes);
+    let capped = bytes.len() as u64 > cap;
+    if capped {
+        bytes.truncate(cap as usize);
+    }
+    (String::from_utf8_lossy(&bytes).into_owned(), capped)
 }
 
 /// Print a hook's output: the hook protocol document Claude Code parses off
 /// stdout.
+///
+/// Never `println!`: it panics when stdout is closed (Claude Code gave up on
+/// the hook), and the release profile aborts on panic. A failed write is
+/// ignored; nobody is reading.
 pub fn print_hook_output(output: Option<&str>) {
+    use std::io::Write as _;
     if let Some(json) = output {
-        println!("{}", json);
+        let mut out = std::io::stdout().lock();
+        let _ = writeln!(out, "{json}");
+        let _ = out.flush();
     }
 }
 
@@ -2255,6 +2466,7 @@ pub async fn run_in_process(
 pub struct DaemonHookExecutor {
     stores: StoreCache,
     registry: engramdb::storage::FileRegistry,
+    seeds: SeedCache,
 }
 
 impl DaemonHookExecutor {
@@ -2262,6 +2474,7 @@ impl DaemonHookExecutor {
         Ok(Self {
             stores: StoreCache::default(),
             registry: engramdb::storage::FileRegistry::global()?,
+            seeds: SeedCache::default(),
         })
     }
 
@@ -2285,23 +2498,10 @@ impl DaemonHookExecutor {
         };
         let config_path = root.join(".engramdb").join("config.toml");
         let config = engramdb::storage::config::load_config_or_default(&config_path).await;
-        let situation =
-            if matches!(call, HookCall::UserPromptSubmit) && config.hooks.situation_classifier {
-                // The embedding model only, like the in-process path: `get`
-                // loads (and leases) every model a config enables, and T5,
-                // NLI or the reranker would hold up a cold prompt for seconds.
-                let mut embedding_only = config.clone();
-                embedding_only.nli.enabled = false;
-                embedding_only.rerank.enabled = false;
-                embedding_only.title.strategy = engramdb::title::TitleStrategy::Keyword;
-                let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
-                match models.get(&embedding_only, Some(backend)).await.embedding {
-                    Some(p) => SituationModel::Provider(p),
-                    None => SituationModel::KeywordOnly,
-                }
-            } else {
-                SituationModel::KeywordOnly
-            };
+        let engramdb_dir = engramdb::storage::paths::project_dir(&root);
+        let initialized =
+            engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
+        let situation = daemon_situation(call, &config, initialized, models, &self.seeds).await;
         let usage_events = std::sync::Mutex::new(Vec::new());
         let env = HookEnv {
             stores: StoreSource::Cached(&self.stores),
@@ -2316,9 +2516,6 @@ impl DaemonHookExecutor {
                 (None, false)
             }
         };
-        let engramdb_dir = engramdb::storage::paths::project_dir(&root);
-        let initialized =
-            engramdb_dir.join("manifest.toml").is_file() || engramdb_dir.join("memories").is_dir();
         let project = initialized.then(|| engramdb::daemon::HookProject {
             project_id: engramdb::storage::project_id::compute_project_id(&root),
             root: root.clone(),
@@ -2332,6 +2529,35 @@ impl DaemonHookExecutor {
             project,
             usage_events: usage_events.into_inner().unwrap_or_else(|e| e.into_inner()),
         }
+    }
+}
+
+/// The situation model for a hook the daemon serves.
+///
+/// Only UserPromptSubmit uses one, and only in an initialized project (the
+/// hook returns nothing elsewhere, so no model is touched there). The
+/// embedding model is used only when the daemon already has it loaded; on a
+/// cold daemon this prompt classifies by keywords and a background load
+/// (pool of one, only when the model can load locally) readies the next one.
+/// A hook never waits on a model load and never grows a pool.
+async fn daemon_situation(
+    call: &HookCall,
+    config: &engramdb::types::EngramConfig,
+    initialized: bool,
+    models: &engramdb::ops::ProviderCache,
+    seeds: &SeedCache,
+) -> SituationModel {
+    if !(matches!(call, HookCall::UserPromptSubmit)
+        && config.hooks.situation_classifier
+        && initialized)
+    {
+        return SituationModel::KeywordOnly;
+    }
+    let backend = engramdb::ops::resolve_backend(config.embeddings.backend, None);
+    let warm = engramdb::ops::onnx_embedding_cached(config, backend);
+    match models.embedding_for_hook(config, backend, warm).await {
+        Some(p) => seeds.model_for(p).await,
+        None => SituationModel::KeywordOnly,
     }
 }
 
@@ -3512,6 +3738,118 @@ mod tests {
         assert_eq!(k("cat <<< \"$X\" | jq ."), Vec::<String>::new());
     }
 
+    /// Generated command lines: whatever the text, `command_keys` returns
+    /// the same keys every time, each a plausible program name no longer
+    /// than the command, distinct, and at most one per segment; and an
+    /// interpreter's script is its key whatever environment, wrapper, flags
+    /// or trailing probe surround it.
+    #[test]
+    fn the_command_key_is_stable_and_bounded_for_generated_commands() {
+        const TOKENS: &[&str] = &[
+            "python",
+            "python3.11",
+            "node",
+            "bash",
+            "cargo",
+            "make",
+            "npm",
+            "run",
+            "test",
+            "build",
+            "-m",
+            "-c",
+            "-e",
+            "--flag",
+            "x=1",
+            "TZ=UTC",
+            "env",
+            "sudo",
+            "timeout",
+            "60",
+            "./scripts/a.py",
+            "/usr/bin/env",
+            "2>&1",
+            ">",
+            "<",
+            "<<'EOF'",
+            "EOF",
+            "<<<",
+            ";",
+            "|",
+            "&&",
+            "||",
+            "&",
+            "\n",
+            "\"",
+            "'",
+            "(",
+            ")",
+            "$(",
+            "`",
+            "ls",
+            "tail",
+            "-5",
+            "é",
+            "中文",
+            "\u{202e}",
+            "\u{0}",
+            "\\",
+            "#",
+            "*",
+            "~",
+            "a",
+            "b.c",
+        ];
+        let mut g = Gen(0xc0ff_ee00_1234_5678);
+        for case in 0..2000 {
+            let n = g.below(16);
+            let command: String = (0..n)
+                .map(|_| {
+                    let sep = [" ", "", "  ", "\t"][g.below(4)];
+                    format!("{}{sep}", TOKENS[g.below(TOKENS.len())])
+                })
+                .collect();
+            let keys = command_keys(&command);
+            assert_eq!(keys, command_keys(&command), "case {case}: {command:?}");
+            let segments = 1 + command.matches(['\n', ';', '|', '&']).count();
+            assert!(
+                keys.len() <= segments,
+                "case {case}: {command:?} -> {keys:?}"
+            );
+            for (i, key) in keys.iter().enumerate() {
+                assert!(plausible_key(key), "case {case}: {key:?} from {command:?}");
+                assert!(
+                    key.len() <= command.len(),
+                    "case {case}: {key:?} from {command:?}"
+                );
+                assert!(!keys[..i].contains(key), "case {case}: duplicate {key:?}");
+            }
+        }
+
+        const INTERPS: &[&str] = &["python", "python3", "python3.12", "node", "bash", "ruby"];
+        const PREFIXES: &[&str] = &["", "TZ=UTC ", "A=1 B=2 ", "env ", "sudo ", "timeout 60 "];
+        const SUFFIXES: &[&str] = &[
+            "",
+            " --month 2026-09",
+            " -v -x",
+            " 2>&1 | tail -5",
+            " > out.log",
+        ];
+        for case in 0..500 {
+            let word: String = (0..1 + g.below(8))
+                .map(|_| (b'a' + g.below(26) as u8) as char)
+                .collect();
+            let script = format!("scripts/{word}.py");
+            let command = format!(
+                "{}{} {script}{}",
+                PREFIXES[g.below(PREFIXES.len())],
+                INTERPS[g.below(INTERPS.len())],
+                SUFFIXES[g.below(SUFFIXES.len())]
+            );
+            assert_eq!(command_keys(&command), [script], "case {case}: {command:?}");
+        }
+    }
+
     #[test]
     fn command_keys_cover_common_runners() {
         let k = |c: &str| command_keys(c);
@@ -3813,6 +4151,58 @@ mod tests {
         }
     }
 
+    /// The hook reads the three-column watch projection, not the filtering
+    /// one: the warning is the same, a memory watching nothing never reaches
+    /// the matcher, and a scheduled (future) invalidation still warns.
+    #[tokio::test]
+    async fn post_tool_use_warns_from_the_watch_projection() {
+        use engramdb::types::Validity;
+
+        let temp_dir = TempDir::new().unwrap();
+        let store = MemoryStore::init(temp_dir.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for n in 0..5 {
+            let mut m = Memory::new(
+                MemoryType::Context,
+                format!("unwatched {n}"),
+                "content",
+                Provenance::human(),
+            );
+            m.physical = vec!["src/**".into()];
+            store.create(&m).await.unwrap();
+        }
+        let mut scheduled = Memory::new(
+            MemoryType::Decision,
+            "Glob watcher",
+            "content",
+            Provenance::human(),
+        );
+        scheduled.id = "watch-glob-0001".to_string();
+        scheduled.valid_while = Some(Validity {
+            invalidated_by: vec!["src/**/*.rs".into()],
+            ..Default::default()
+        });
+        scheduled.invalidated_at = Some(chrono::Utc::now() + chrono::Duration::days(30));
+        store.create(&scheduled).await.unwrap();
+
+        let input = serde_json::json!({
+            "tool_name": "Edit",
+            "tool_input": { "file_path": temp_dir.path().join("src/a/b.rs").to_str().unwrap() }
+        })
+        .to_string();
+        let out = process_post_tool_use(&input, temp_dir.path())
+            .await
+            .unwrap()
+            .expect("a watch match warns");
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"],
+            "[EngramDB]\n⚠ this edit may invalidate memory watch-glob-00 ('Glob watcher') — verify \
+             it or update/invalidate it"
+        );
+    }
+
     #[tokio::test]
     async fn post_tool_use_warns_on_watch_match_and_respects_validity() {
         use engramdb::types::Validity;
@@ -4013,6 +4403,100 @@ mod tests {
         }
         config.hooks.situation_classifier = false;
         assert_eq!(prompt_situation(prompt, &config, &model).await, None);
+    }
+
+    /// Counts every text it embeds.
+    struct CountingTexts(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl engramdb::embeddings::EmbeddingProvider for CountingTexts {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            FamilyEmbedder { fail: false }.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.0
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            FamilyEmbedder { fail: false }.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            SITUATION_FAMILIES.len() + 1
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+        fn model_id(&self) -> String {
+            "family-stub".into()
+        }
+    }
+
+    /// The daemon embeds the 24 seeds once and then only each prompt, and
+    /// decides exactly as the uncached classifier does.
+    #[tokio::test]
+    async fn daemon_executor_embeds_seeds_once() {
+        let config = engramdb::types::EngramConfig::default();
+        let seeds = SeedCache::default();
+        let counting = std::sync::Arc::new(CountingTexts(std::sync::atomic::AtomicUsize::new(0)));
+        let texts = || counting.0.load(std::sync::atomic::Ordering::SeqCst);
+        let uncached = stub_model(false);
+        let seed_count = engramdb::prompt_intent::PrototypeParams::default().seeds_per_class * 4;
+
+        let model = seeds.model_for(counting.clone()).await;
+        assert!(matches!(model, SituationModel::Cached { .. }));
+        let prompt = "the tests hang forever on my machine";
+        assert_eq!(
+            prompt_situation(prompt, &config, &model).await,
+            prompt_situation(prompt, &config, &uncached).await
+        );
+        assert_eq!(texts(), seed_count + 1, "seeds and the first prompt");
+
+        let model = seeds.model_for(counting.clone()).await;
+        for prompt in ["ok thanks", "compare the tradeoff, what do you recommend"] {
+            assert_eq!(
+                prompt_situation(prompt, &config, &model).await,
+                prompt_situation(prompt, &config, &uncached).await,
+                "{prompt}"
+            );
+        }
+        assert_eq!(texts(), seed_count + 3, "only the prompts after the first");
+    }
+
+    #[tokio::test]
+    async fn seed_cache_is_bounded_and_skips_failed_builds() {
+        let seeds = SeedCache::default();
+        let failing = std::sync::Arc::new(FamilyEmbedder { fail: true });
+        assert!(matches!(
+            seeds.model_for(failing).await,
+            SituationModel::Provider(_)
+        ));
+        assert_eq!(seeds.lock().len(), 0, "a failed build is not cached");
+        for i in 0..(SEED_CACHE_MAX + 2) {
+            let p = NamedFamily(format!("family-{i}"));
+            assert!(seeds.classifier_for(&p).await.is_some());
+        }
+        assert_eq!(seeds.lock().len(), SEED_CACHE_MAX);
+    }
+
+    /// [`FamilyEmbedder`] under another model id.
+    struct NamedFamily(String);
+
+    #[async_trait::async_trait]
+    impl engramdb::embeddings::EmbeddingProvider for NamedFamily {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            FamilyEmbedder { fail: false }.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            FamilyEmbedder { fail: false }.embed_batch(texts).await
+        }
+        fn dimensions(&self) -> usize {
+            SITUATION_FAMILIES.len() + 1
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+        fn model_id(&self) -> String {
+            self.0.clone()
+        }
     }
 
     #[test]
@@ -4346,6 +4830,56 @@ mod tests {
         forget_shown(&input("sess-a"), dir);
         let again = run(input("sess-a")).await.expect("after compaction");
         assert!(again.contains("Use async everywhere"), "{again}");
+    }
+
+    /// The engine skips loading the already-shown memories (`skip_load`)
+    /// but they keep their place in the pool, so each edit injects exactly
+    /// what dropping them after the query did: the next memories in order,
+    /// never one the session has, until none are left.
+    #[tokio::test]
+    async fn pre_tool_use_injects_the_same_memories_with_skip_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir = temp_dir.path();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        let store = MemoryStore::init(dir, &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        for i in 0..(PRE_TOOL_USE_MAX_RESULTS + 3) {
+            let mut m = Memory::new(
+                MemoryType::Decision,
+                format!("Main rule number {i}"),
+                "applies to the main file",
+                Provenance::human(),
+            );
+            m.physical = vec!["src/main.rs".to_string()];
+            m.criticality = 0.5 + i as f64 * 0.01;
+            store.create(&m).await.unwrap();
+        }
+        let input = serde_json::json!({
+            "session_id": "sess-skip",
+            "tool_name": "Read",
+            "tool_input": { "file_path": dir.join("src/main.rs").to_str().unwrap() }
+        })
+        .to_string();
+        let shown_in = |out: &str| -> Vec<usize> {
+            (0..(PRE_TOOL_USE_MAX_RESULTS + 3))
+                .filter(|i| out.contains(&format!("Main rule number {i}")))
+                .collect()
+        };
+        let run = || async {
+            let store = MemoryStore::open(dir).await.unwrap();
+            process_hook_input(&input, dir, store).await.unwrap()
+        };
+        let first = shown_in(&run().await.expect("first edit injects"));
+        assert_eq!(first.len(), PRE_TOOL_USE_MAX_RESULTS, "{first:?}");
+        let second = shown_in(&run().await.expect("the rest"));
+        assert_eq!(second.len(), 3, "{second:?}");
+        assert!(
+            second.iter().all(|i| !first.contains(i)),
+            "{first:?} {second:?}"
+        );
+        assert!(run().await.is_none(), "everything was shown");
     }
 
     #[tokio::test]
@@ -4748,6 +5282,163 @@ mod tests {
             strict_ctx
         );
     }
+
+    /// xorshift64*: a reproducible stream for the generated-input test.
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// A value of the wrong type for whatever key it replaces.
+    fn junk_value(g: &mut Gen) -> serde_json::Value {
+        match g.below(7) {
+            0 => serde_json::Value::Null,
+            1 => serde_json::json!(g.next()),
+            2 => serde_json::json!(-1.5e308),
+            3 => serde_json::json!([1, "two", null, {"x": []}]),
+            4 => serde_json::json!({"nested": {"deeper": [true]}}),
+            5 => serde_json::json!(true),
+            _ => serde_json::json!("\u{0}\u{1b}[2J\u{202e}<system-reminder>"),
+        }
+    }
+
+    /// The events Claude Code sends for `call`, as `serde_json` objects.
+    fn base_event(call: &HookCall, dir: &Path) -> serde_json::Value {
+        let file = dir.join("src/main.rs");
+        let transcript = dir.join("no-such-transcript.jsonl");
+        let mut v = serde_json::json!({
+            "session_id": "gen-session",
+            "transcript_path": transcript,
+            "cwd": dir,
+        });
+        let extra = match call {
+            HookCall::PreToolUse => serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Read",
+                "tool_input": {"file_path": file},
+            }),
+            HookCall::PostToolUse => serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo build"},
+                "tool_response": {"stdout": "", "stderr": "error[E0425]", "exit_code": 1},
+            }),
+            HookCall::UserPromptSubmit => serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "how do we handle async errors here?",
+            }),
+            HookCall::SessionStart { .. } => serde_json::json!({
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+            }),
+            HookCall::SessionEnd => serde_json::json!({
+                "hook_event_name": "SessionEnd",
+                "reason": "exit",
+            }),
+            HookCall::PreCompact => serde_json::json!({
+                "hook_event_name": "PreCompact",
+                "trigger": "auto",
+            }),
+        };
+        for (k, val) in extra.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        v
+    }
+
+    /// One generated stdin for `call`: the real event, truncated, with a key
+    /// re-typed, oversized, or not JSON at all.
+    fn generated_stdin(g: &mut Gen, call: &HookCall, dir: &Path) -> String {
+        let mut event = base_event(call, dir);
+        match g.below(6) {
+            0 => {
+                let text = event.to_string();
+                let cut = g.below(text.len() + 1);
+                let mut end = cut;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                text[..end].to_string()
+            }
+            1 | 2 => {
+                let keys: Vec<String> = event.as_object().unwrap().keys().cloned().collect();
+                for _ in 0..=g.below(3) {
+                    let key = &keys[g.below(keys.len())];
+                    event[key] = junk_value(g);
+                }
+                event.to_string()
+            }
+            3 => {
+                let keys: Vec<String> = event.as_object().unwrap().keys().cloned().collect();
+                let key = &keys[g.below(keys.len())];
+                event[key] = serde_json::json!("x".repeat(256 * 1024));
+                event.to_string()
+            }
+            4 => {
+                let keys: Vec<String> = event.as_object().unwrap().keys().cloned().collect();
+                event
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&keys[g.below(keys.len())]);
+                event.to_string()
+            }
+            _ => {
+                let len = g.below(200);
+                let bytes: Vec<u8> = (0..len).map(|_| g.next() as u8).collect();
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        }
+    }
+
+    /// Every hook fails open on whatever stdin it is handed: truncated,
+    /// mis-typed, oversized or not JSON. No panic (an abort under the release
+    /// profile, which Claude Code reports as a broken hook), and any output is
+    /// the JSON document Claude Code parses.
+    #[tokio::test]
+    async fn hook_handlers_survive_generated_stdin() {
+        let (tmp, _store) = setup_store_with_memories().await;
+        let env = HookEnv {
+            stores: StoreSource::Fresh,
+            situation: SituationModel::KeywordOnly,
+            usage: UsageSink::Log,
+            registry: None,
+        };
+        let calls = [
+            HookCall::PreToolUse,
+            HookCall::SessionStart {
+                min_criticality: 0.5,
+            },
+            HookCall::UserPromptSubmit,
+            HookCall::PostToolUse,
+            HookCall::SessionEnd,
+            HookCall::PreCompact,
+        ];
+        let mut g = Gen(0x5eed_0ff0_0dca_fe00);
+        for call in &calls {
+            for case in 0..25 {
+                let stdin = generated_stdin(&mut g, call, tmp.path());
+                let preview: String = stdin.chars().take(200).collect();
+                // `Ok(None)` (nothing to inject) and `Err` (swallowed by the
+                // caller) are both fail-open; only an output is checked.
+                if let Ok(Some(out)) = execute_hook(call, tmp.path(), &stdin, &env).await {
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+                        "{} case {case}: output is not JSON: {out}\nstdin: {preview}",
+                        call.name()
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -5117,6 +5808,34 @@ mod daemon_executor_tests {
         assert!(reg.projects.iter().any(|e| e.project_id == id));
     }
 
+    /// A project that fell out of the registry may have lost its data
+    /// directory to the orphan sweep: the notice then says to reindex.
+    #[tokio::test]
+    async fn registration_notice_names_reindex_when_the_index_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mem = engramdb::types::Memory::new(
+            MemoryType::Decision,
+            "T",
+            "C",
+            engramdb::types::Provenance::human(),
+        );
+        store.create(&mem).await.unwrap();
+        let lancedb = engramdb::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(lancedb).unwrap();
+
+        let registry = InMemoryRegistry::new();
+        let notice = registration_notice(tmp.path(), Some(&registry))
+            .await
+            .expect("an unregistered store gets a notice");
+        assert!(notice.contains("registered it now"), "{notice}");
+        assert!(notice.contains("`engramdb reindex`"), "{notice}");
+        assert!(notice.contains("1 memory"), "{notice}");
+    }
+
     /// A store the daemon has cached still sees a memory written afterwards by
     /// another process (every LanceDB call reopens its table).
     #[tokio::test]
@@ -5200,5 +5919,199 @@ mod daemon_executor_tests {
         assert_eq!(project.project_id, store.project_id);
         assert_eq!(project.session_id.as_deref(), Some("sess-9"));
         assert!(project.stats_enabled);
+    }
+
+    /// A daemon-served UserPromptSubmit in a directory with no store returns
+    /// nothing, so it must not load (or start loading) a model either: it
+    /// used to load the config's whole embedding pool before looking.
+    #[tokio::test]
+    async fn daemon_user_prompt_submit_in_an_uninitialized_dir_touches_no_model() {
+        use engramdb::daemon::HookExecutor;
+        let exec = DaemonHookExecutor::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let models = engramdb::ops::ProviderCache::new();
+        let input = serde_json::json!({ "prompt": "why does the build fail?" }).to_string();
+        let run = exec
+            .run(&HookCall::UserPromptSubmit, bare.path(), &input, &models)
+            .await;
+        assert!(run.project.is_none());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(models.loaded_count().await, 0, "a model was loaded");
+        assert!(models.model_ids().await.is_empty());
+    }
+
+    /// stdin is read through a cap: an over-cap event is cut (and flagged),
+    /// never read without bound into memory.
+    #[test]
+    fn read_capped_truncates_at_the_cap() {
+        let (text, capped) = read_capped(std::io::Cursor::new(b"abcdef".to_vec()), 4);
+        assert_eq!(text, "abcd");
+        assert!(capped);
+        let (text, capped) = read_capped(std::io::Cursor::new(b"abcd".to_vec()), 4);
+        assert_eq!(text, "abcd");
+        assert!(!capped, "exactly the cap is not over it");
+    }
+}
+
+/// `delegate_to_daemon`'s mapping from what the daemon did to what the CLI
+/// does next. The socket is steered through the armed (per-process) global
+/// config, so no environment variable is touched.
+#[cfg(test)]
+mod delegation_tests {
+    use super::*;
+    use engramdb::daemon::protocol::{DaemonOp, DaemonResponse};
+    use engramdb::daemon::test_support::{current_pong, spawn_recording_stub, wait_connectable};
+
+    /// A 0700 temp dir: the transport refuses a daemon folder with group or
+    /// other bits, and `TempDir::new` follows the umask.
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        dir
+    }
+
+    /// Point the global `[daemon]` at `socket`.
+    fn configure(socket: &Path, enabled: bool, use_for_cli: bool) {
+        let path = engramdb::storage::paths::global_config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "[daemon]\nenabled = {enabled}\nuse_for_cli = {use_for_cli}\nsocket_path = {:?}\n",
+                socket.display().to_string()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn ops(log: &std::sync::Mutex<Vec<String>>) -> Vec<String> {
+        log.lock().unwrap().clone()
+    }
+
+    fn sent_hook(ops: &[String]) -> bool {
+        ops.iter().any(|op| op.starts_with("Hook"))
+    }
+
+    const EVENT: &str = r#"{"session_id":"s1"}"#;
+
+    #[tokio::test]
+    async fn hook_lost_reply_is_done_and_runs_nothing_here() {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let log = spawn_recording_stub(socket.clone(), |op| match op {
+            DaemonOp::Version => Some(current_pong()),
+            // The daemon took the hook and died before answering.
+            _ => None,
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, true, true);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(
+            matches!(out, Delegated::Done),
+            "a lost reply must not run the hook again here"
+        );
+        assert!(
+            sent_hook(&ops(&log)),
+            "the hook was never sent: {:?}",
+            ops(&log)
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_not_sent_runs_here() {
+        let sock_dir = private_dir();
+        configure(&sock_dir.path().join("nobody.sock"), true, true);
+        let project = tempfile::TempDir::new().unwrap();
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+        assert!(matches!(out, Delegated::RunHere));
+    }
+
+    #[tokio::test]
+    async fn hook_to_an_older_protocol_daemon_runs_here() {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let older = (engramdb::daemon::PROTOCOL_VERSION.parse::<i64>().unwrap() - 1).to_string();
+        let log = spawn_recording_stub(socket.clone(), move |op| match op {
+            DaemonOp::Version | DaemonOp::Ping => Some(DaemonResponse::Pong {
+                version: older.clone(),
+                build: Some(env!("CARGO_PKG_VERSION").to_string()),
+            }),
+            _ => None,
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, true, true);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(matches!(out, Delegated::RunHere));
+        assert!(
+            !sent_hook(&ops(&log)),
+            "a hook was sent to an older protocol: {:?}",
+            ops(&log)
+        );
+    }
+
+    async fn never_connects(enabled: bool, use_for_cli: bool) {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let log = spawn_recording_stub(socket.clone(), |op| match op {
+            DaemonOp::Version | DaemonOp::Ping => Some(current_pong()),
+            _ => Some(DaemonResponse::HookOutput {
+                stdout: None,
+                ok: true,
+            }),
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, enabled, use_for_cli);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(matches!(out, Delegated::RunHere));
+        assert!(
+            ops(&log).is_empty(),
+            "the daemon was contacted: {:?}",
+            ops(&log)
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_use_for_cli_false_never_connects() {
+        never_connects(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn hook_daemon_disabled_never_connects() {
+        never_connects(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn hook_served_is_done() {
+        let sock_dir = private_dir();
+        let socket = sock_dir.path().join("d.sock");
+        let log = spawn_recording_stub(socket.clone(), |op| match op {
+            DaemonOp::Version | DaemonOp::Ping => Some(current_pong()),
+            DaemonOp::Hook { .. } => Some(DaemonResponse::HookOutput {
+                stdout: None,
+                ok: true,
+            }),
+            _ => None,
+        });
+        wait_connectable(&socket).await;
+        configure(&socket, true, true);
+        let project = tempfile::TempDir::new().unwrap();
+
+        let out = delegate_to_daemon(&HookCall::PreCompact, project.path(), EVENT).await;
+
+        assert!(matches!(out, Delegated::Done));
+        assert!(sent_hook(&ops(&log)));
     }
 }

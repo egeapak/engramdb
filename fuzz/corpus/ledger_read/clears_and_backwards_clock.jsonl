@@ -1,0 +1,5 @@
+{"session_id":"bbbb2222","at":"2026-08-07T12:00:00Z","decision":"deferred","note":"later"}
+{"session_id":"bbbb2222","at":"2026-08-07T11:00:00Z","decision":"skipped","note":null}
+not json at all
+{"session_id":"../escape","at":"2026-08-07T12:00:00Z","decision":"harvested"}
+{"session_id":"cccc3333","at":"2026-08-07T13:00:00Z","stage":"compressed"}

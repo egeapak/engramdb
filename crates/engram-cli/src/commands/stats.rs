@@ -3,9 +3,9 @@
 use crate::output::{outln, OutputFormatter, Stats};
 use anyhow::Result;
 #[cfg(feature = "ollama")]
-use engramdb::embeddings::{OllamaProvider, ALL_MINILM, MXBAI_EMBED_LARGE, NOMIC_EMBED_TEXT};
+use engramdb::embeddings::OllamaProvider;
 #[cfg(feature = "onnxruntime")]
-use engramdb::embeddings::{OnnxProvider, ONNX_MXBAI_EMBED_LARGE, ONNX_NOMIC_EMBED_TEXT};
+use engramdb::embeddings::OnnxProvider;
 use engramdb::ops::compute_stats;
 use engramdb::storage::MemoryStore;
 use engramdb::telemetry::StatsCollector;
@@ -298,32 +298,23 @@ async fn print_embeddings_status(
     backend: EmbeddingBackend,
     formatter: &OutputFormatter,
 ) {
-    if !matches!(
-        model,
-        "onnx" | "all-minilm" | "nomic-embed-text" | "mxbai-embed-large"
-    ) {
+    // The one provider table (`ops::provider_specs`), so `stats` accepts
+    // exactly the names the resolver does.
+    let Some(info) = engramdb::ops::provider_info(model) else {
         outln!(
             formatter,
             "Embeddings: Not available (unknown provider '{}')",
             model
         );
         return;
-    }
-
-    let display_name = match model {
-        "onnx" => "all-minilm",
-        other => other,
     };
+    let display_name = info.display_name;
 
     // Check the local ONNX Runtime engine if this build has it and the backend
     // allows it.
     #[cfg(feature = "onnxruntime")]
     if backend != EmbeddingBackend::Ollama {
-        let available = match model {
-            "nomic-embed-text" => OnnxProvider::try_with_model(ONNX_NOMIC_EMBED_TEXT).is_some(),
-            "mxbai-embed-large" => OnnxProvider::try_with_model(ONNX_MXBAI_EMBED_LARGE).is_some(),
-            _ => OnnxProvider::try_new().is_some(),
-        };
+        let available = OnnxProvider::try_with_model(info.onnx.clone()).is_some();
         if available {
             outln!(
                 formatter,
@@ -344,12 +335,7 @@ async fn print_embeddings_status(
     // Check Ollama if backend allows it
     #[cfg(feature = "ollama")]
     if backend != EmbeddingBackend::Onnx {
-        let ollama_spec = match model {
-            "onnx" | "all-minilm" => ALL_MINILM,
-            "nomic-embed-text" => NOMIC_EMBED_TEXT,
-            _ => MXBAI_EMBED_LARGE,
-        };
-        if let Some(provider) = OllamaProvider::try_new(ollama_spec) {
+        if let Some(provider) = OllamaProvider::try_new(info.ollama) {
             match provider.check_model_available().await {
                 Ok(true) => {
                     outln!(

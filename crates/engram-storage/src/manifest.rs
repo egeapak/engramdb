@@ -25,8 +25,10 @@ use std::path::Path;
 /// stem index the keyword scorer reads instead of re-deriving it from every
 /// memory on every query. `0.6.0` added the `conversations` table
 /// (`storage::conversation_index`) beside `memories` and `chunks` — additive,
-/// so the migration it triggers rewrites nothing and exists only to make the
-/// new table appear in stores created before it. `0.7.0` added
+/// so the migration it triggers rewrites nothing. It does not create the
+/// table either: the harvest path creates it on first use, in old and new
+/// stores alike, and an empty one made here would keep the data dir from
+/// `projects prune` (`paths::holds_irreplaceable_data`). `0.7.0` added
 /// `source_sessions`, the harvest evidence link — the sessions a memory was
 /// extracted from, which is also what pins their transcript copies against
 /// budget eviction. `0.8.0` added `content_sha256` + `content_len`, the identity

@@ -60,6 +60,14 @@ engramdb query --mode rank --path src/foo.rs --include-global
 
 The global data directory is `<global_data_dir>/projects/<global_id>/` (no `.engramdb/` in any project tree — global memories live entirely in user-space).
 
+## Groups
+
+A group is a named memory store that several projects on this machine share.
+A project that subscribes to a group sees the group's memories in its own
+queries, and may write to the group. Set one up with
+`engramdb groups subscribe <name>`; see the
+[`groups` reference](./cli-reference.md#groups--memory-shared-by-a-set-of-projects).
+
 ## Project identity drift
 
 A project's ID is derived from its git remote when it has one, and from its
@@ -139,8 +147,8 @@ a warning in human output, and in `skipped[]` in JSON:
   one path.
 - A **linked git worktree** carrying its own `.engramdb/`. Worktrees are
   sub-projects: memory operations inside one already route to the main
-  checkout, and any stray local store is consolidated into it on the next
-  command. Adopting one as a root project would give the same memory files two
+  checkout, and any stray local store (one git does not track) is
+  consolidated into it on the next command. Adopting one as a root project would give the same memory files two
   owners, double-counting them in `projects list` and `projects stats`. Run
   `discover` against the main checkout instead.
 
@@ -184,12 +192,21 @@ alone. `projects delete --purge` is the one way to say you mean it anyway.
 
 When you run a memory operation inside a linked git worktree, EngramDB **routes the operation to the main worktree's project**:
 
-1. Detects the linked worktree via the `.git` file pointing to `<main>/.git/worktrees/<name>`.
+1. Detects the linked worktree via the `.git` file pointing to `<main>/.git/worktrees/<name>`. The pointer is followed only when git's own back-link (`<main>/.git/worktrees/<name>/gitdir`) names this worktree; a worktree moved by hand acts as a standalone directory (with a warning) until you run `git worktree repair`.
 2. Ensures the main worktree's project is registered.
 3. Registers the current worktree as a sub-project (parent = main).
 4. Consolidates any memories previously written to a stray worktree-local `.engramdb/` into the main store.
 
 `add`, `query`, `update`, etc. target one consistent store regardless of which worktree you're in.
+
+**What "stray" means.** A worktree-local `.engramdb/` is stray only when git tracks nothing under it (EngramDB asks `git ls-files`). If your repository commits its memories, every worktree has `.engramdb/` as an ordinary checkout, and EngramDB treats it as one: it writes nothing under it, deletes nothing under it, and copies nothing out of it. In that setup:
+
+- All reads and writes in the worktree still go to the main worktree's store.
+- A memory committed only on the worktree's branch is **not visible** to EngramDB while it is only on that branch. It becomes visible when the branch is merged into whatever the main worktree has checked out. It is deliberately not copied into the main worktree: that would write one branch's state into another branch's working tree.
+- A memory created from the worktree is written into the main worktree's `.engramdb/memories/` and is committed from the main checkout.
+- `git status` in the worktree stays clean after any EngramDB command or hook.
+
+`git` must be on `PATH` for a stray store to be consolidated. When git cannot be asked (not installed, or it refuses the repository), the worktree-local directory is left alone and a warning is logged; routing to the main worktree does not depend on it.
 
 **Exceptions.** A few commands deliberately do **not** route to the main worktree:
 
@@ -229,4 +246,4 @@ engramdb query --dir ~/code/other-project --mode rank --path src/bar.rs
 ## Notes
 
 - **`--global` vs `--include-global`.** `--global` operates against the global store **instead of** the current project. `--include-global` operates against the current project **plus** the global store.
-- **Project IDs are path-stable** when there is no git remote (with one, the remote decides). Moving such a project produces a new ID — run `engramdb projects prune` after to reclaim the old data directory. Prune keeps it if it holds personal memories, archived transcripts or conversation summaries (which is the common case for any project that has ended a Claude Code session); move what you need across, then `projects delete --purge` the old ID.
+- **Project IDs are path-stable** when there is no git remote (with one, the remote decides). Moving such a project produces a new ID — run `engramdb projects prune` after to reclaim the old data directory. Prune keeps it if it holds personal memories, transcript copies or conversation summaries (which is the common case for any project that has ended a Claude Code session); move what you need across, then `projects delete --purge` the old ID.

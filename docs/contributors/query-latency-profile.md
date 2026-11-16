@@ -115,6 +115,15 @@ A ~0.9 ms fixed floor (the two dirent scans) plus ~0.02 ms per memory. The
 marginal file read + parse is genuinely cheap; only the fixed scans are worth
 attacking, and they are worth ~1 ms.
 
+**Correction (2026-11, R7).** Two things above did not hold. The "fixed" floor
+is the two directory scans, so it grows with the *store*, not the request:
+`get_batch` of one id costs 20.8 ms at 10,000 memories. And the "candidates"
+column was read as "the survivors", but a text query loaded the file of
+**every candidate that passed the index filters**, not of the 30 it returned —
+at 10,000 memories that was 183 ms of a 233 ms query. The TL;DR's row 2 (file reads are
+not hot) was therefore wrong for text queries;
+R7 has the numbers and the fix.
+
 
 ## R5 · The fragment-pressure compaction trigger (implemented)
 
@@ -214,6 +223,53 @@ This settles the open question in
 [turbovec-evaluation.md](./turbovec-evaluation.md) R7. Widening the embedding
 would rescue TurboQuant's recall at d=384 — but it is not worth doing for that
 reason, or for any reason these measurements surface.
+
+## R7 · Text queries read only their survivors' files (implemented)
+
+*2026-11 · `examples/query_stage_profile.rs` (now with engine-level rows),
+keyword-only (`KEYWORD_ONLY=1`), `--profile eval` (release with thin LTO),
+p50 of 30 reps, deterministic 1,000- and 10,000-memory stores from
+`examples/dashboard_bench_store.rs`.*
+
+Before, a text query listed the filtering projection (with every row's
+`keyword_stems`), loaded and parsed the `.md` file of every candidate that
+survived the index filters, scored each from the parsed memory, and returned
+a handful. The stages, measured on the old code:
+
+| row | 1k | 10k |
+|---|---|---|
+| `list_for_filtering` | 4.36 ms | 19.08 ms |
+| `get_batch(30)` | 3.40 ms | 23.08 ms |
+| `get_batch(all ids)` — what a text query loaded | 18.94 ms | 182.82 ms |
+| text Filter (whole query) | 26.94 ms | 233.40 ms |
+| text Rank (whole query) | 28.31 ms | 233.79 ms |
+| scope-only Rank with a path (PreToolUse) | 8.74 ms | 60.95 ms |
+
+Three changes, each measured on its own:
+
+| change | text Filter 1k / 10k | scope-only Rank 1k / 10k |
+|---|---|---|
+| before | 26.94 / 233.40 ms | 8.74 / 60.95 ms |
+| projection without `keyword_stems` unless the query has text | 29.03 / 235.32 | 7.30 / 37.44 |
+| stems borrowed, not cloned twice | 26.43 / 229.79 | 7.52 / 44.15 |
+| scored from the index row; only survivors loaded | **8.07 / 59.96** | 6.04 / 39.01 |
+
+Text Rank moved the same way (28.31 → 9.74 ms at 1k, 233.79 → 60.06 ms at
+10k). The scope-only row is noisy between builds at 10k (37–44 ms) but
+consistently below the 61 ms it started from. Files are now read only for
+rows without stored stems (written before the column existed), the
+reranker's `top_n`, and the returned results and their expanded neighbours. A
+survivor whose file vanished since the scan is dropped, uncounted, and
+refilled once from the cut tail.
+
+Ranking is unchanged, and provably so: `retrieval::engine::text_query_pin_tests`
+pins the complete output (id order, score bits, every breakdown field,
+`total`, `retrieval_quality`, `dropped_below_threshold`) of 288 text queries
+against a golden file captured before any of this work.
+
+What remains at 10k is mostly `list_for_filtering` (19 ms) and the two
+directory scans behind every `get_batch` (~20 ms) — the latter is now the
+largest fixed cost of a text query, and the next thing to attack.
 
 ## What this means for a daemon-side cache
 

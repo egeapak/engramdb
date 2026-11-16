@@ -2,9 +2,9 @@
 
 import { h, mount } from '../dom.js';
 import { api } from '../api.js';
-import { fmt, ago, daysSince, shortId } from '../format.js';
-import { badge, kindIcon, scopeName, TYPE_LABEL } from '../scopes.js';
-import { projHead, statusPill, errorBox } from './common.js';
+import { fmt, ago, daysSince, shortId, score } from '../format.js';
+import { badge, kindIcon, scopeName, scopeKey, TYPE_LABEL } from '../scopes.js';
+import { projHead, statusPill, errorBox, unavailable } from './common.js';
 
 const COLS = [
   { k: 'scope', label: 'Top-level scope' },
@@ -20,10 +20,32 @@ const COLS = [
 const TEXT_SORT = new Set(['summary', 'type', 'scope']);
 const PAGE = 100;
 
+/**
+ * The type select's options: the facets, plus the filtered type at 0 when
+ * the facets (which follow the status filter) no longer hold it, so the
+ * select still names the filter that is on and "All types" clears it.
+ */
+export function typeOptions(types, kind) {
+  if (!kind || types.some((t) => t.name === kind)) return types;
+  return [...types, { name: kind, count: 0 }];
+}
+
+/**
+ * The `top_scope=` value after a chip toggle. `on` holds the scope keys
+ * that are on, `scopes` the keys of the chips shown (the facets). The
+ * filter clears only when every chip is on; a key in `on` that is not among
+ * the facets (a scope the status filter hides) is kept, so it comes back
+ * with the status. `∅` names "none on".
+ */
+export function nextTopScope(on, scopes) {
+  if (scopes.every((k) => on.has(k))) return '';
+  return Array.from(on).join(',') || '∅';
+}
+
 export async function renderMemories(main, ctx) {
   const p = ctx.project;
   if (!p.available) {
-    mount(main, errorBox({ status: 409, message: `${p.name} is unavailable: ${p.unavailable_reason}` }));
+    mount(main, unavailable(p, ctx, 'Memories'));
     return;
   }
   const q = ctx.route.query;
@@ -120,8 +142,9 @@ export async function renderMemories(main, ctx) {
   };
 
   const renderChips = (scopes) => {
-    // '-' names "no logical scope" in the URL, so an empty name survives a join.
-    const key = (name) => name || '-';
+    // `scopeKey`: `-` for no scope, else percent-encoded, so a name with a
+    // comma (or one named `-`) survives the join.
+    const key = scopeKey;
     const on = new Set(f.top_scope ? f.top_scope.split(',') : scopes.map((l) => key(l.name)));
     mount(
       chips,
@@ -135,7 +158,7 @@ export async function renderMemories(main, ctx) {
             onclick: () => {
               if (on.has(key(l.name))) on.delete(key(l.name));
               else on.add(key(l.name));
-              f.top_scope = on.size === scopes.length ? '' : Array.from(on).join(',') || '\u2205';
+              f.top_scope = nextTopScope(on, scopes.map((l) => key(l.name)));
               writeUrl();
               renderChips(scopes);
               load(false);
@@ -169,7 +192,7 @@ export async function renderMemories(main, ctx) {
       h('td', { class: 'n' }, fmt(m.usage.fetched)),
       h('td', { class: 'n' }, fmt(m.usage.updated)),
       h('td', { class: 'n' }, stale && daysSince(m.created_at) > 30 ? h('span', { class: 'stale-tag' }, ago(last)) : ago(last)),
-      h('td', { class: 'n' }, m.criticality.toFixed(2)),
+      h('td', { class: 'n' }, score(m.criticality)),
     );
   };
 
@@ -194,12 +217,13 @@ export async function renderMemories(main, ctx) {
     if (!facetsShown) {
       facetsShown = true;
       renderChips(page.facets.scopes);
-      const types = page.facets.types;
+      const types = typeOptions(page.facets.types, f.kind);
       mount(
         kindSel,
         h('option', { value: '' }, 'All types'),
         types.map((t) => h('option', { value: t.name, selected: t.name === f.kind }, `${TYPE_LABEL[t.name] || t.name} (${fmt(t.count)})`)),
       );
+      kindSel.value = f.kind || '';
     }
     const rows = page.items.map(rowEl);
     shown = (append ? shown : 0) + rows.length;

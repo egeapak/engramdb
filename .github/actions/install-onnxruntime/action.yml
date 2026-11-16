@@ -1,0 +1,85 @@
+name: Install ONNX Runtime
+description: >-
+  Download Microsoft's official ONNX Runtime build for Linux x64, verify its
+  SHA-256, and install libonnxruntime.so into /usr/local/lib.
+
+# The one place the runtime version and its digest are written. Four jobs used
+# to carry their own copy of the download, each with `curl -sSLO` and no
+# integrity check: the library every model-loading test dlopens was whatever
+# the URL returned that day (and an HTML error page failed later, in `tar`,
+# with a misleading message).
+#
+# To move to a new version, change BOTH defaults together. Take the digest
+# from the release page (GitHub shows a sha256 for every asset) or compute it:
+#   curl -fsSLO https://github.com/microsoft/onnxruntime/releases/download/v<V>/onnxruntime-linux-x64-<V>.tgz
+#   sha256sum onnxruntime-linux-x64-<V>.tgz
+# CLAUDE.md's sandbox section and docs name the same archive.
+#
+# Microsoft's build, deliberately not the one `ort` would download: that
+# prebuilt executes quantized models incorrectly on AVX-512/AMX hosts. See
+# docs/contributors/embedding-model-alternatives.md (R6/R9).
+#
+# Linux x64 only: no macOS or Windows job installs a runtime.
+inputs:
+  version:
+    description: ONNX Runtime release, without the leading "v".
+    required: false
+    default: "1.24.2"
+  sha256:
+    description: SHA-256 of onnxruntime-linux-x64-<version>.tgz.
+    required: false
+    default: "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6"
+
+runs:
+  using: composite
+  steps:
+    - name: Refuse to run off Linux x64
+      if: runner.os != 'Linux' || runner.arch != 'X64'
+      shell: bash
+      run: |
+        echo "::error::install-onnxruntime only knows the linux-x64 archive"
+        exit 1
+
+    # Keyed on the digest too, so a changed digest never restores the old
+    # archive. The archive is verified after a restore as well as after a
+    # download: a cache entry is not more trusted than the network.
+    - name: Restore the ONNX Runtime archive
+      id: archive
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/onnxruntime/onnxruntime-linux-x64-${{ inputs.version }}.tgz
+        key: onnxruntime-linux-x64-${{ inputs.version }}-${{ inputs.sha256 }}
+
+    - name: Download, verify and install
+      shell: bash
+      env:
+        ORT_VERSION: ${{ inputs.version }}
+        ORT_SHA256: ${{ inputs.sha256 }}
+        ORT_DIR: ${{ runner.temp }}/onnxruntime
+        CACHE_HIT: ${{ steps.archive.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        if ! [[ "$ORT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::version '$ORT_VERSION' is not of the form X.Y.Z"; exit 1
+        fi
+        if ! [[ "$ORT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "::error::sha256 is not 64 lowercase hex digits"; exit 1
+        fi
+        name="onnxruntime-linux-x64-${ORT_VERSION}"
+        archive="${ORT_DIR}/${name}.tgz"
+        mkdir -p "$ORT_DIR"
+        if [ ! -f "$archive" ]; then
+          echo "cache hit: '${CACHE_HIT}'; downloading ${name}.tgz"
+          curl -fsSL --retry 3 --retry-all-errors -o "$archive" \
+            "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${name}.tgz"
+        fi
+        if ! echo "${ORT_SHA256}  ${archive}" | sha256sum -c -; then
+          echo "::error::${name}.tgz does not match the pinned SHA-256 (got $(sha256sum "$archive" | cut -d' ' -f1)). Nothing was installed."
+          # Do not let a bad archive be saved to the cache by the post step.
+          rm -f "$archive"
+          exit 1
+        fi
+        tar -xzf "$archive" -C "$ORT_DIR"
+        sudo cp "${ORT_DIR}/${name}/lib/libonnxruntime.so.${ORT_VERSION}" /usr/local/lib/libonnxruntime.so
+        sudo ldconfig
+        echo "Installed ONNX Runtime ${ORT_VERSION} at /usr/local/lib/libonnxruntime.so"

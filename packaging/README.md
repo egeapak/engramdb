@@ -1,5 +1,7 @@
 # Packaging
 
+Status: the Scoop manifests in `scoop/` are templates. No bucket is published.
+
 Package definitions for distributing EngramDB. They are kept in-tree so the
 runtime contract below is versioned next to the code that depends on it, but
 they are **not** consumed by any build: publishing means copying them into a
@@ -109,8 +111,8 @@ the `"depends"` line as-is.
 
 ## Upgrades and the shared daemon
 
-The daemon caches provider bundles for its whole lifetime, so one running
-across an upgrade keeps serving the *previous* release's models. That is not
+A daemon that keeps running across an upgrade is the previous release's binary,
+and it resolves model names with that release's defaults. That is not
 cosmetic: the client fingerprints the embedding model it expects, so
 `reindex --embeddings-only` re-embeds via the old daemon, stamps the old model
 id, and `doctor` immediately reports a mismatch again — running the suggested

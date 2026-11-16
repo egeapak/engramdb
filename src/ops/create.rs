@@ -166,6 +166,14 @@ async fn create_memory_unrecorded(
     if let Some(floor) = params.decay_floor {
         super::validate_score(floor, "decay_floor")?;
     }
+    // `supersedes` entries may be prefixes; resolve them to full ids (or fail
+    // the call) before anything is written, so the privacy check and the
+    // window close below see the ids the file will store.
+    let supersedes = if params.supersedes.is_empty() {
+        Vec::new()
+    } else {
+        super::resolve_supersedes(store, &params.supersedes, None, &[]).await?
+    };
     let summary = params.summary;
 
     // Use default physical scope if empty
@@ -211,7 +219,13 @@ async fn create_memory_unrecorded(
                         (cfg.observation_half_life_days, cfg.observation_decay_floor)
                     })
                     .unwrap_or((90, 0.2));
-                Some(Decay::exponential(Duration::days(half_life_days as i64)).with_floor(floor))
+                let half_life = super::parsing::config_days(half_life_days).unwrap_or_else(|| {
+                    tracing::warn!(
+                        "[epistemic] observation_half_life_days = {half_life_days} is out of range; using 90"
+                    );
+                    Duration::days(90)
+                });
+                Some(Decay::exponential(half_life).with_floor(floor))
             }
             _ => crate::types::default_decay(params.type_, epistemic),
         };
@@ -242,7 +256,7 @@ async fn create_memory_unrecorded(
     memory.confidence = params.confidence;
     memory.details = params.details;
     memory.visibility = params.visibility;
-    memory.supersedes = params.supersedes;
+    memory.supersedes = supersedes;
     // Normalize an empty audience list to `None` (whole-group visibility) so an
     // empty `--audience` never accidentally hides a memory from everyone.
     memory.audience = params.audience.filter(|a| !a.is_empty());
@@ -268,13 +282,16 @@ async fn create_memory_unrecorded(
 
         // Apply numeric fields
         if let Some(half_life_secs) = params.decay_half_life {
-            decay.half_life = Some(Duration::seconds(half_life_secs as i64));
+            decay.half_life = Some(super::parsing::decay_seconds(
+                "decay_half_life",
+                half_life_secs,
+            )?);
         } else if let Some(existing_decay) = &memory.decay {
             decay.half_life = existing_decay.half_life;
         }
 
         if let Some(ttl_secs) = params.decay_ttl {
-            decay.ttl = Some(Duration::seconds(ttl_secs as i64));
+            decay.ttl = Some(super::parsing::decay_seconds("decay_ttl", ttl_secs)?);
         } else if let Some(existing_decay) = &memory.decay {
             decay.ttl = existing_decay.ttl;
         }
@@ -291,7 +308,7 @@ async fn create_memory_unrecorded(
     // Compute expires_at from decay TTL if applicable
     if let Some(ref decay) = memory.decay {
         if let Some(ttl) = decay.ttl {
-            memory.expires_at = Some(memory.created_at + ttl);
+            memory.expires_at = Some(super::parsing::expiry_from(memory.created_at, ttl)?);
         }
     }
 
@@ -315,7 +332,36 @@ async fn create_memory_unrecorded(
     )
     .await?;
 
-    let id = store.create(&memory).await?;
+    // The synchronous embed (CLI, tests, compress) runs before the write, so
+    // file, vectors and row land in one `create_with_chunks`: one
+    // memories-table commit, where `create` then the chunk upsert cost two
+    // (the row, then its `has_embedding` flag). An embed failure is
+    // non-fatal, as in the async branch: the memory is created without
+    // vectors and degrades to keyword-only retrieval until a reindex.
+    let sync_engine = engine.filter(|e| e.embeddings_available() && !params.embed_async);
+    let mut ingest_query = None;
+    let id = match sync_engine {
+        Some(engine) => match engine.embed_unwritten(&memory).await {
+            Ok(Some(new)) => {
+                let id = store
+                    .create_with_chunks(&memory, new.vectors, Some(new.embed_sha256))
+                    .await?;
+                engine.stamp_first_embed(new.fingerprint).await;
+                ingest_query = new.query;
+                id
+            }
+            Ok(None) => store.create(&memory).await?,
+            Err(e) => {
+                tracing::warn!(
+                    memory_id = %memory.id,
+                    "memory created but embedding failed (semantic search \
+                     will miss it until `engramdb reindex --embeddings-only`): {e}"
+                );
+                store.create(&memory).await?
+            }
+        },
+        None => store.create(&memory).await?,
+    };
 
     // Supersession closes validity windows (§2.4 writer 1): each referenced
     // live memory gets `invalidated_at = now`, `superseded_by = <new id>`.
@@ -348,27 +394,9 @@ async fn create_memory_unrecorded(
                 let follow_up = super::link_proposals::follow_up(engine.config().links.clone());
                 let _ = engine.spawn_ingest(memory, Some(follow_up));
             } else {
-                // `memory.id == id` (set by Memory::new), so embed the
-                // in-hand value directly — the old `store.get(&id)` re-read
-                // was a redundant dir-scan+parse of a file we just wrote.
-                //
-                // Embed failure is non-fatal, matching the async branch: the
-                // memory is already durably created (file + index row), so
-                // returning Err here would tell the caller the create failed
-                // and the natural retry would write a DUPLICATE memory. The
-                // memory degrades to keyword-only retrieval until a reindex.
+                // Embedded before the write, above.
                 let saved = memory;
-                let query = match engine.embed_for_ingest(&saved).await {
-                    Ok(q) => q,
-                    Err(e) => {
-                        tracing::warn!(
-                            memory_id = %saved.id,
-                            "memory created but embedding failed (semantic search \
-                             will miss it until `engramdb reindex --embeddings-only`): {e}"
-                        );
-                        None
-                    }
-                };
+                let query = ingest_query;
 
                 // Detect contradictions with existing memories and find its
                 // embedding neighbours: one vector search with the vector the
@@ -458,6 +486,62 @@ mod tests {
             title_strategy: TitleStrategy::None,
             embed_async: false,
         }
+    }
+
+    /// Deterministic 384-wide vectors, no model.
+    struct FixedEmbedding;
+
+    #[async_trait::async_trait]
+    impl crate::embeddings::EmbeddingProvider for FixedEmbedding {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![0.5f32; 384])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.5f32; 384]).collect())
+        }
+        fn dimensions(&self) -> usize {
+            384
+        }
+        fn max_tokens(&self) -> usize {
+            256
+        }
+        fn model_id(&self) -> String {
+            "onnx/fixed".to_string()
+        }
+    }
+
+    /// The synchronous embed writes file, vectors and row in one
+    /// memories-table commit (`create` then the chunk upsert cost two), and
+    /// still stamps the store's first embedding fingerprint.
+    #[tokio::test]
+    async fn sync_create_commits_the_row_once_with_its_vectors() {
+        let (_t, store) = setup_test_store().await;
+        let engine = crate::retrieval::RetrievalEngine::new(
+            store.clone(),
+            crate::types::EngramConfig::default(),
+        )
+        .with_embedding_provider(std::sync::Arc::new(FixedEmbedding));
+
+        let before = store.memories_version_for_test().await.unwrap();
+        let created = create_memory(
+            &store,
+            minimal_create_params(),
+            Some(&engine),
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let after = store.memories_version_for_test().await.unwrap();
+        assert_eq!(after - before, 1, "one memories-table commit per create");
+
+        assert!(!store.export_chunks(&created.id).await.unwrap().is_empty());
+        let digests = store.embed_digests().await.unwrap();
+        assert!(
+            digests.get(&created.id).is_some_and(|d| d.is_some()),
+            "the vectors carry their embed digest"
+        );
+        let fp = store.embedding_fingerprint().await.unwrap().unwrap();
+        assert_eq!(fp.model, "onnx/fixed");
     }
 
     // Finding #3: create_memory validates criticality/confidence in the shared
@@ -683,6 +767,38 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Invalid decay strategy"));
+    }
+
+    /// `Duration::seconds` panics above `i64::MAX / 1000` and
+    /// `u64::MAX as i64` is `-1`: both used to reach it unchecked.
+    #[tokio::test]
+    async fn create_rejects_an_out_of_range_decay_ttl() {
+        let (_temp, store) = setup_test_store().await;
+        for ttl in [99_999_999_999_999, u64::MAX] {
+            let mut params = minimal_create_params();
+            params.decay_ttl = Some(ttl);
+            let err = create_memory(&store, params, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_ttl must be at most"), "{err}");
+        }
+        assert!(store.list_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_an_out_of_range_decay_half_life() {
+        let (_temp, store) = setup_test_store().await;
+        for half_life in [99_999_999_999_999, u64::MAX] {
+            let mut params = minimal_create_params();
+            params.decay_half_life = Some(half_life);
+            let err = create_memory(&store, params, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_half_life must be at most"), "{err}");
+        }
+        assert!(store.list_ids().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1050,7 +1166,7 @@ mod epistemic_create_tests {
         .unwrap();
 
         let mut p = params(MemoryType::Decision);
-        p.supersedes = vec![old.id.clone(), "missing-id".into()];
+        p.supersedes = vec![old.id.clone()];
         let new = create_memory(&store, p, None, crate::ops::Surface::Cli)
             .await
             .unwrap();
@@ -1058,8 +1174,101 @@ mod epistemic_create_tests {
         let old_mem = store.get(&old.id).await.unwrap();
         assert!(old_mem.invalidated_at.is_some(), "window closed");
         assert_eq!(old_mem.superseded_by.as_deref(), Some(new.id.as_str()));
-        // The missing id was skipped without failing the create.
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_unknown_supersedes_id() {
+        let (_t, store) = setup().await;
+        let old = create_memory(
+            &store,
+            params(MemoryType::Decision),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let before = store.list_ids().await.unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec![old.id.clone(), "missing-id".into()];
+        let err = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no memory matches 'missing-id'"), "{err}");
+        assert_eq!(store.list_ids().await.unwrap(), before, "nothing written");
+        assert!(store.get(&old.id).await.unwrap().invalidated_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn create_resolves_a_supersedes_prefix() {
+        let (_t, store) = setup().await;
+        let old = create_memory(
+            &store,
+            params(MemoryType::Decision),
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec![old.id[..8].to_string()];
+        let new = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+
+        let old_mem = store.get(&old.id).await.unwrap();
+        assert!(old_mem.invalidated_at.is_some(), "window closed");
+        assert_eq!(old_mem.superseded_by.as_deref(), Some(new.id.as_str()));
         let new_mem = store.get(&new.id).await.unwrap();
-        assert!(new_mem.supersedes.contains(&"missing-id".to_string()));
+        assert_eq!(new_mem.supersedes, vec![old.id.clone()], "full id stored");
+    }
+
+    #[tokio::test]
+    async fn create_refuses_an_ambiguous_supersedes_prefix() {
+        let (_t, store) = setup().await;
+        for id in ["dupe-aaaa", "dupe-bbbb"] {
+            let mut m = Memory::new(MemoryType::Decision, id, "content", Provenance::human());
+            m.id = id.to_string();
+            store.create(&m).await.unwrap();
+        }
+        let before = store.list_ids().await.unwrap();
+
+        let mut p = params(MemoryType::Decision);
+        p.supersedes = vec!["dupe-".into()];
+        let err = create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("supersedes"), "{err}");
+        assert_eq!(store.list_ids().await.unwrap(), before, "nothing written");
+    }
+
+    #[tokio::test]
+    async fn create_supersedes_prefix_obeys_the_privacy_rule() {
+        let (_t, store) = setup().await;
+        let mut personal = params(MemoryType::Decision);
+        personal.visibility = Visibility::Personal;
+        let personal = create_memory(&store, personal, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let before = store.list_ids().await.unwrap();
+
+        // A shared (committed) memory naming a personal one by prefix: the
+        // check used to be skipped because the prefix did not load.
+        let mut p = params(MemoryType::Decision);
+        p.visibility = Visibility::Shared;
+        p.supersedes = vec![personal.id[..8].to_string()];
+        assert!(create_memory(&store, p, None, crate::ops::Surface::Cli)
+            .await
+            .is_err());
+        assert_eq!(store.list_ids().await.unwrap(), before, "nothing written");
+        assert!(store
+            .get(&personal.id)
+            .await
+            .unwrap()
+            .invalidated_at
+            .is_none());
     }
 }

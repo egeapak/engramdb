@@ -31,12 +31,21 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
 
 - **Overview** — memory count; reads in the last 7 days as three numbers
   (retrieved, injected, fetched), each against the 7 days before; how many
-  memories have been read at all; and how many are challenged. A 30-day
-  chart with one row per signal — retrieved, injected, fetched and writes —
-  each on its own scale. A *needs attention* list: proposed contradictions
-  first (under a red banner), then challenged memories, memories
-  that need review, other proposed relations, and memories nobody has read in 30
-  days. Each proposed relation opens a *Review* panel in place.
+  live memories have been read at all (an invalidated one's reads are not
+  counted there); how many are challenged; and how many relations there
+  are, counted as the Relations tab lists them by default (proposed and
+  confirmed, not rejected, none to an invalidated memory). A 30-day chart
+  with one row per signal — retrieved, injected, fetched and writes — each
+  on its own scale. **Days are UTC days**: "today" and "the last 7 days"
+  start at midnight UTC, whatever your time zone, and the page says so. A
+  *needs attention* list: proposed contradictions first (under a red
+  banner), then challenged memories, memories that need review, other
+  proposed relations, and memories nobody has read in 30 days. Each group
+  shows its first 12 and says how many more there are; the counts on the
+  tiles and the banner are the store's, not the list's. Each proposed
+  relation opens a *Review* panel in place; a relation someone reviewed in
+  another tab meanwhile ends as *Already reviewed elsewhere* and the list
+  reloads.
 - **Memories** — every memory in a sortable table, filterable by text, type,
   status and top-level scope. *Retrieved*, *injected* and *fetched* are separate
   columns and are never added up: a memory retrieved by a query, put into an
@@ -52,10 +61,17 @@ the header. Flags are in the [CLI reference](./cli-reference.md#dashboard--local
   cheaper summary that can trail them briefly until the next refresh.
 - **Health** — the index-against-files part of `engramdb doctor` for the
   selected store: stale rows, orphaned files, content drift, unreadable
-  files. The dashboard never repairs; run `engramdb doctor --fix`.
+  files. A file that does not parse (a merge conflict in its hidden block,
+  say) is listed by id with the reason; `doctor --fix` cannot
+  repair it, so it needs a hand fix. Otherwise the dashboard never
+  repairs; run `engramdb doctor --fix`.
 - **Projects** — every store on the machine. A project whose directory is
   gone, or a worktree (which keeps its memories in the main checkout), is
-  listed as unavailable with the reason rather than hidden.
+  listed as unavailable with the reason rather than hidden. Its pages say
+  why and offer *Try again*, which reads the project list afresh, so a
+  project that comes back (a drive plugged in again) opens without
+  reloading the browser. A link the page cannot read says *This link is
+  not valid*.
 - **Graph** — the store's memories and the relations between them
   (below).
 - **Relations** — every relation as a scope × scope matrix and a list that
@@ -198,7 +214,11 @@ expands it to every one, for keyboard and screen-reader use.
 A large store shows its most connected memories first (800 by default); the
 page says when it is partial, and picking a top-level scope shows the rest of it. The
 layout is computed by the dashboard server and is deterministic: the same
-store draws the same graph. While a large graph is being laid out the page
+store draws the same graph. Zooming and panning survive the box changing
+width (a scrollbar coming or going, a window resize): the view keeps its
+centre and scale, and only a view at *Fit* re-fits. The counts card's
+*Not drawn* line counts the relations to memories past the limit that the
+kind and status filters would show. While a large graph is being laid out the page
 says so; if the dashboard is busy laying out other graphs it tries again
 by itself, and if a layout fails the page says so with a *Try again*
 button.
@@ -260,7 +280,9 @@ for review — at any store size, on a phone, and with a screen reader.
 - **The list** shows each relation as a sentence ("*A* supports *B*"), each
   end's scope, its status, origin, confidence and age, links to both
   memories and a *Show in graph* link that opens the graph with the source
-  memory selected (in its scope, above 150 memories). Proposed relations come
+  memory selected (in its scope, above 150 memories; the link names the
+  scope too, so a graph that turns out to have more than 150 memories under
+  the link's filters opens that scope rather than the overview). Proposed relations come
   first, then contradictions, then the newest; 100 at a time, *Load more*
   for the next 100. Filter by kind, status (proposed and confirmed by
   default; *Rejected* or *Every status* to see rejected ones), text (both
@@ -281,7 +303,7 @@ The API behind it, `GET /api/projects/{id}/relations`, takes `kind=`
 `rejected`, `all`; default every status but rejected, or add
 `include_rejected=true`), `q=`, `include_invalidated=`, the scope pair
 `from_scope=`/`to_scope=` (exact names, `-` for no scope; a symmetric kind
-matches either order), `touches=` (either end in a scope), `subs=1`, `limit=`
+matches either order; escaped as below), `touches=` (either end in a scope), `subs=1`, `limit=`
 (100, at most 500) and `cursor=`. It answers `total`, `items`, `counts`,
 `next_cursor` (`null` on the last page) and, on the first page, `matrix`:
 
@@ -300,6 +322,15 @@ matches either order), `touches=` (either end in a scope), `subs=1`, `limit=`
             "cells": [{"from": "storage", "to": "hooks", "count": 12, "contradictions": 2,
                        "proposed": 4, "kinds": {"contradicts": {"proposed": 2}}}]}}
 ```
+
+**Scope names in the address and the API.** `top_scope=` (on `/memories`
+and `/graph`, a comma-separated list) and `from_scope=` / `to_scope=` /
+`touches=` take each scope **percent-escaped** inside the value: `-` is
+"no scope", a scope literally named `-` is `%2D`, a comma in a name is
+`%2C` (so `a,b` is one scope, and a list of `a` and `b` is `a,b`), and `%`
+is `%25`. A bad escape is a `400`. Links written before this keep working
+unless a scope name contains `%`. In a URL the escapes are escaped once
+more, as the page does (`top_scope=a%252Cb`).
 
 Paging is keyed, not by offset: the cursor is the last row's place in the
 order, so relations that stay as they were are never repeated or skipped
@@ -371,7 +402,9 @@ project or `.engramdb/`: graph layouts it computed, kept in
 `<cache dir>/engramdb/dashboard/layouts/` (`~/.cache` on Linux,
 `~/Library/Caches` on macOS), a folder it creates with mode 0700 and refuses
 to use if anyone else can read it. The files hold memory positions, label
-spots and scope names only, never summaries or memory text, and the folder
+spots and scope names only, never summaries or memory text; each ends with a
+checksum, and one that fails it (or holds a number that is not finite) is
+computed again rather than drawn. The folder
 is kept under 64 MiB (oldest first); it touches only files it wrote. Delete
 it at any time. `ENGRAMDB_DASHBOARD_CACHE_DIR` moves it and
 `ENGRAMDB_DASHBOARD_LAYOUT_CACHE=0` turns it off (layouts are then computed

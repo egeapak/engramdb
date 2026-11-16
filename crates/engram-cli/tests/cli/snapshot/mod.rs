@@ -182,6 +182,9 @@ impl Fixture {
     #[allow(deprecated)]
     fn base(&self) -> assert_cmd::Command {
         let mut c = assert_cmd::Command::cargo_bin("engramdb").expect("binary engramdb not found");
+        // The shared isolation first; everything below overrides it where the
+        // snapshots need more (an empty model cache, offline, no logs).
+        crate::helpers::isolate(&mut c, self.home.path(), self.runtime.path());
         c.env("ENGRAMDB_DATA_DIR", self.data.path());
         c.env("ENGRAMDB_CONFIG_DIR", self.config.path());
         c.env(
@@ -820,11 +823,12 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
         // `add -e` writes its template to `std::env::temp_dir()` — *not* under
         // any fixture directory, so no `[…]` path replacement above reaches it
-        // — under a per-run name, `engramdb-add-<uuid>.txt`. Must precede the
-        // UUID rule, which would otherwise consume the name's variable half
-        // and leave the machine's temp prefix behind.
+        // — under a per-run name, `engramdb-add-<random>.txt` (a `tempfile`
+        // suffix of letters and digits). Must precede the UUID rule, which
+        // would otherwise consume the name's variable half and leave the
+        // machine's temp prefix behind.
         (
-            Regex::new(r"\S*engramdb-add-[0-9a-f-]+\.txt").unwrap(),
+            Regex::new(r"\S*engramdb-add-[0-9A-Za-z-]+\.txt").unwrap(),
             "[ADD_TEMPLATE]",
         ),
         (
@@ -879,15 +883,38 @@ static FILTERS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             Regex::new(r#"(cannot be (?:indexed|searched)): [^\n"]*"#).unwrap(),
             "${1}: [EMBEDDING_UNAVAILABLE]",
         ),
+        // An OS error number is the platform's, not the command's: a refused
+        // connection is `os error 111` on Linux and `61` on macOS. The words
+        // before it stay asserted.
+        (
+            Regex::new(r"\(os error \d+\)").unwrap(),
+            "(os error [ERRNO])",
+        ),
+        // `harvest list` reports each transcript's size in bytes, and every
+        // record the fixture writes carries the project's path as its `cwd`.
+        // That path is the OS temp dir's, so its length (and the size) differs
+        // between Linux and macOS.
+        (Regex::new(r#""bytes": \d+"#).unwrap(), "\"bytes\": [BYTES]"),
         (
             Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?")
                 .unwrap(),
             "[TIMESTAMP]",
         ),
         (Regex::new(r"\d{4}-\d{2}-\d{2}").unwrap(), "[DATE]"),
+        // Sizes that depend on LanceDB's files (an index, a data dir that
+        // holds one, a store's total) are redacted by their label; any other
+        // size is the fixture's and stays asserted. A size that turns out to
+        // differ between machines goes here with its label, never back into
+        // a blanket rule.
         (
-            Regex::new(r"\b\d+(?:\.\d+)? (?:B|KB|MB|GB|TB)\b").unwrap(),
-            "[SIZE]",
+            Regex::new(r"((?:index|projects|disk usage): )\d+(?:\.\d+)? (?:B|KB|MB|GB|TB)\b")
+                .unwrap(),
+            "${1}[SIZE]",
+        ),
+        // The disk-usage check's JSON message is the store's total alone.
+        (
+            Regex::new(r#"("message": ")\d+(?:\.\d+)? (?:B|KB|MB|GB|TB)""#).unwrap(),
+            "${1}[SIZE]\"",
         ),
         (Regex::new(r"\b\d+(?:\.\d+)?ms\b").unwrap(), "[MS]"),
         (

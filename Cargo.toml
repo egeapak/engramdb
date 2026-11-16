@@ -27,8 +27,8 @@ path = "src/lib.rs"
 [features]
 default = ["onnxruntime", "load-dynamic", "ollama"]
 # ONNX Runtime stack (`ort` + `fastembed` + the `engram-onnx` EP wiring). On by
-# default. A pure-Rust build for a platform with no prebuilt ORT (Intel Mac)
-# uses `--no-default-features --features tract` instead.
+# default. With it off, embeddings use Ollama and NLI, reranking and T5 titling
+# compile out.
 onnxruntime = ["engram-models/onnxruntime", "dep:engram-onnx"]
 ollama = ["reqwest", "engram-models/ollama"]
 # Apple Core ML (GPU / Neural Engine) acceleration for all ONNX models.
@@ -43,7 +43,7 @@ coreml = ["onnxruntime", "engram-onnx/coreml", "engram-models/coreml"]
 # refuses that feature set, so the build fails at link time.
 xnnpack = ["onnxruntime", "engram-onnx/xnnpack", "engram-models/xnnpack"]
 # --- ONNX Runtime linking strategy ---------------------------------------
-# EngramDB does not vendor an ONNX Runtime. Exactly one of the three strategies
+# EngramDB does not vendor an ONNX Runtime. One of the two strategies
 # below decides where `libonnxruntime` comes from; `load-dynamic` is in
 # `default`, so selecting another means `--no-default-features`.
 #
@@ -84,8 +84,8 @@ fearless_simd = "1.2.0"
 # Workspace sub-crates (extracted layers; re-exported from lib.rs so the
 # `engramdb::<module>` and `crate::<module>` paths stay stable in the core).
 engram-types = { path = "crates/engram-types" }
-# ONNX Runtime EP wiring, re-exported as `engramdb::onnx_ep`. Optional so a
-# pure-`tract` build (Intel Mac) drops ORT entirely. Gated by `onnxruntime`.
+# ONNX Runtime EP wiring, re-exported as `engramdb::onnx_ep`. Optional: gated
+# by `onnxruntime`.
 engram-onnx = { path = "crates/engram-onnx", optional = true }
 engram-storage = { path = "crates/engram-storage" }
 engram-models = { path = "crates/engram-models", default-features = false }
@@ -133,6 +133,16 @@ rustix = { version = "1", features = ["process"] }
 # glibc `malloc_trim`: after the daemon unloads a model, hand the freed
 # heap back to the OS (already in the dependency tree via tempfile et al.).
 libc = "0.2"
+
+# Windows-only: the daemon client's named-pipe owner check (server process ->
+# token user SID). Already in the dependency tree via tokio et al.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # Enable storage's `test-support` module (global-store serialization lock) for

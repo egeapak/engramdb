@@ -116,10 +116,38 @@ struct Ctx {
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
+/// A one-shot pause point at the start of [`Ctx::persist`], for tests that
+/// need to observe the daemon while a persist is in progress.
+#[cfg(test)]
+pub(crate) mod persist_pause {
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
+
+    type Gate = (Arc<Notify>, Arc<Notify>);
+    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+
+    /// Arm the pause for the next persist: returns `(entered, release)`.
+    pub(crate) fn arm() -> Gate {
+        let gate = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        *GATE.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    pub(super) async fn wait() {
+        let gate = GATE.lock().unwrap().take();
+        if let Some((entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+    }
+}
+
 impl Ctx {
     /// Persist the request counters and write buffered hook events. Every
     /// shutdown path calls this.
     async fn persist(&self) {
+        #[cfg(test)]
+        persist_pause::wait().await;
         self.hook_telemetry.flush().await;
         metrics::persist(
             self.pid,
@@ -320,6 +348,25 @@ pub(crate) async fn run_daemon_with_cache(
         });
     }
 
+    // Keep daemon.log bounded while the daemon runs: the size cap used to be
+    // applied only when the log was opened, i.e. at spawn.
+    {
+        let log = super::daemon_log_path(&socket);
+        let mut shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(LOG_CAP_INTERVAL) => {}
+                    _ = shutdown.changed() => return,
+                }
+                let log = log.clone();
+                let _ =
+                    tokio::task::spawn_blocking(move || super::logging::cap_in_place(&log)).await;
+            }
+        });
+    }
+
+    let mut accept_backoff = AcceptBackoff::default();
     loop {
         let stream = tokio::select! {
             // Shutdown (requested by a client or the idle watchdog): stop
@@ -336,9 +383,28 @@ pub(crate) async fn run_daemon_with_cache(
                 break;
             }
             res = listener.accept() => match res {
-                Ok(v) => v,
+                Ok(v) => {
+                    accept_backoff.reset();
+                    v
+                }
                 Err(e) => {
-                    tracing::warn!("daemon accept failed: {e}");
+                    // A persistent error (EMFILE, ENFILE) fails every accept
+                    // at once: without a pause this loop spins a core and
+                    // writes a warning per iteration into daemon.log.
+                    let (delay, warn) = accept_backoff.on_error(Instant::now());
+                    if let Some(suppressed) = warn {
+                        tracing::warn!(
+                            "daemon accept failed: {e} (retrying in {delay:?}; \
+                             {suppressed} similar error(s) not logged)"
+                        );
+                    }
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            tracing::info!("engramdb daemon stopped accepting connections");
+                            break;
+                        }
+                        _ = tokio::time::sleep(delay) => {}
+                    }
                     continue;
                 }
             },
@@ -399,12 +465,64 @@ pub(crate) async fn run_daemon_with_cache(
     // bounded window to finish before the front-end exits the process.
     drop(listener);
     drain_connections(&active, Duration::from_secs(30)).await;
-    // Persist once more AFTER the drain: the Shutdown handler persisted
-    // before requesting shutdown, so counter increments from connections
-    // that finished during the drain would otherwise be silently dropped
-    // across the restart (the next daemon seeds from the last snapshot).
+    // Persist once more AFTER the drain: the Shutdown handler's persist ran
+    // while other connections could still be finishing, so counter
+    // increments from connections that finished during the drain would
+    // otherwise be silently dropped across the restart (the next daemon
+    // seeds from the last snapshot).
     ctx.persist().await;
     Ok(())
+}
+
+/// How often a running daemon re-applies the `daemon.log` size cap.
+const LOG_CAP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Exponential backoff for failed `accept` calls, with a rate-limited warning.
+///
+/// The delay starts at [`AcceptBackoff::MIN`], doubles per consecutive error
+/// up to [`AcceptBackoff::MAX`], and resets on the next successful accept. The
+/// first error of a run is warned; after that at most one warning per
+/// [`AcceptBackoff::WARN_EVERY`], carrying how many were suppressed.
+#[derive(Debug, Default)]
+pub(crate) struct AcceptBackoff {
+    delay: Option<Duration>,
+    last_warn: Option<Instant>,
+    suppressed: u64,
+}
+
+impl AcceptBackoff {
+    pub(crate) const MIN: Duration = Duration::from_millis(10);
+    pub(crate) const MAX: Duration = Duration::from_secs(1);
+    pub(crate) const WARN_EVERY: Duration = Duration::from_secs(10);
+
+    /// Record an error at `now`: the delay to sleep, and `Some(suppressed)`
+    /// when this error should be logged.
+    pub(crate) fn on_error(&mut self, now: Instant) -> (Duration, Option<u64>) {
+        let delay = match self.delay {
+            None => Self::MIN,
+            Some(d) => (d * 2).min(Self::MAX),
+        };
+        self.delay = Some(delay);
+        let warn = match self.last_warn {
+            Some(at) if now.duration_since(at) < Self::WARN_EVERY => {
+                self.suppressed += 1;
+                None
+            }
+            _ => {
+                self.last_warn = Some(now);
+                Some(std::mem::take(&mut self.suppressed))
+            }
+        };
+        (delay, warn)
+    }
+
+    /// A successful accept: the next error starts over at [`Self::MIN`] and
+    /// is warned again.
+    pub(crate) fn reset(&mut self) {
+        self.delay = None;
+        self.last_warn = None;
+        self.suppressed = 0;
+    }
 }
 
 /// Wait (bounded) for all in-flight connections to finish.
@@ -477,13 +595,19 @@ where
         let Some(req) = req else {
             return Ok(());
         };
-        // Shutdown is terminal: ack, flush, persist, then signal the accept
-        // loop so `run_daemon` returns (the daemon binary's main then exits).
+        // Shutdown is terminal: ack, signal the accept loop to stop, then
+        // persist, so `run_daemon` returns (the daemon binary's main then
+        // exits). Stop accepting *before* the persist: a client evicting this
+        // (older) daemon spawns a replacement once the socket refuses, and a
+        // listener kept open through a slow persist made that replacement
+        // yield to a daemon that was about to exit. This connection stays
+        // counted in `active` until it returns, so the drain still waits for
+        // this persist.
         if let DaemonOp::Shutdown = req.op {
             write_msg(&mut write_half, &DaemonResponse::ShuttingDown).await?;
             tracing::info!("engramdb daemon shutting down on request");
-            ctx.persist().await;
             ctx.request_shutdown();
+            ctx.persist().await;
             return Ok(());
         }
 

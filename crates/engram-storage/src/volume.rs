@@ -310,3 +310,53 @@ mod tests {
         assert!(!on_unmounted_volume(tmp.path()));
     }
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn windows_volume_root_of_a_drive_path() {
+        assert_eq!(
+            windows_volume_root(Path::new(r"E:\x\y")),
+            Some(PathBuf::from(r"E:\"))
+        );
+    }
+
+    #[test]
+    fn windows_volume_root_of_a_unc_path() {
+        assert_eq!(
+            windows_volume_root(Path::new(r"\\server\share\x")),
+            Some(PathBuf::from(r"\\server\share\"))
+        );
+    }
+
+    #[test]
+    fn windows_volume_root_of_a_relative_path_is_none() {
+        assert_eq!(windows_volume_root(Path::new(r"x\y")), None);
+        assert_eq!(windows_volume_root(Path::new(r"\x\y")), None);
+    }
+
+    /// The first drive letter from `Z` down whose root does not exist.
+    fn missing_drive() -> char {
+        ('D'..='Z')
+            .rev()
+            .find(|l| !Path::new(&format!(r"{l}:\")).exists())
+            .expect("a free drive letter between D and Z")
+    }
+
+    #[test]
+    fn a_missing_drive_letter_is_an_unmounted_volume() {
+        let letter = missing_drive();
+        let path = PathBuf::from(format!(r"{letter}:\projects\app"));
+        assert!(on_unmounted_volume(&path), "{}", path.display());
+    }
+
+    #[test]
+    fn an_existing_drive_with_a_missing_folder_is_not_unmounted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("deleted-project");
+        assert!(!path.exists());
+        assert!(!on_unmounted_volume(&path), "{}", path.display());
+    }
+}

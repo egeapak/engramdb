@@ -157,7 +157,9 @@ function resultText(o, out, edge) {
  * Review controls for `edge` ({src, dst, dst_store?, kind, status,
  * src_summary?, dst_summary?}). `viewer` is the memory whose page this is,
  * for "this one / the other" wording. `onDone(out, text)` runs after a
- * successful write, with the server's answer and the sentence shown.
+ * successful write, with the server's answer and the sentence shown, and
+ * after a review that was settled elsewhere (409 `not_proposed`, 404
+ * `unknown_edge`), with `out` null: either way the view reloads.
  */
 export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
   if (edge.kind === 'supersedes') return null;
@@ -232,6 +234,19 @@ export function reviewControls(edge, ctx, { viewer, onDone } = {}) {
         settle(key, box);
         if (onDone) onDone(out, text);
       } catch (e) {
+        // Settled elsewhere (another tab, the CLI): the choices can only
+        // fail again, so this is a final state, and the view reloads.
+        const gone = e && (e.code === 'not_proposed' || e.code === 'unknown_edge');
+        if (gone) {
+          const text = e.code === 'unknown_edge' ? 'This relation no longer exists.' : `Already reviewed elsewhere: ${e.message || 'it is no longer proposed'}`;
+          reviews.set(key, { state: 'done', text });
+          live.textContent = text;
+          mount(box, live);
+          live.focus();
+          settle(key, box);
+          if (onDone) onDone(null, text);
+          return;
+        }
         reviews.delete(key);
         live.textContent = '';
         // Any other box for this edge offers the choices again.

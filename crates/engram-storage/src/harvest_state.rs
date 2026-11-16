@@ -26,7 +26,9 @@
 //! without a lock (`O_APPEND` places each record at the end atomically), and
 //! makes a partial write cost exactly the torn line instead of the file — so
 //! the lock, the four-state merge precedence and the corrupt-file quarantine
-//! are all gone with the map they existed for.
+//! are all gone with the map they existed for. (The one lock that exists is
+//! compaction's own non-blocking try-lock, which no append and no read ever
+//! looks at; see [`maybe_compact`].)
 //!
 //! # Line format
 //!
@@ -181,6 +183,15 @@ pub struct HarvestEntry {
     pub note: Option<String>,
     /// The archived transcript, when one is held.
     pub archive: Option<crate::transcript_archive::ArchiveRef>,
+    /// When the automatic index pass last failed to index this session, or
+    /// `None` when it never failed or has been indexed since.
+    ///
+    /// The maintenance pass reads it to retry a failing session at most once
+    /// per day and after every session that never failed, so a handful of
+    /// unindexable sessions (a transcript that will not parse, a copy that
+    /// will not decompress) cannot take the whole per-pass budget forever.
+    /// [`set_stage`] with [`HarvestStage::Indexed`] clears it.
+    pub index_failed_at: Option<DateTime<Utc>>,
 }
 
 impl HarvestEntry {
@@ -194,6 +205,7 @@ impl HarvestEntry {
             stage: HarvestStage::Collected,
             note: None,
             archive: None,
+            index_failed_at: None,
         }
     }
 
@@ -258,6 +270,17 @@ struct LedgerLine {
         skip_serializing_if = "Option::is_none"
     )]
     archive: Option<Option<crate::transcript_archive::ArchiveRef>>,
+    /// When the automatic index pass last failed on this session; `null`
+    /// clears it (written with the `indexed` stage).
+    ///
+    /// A binary from before this field ignores it on read, and its compaction
+    /// drops it: the cost is one early retry of that session, nothing more.
+    #[serde(
+        default,
+        deserialize_with = "explicit_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    index_failed_at: Option<Option<DateTime<Utc>>>,
     /// Tombstone: the entry is gone as of `at`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     removed: bool,
@@ -276,6 +299,7 @@ impl LedgerLine {
             memories_created: None,
             note: None,
             archive: None,
+            index_failed_at: None,
             removed: false,
         }
     }
@@ -411,12 +435,26 @@ fn parse_lines(raw: &str) -> Vec<LedgerLine> {
 
 /// Apply the patches in order. Later lines win, field by field.
 fn fold(lines: Vec<LedgerLine>) -> HashMap<String, Folded> {
+    fold_with_tombstones(lines).0
+}
+
+/// [`fold`], plus the sessions whose last line is a tombstone, with its `at`.
+///
+/// Compaction needs them: a snapshot that simply left a removed session out
+/// also dropped the fact that it *was* removed, so older lines arriving later
+/// (a sub-project's ledger adopted after the compaction) brought it back.
+fn fold_with_tombstones(
+    lines: Vec<LedgerLine>,
+) -> (HashMap<String, Folded>, HashMap<String, DateTime<Utc>>) {
     let mut map: HashMap<String, Folded> = HashMap::new();
+    let mut tombstones: HashMap<String, DateTime<Utc>> = HashMap::new();
     for line in lines {
         if line.removed {
             map.remove(&line.session_id);
+            tombstones.insert(line.session_id, line.at);
             continue;
         }
+        tombstones.remove(&line.session_id);
         let folded = map.entry(line.session_id).or_insert_with(|| Folded {
             entry: HarvestEntry::seed(line.at),
             last_at: line.at,
@@ -448,8 +486,21 @@ fn fold(lines: Vec<LedgerLine>) -> HashMap<String, Folded> {
         if let Some(archive) = line.archive {
             folded.entry.archive = archive;
         }
+        if let Some(failed) = line.index_failed_at {
+            folded.entry.index_failed_at = failed;
+        }
     }
-    map
+    (map, tombstones)
+}
+
+/// The tombstones a compacted log still has to carry: those younger than the
+/// age window. An older one guards against lines the window drops anyway.
+fn kept_tombstones(mut tombstones: HashMap<String, DateTime<Utc>>) -> Vec<(String, DateTime<Utc>)> {
+    let cutoff = Utc::now() - Duration::days(PRUNE_AFTER_DAYS);
+    tombstones.retain(|_, at| *at > cutoff);
+    let mut kept: Vec<(String, DateTime<Utc>)> = tombstones.into_iter().collect();
+    kept.sort();
+    kept
 }
 
 /// Drop entries that have left the log, loudly, and ones past the age window.
@@ -506,11 +557,14 @@ fn drain_and_prune(folded: &mut HashMap<String, Folded>) {
     folded.retain(|_, f| f.entry.archive.is_some() || f.entry.harvested_at > cutoff);
 }
 
-/// How far the log has outgrown the state it carries: `(lines, live entries)`.
+/// How far the log has outgrown the state it carries: `(lines, entries)`.
 ///
 /// The same two numbers [`maybe_compact`] compares, exposed so `doctor` can
 /// report pending compaction without duplicating the fold. A missing file is
-/// `(0, 0)`.
+/// `(0, 0)`. `entries` is what a compacted log would hold: the live entries
+/// **plus** one line per removed session whose tombstone is younger than the
+/// age window (compaction keeps those, so counting them is what lets it
+/// converge after a `harvest reset`).
 ///
 /// Reported rather than acted on: compaction is opportunistic (it happens on
 /// the next append that crosses the size gate) and a log that is merely long
@@ -521,9 +575,9 @@ fn drain_and_prune(folded: &mut HashMap<String, Folded>) {
 pub fn compaction_pressure(project_dir: &Path) -> (usize, usize) {
     let raw = read_ledger_text(&ledger_path(project_dir));
     let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
-    let mut folded = fold(parse_lines(&raw));
+    let (mut folded, tombstones) = fold_with_tombstones(parse_lines(&raw));
     drain_and_prune(&mut folded);
-    (lines, folded.len())
+    (lines, folded.len() + kept_tombstones(tombstones).len())
 }
 
 /// Whether the log has outgrown its live entries by the factor compaction acts
@@ -611,6 +665,7 @@ pub fn mark_harvested(
             stage: HarvestStage::Collected,
             note,
             archive: None,
+            index_failed_at: None,
         });
     // The fold stamps `harvested_at` from the winning decision line's own
     // timestamp, so "the entry does not carry ours" is exactly "a later
@@ -660,7 +715,36 @@ pub fn set_stage(project_dir: &Path, session_id: &str, stage: HarvestStage) -> R
     }
     let mut line = LedgerLine::touching(session_id);
     line.stage = Some(stage);
+    if stage == HarvestStage::Indexed {
+        // Indexed settles any earlier failure, so the retry clock stops.
+        line.index_failed_at = Some(None);
+    }
     append(project_dir, &[line])
+}
+
+/// Record that the automatic index pass failed on these sessions at `at`.
+///
+/// One append for the whole batch. The stage and decision are untouched, so a
+/// failure never reopens or settles anything; it only defers the next
+/// automatic attempt (see `ops::harvest_index`).
+pub fn set_index_failed(
+    project_dir: &Path,
+    session_ids: &[String],
+    at: DateTime<Utc>,
+) -> Result<()> {
+    let lines: Vec<LedgerLine> = session_ids
+        .iter()
+        .filter(|id| crate::transcripts::is_valid_session_id(id))
+        .map(|id| {
+            let mut line = LedgerLine::touching(id);
+            line.index_failed_at = Some(Some(at));
+            line
+        })
+        .collect();
+    if lines.is_empty() {
+        return Ok(());
+    }
+    append(project_dir, &lines)
 }
 
 /// Forget the archive reference for one or more sessions, keeping the review
@@ -988,6 +1072,7 @@ fn migrate_legacy_map(project_dir: &Path) {
             memories_created: Some(entry.memories_created),
             note: Some(entry.note),
             archive: Some(entry.archive),
+            index_failed_at: None,
             removed: false,
         });
     }
@@ -1036,14 +1121,34 @@ fn append(project_dir: &Path, lines: &[LedgerLine]) -> Result<()> {
     Ok(())
 }
 
+/// The compaction lock, beside the ledger.
+fn compact_lock_path(project_dir: &Path) -> PathBuf {
+    ledger_path(project_dir).with_file_name("harvest_ledger.compact.lock")
+}
+
 /// Rewrite the log as one line per live entry once it has outgrown them.
 ///
 /// Purely a space reclaim — the fold is identical either way, which costs the
 /// snapshot line a second timestamp (see [`LedgerLine::decided_at`]: `at`
 /// places it in the sequence, `decided_at` preserves what the fold reports as
 /// `harvested_at`) — so it is best-effort throughout and gives up rather than
-/// risk a record. Two hazards, both handled by reading the tail rather than by
-/// taking a lock:
+/// risk a record.
+///
+/// **One compactor at a time.** Two compactors each snapshot the file, and the
+/// second `rename` discards whatever the first one's new file gained in
+/// between (and, with a shared temp name, they wrote into each other's temp).
+/// So compaction — and only compaction — takes a *non-blocking* `flock` on
+/// `harvest_ledger.compact.lock`; when it is held, or cannot be opened, this
+/// call simply does not compact. Appends and reads never look at the lock:
+/// the append path stays one `open` + `write`.
+///
+/// **One inode throughout.** The body is read through the handle the tail
+/// reads use, so "consumed" always describes the same file, in **bytes** (a
+/// lossy decode changes lengths). Immediately before the `rename` the handle
+/// is compared with whatever is at the path now; if a different file is
+/// there, this call gives up and removes its temp.
+///
+/// Appends are handled by reading the tail rather than by locking them out:
 ///
 /// 1. Appends landing *while* the snapshot is being built are carried over
 ///    verbatim, re-read until the file stops growing.
@@ -1054,6 +1159,15 @@ fn append(project_dir: &Path, lines: &[LedgerLine]) -> Result<()> {
 /// What is left is the writer that opened before the rename and had not
 /// finished when the recovery read ran: microseconds, once per compaction. It
 /// is a real (if small) loss path and this is where it is declared.
+///
+/// **Tombstones survive.** A removed session younger than the age window is
+/// written as one `removed` line at its original instant, so lines older than
+/// the removal that arrive later (an adopted sub-project ledger) still lose to
+/// it. Without that the compacted log forgot the removal and the session came
+/// back.
+///
+/// The new file is synced before the rename and the directory after it, so a
+/// power cut leaves either the old log or the whole new one.
 fn maybe_compact(project_dir: &Path) {
     let path = ledger_path(project_dir);
     let Ok(meta) = std::fs::metadata(&path) else {
@@ -1062,20 +1176,34 @@ fn maybe_compact(project_dir: &Path) {
     if meta.len() < COMPACT_MIN_BYTES {
         return;
     }
-    let Ok(Some(raw)) = crate::state_file::read_state_file(&path) else {
+    // Held until this function returns; released by the close.
+    let Ok(lock) = crate::state_file::open_lock_file(&compact_lock_path(project_dir)) else {
         return;
     };
+    if lock.try_lock().is_err() {
+        return;
+    }
+
+    let Ok(Some(mut handle)) = crate::state_file::open_state_file_for_read(&path) else {
+        return;
+    };
+    let Ok(raw_bytes) = read_from(&mut handle, 0) else {
+        return;
+    };
+    let mut consumed = raw_bytes.len() as u64;
+    let raw = crate::state_file::lossy_text(raw_bytes, &path);
     let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
-    let mut folded = fold(parse_lines(&raw));
+    let (mut folded, tombstones) = fold_with_tombstones(parse_lines(&raw));
     drain_and_prune(&mut folded);
-    if lines <= folded.len().max(1) * COMPACT_FACTOR {
+    let tombstones = kept_tombstones(tombstones);
+    if !compaction_is_pending(lines, folded.len() + tombstones.len()) {
         return;
     }
 
     // Sorted, so the rewritten file is reproducible and diffable.
     let mut ids: Vec<&String> = folded.keys().collect();
     ids.sort();
-    let mut body = String::new();
+    let mut body: Vec<u8> = Vec::new();
     for id in ids {
         let f = &folded[id];
         let entry = &f.entry;
@@ -1086,7 +1214,9 @@ fn maybe_compact(project_dir: &Path) {
             // a concurrent append could beat data that is newer than itself.
             at: f.last_at,
             stage: Some(entry.stage),
-            decision: Some(entry.decision()),
+            // The raw decision, not `decision()`: an entry no line ever
+            // decided stays undecided, as the fold of the original log says.
+            decision: entry.decision,
             // The two timestamps have to be carried separately, because they
             // answer different questions and the snapshot needs both: `at`
             // places the line in the sequence, `decided_at` is what the fold
@@ -1097,22 +1227,34 @@ fn maybe_compact(project_dir: &Path) {
             memories_created: Some(entry.memories_created),
             note: Some(entry.note.clone()),
             archive: Some(entry.archive.clone()),
+            // Fold-preserving like every other field: a compaction that
+            // dropped it would let a failing session back to the front of
+            // the queue.
+            index_failed_at: Some(entry.index_failed_at),
             removed: false,
         };
         let Ok(encoded) = serde_json::to_string(&line) else {
             return;
         };
-        body.push_str(&encoded);
-        body.push('\n');
+        body.extend_from_slice(encoded.as_bytes());
+        body.push(b'\n');
+    }
+    for (id, at) in tombstones {
+        let mut line = LedgerLine::touching(&id);
+        // The removal's own instant: it must keep losing to anything newer
+        // and keep beating anything older.
+        line.at = at;
+        line.removed = true;
+        let Ok(encoded) = serde_json::to_string(&line) else {
+            return;
+        };
+        body.extend_from_slice(encoded.as_bytes());
+        body.push(b'\n');
     }
 
     // Carry over anything appended while the snapshot was being built, and keep
     // going until the file stops moving. Still growing after a few passes means
     // a busy writer, and leaving the file long is the harmless outcome.
-    let Ok(Some(mut handle)) = crate::state_file::open_state_file_for_read(&path) else {
-        return;
-    };
-    let mut consumed = raw.len() as u64;
     let mut settled = false;
     for _ in 0..COMPACT_TAIL_ATTEMPTS {
         let Ok(meta) = handle.metadata() else {
@@ -1130,30 +1272,71 @@ fn maybe_compact(project_dir: &Path) {
             return;
         };
         consumed += tail.len() as u64;
-        body.push_str(&tail);
+        body.extend_from_slice(&tail);
     }
     if !settled {
         return;
     }
-    if crate::state_file::write_state_file(&path, &body).is_err() {
+    #[cfg(test)]
+    compaction_pause();
+    let replaced =
+        crate::state_file::replace_state_file_if(&path, &body, || same_file(&handle, &path));
+    if !matches!(replaced, Ok(true)) {
         return;
     }
     // The unlinked inode is still open here, so a write that raced the rename
     // is visible and can be moved onto the new file.
     if let Ok(tail) = read_from(&mut handle, consumed) {
         if !tail.is_empty() {
-            let _ = crate::state_file::append_state_file(&path, &tail);
+            let _ = crate::state_file::append_state_bytes(&path, &tail);
         }
+    }
+    drop(lock);
+}
+
+/// Is the file at `path` still the one `handle` has open?
+///
+/// A renamed-over ledger (another binary's compaction, an adoption, a user's
+/// editor) is a different inode: what this call read is no longer what it
+/// would replace.
+#[cfg(unix)]
+fn same_file(handle: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (handle.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(open), Ok(now)) => open.dev() == now.dev() && open.ino() == now.ino(),
+        _ => false,
     }
 }
 
-/// Read `handle` from `offset` to EOF as text, leaving the cursor at the end.
-fn read_from(handle: &mut std::fs::File, offset: u64) -> std::io::Result<String> {
+/// No inode to compare off unix; the compaction lock is the protection there.
+#[cfg(not(unix))]
+fn same_file(_handle: &std::fs::File, path: &Path) -> bool {
+    path.exists()
+}
+
+/// Read `handle` from `offset` to EOF as **bytes**, leaving the cursor at the
+/// end. Bytes, because the offsets are file offsets and the tail is carried
+/// over verbatim: a lossy decode would change both.
+fn read_from(handle: &mut std::fs::File, offset: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
     handle.seek(SeekFrom::Start(offset))?;
-    let mut out = String::new();
-    handle.read_to_string(&mut out)?;
+    let mut out = Vec::new();
+    handle.read_to_end(&mut out)?;
     Ok(out)
+}
+
+/// Test hook: runs between "the tail settled" and the rename.
+#[cfg(test)]
+static COMPACTION_PAUSE: std::sync::Mutex<Option<Box<dyn Fn() + Send>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn compaction_pause() {
+    if let Ok(hook) = COMPACTION_PAUSE.lock() {
+        if let Some(hook) = hook.as_ref() {
+            hook();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1256,7 +1439,7 @@ mod tests {
             "each transition must cost exactly one line"
         );
         assert_eq!(
-            read_from(&mut open_before, 0).unwrap(),
+            String::from_utf8(read_from(&mut open_before, 0).unwrap()).unwrap(),
             after,
             "the writes went to a different file than the one already open; \
              a concurrent writer's record would go down with it"
@@ -1451,6 +1634,34 @@ mod tests {
     }
 
     #[test]
+    fn index_failure_survives_compaction_and_is_cleared_by_indexed() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let failed_at = "2026-08-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        set_index_failed(dir, &["s1".to_string()], failed_at).unwrap();
+        assert_eq!(read_harvested(dir)["s1"].index_failed_at, Some(failed_at));
+
+        let filler = "x".repeat(2048);
+        append_until_compacted(dir, "s1", &filler);
+        assert_eq!(lines_in(dir).len(), 1, "compaction did not run");
+        assert_eq!(
+            read_harvested(dir)["s1"].index_failed_at,
+            Some(failed_at),
+            "compaction dropped the index failure marker"
+        );
+
+        set_stage(dir, "s1", HarvestStage::Indexed).unwrap();
+        let entry = &read_harvested(dir)["s1"];
+        assert_eq!(entry.stage, HarvestStage::Indexed);
+        assert_eq!(
+            entry.index_failed_at, None,
+            "indexing must clear the marker"
+        );
+        // A marker never touches the decision.
+        assert_eq!(entry.decision(), HarvestDecision::Deferred);
+    }
+
+    #[test]
     fn compaction_drops_dead_entries_but_keeps_live_ones() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
@@ -1473,10 +1684,188 @@ mod tests {
         let map = read_harvested(dir);
         assert_eq!(map.len(), 1, "tombstoned entries came back");
         assert!(map.contains_key("alive"));
+        // The removal itself is kept — one bare tombstone line per session,
+        // none of its content — so older lines arriving later still lose.
+        let dead0: Vec<String> = lines_in(dir)
+            .into_iter()
+            .filter(|l| l.contains("\"dead0\""))
+            .collect();
+        assert_eq!(dead0.len(), 1, "{dead0:?}");
+        assert!(dead0[0].contains("\"removed\":true"), "{}", dead0[0]);
         assert!(
-            !lines_in(dir).iter().any(|l| l.contains("dead0")),
-            "compaction kept a session it had already applied a tombstone for"
+            !dead0[0].contains("xxxx"),
+            "compaction kept the content of a removed session"
         );
+        assert_eq!(lines_in(dir).len(), 9, "8 tombstones and one live entry");
+    }
+
+    /// Mark `session_id` `n` times while the compaction lock is held, so the
+    /// log grows past the gate without being rewritten.
+    fn grow_without_compacting(dir: &Path, session_id: &str, n: usize, note: &str) {
+        let lock = crate::state_file::open_lock_file(&compact_lock_path(dir)).unwrap();
+        lock.lock().unwrap();
+        for _ in 0..n {
+            mark_harvested(
+                dir,
+                session_id,
+                &[],
+                HarvestDecision::Deferred,
+                Some(note.to_string()),
+            )
+            .unwrap();
+        }
+    }
+
+    fn temps_beside_the_ledger(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(ledger_path(dir).parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_held_compaction_lock_skips_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let filler = "x".repeat(2048);
+        // 100 lines of 2 KiB for one entry: far past both gates.
+        grow_without_compacting(dir, "s1", 100, &filler);
+        assert_eq!(lines_in(dir).len(), 100, "compacted under a held lock");
+        assert_eq!(read_harvested(dir).len(), 1, "appends and reads never wait");
+
+        // Lock released: the next append compacts.
+        mark_harvested(dir, "s1", &[], HarvestDecision::Deferred, Some(filler)).unwrap();
+        assert_eq!(lines_in(dir).len(), 1);
+    }
+
+    /// Two compactors each snapshot the file; with one shared temp name they
+    /// also wrote into each other's temp, and the result was a log with
+    /// spliced lines.
+    #[test]
+    fn two_compactors_never_interleave() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let filler = "x".repeat(1024);
+        grow_without_compacting(dir, "s0", 150, &filler);
+        grow_without_compacting(dir, "s1", 150, &filler);
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..40 {
+                        maybe_compact(dir);
+                    }
+                });
+            }
+            for i in 0..4 {
+                let filler = &filler;
+                scope.spawn(move || {
+                    // The same patch every time, so the final fold does not
+                    // depend on which of the appends was the last to land.
+                    for _ in 0..150 {
+                        mark_harvested(
+                            dir,
+                            &format!("a{i}"),
+                            &[format!("m{i}")],
+                            HarvestDecision::Harvested,
+                            Some(filler.clone()),
+                        )
+                        .unwrap();
+                    }
+                });
+            }
+        });
+
+        for line in lines_in(dir) {
+            assert!(
+                serde_json::from_str::<LedgerLine>(&line).is_ok(),
+                "a spliced line: {}",
+                &line[..line.len().min(200)]
+            );
+        }
+        let map = read_harvested(dir);
+        assert_eq!(map.len(), 6, "{:?}", map.keys().collect::<Vec<_>>());
+        for id in ["s0", "s1"] {
+            assert_eq!(map[id].decision(), HarvestDecision::Deferred);
+            assert_eq!(map[id].note.as_deref(), Some(filler.as_str()));
+        }
+        for i in 0..4 {
+            let entry = &map[&format!("a{i}")];
+            assert_eq!(entry.decision(), HarvestDecision::Harvested);
+            assert_eq!(entry.memory_ids, vec![format!("m{i}")]);
+            assert_eq!(entry.note.as_deref(), Some(filler.as_str()));
+        }
+        assert!(
+            lines_in(dir).len() < 300,
+            "nothing was ever compacted ({} lines)",
+            lines_in(dir).len()
+        );
+        assert!(
+            temps_beside_the_ledger(dir).is_empty(),
+            "{:?}",
+            temps_beside_the_ledger(dir)
+        );
+    }
+
+    /// A compacted log used to forget that a session had been removed, so a
+    /// sub-project ledger adopted afterwards — whose lines are older than the
+    /// removal — brought the session back.
+    #[test]
+    fn compaction_keeps_a_tombstone_against_a_late_adoption() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        let sub = root.join("child");
+        std::fs::create_dir_all(&sub).unwrap();
+        let filler = "x".repeat(2048);
+
+        // The sub-project reviewed the session first, in its own ledger.
+        mark_harvested(&sub, "s1", &["m1".into()], HarvestDecision::Harvested, None).unwrap();
+        // Later the root reviewed and then reset it...
+        mark_harvested(&root, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        clear_harvested(&root, "s1").unwrap();
+        assert!(!is_harvested(&root, "s1"));
+        // ...and the root's log was compacted.
+        append_until_compacted(&root, "filler", &filler);
+        assert!(!is_harvested(&root, "s1"));
+
+        adopt_ledger(&sub, &root).unwrap();
+        assert!(
+            !read_harvested(&root).contains_key("s1"),
+            "an older adopted line undid a reset the compaction had forgotten"
+        );
+        assert!(read_harvested(&root).contains_key("filler"));
+    }
+
+    /// The body is read through one handle; if another file is at the path
+    /// by the time of the rename, what was read is not what would be replaced.
+    #[cfg(unix)]
+    #[test]
+    fn compaction_gives_up_when_the_ledger_was_replaced_under_it() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let filler = "x".repeat(2048);
+        grow_without_compacting(&dir, "s1", 100, &filler);
+
+        let path = ledger_path(&dir);
+        let replacement =
+            "{\"session_id\":\"other\",\"at\":\"2026-01-01T00:00:00Z\",\"decision\":\"skipped\"}\n";
+        let swap_path = path.clone();
+        *COMPACTION_PAUSE.lock().unwrap() = Some(Box::new(move || {
+            let staged = swap_path.with_file_name("staged");
+            std::fs::write(&staged, replacement).unwrap();
+            std::fs::rename(&staged, &swap_path).unwrap();
+        }));
+        maybe_compact(&dir);
+        *COMPACTION_PAUSE.lock().unwrap() = None;
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            replacement,
+            "the compaction replaced a file it had not read"
+        );
+        assert!(temps_beside_the_ledger(&dir).is_empty());
     }
 
     #[test]
@@ -2079,10 +2468,10 @@ mod tests {
         // another way — `projects delete --cascade`, an archive written under
         // the pre-`projects link` id, eviction on another machine — never
         // reached `clear_archive_refs` and made its entry immortal.
+        // The armed data dir, and a project id no other test uses (the id of
+        // a fresh temp dir), so no test needs to move ENGRAMDB_DATA_DIR.
         let tmp = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
-        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        let proj = crate::project_id::compute_project_id(tmp.path());
 
         let dir = tmp.path();
         let mut ghost = LedgerLine::touching("ghost");
@@ -2092,17 +2481,12 @@ mod tests {
         append(dir, &[ghost]).unwrap();
 
         // No archive directory at all: every claim is dangling.
-        let cleared = reconcile_archive_refs(dir, "proj").unwrap();
+        let cleared = reconcile_archive_refs(dir, &proj).unwrap();
         assert_eq!(cleared, vec!["ghost"], "the dangling ref was not noticed");
         assert!(
             !read_harvested(dir).contains_key("ghost"),
             "an entry naming a file that does not exist outlived the age window"
         );
-
-        match prev {
-            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
-        }
     }
 
     #[test]
@@ -2110,26 +2494,19 @@ mod tests {
         // Negative control: the whole point of the exemption is that a live
         // archive keeps its only index into itself.
         let tmp = TempDir::new().unwrap();
-        let data = TempDir::new().unwrap();
-        let prev = std::env::var("ENGRAMDB_DATA_DIR").ok();
-        std::env::set_var("ENGRAMDB_DATA_DIR", data.path());
+        let proj = crate::project_id::compute_project_id(tmp.path());
 
         let src = TempDir::new().unwrap();
         let transcript = src.path().join("live.jsonl");
         std::fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
-        let archive = crate::transcript_archive::archive_transcript("proj", "live", &transcript)
+        let archive = crate::transcript_archive::archive_transcript(&proj, "live", &transcript)
             .expect("archive written");
         set_archive(tmp.path(), "live", archive).unwrap();
 
-        assert!(reconcile_archive_refs(tmp.path(), "proj")
+        assert!(reconcile_archive_refs(tmp.path(), &proj)
             .unwrap()
             .is_empty());
         assert!(read_harvested(tmp.path())["live"].archive.is_some());
-
-        match prev {
-            Some(v) => std::env::set_var("ENGRAMDB_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAMDB_DATA_DIR"),
-        }
     }
 
     #[test]
@@ -2350,5 +2727,175 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("reading a ledger path occupied by a FIFO never returned");
+    }
+
+    /// One torn multibyte character made the strict read fail, and a failed
+    /// read folds as an empty ledger: every review record looked gone.
+    #[test]
+    fn a_ledger_with_one_invalid_byte_keeps_every_other_entry() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        mark_harvested(dir, "s1", &[], HarvestDecision::Skipped, None).unwrap();
+        mark_harvested(dir, "s2", &[], HarvestDecision::Skipped, None).unwrap();
+        // A torn line between two good ones.
+        let path = ledger_path(dir);
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(b"{\"session_id\":\"s3\",\"note\":\"caf");
+        bytes.push(0xC3);
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).unwrap();
+        mark_harvested(dir, "s4", &[], HarvestDecision::Skipped, None).unwrap();
+
+        assert!(is_harvested(dir, "s1"));
+        assert!(is_harvested(dir, "s2"));
+        assert!(is_harvested(dir, "s4"));
+    }
+
+    /// A tiny deterministic generator (xorshift64*), so a failing case is
+    /// reproducible from its index alone.
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+        fn chance(&mut self, one_in: u64) -> bool {
+            self.below(one_in) == 0
+        }
+    }
+
+    /// One generated ledger line, as JSON. Timestamps are within the last
+    /// ten days (so the age window keeps them), on a coarse grid so equal
+    /// instants are common, and written in random order relative to their
+    /// time (a backwards clock).
+    fn generated_line(g: &mut Gen, base: DateTime<Utc>) -> serde_json::Value {
+        const SESSIONS: [&str; 6] = ["s-a", "s-b", "s-c", "s-d", "s-e", "s-f"];
+        let at = |g: &mut Gen| base + Duration::minutes(g.below(40) as i64 * 15);
+        let mut line = serde_json::Map::new();
+        line.insert("session_id".into(), SESSIONS[g.below(6) as usize].into());
+        line.insert("at".into(), serde_json::to_value(at(g)).unwrap());
+        if g.chance(12) {
+            line.insert("removed".into(), true.into());
+            return line.into();
+        }
+        if g.chance(2) {
+            let stage = ["collected", "indexed"][g.below(2) as usize];
+            line.insert("stage".into(), stage.into());
+        }
+        if g.chance(2) {
+            let decision = ["harvested", "skipped", "deferred", "unreviewed"][g.below(4) as usize];
+            line.insert("decision".into(), decision.into());
+        }
+        if g.chance(3) {
+            let ids: Vec<String> = (0..g.below(4)).map(|i| format!("m{i}")).collect();
+            line.insert("memory_ids".into(), ids.into());
+        }
+        if g.chance(8) {
+            line.insert("memories_created".into(), g.below(5).into());
+        }
+        match g.below(4) {
+            0 => {
+                line.insert("note".into(), serde_json::Value::Null);
+            }
+            1 => {
+                line.insert("note".into(), format!("note {}", g.below(100)).into());
+            }
+            _ => {}
+        }
+        match g.below(4) {
+            0 => {
+                line.insert("archive".into(), serde_json::Value::Null);
+            }
+            1 => {
+                let archive = crate::transcript_archive::ArchiveRef {
+                    file_name: format!("f{}.jsonl.zst", g.below(10)),
+                    bytes: g.below(1000),
+                    original_bytes: g.below(10_000),
+                    sha256: format!("{:064x}", g.next()),
+                    archived_at: at(g),
+                };
+                line.insert("archive".into(), serde_json::to_value(archive).unwrap());
+            }
+            _ => {}
+        }
+        match g.below(5) {
+            0 => {
+                line.insert("index_failed_at".into(), serde_json::Value::Null);
+            }
+            1 => {
+                line.insert(
+                    "index_failed_at".into(),
+                    serde_json::to_value(at(g)).unwrap(),
+                );
+            }
+            _ => {}
+        }
+        line.into()
+    }
+
+    /// Every field of every entry, in a comparable form. The raw `decision`
+    /// is compared as it is: an entry no line ever decided must stay `None`.
+    fn folded_view(dir: &Path) -> std::collections::BTreeMap<String, String> {
+        read_harvested(dir)
+            .into_iter()
+            .map(|(id, e)| (id, format!("{e:?}")))
+            .collect()
+    }
+
+    /// Compaction rewrites the log as one snapshot line per entry (plus
+    /// young tombstones). Folding the rewrite must give exactly what folding
+    /// the original gave — every field, `harvested_at` included — for any
+    /// sequence of patches: random fields, `null` clears, equal and
+    /// backwards timestamps, tombstones and re-creations. `compressed` is
+    /// left out: it drains on read by design.
+    #[test]
+    fn compaction_preserves_the_fold_for_generated_ledgers() {
+        let base = Utc::now() - Duration::days(10);
+        // Lines whose session id is refused: counted as lines (so the log
+        // qualifies for compaction), never folded.
+        let padding = format!(
+            "{}\n",
+            serde_json::json!({"session_id": "..", "at": base, "note": "x".repeat(40)})
+        )
+        .repeat(1 + COMPACT_MIN_BYTES as usize / 80);
+        let mut compacted = 0;
+        for case in 0..500u64 {
+            let mut g = Gen(0x9e37_79b9_7f4a_7c15 ^ (case + 1).wrapping_mul(0x1000_0000_01b3));
+            let tmp = TempDir::new().unwrap();
+            let dir = tmp.path();
+            std::fs::create_dir_all(dir.join(".engramdb").join("state")).unwrap();
+            let mut text = padding.clone();
+            for _ in 0..(1 + g.below(30)) {
+                text.push_str(&generated_line(&mut g, base).to_string());
+                text.push('\n');
+            }
+            std::fs::write(ledger_path(dir), &text).unwrap();
+
+            let before = folded_view(dir);
+            maybe_compact(dir);
+            let rewritten = std::fs::read_to_string(ledger_path(dir)).unwrap();
+            if rewritten.len() < text.len() {
+                compacted += 1;
+            }
+            let after = folded_view(dir);
+            assert_eq!(
+                before, after,
+                "case {case}: compaction changed the fold\n--- original ---\n{}\n--- compacted ---\n{rewritten}",
+                text.lines()
+                    .filter(|l| !l.contains(r#""session_id":"..""#))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+        assert_eq!(
+            compacted, 500,
+            "every generated log must actually be compacted"
+        );
     }
 }

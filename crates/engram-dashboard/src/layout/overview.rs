@@ -11,7 +11,7 @@
 
 use serde::Serialize;
 
-use super::scope_force::pack;
+use super::scope_force::{pack, PACK_MAX};
 use super::{js_cmp, js_round};
 
 const MARGIN: f64 = 14.0;
@@ -108,22 +108,28 @@ pub fn layout(input: &OverviewInput) -> OverviewOutput {
         mean += rad[k];
     }
     mean = if m > 0 { mean / m as f64 } else { 1.0 };
-    let mut aff = vec![0.0f64; m * m];
-    for e in &input.edges {
-        if e.s == e.t || e.s >= m || e.t >= m {
-            continue;
+    // The affinity matrix is m × m, and `pack` reads it only up to
+    // PACK_MAX scopes (past that it lays them on a spiral), so it is not
+    // built past that: a store's top-scope count has no cap.
+    let aff = (m <= PACK_MAX).then(|| {
+        let mut aff = vec![0.0f64; m * m];
+        for e in &input.edges {
+            if e.s == e.t || e.s >= m || e.t >= m {
+                continue;
+            }
+            let a = rank[e.s];
+            let b = rank[e.t];
+            let n = if e.n != 0.0 && !e.n.is_nan() {
+                e.n
+            } else {
+                1.0
+            };
+            aff[a * m + b] += n;
+            aff[b * m + a] += n;
         }
-        let a = rank[e.s];
-        let b = rank[e.t];
-        let n = if e.n != 0.0 && !e.n.is_nan() {
-            e.n
-        } else {
-            1.0
-        };
-        aff[a * m + b] += n;
-        aff[b * m + a] += n;
-    }
-    let c = pack(&rad, Some(&aff), aspect, 2f64.max(mean * 2.2));
+        aff
+    });
+    let c = pack(&rad, aff.as_deref(), aspect, 2f64.max(mean * 2.2));
     let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
     let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for k in 0..m {

@@ -67,8 +67,9 @@
 
 The arrows are dependency direction. The layers above only depend on the layers below.
 
-The layers are real Cargo workspace crates: `engram-cli` and `engram-mcp` are
-front-ends over the `engramdb` core lib (the root crate, `src/`), and the core
+The layers are real Cargo workspace crates: `engram-cli`, `engram-mcp` and
+`engram-dashboard` (the local web dashboard, a third front end that the
+diagram does not show) are front-ends over the `engramdb` core lib (the root crate, `src/`), and the core
 re-exports the extracted leaf crates (`engram-storage`, `engram-models`,
 `engram-types`, `engram-onnx`) under their historical module paths
 (`engramdb::storage`, `::embeddings`, `::types`, …). See
@@ -195,6 +196,10 @@ Every store records a fingerprint of the embedding model it was built with: `mod
 See [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) ("Shared embedding daemon" section) for the full design. The contract you must not break: **daemon failures never break operations** — when disabled or unreachable, the MCP process loads models in-process. Every client/server site uses `daemon::resolve_socket` so they agree on the socket path.
 
 The daemon's settings (`[daemon]`) come only from the **global** config file (`engram_storage::paths::global_config_path`, loaded by `engram_storage::config::load_global_config_or_default`), never from a project's `.engramdb/config.toml`: one daemon serves every project. A project `[daemon]` table still parses (`EngramConfig::legacy_daemon`, raw TOML) so old configs load, but nothing reads it as settings; the loader warns and `doctor` reports it. Model selection stays per project and travels in each request (`daemon::ModelSelection`); the daemon never reads a project directory.
+
+## Dashboard
+
+`engramdb dashboard` (`crates/engram-dashboard/`) is a local web view of every store on the machine. It runs as its own process, never inside the daemon, and it loads no model. It opens stores read-only, so a GET writes nothing: no migration, no usage event. The server computes every graph layout; the page has no layout code. The one write path is the review of a proposed relation, and it works only with `--allow-writes`. The full description is [dashboard.md](./dashboard.md); the rules that guard known defects are also listed in [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md). Budgets and measurements are in [dashboard-performance.md](./dashboard-performance.md).
 
 ## Retrieval pipeline
 

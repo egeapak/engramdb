@@ -297,9 +297,11 @@ impl PrototypeClassifier {
     /// Embed the seeds and `prompt` in **one** batch call and classify it.
     ///
     /// For a caller that classifies a single prompt and exits (the
-    /// UserPromptSubmit hook): nothing is kept between calls, so there is no
-    /// cache to go stale when the model or [`SEEDS`] change, at the cost of
-    /// embedding the seeds every time ([`PrototypeParams::seeds_per_class`]).
+    /// UserPromptSubmit hook in its own process): nothing is kept between
+    /// calls, so there is no cache to go stale when the model or [`SEEDS`]
+    /// change, at the cost of embedding the seeds every time
+    /// ([`PrototypeParams::seeds_per_class`]). The daemon keeps a built
+    /// classifier instead and calls [`Self::classify_with`].
     pub async fn classify_once(
         provider: &dyn EmbeddingProvider,
         params: PrototypeParams,
@@ -368,6 +370,37 @@ impl PrototypeClassifier {
     pub fn with_params(mut self, params: PrototypeParams) -> Self {
         self.params = params;
         self
+    }
+
+    /// Embed `prompt` alone with `provider` and classify it against seeds
+    /// embedded earlier ([`Self::build`]) — for a long-lived process that
+    /// keeps the classifier (the daemon). Refuses a provider whose model is
+    /// not the one the seeds were embedded with, so the caller falls back to
+    /// [`Self::classify_once`] rather than comparing vectors of two models.
+    ///
+    /// The prompt is embedded as a batch of one, which with the default 24
+    /// seeds and ONNX's 8-text runs is the same run `classify_once` gives it
+    /// (three runs of seeds, then the prompt alone), so the decision is the
+    /// same.
+    pub async fn classify_with(
+        &self,
+        provider: &dyn EmbeddingProvider,
+        prompt: &str,
+    ) -> Result<PromptDecision> {
+        let model = provider.model_id();
+        ensure!(
+            model == self.model_id,
+            "classifier seeds are from {}, not {model}",
+            self.model_id
+        );
+        let mut vectors = provider.embed_batch(&[prompt]).await?;
+        ensure!(
+            vectors.len() == 1,
+            "provider returned {} vectors for 1 text",
+            vectors.len()
+        );
+        let v = vectors.pop().expect("length checked above");
+        Ok(self.classify_embedded(prompt, &v))
     }
 
     /// Embed `prompt` and classify it.
@@ -728,6 +761,46 @@ mod tests {
             let v = FamilyEmbedder.embed(prompt).await.unwrap();
             assert_eq!(once, built.classify_embedded(prompt, &v), "{prompt}");
         }
+    }
+
+    #[tokio::test]
+    async fn classify_with_matches_classify_once() {
+        let params = PrototypeParams::default();
+        let built = PrototypeClassifier::build(&FamilyEmbedder, params)
+            .await
+            .unwrap();
+        let mut prompts: Vec<&str> = SEEDS.iter().map(|(_, t)| *t).collect();
+        prompts.extend([
+            "the server segfault is a bug",
+            "compare the tradeoff, what do you recommend",
+            "rename and move the file",
+            "ok thanks",
+            "looks good, push it and open a PR",
+            "",
+        ]);
+        for prompt in prompts {
+            let once = PrototypeClassifier::classify_once(&FamilyEmbedder, params, prompt)
+                .await
+                .unwrap();
+            let with = built.classify_with(&FamilyEmbedder, prompt).await.unwrap();
+            assert_eq!(with, once, "{prompt:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_with_refuses_another_model() {
+        let built = PrototypeClassifier::build(&FamilyEmbedder, PrototypeParams::default())
+            .await
+            .unwrap();
+        let p = CountingEmbedder(std::sync::atomic::AtomicUsize::new(0));
+        assert_ne!(p.model_id(), built.model_id());
+        let err = built.classify_with(&p, "a bug").await.unwrap_err();
+        assert!(err.to_string().contains("seeds are from"), "{err}");
+        assert_eq!(
+            p.0.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing embedded with the other model"
+        );
     }
 
     #[test]

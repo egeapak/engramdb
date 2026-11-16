@@ -47,6 +47,10 @@ pub struct GcPlan {
     pub candidates: Vec<GcCandidate>,
     /// IDs found in index but missing from data store. Suggests reindex is needed.
     pub stale_entries: Vec<String>,
+    /// IDs whose memory file exists but does not parse (`doctor` names them).
+    /// Not stale entries: reindex would keep their rows, and gc never deletes
+    /// them.
+    pub unparseable: Vec<String>,
     /// The effective threshold the candidates were scored against.
     pub threshold: f64,
 }
@@ -79,6 +83,8 @@ pub struct GcResult {
     pub skipped: Vec<String>,
     /// IDs found in index but missing from data store. Suggests reindex is needed.
     pub stale_entries: Vec<String>,
+    /// IDs whose memory file exists but does not parse; see [`GcPlan::unparseable`].
+    pub unparseable: Vec<String>,
     /// Index optimize stats from the maintenance pass that runs after the
     /// deletion phase. `None` on a dry run (a preview must not mutate the
     /// store, and optimize commits new versions) and when the optimize pass
@@ -101,18 +107,32 @@ pub async fn plan_gc(
     let loaded = store.get_batch(&ids).await?;
     let loaded_ids: std::collections::HashSet<&str> =
         loaded.iter().map(|(id, _)| id.as_str()).collect();
-    let stale_entries: Vec<String> = ids
+    let not_loaded: Vec<String> = ids
         .iter()
         .filter(|id| !loaded_ids.contains(id.as_str()))
         .cloned()
         .collect();
+    // A row that did not load is stale only when its file is gone; a file
+    // that is there but does not parse is a different problem (doctor names
+    // it), and calling it a stale index entry sent the user to a reindex that
+    // keeps the row.
+    let on_disk = if not_loaded.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        store.batch_exists(&not_loaded).await?
+    };
+    let (unparseable, stale_entries): (Vec<String>, Vec<String>) = not_loaded
+        .into_iter()
+        .partition(|id| on_disk.contains(id.as_str()));
 
     // §2.4 retention: memories whose validity window closed longer ago than
     // `[epistemic] invalidated_retention_days` are purged regardless of
     // score. `0` = keep forever.
     let retention_days = config.epistemic.invalidated_retention_days;
-    let retention_cutoff =
-        (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
+    // An out-of-range retention means "nothing is that old" (no cutoff).
+    let retention_cutoff = (retention_days > 0)
+        .then(|| super::parsing::days_before(now, retention_days))
+        .flatten();
 
     let mut candidates = Vec::new();
     for (_, memory) in &loaded {
@@ -151,6 +171,7 @@ pub async fn plan_gc(
     Ok(GcPlan {
         candidates,
         stale_entries,
+        unparseable,
         threshold,
     })
 }
@@ -173,8 +194,10 @@ pub async fn execute_gc_plan(
 
     // Recompute the retention cutoff for execution-time re-validation.
     let retention_days = config.epistemic.invalidated_retention_days;
-    let retention_cutoff =
-        (retention_days > 0).then(|| now - chrono::Duration::days(retention_days as i64));
+    // An out-of-range retention means "nothing is that old" (no cutoff).
+    let retention_cutoff = (retention_days > 0)
+        .then(|| super::parsing::days_before(now, retention_days))
+        .flatten();
 
     // One lock, one batched re-read, one index delete, one chunk delete and
     // one manifest refresh for the whole sweep. `delete_if` per candidate was
@@ -238,6 +261,7 @@ pub async fn execute_gc_plan(
         count,
         skipped,
         stale_entries: plan.stale_entries,
+        unparseable: plan.unparseable,
         maintenance: None,
     })
 }
@@ -323,6 +347,7 @@ pub async fn gc_memories(
             count,
             skipped: Vec::new(),
             stale_entries: plan.stale_entries,
+            unparseable: plan.unparseable,
             maintenance: None,
         });
     }
@@ -609,6 +634,49 @@ mod tests {
         );
     }
 
+    /// A file that is present but does not parse is not a stale index entry
+    /// (reindex keeps its row): it is reported on its own, and never deleted.
+    #[tokio::test]
+    async fn gc_separates_unparseable_files_from_stale_entries() {
+        let tmp = TempDir::new().unwrap();
+        let store = init_store(tmp.path()).await;
+        let cfg = EngramConfig::default();
+
+        let mut broken = low_criticality_memory("will not parse");
+        broken.supersedes = vec!["old-1".into()];
+        store.create(&broken).await.unwrap();
+        let path = tmp
+            .path()
+            .join(".engramdb/memories")
+            .join(format!("{}.md", broken.id));
+        let clean = std::fs::read_to_string(&path).unwrap();
+        let conflicted = clean.replace(
+            "supersedes:\n- old-1\n",
+            "<<<<<<< HEAD\nsupersedes:\n- old-1\n=======\nsupersedes: []\n>>>>>>> topic\n",
+        );
+        assert_ne!(clean, conflicted);
+        std::fs::write(&path, conflicted).unwrap();
+
+        let gone = low_criticality_memory("file deleted");
+        store.create(&gone).await.unwrap();
+        std::fs::remove_file(
+            tmp.path()
+                .join(".engramdb/memories")
+                .join(format!("{}.md", gone.id)),
+        )
+        .unwrap();
+
+        for dry_run in [true, false] {
+            let result = gc_memories(&store, &cfg, dry_run, Some(0.99))
+                .await
+                .unwrap();
+            assert_eq!(result.unparseable, vec![broken.id.clone()]);
+            assert_eq!(result.stale_entries, vec![gone.id.clone()]);
+            assert!(!result.removed.contains(&broken.id));
+        }
+        assert!(path.exists(), "gc never deletes an unparseable file");
+    }
+
     /// TOCTOU guard: a candidate whose criticality is raised between the
     /// scoring (planning) phase and the deletion (execution) phase must
     /// survive — the stale score from the snapshot must not destroy the
@@ -773,6 +841,25 @@ mod invalidated_retention_tests {
             "the live low-score control should still be reaped: {:?}",
             result.removed
         );
+    }
+
+    /// A retention too large for `chrono` used to panic in
+    /// `Duration::days` (a release build aborts); it now means "nothing is
+    /// that old".
+    #[tokio::test]
+    async fn gc_survives_an_enormous_retention_days() {
+        let (_t, store) = setup().await;
+        let mut old = memory("gc-enormous", 0.9);
+        old.invalidated_at = Some(Utc::now() - Duration::days(10_000));
+        store.create(&old).await.unwrap();
+
+        let mut config = EngramConfig::default();
+        config.epistemic.invalidated_retention_days = u64::MAX;
+        for dry_run in [true, false] {
+            let result = gc_memories(&store, &config, dry_run, None).await.unwrap();
+            assert!(result.removed.is_empty(), "{:?}", result.removed);
+        }
+        assert!(store.get("gc-enormous").await.is_ok());
     }
 
     #[tokio::test]

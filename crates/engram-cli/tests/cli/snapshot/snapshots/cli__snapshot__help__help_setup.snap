@@ -11,7 +11,7 @@ Usage: engramdb setup [OPTIONS]
 
 Options:
       --no-plugin
-          Skip plugin install in global mode, write hooks and MCP directly to settings.json
+          Skip plugin install in global mode; write hooks to settings.json and the MCP entry to ~/.claude.json
 
       --global
           Install to ~/.claude/ instead of project-local .claude/

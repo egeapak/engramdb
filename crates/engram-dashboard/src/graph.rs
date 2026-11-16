@@ -70,7 +70,9 @@ use engramdb::storage::lance_index::IndexFilterable;
 use engramdb::types::Status;
 use serde::Serialize;
 
-use crate::api::{color_slots, ok, open, query, status_str, top_scope_of, wire, ApiResult};
+use crate::api::{
+    color_slots, finite, ok, open, query, scope_keys, status_str, top_scope_of, wire, ApiResult,
+};
 use crate::layout::{
     cache::Flight, overview::OverviewInput, Cached, EdgeFacts, ForceInput, Groups, LayoutInput,
     LayoutRequest, NodeFacts,
@@ -244,6 +246,9 @@ struct Counts {
     /// other is one the filters admit; neither a relation with both ends
     /// outside `top_scope=` nor one counted in `stub_scopes` (drawn end or not).
     hidden: usize,
+    /// `hidden` by kind and status (the shape of a tally's `kinds`), so the
+    /// page counts them under its display filters; sums to `hidden`.
+    hidden_kinds: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
 #[derive(Serialize)]
@@ -417,10 +422,17 @@ async fn layout_of(
     let input = Arc::new(input);
     let key = input.digest();
     let cached = cached_layout(state, &input, &key).await?;
-    tokio::task::spawn_blocking(move || input.render(&cached, &key, groups, dirs.as_ref()))
-        .await
-        .map_err(layout_failed)?
-        .map_err(layout_failed)
+    let k = key.clone();
+    let rendered =
+        tokio::task::spawn_blocking(move || input.render(&cached, &k, groups, dirs.as_ref()))
+            .await
+            .map_err(layout_failed)?;
+    rendered.map_err(|why| {
+        // What the cache holds for this key cannot be sent: drop it, so
+        // *Try again* computes it afresh instead of failing the same way.
+        state.layouts.forget(&key);
+        layout_failed(why)
+    })
 }
 
 /// A memory's sub-scope: the first two segments of its first logical scope,
@@ -538,7 +550,7 @@ fn rank(rows: &mut [(&IndexFilterable, usize, u64)]) {
     rows.sort_by(|a, b| {
         b.1.cmp(&a.1)
             .then(b.2.cmp(&a.2))
-            .then(b.0.criticality.total_cmp(&a.0.criticality))
+            .then(finite(b.0.criticality).total_cmp(&finite(a.0.criticality)))
             .then_with(|| a.0.id.cmp(&b.0.id))
     });
 }
@@ -572,9 +584,8 @@ pub(crate) async fn project_graph(
         include_rejected: flag(&q, "include_rejected", false)?,
         include_invalidated: flag(&q, "include_invalidated", false)?,
     };
-    let scopes_wanted: Option<Vec<&str>> = q
-        .get("top_scope")
-        .map(|l| l.split(',').map(str::trim).collect());
+    let scopes_wanted: Option<Vec<String>> =
+        q.get("top_scope").map(|l| scope_keys(l)).transpose()?;
     let limit: usize = match q.get("limit") {
         Some(l) => l
             .parse::<usize>()
@@ -655,10 +666,9 @@ pub(crate) async fn project_graph(
         .iter()
         .filter_map(|n| rows.get(n.id.as_str()).copied())
         .filter(|e| {
-            scopes_wanted.as_ref().is_none_or(|ls| {
-                let l = top_scope_of(&e.logical).unwrap_or_else(|| "-".to_string());
-                ls.contains(&l.as_str())
-            })
+            scopes_wanted
+                .as_ref()
+                .is_none_or(|ls| ls.contains(&top_scope_of(&e.logical).unwrap_or_default()))
         })
         .collect();
     if summary_over.is_some_and(|n| admitted.len() > n) {
@@ -801,6 +811,12 @@ pub(crate) async fn project_graph(
                     || !rows.contains_key(e.dst.as_str()));
             if !keep && touches_view(e) {
                 counts.hidden += 1;
+                *counts
+                    .hidden_kinds
+                    .entry(e.kind.as_str().to_string())
+                    .or_default()
+                    .entry(e.status.as_str().to_string())
+                    .or_insert(0) += 1;
             }
             keep
         })
@@ -853,7 +869,7 @@ pub(crate) async fn project_graph(
             dst_store: e.dst_store.clone(),
             kind: e.kind.clone(),
             symmetric: e.symmetric,
-            confidence: e.confidence,
+            confidence: finite(e.confidence),
             origin: e.origin.clone(),
             status: e.status.clone(),
             created_at: e.created_at,
@@ -882,7 +898,7 @@ pub(crate) async fn project_graph(
                 challenged: e.status == Status::Challenged,
                 invalidated: e.invalidated_at.is_some_and(|t| t <= now),
                 visibility: wire(&e.visibility).to_lowercase(),
-                criticality: e.criticality,
+                criticality: finite(e.criticality),
                 color_slot: top_scope.as_ref().and_then(|l| slots.get(l).copied()),
                 top_scope,
                 scope: e.logical.first().cloned(),
@@ -924,7 +940,7 @@ pub(crate) async fn project_graph(
                     let key = input.digest();
                     match &*cached_layout(&state, &input, &key).await? {
                         Cached::Overview(text) => {
-                            let me = if ls[0] == "-" { "" } else { ls[0] };
+                            let me = ls[0].as_str();
                             let names: Vec<&str> = far.iter().map(|f| f.name.as_str()).collect();
                             crate::layout::overview_dirs(text, me, &names)
                         }

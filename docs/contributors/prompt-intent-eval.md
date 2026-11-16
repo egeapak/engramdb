@@ -4,8 +4,10 @@ Status: **the situation classifier is wired into the UserPromptSubmit hook;
 the context gate is parked.** The hook uses the classifier with a running
 daemon's model, or else loads the embedding model in-process (keyword tables
 when neither is available). It searches on every prompt, and adds a second
-search on the tail of the agent's previous message. Nothing is cached: each
-call embeds the seeds and the prompt in one batch.
+search on the tail of the agent's previous message. In the hook's own process
+nothing is cached: each call embeds the seeds and the prompt in one batch. A
+hook the daemon serves embeds the seeds once per model and then only the
+prompt (see "Seeds per class" below).
 
 ## What is being decided
 
@@ -124,11 +126,21 @@ the docs". No length guard can separate them from "ok go" or "sure thing".
 They need short task seeds in the `Other` class, or a larger margin (0.10 has
 one wrong skip but catches two fewer skips).
 
-### Seeds per class, without a cache
+### Seeds per class, and the daemon's seed cache
 
-The hook keeps nothing between prompts, so every call embeds the seeds and the
-prompt together (`PrototypeClassifier::classify_once`, one batch call). The
-number of seeds per class is then the cost knob. Same 150 prompts, two runs
+A hook in its own process keeps nothing between prompts, so every call embeds
+the seeds and the prompt together (`PrototypeClassifier::classify_once`, one
+batch call). The number of seeds per class is then the cost knob.
+
+A hook the daemon serves keeps the built classifier (`hook::SeedCache`, keyed
+by model id, width and seeds per class) and embeds only the prompt
+(`classify_with`): 1 text per prompt instead of 25. The decision is the same
+one: ONNX embeds in runs of at most 8 texts, so the 24 default seeds were
+already three runs of their own and the prompt a fourth run alone, which is
+exactly what `classify_with` embeds. With a seed count that is not a multiple
+of 8 the prompt shared a run with seeds, and the two paths would differ at
+rounding level. The seeds are constants of the binary and a new build evicts
+the daemon, so the cache cannot go stale. Same 150 prompts, two runs
 with identical accuracy:
 
 | Seeds per class | Seeds embedded | Situation accuracy | Macro-F1 | Per prompt, in-process (p50 / p95) |

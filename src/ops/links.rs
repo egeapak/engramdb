@@ -369,6 +369,11 @@ pub(crate) async fn check_privacy(
     let mut ids: Vec<&str> = named.iter().map(String::as_str).collect();
     ids.extend(supersede_targets.iter().map(String::as_str));
     ids.retain(|id| Some(*id) != holder_id);
+    // Nothing named and nothing inbound to check: the common create, which
+    // would otherwise still pay a batch read.
+    if ids.is_empty() && !check_inbound {
+        return Ok(());
+    }
     let loaded: HashMap<String, Memory> = store.get_batch(&ids).await?.into_iter().collect();
     let holder = holder_id.unwrap_or("the new memory");
     if holder_visibility == Visibility::Shared {
@@ -915,6 +920,58 @@ async fn remove_reverse_copy(
     Ok(())
 }
 
+/// `source_id` no longer supersedes `target_id`: hand the target's
+/// `superseded_by` mirror to another memory that still lists it in
+/// `supersedes`, or, when none does, reopen the target's validity window.
+///
+/// Only acts when the target's `superseded_by` names `source_id` (checked
+/// under the write lock); returns whether the target was reopened. Call it
+/// after `source_id`'s own list has dropped the target, so the edge rows no
+/// longer count it as a superseder.
+pub(crate) async fn release_superseded(
+    store: &MemoryStore,
+    source_id: &str,
+    target_id: &str,
+) -> Result<bool> {
+    let others: Vec<String> = store
+        .list_edge_rows_touching(target_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| {
+            r.kind == LinkKind::Supersedes
+                && r.field == EdgeField::Supersedes
+                && r.dst_id == target_id
+                && r.src_id != source_id
+        })
+        .map(|r| r.src_id)
+        .collect();
+    let successor = store
+        .get_batch(&others.iter().map(String::as_str).collect::<Vec<_>>())
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(_, m)| m.supersedes.iter().any(|s| s == target_id))
+        .map(|(id, _)| id);
+    let mut reopened = false;
+    store
+        .update_with(target_id, |m| {
+            if m.superseded_by.as_deref() == Some(source_id) {
+                match successor {
+                    Some(next) => m.superseded_by = Some(next),
+                    None => {
+                        m.superseded_by = None;
+                        m.invalidated_at = None;
+                        reopened = true;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(reopened)
+}
+
 async fn unlink_supersedes(
     store: &MemoryStore,
     edge: EdgeRef,
@@ -948,47 +1005,8 @@ async fn unlink_supersedes(
             })
             .await?;
     }
-    // Reopen the target only when nothing else still supersedes it: another
-    // memory listing it in `supersedes` takes over the mirror instead, and
-    // the window stays closed.
     let reopened = if mirrored {
-        let src_id = src.id.clone();
-        let others: Vec<String> = store
-            .list_edge_rows_touching(&dst_id)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| {
-                r.kind == LinkKind::Supersedes
-                    && r.field == EdgeField::Supersedes
-                    && r.dst_id == dst_id
-                    && r.src_id != src_id
-            })
-            .map(|r| r.src_id)
-            .collect();
-        let successor = store
-            .get_batch(&others.iter().map(String::as_str).collect::<Vec<_>>())
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .find(|(_, m)| m.supersedes.contains(&dst_id))
-            .map(|(id, _)| id);
-        let reopen = successor.is_none();
-        store
-            .update_with(&dst_id, |m| {
-                if m.superseded_by.as_deref() == Some(src_id.as_str()) {
-                    match successor {
-                        Some(next) => m.superseded_by = Some(next),
-                        None => {
-                            m.superseded_by = None;
-                            m.invalidated_at = None;
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .await?;
-        reopen
+        release_superseded(store, &src.id, &dst_id).await?
     } else {
         false
     };
@@ -2364,6 +2382,19 @@ mod tests {
         (tmp, store)
     }
 
+    /// Delete the edge rows `owner` declares straight from the derived table,
+    /// leaving its file alone: what a failed edge write leaves behind.
+    async fn drop_edge_rows_owned_by(store: &MemoryStore, owner: &str) {
+        let lance = crate::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        let conn = lancedb::connect(lance.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        crate::storage::edge_index::delete_owned(&conn, &[owner.to_string()])
+            .await
+            .unwrap();
+    }
+
     async fn mem(store: &MemoryStore, summary: &str, visibility: Visibility) -> String {
         let mut m = Memory::new(
             MemoryType::Decision,
@@ -3014,6 +3045,34 @@ mod tests {
         assert_eq!(h.personal_leaks[0].src, p);
         assert_eq!(h.personal_leaks[0].dst, s);
         assert_eq!(h.table_drift, 0, "{h:?}");
+    }
+
+    /// A row the files declare but the derived table lacks is drift, and
+    /// `reindex` (the documented repair) clears it.
+    #[tokio::test]
+    async fn edge_health_counts_rows_missing_from_the_table() {
+        let (_t, store) = store().await;
+        let a = mem(&store, "a", Visibility::Shared).await;
+        let b = mem(&store, "b", Visibility::Shared).await;
+        store
+            .update_with(&a, |m| {
+                m.links.push(crate::types::Link::new(
+                    b.clone(),
+                    LinkKind::Supports,
+                    crate::types::LinkOrigin::Human,
+                ));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(edge_health(&store).await.unwrap().table_drift, 0);
+
+        drop_edge_rows_owned_by(&store, &a).await;
+
+        let h = edge_health(&store).await.unwrap();
+        assert_eq!(h.table_drift, 1, "{h:?}");
+        store.reindex().await.unwrap();
+        assert_eq!(edge_health(&store).await.unwrap().table_drift, 0);
     }
 
     /// Cross-store edges against a real, openable group store: checked as

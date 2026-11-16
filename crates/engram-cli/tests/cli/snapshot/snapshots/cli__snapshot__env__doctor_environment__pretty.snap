@@ -22,8 +22,8 @@ Project
   ✓ Write lock: no active writer
   ○ Project .gitignore: no .gitignore file
   ✓ Project disk usage: [SIZE]
-      shared: [SIZE] (0 memories)
-      personal: [SIZE] (0 memories)
+      shared: 0 B (0 memories)
+      personal: 0 B (0 memories)
       index: [SIZE]
 
 Projects
@@ -38,7 +38,7 @@ Global settings & models
   ○ Global gitignore: .engramdb not in global excludes
   ℹ Add .engramdb to [HOME]/config/git/ignore to ignore it in all repositories
   ⚠ Claude Code plugin: not found
-  ℹ Install with `claude plugin add https://github.com/egeapak/engramdb`
+  ℹ Install in Claude Code with `/plugin marketplace add egeapak/engramdb`, then `/plugin install engram@engramdb`
   ⚠ Hook configuration: not configured
   ℹ Install the Claude Code plugin to configure hooks automatically
   ○ Auto-maintenance: disabled

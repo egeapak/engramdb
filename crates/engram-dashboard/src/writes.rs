@@ -136,9 +136,9 @@ async fn open_writable(location: &Location) -> Result<MemoryStore, ApiError> {
 /// reviewed elsewhere (409 `not_proposed`, naming its status); an
 /// `ops::links` refusal — a loser already superseded, a personal-id leak, a
 /// bad store spec — which ops types as [`links::LinkRefused`] (409
-/// `edge_write_refused`). Anything else — storage (I/O, the index, which
-/// reports every LanceDB failure as `Validation`) or an untyped `anyhow`
-/// error from below — is the server's problem: 500.
+/// `edge_write_refused`). Anything else — storage (I/O, or the index, typed
+/// `StorageError::Index`) or an untyped `anyhow` error from below — is the
+/// server's problem: 500.
 fn write_error(e: anyhow::Error) -> ApiError {
     if let Some(missing) = e.downcast_ref::<links::EdgeNotFound>() {
         return ApiError::not_found("unknown_edge", missing.to_string());
@@ -157,9 +157,11 @@ fn write_error(e: anyhow::Error) -> ApiError {
         Some(StorageError::NotFound(id)) => {
             ApiError::not_found("unknown_memory", format!("no memory {id} in this store"))
         }
-        Some(StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix") => {
-            ApiError::new(StatusCode::BAD_REQUEST, "ambiguous_id", msg.clone())
-        }
+        Some(ambiguous @ StorageError::AmbiguousId { .. }) => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "ambiguous_id",
+            ambiguous.to_string(),
+        ),
         _ => ApiError::internal(format!("{e:#}")),
     }
 }
@@ -329,12 +331,19 @@ mod tests {
             (StatusCode::NOT_FOUND, "unknown_memory")
         );
         let ambiguous = write_error(
-            StorageError::Validation("Ambiguous ID prefix 'a': matches 2 memories".into()).into(),
+            StorageError::AmbiguousId {
+                prefix: "a".into(),
+                matches: 2,
+            }
+            .into(),
         );
-        assert_eq!(ambiguous.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            (ambiguous.status, ambiguous.code),
+            (StatusCode::BAD_REQUEST, "ambiguous_id")
+        );
         for e in [
             anyhow::anyhow!("Failed to query edges"),
-            StorageError::Validation("LanceDB upsert failed".into()).into(),
+            StorageError::index("upsert")(anyhow::anyhow!("commit conflict")).into(),
         ] {
             let mapped = write_error(e);
             assert_eq!(

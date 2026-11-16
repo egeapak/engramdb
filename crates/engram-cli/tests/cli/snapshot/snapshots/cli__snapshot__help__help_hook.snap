@@ -13,8 +13,8 @@ Commands:
   pre-tool-use        Handle PreToolUse hook events (reads JSON from stdin, outputs additionalContext)
   session-start       Handle SessionStart hook events (outputs high-criticality memories)
   user-prompt-submit  Handle UserPromptSubmit hook events (prompt-relevant memories with situation inference)
-  post-tool-use       Handle PostToolUse hook events (warn when an edit touches a memory's watch paths)
-  session-end         Handle SessionEnd hook events (housekeeping; no context output)
+  post-tool-use       Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)
+  session-end         Handle SessionEnd hook events (housekeeping and the transcript copy; no context output)
   pre-compact         Handle PreCompact hook events (store-your-memories reminder before compaction)
   help                Print this message or the help of the given subcommand(s)
 

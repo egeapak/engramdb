@@ -21,11 +21,12 @@ EngramDB loads ONNX Runtime at startup rather than embedding it, so it has to be
 
 ```bash
 brew install onnxruntime          # macOS / Linuxbrew
-scoop install onnxruntime         # Windows
 sudo apt-get install -y libonnxruntime   # where packaged
 ```
 
-Or point at a specific library with `ORT_DYLIB_PATH=/path/to/libonnxruntime.so`. Until one is found EngramDB still runs — search falls back to keyword matching.
+Windows: download the official ONNX Runtime zip from the Microsoft releases page, unpack it, and set `ORT_DYLIB_PATH` to the absolute path of `onnxruntime.dll` (or put its `lib` folder on `PATH`).
+
+Or point at a specific library with `ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so` (a relative path is refused). Until one is found EngramDB still runs — search falls back to keyword matching.
 
 **`ONNX Runtime <version> is too old` (needs API 24).**
 The runtime that was found predates 1.24, which provides C API version 24, the version EngramDB's `ort` build requires. Homebrew ships 1.28; distro packages are often older. Upgrade it, or point `ORT_DYLIB_PATH` at a newer one. EngramDB reports the version it found instead of failing inside `ort`.
@@ -93,7 +94,7 @@ The folder that holds the socket also holds the daemon's lock and log, so the da
 A project's `.engramdb/config.toml` still has a `[daemon]` section. Daemon settings now come only from the global config file (`~/.config/engramdb/config.toml` on Linux, `~/Library/Application Support/engramdb/config.toml` on macOS). Move the keys there and delete the section from the project config. `engramdb doctor` lists the keys.
 
 **Daemon keeps using the old embedding model after a config change.**
-Run `engramdb daemon restart`. A running daemon caches loaded models for its lifetime.
+It should not: a changed model setting is a different model for the daemon, and it loads on the next request. The old model is unloaded after it has been unused for the idle timeout. If results still look wrong, run `engramdb doctor`; a fingerprint mismatch means the store needs `engramdb reindex --embeddings-only`. `engramdb daemon restart` is safe but rarely needed.
 
 **Auto-spawn races.** Two MCP processes spawn the daemon at the same time and one fails.
 This is expected and self-recovering — only one process binds the socket. The other(s) get a `connection refused`, retry with backoff, and connect to the winner. If you see persistent errors, run `engramdb daemon status` to confirm a daemon is up.
@@ -115,7 +116,7 @@ That's intended. Each MCP `serve` session sends a heartbeat that keeps the daemo
 Run `engramdb setup --global` to write `mcp__*` permissions to `~/.claude/settings.json`.
 
 **Duplicate hook output.**
-The plugin and `engramdb setup` both wrote hooks. Remove the manual entries from `~/.claude/settings.json` (`hooks` + `mcpServers`) — the plugin manages them.
+The plugin and `engramdb setup` both wrote hooks. Remove the manual hook entries from `~/.claude/settings.json` and the `engramdb` entry from `~/.claude.json` (project scope: `<project>/.claude/settings.json` and `<project>/.mcp.json`). The plugin manages both.
 
 **Hooks fire but produce no output.**
 - Check that the project has memories: `engramdb list`.
@@ -137,7 +138,7 @@ It should. Worktrees auto-route to the main project. If they're not, run:
 If a worktree was init'd before this routing was added, you may have a stray `.engramdb/` in the worktree. EngramDB will auto-consolidate it on the next memory op; otherwise run any memory command in the worktree to trigger consolidation.
 
 **`projects prune` lists projects I want to keep.**
-Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. Memories aren't lost: prune keeps any data directory still holding personal memories, archived transcripts or conversation summaries, whole — those it lists as `retained_irreplaceable` — and reclaims only the ones that hold nothing but rebuildable data. Shared memories live in the project tree and are never touched.
+Those projects' on-disk paths no longer exist. Either restore the path, or accept the prune. Memories aren't lost: prune keeps any data directory still holding personal memories, transcript copies or conversation summaries, whole — those it lists as `retained_irreplaceable` — and reclaims only the ones that hold nothing but rebuildable data. Shared memories live in the project tree and are never touched.
 
 If `doctor` keeps reporting the same reclaimable orphan after a prune, check
 prune's `failed_to_reclaim` — a directory it could not unlink (owned by another
@@ -168,7 +169,7 @@ After init: `engramdb projects unlink <worktree_id>`. It becomes a root project.
 
 **Queries are slow.**
 - First call in a process is ~240 ms (cold model load). Subsequent calls should be <20 ms. If they're not, run `engramdb stats --daemon` to see latencies and figure out which stage is slow.
-- For very large stores (>10k memories), turn on the reranker (`[rerank].enabled = true`) and lower `top_n` to e.g. 30 — reranking quality stays high while latency drops.
+- For very large stores (>10k memories): the reranker is on by default with `top_n = 10`. If queries are slow, `engramdb stats --daemon` shows which stage costs the time. Setting `[rerank].enabled = false` removes the reranker's cost (about 150 ms per query) and lowers ranking quality.
 
 **Reindex is slow.**
 O(N × embedding-cost) where N = memory count. Expect minutes for thousands of memories. Run with the daemon up — batches share an open model session.
@@ -185,7 +186,7 @@ Per-process model load. Use the daemon (the global `[daemon].enabled = true`, th
 Delete `.engramdb/manifest.toml` and re-init — the index can be rebuilt from memory files with `engramdb reindex`. Memory files themselves are the source of truth.
 
 **Lost / corrupted LanceDB index.**
-`engramdb reindex --index-only`. Vectors are recomputed from memory files.
+Run `engramdb reindex`. It rebuilds the index rows from the memory files and embeds every memory again, because the vectors were stored in the same place. `--index-only` rebuilds the rows without embedding: use it only when the vectors are intact.
 
 ## Getting help
 

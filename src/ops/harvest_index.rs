@@ -468,15 +468,30 @@ pub fn pending_sessions(
     ))
 }
 
+/// How long the automatic pass leaves a session alone after it failed to
+/// index it.
+///
+/// A failure is usually permanent (a transcript that will not parse, a copy
+/// that will not decompress), and the pass is capped per run: without a pause
+/// the same few failing sessions, being the newest, took the whole budget on
+/// every pass and starved every older session behind them. An explicit
+/// `harvest index <id>` / `--all` ignores this.
+pub fn index_retry_after() -> Duration {
+    Duration::hours(24)
+}
+
 /// The due-ness rules, split from the IO so they can be tested directly —
 /// the same split [`crate::ops::harvest::filter_sessions`] uses.
+///
+/// A session whose last automatic attempt failed is skipped for
+/// [`index_retry_after`], then sorted after every session that never failed.
 fn due_sessions(
     summaries: Vec<SessionSummary>,
     ledger: &std::collections::HashMap<String, harvest_state::HarvestEntry>,
     after: Duration,
     now: DateTime<Utc>,
 ) -> Vec<String> {
-    let mut due: Vec<(Option<DateTime<Utc>>, String)> = Vec::new();
+    let mut due: Vec<(bool, Option<DateTime<Utc>>, String)> = Vec::new();
     for session in summaries {
         let entry = ledger.get(&session.session_id);
         // `Indexed` and `Compressed` are both past this stage; only a
@@ -484,16 +499,32 @@ fn due_sessions(
         if entry.is_some_and(|e| e.stage != HarvestStage::Collected) {
             continue;
         }
+        let failed_at = entry.and_then(|e| e.index_failed_at);
+        if failed_at.is_some_and(|t| now - t < index_retry_after()) {
+            continue;
+        }
         let settled = entry.is_some_and(|e| e.is_settled());
         let aged = session.ended_at.is_some_and(|end| now - end >= after);
         if settled || aged {
-            due.push((session.ended_at, session.session_id));
+            due.push((failed_at.is_some(), session.ended_at, session.session_id));
         }
     }
-    // Newest first: a pass that is capped should spend its budget on the
-    // conversations a search is most likely to be about.
-    due.sort_by_key(|(ended_at, _)| std::cmp::Reverse(*ended_at));
-    due.into_iter().map(|(_, id)| id).collect()
+    // Never-failed first, then newest first: a pass that is capped should
+    // spend its budget on the conversations a search is most likely to be
+    // about, and not on ones that already failed once.
+    due.sort_by_key(|(failed, ended_at, _)| (*failed, std::cmp::Reverse(*ended_at)));
+    due.into_iter().map(|(_, _, id)| id).collect()
+}
+
+/// Sessions the automatic pass failed on and has not indexed since.
+///
+/// `doctor` reports these apart from the pending count, which they would
+/// otherwise sit in forever without saying why.
+pub fn index_failures(scope: &SessionScope) -> usize {
+    harvest_state::read_harvested(&scope.root_dir)
+        .values()
+        .filter(|e| e.stage == HarvestStage::Collected && e.index_failed_at.is_some())
+        .count()
 }
 
 /// Index every due session, up to `limit`.
@@ -508,11 +539,28 @@ pub async fn index_pending(
     after: Duration,
     limit: usize,
 ) -> Result<IndexReport> {
-    let due: Vec<String> = pending_sessions(scope, after, Utc::now())?
+    let now = Utc::now();
+    let due: Vec<String> = pending_sessions(scope, after, now)?
         .into_iter()
         .take(limit)
         .collect();
-    index_sessions_with(scope, index, engine, &due, false, Prefer::Live).await
+    let report = index_sessions_with(scope, index, engine, &due, false, Prefer::Live).await?;
+    // Only the automatic pass marks failures: it is the one with a budget to
+    // protect. An explicit run reports its failures and leaves the ledger be.
+    if !report.skipped.is_empty() {
+        let failed: Vec<String> = report
+            .skipped
+            .iter()
+            .map(|s| s.session_id.clone())
+            .collect();
+        if let Err(e) = harvest_state::set_index_failed(&scope.root_dir, &failed, now) {
+            tracing::warn!(
+                "could not record {} failed session(s) in the harvest ledger: {e}",
+                failed.len()
+            );
+        }
+    }
+    Ok(report)
 }
 
 /// Index the sessions named, or every session with bytes behind it.
@@ -1881,6 +1929,7 @@ mod tests {
             stage,
             note: None,
             archive: None,
+            index_failed_at: None,
         }
     }
 
@@ -1937,6 +1986,157 @@ mod tests {
             now,
         );
         assert!(due.is_empty(), "{due:?}");
+    }
+
+    #[test]
+    fn due_sessions_skips_recent_failures_and_sorts_old_ones_last() {
+        let now = Utc::now();
+        let sessions = vec![
+            summary_at("failed-just-now", Some(now - Duration::hours(30))),
+            summary_at("failed-long-ago", Some(now - Duration::hours(40))),
+            summary_at("never-failed", Some(now - Duration::hours(50))),
+        ];
+        let failed = |at| {
+            let mut e = entry(HarvestDecision::Unreviewed, HarvestStage::Collected);
+            e.index_failed_at = Some(at);
+            e
+        };
+        let ledger = [
+            (
+                "failed-just-now".to_string(),
+                failed(now - Duration::hours(1)),
+            ),
+            (
+                "failed-long-ago".to_string(),
+                failed(now - Duration::hours(25)),
+            ),
+            (
+                "never-failed".to_string(),
+                entry(HarvestDecision::Unreviewed, HarvestStage::Collected),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let due = due_sessions(sessions, &ledger, Duration::hours(24), now);
+        assert_eq!(
+            due,
+            vec!["never-failed".to_string(), "failed-long-ago".to_string()],
+            "a recent failure waits out the retry window, an older one goes after \
+             every session that never failed even though it is newer"
+        );
+    }
+
+    /// An embedder that refuses any text mentioning "poison", standing in for
+    /// a session that fails the same way on every attempt.
+    struct PoisonEmbedder;
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for PoisonEmbedder {
+        async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+            if text.contains("poison") {
+                anyhow::bail!("this text never embeds");
+            }
+            KeywordEmbedder.embed(text).await
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            let mut out = Vec::new();
+            for t in texts {
+                out.push(self.embed(t).await?);
+            }
+            Ok(out)
+        }
+        fn dimensions(&self) -> usize {
+            DIM
+        }
+        fn model_id(&self) -> String {
+            "poison-stub".into()
+        }
+        fn max_tokens(&self) -> usize {
+            512
+        }
+    }
+
+    /// Write a live transcript for `session` whose timestamps fall on `day`.
+    fn write_live_on(live_dir: &Path, cwd: &Path, session: &str, prompt: &str, day: &str) {
+        let path = write_transcript_for(live_dir, cwd, session, prompt, "an answer");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("2026-08-01", day)).unwrap();
+    }
+
+    /// The automatic pass is capped and newest-first, so two sessions that
+    /// fail every time used to take its whole budget on every pass and the
+    /// older session behind them was never indexed.
+    #[tokio::test]
+    async fn failing_sessions_do_not_starve_older_ones() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let claude = root.join("claude");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+        let scope = SessionScope {
+            root_project_id: "starve-proj".into(),
+            root_dir: root.clone(),
+            paths: vec![root.clone()],
+        };
+        let store = MemoryStore::init(&root, &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let engine = RetrievalEngine::new(store, EngramConfig::default())
+            .with_embedding_provider(Arc::new(PoisonEmbedder));
+        let index = index_at(&root).await;
+        let live_dir = claude
+            .join("projects")
+            .join(transcripts::encode_project_dir(&root));
+        write_live_on(&live_dir, &root, "bad1", "poison one", "2026-09-02");
+        write_live_on(&live_dir, &root, "bad2", "poison two", "2026-09-01");
+        write_live_on(&live_dir, &root, "good", "about lancedb", "2026-08-01");
+
+        let after = Duration::hours(1);
+        let first = index_pending(&scope, &index, &engine, after, 2)
+            .await
+            .unwrap();
+        assert_eq!(first.skipped.len(), 2, "{first:?}");
+        let second = index_pending(&scope, &index, &engine, after, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.indexed,
+            vec!["good".to_string()],
+            "the older session must get its turn: {second:?}"
+        );
+        assert!(second.skipped.is_empty(), "{second:?}");
+        assert_eq!(index_failures(&scope), 2);
+    }
+
+    #[tokio::test]
+    async fn explicit_index_ignores_the_failure_marker() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let claude = root.join("claude");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+        let scope = SessionScope {
+            root_project_id: "explicit-proj".into(),
+            root_dir: root.clone(),
+            paths: vec![root.clone()],
+        };
+        let engine = engine_with_embeddings(&root).await;
+        let index = index_at(&root).await;
+        let live_dir = claude
+            .join("projects")
+            .join(transcripts::encode_project_dir(&root));
+        write_live_on(&live_dir, &root, "s1", "about lancedb", "2026-08-01");
+        harvest_state::set_index_failed(&root, &["s1".to_string()], Utc::now()).unwrap();
+        assert!(
+            pending_sessions(&scope, Duration::hours(1), Utc::now())
+                .unwrap()
+                .is_empty(),
+            "a fresh failure keeps the automatic pass away"
+        );
+
+        let report = index_sessions(&scope, &index, &engine, &["s1".to_string()], false)
+            .await
+            .unwrap();
+        assert_eq!(report.indexed, vec!["s1".to_string()], "{report:?}");
+        assert_eq!(index_failures(&scope), 0, "indexing clears the marker");
     }
 
     // ---- deleting a conversation ----

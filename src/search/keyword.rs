@@ -62,7 +62,14 @@ pub fn keyword_search<M: Borrow<Memory>>(query: &str, memories: &[M]) -> Vec<(us
 ///
 /// The returned indices refer to `stems`, so the caller is responsible for
 /// keeping that slice aligned with whatever it maps results back onto.
-pub fn keyword_search_stems(query: &str, stems: &[KeywordStems]) -> Vec<(usize, f64)> {
+///
+/// Generic over [`Borrow`](std::borrow::Borrow) so a caller holding stems by
+/// reference (or as a `Cow`, borrowed from the index row with an owned
+/// fallback) passes them without cloning each one.
+pub fn keyword_search_stems<S: Borrow<KeywordStems>>(
+    query: &str,
+    stems: &[S],
+) -> Vec<(usize, f64)> {
     // Normalized, stemmed, deduplicated query terms. Deduplication matters:
     // the loop below awards points per token, so a repeated word used to be
     // counted once per occurrence.
@@ -79,7 +86,7 @@ pub fn keyword_search_stems(query: &str, stems: &[KeywordStems]) -> Vec<(usize, 
     // of summary-only memories does not drag the reference to zero.
     let non_empty: Vec<usize> = stems
         .iter()
-        .map(|s| s.content_len)
+        .map(|s| Borrow::<KeywordStems>::borrow(s).content_len)
         .filter(|l| *l > 0)
         .collect();
     let avg_content_len = if non_empty.is_empty() {
@@ -92,7 +99,12 @@ pub fn keyword_search_stems(query: &str, stems: &[KeywordStems]) -> Vec<(usize, 
         .iter()
         .enumerate()
         .filter_map(|(idx, doc)| {
-            let score = score_stems(doc, &query_tokens, &weights, avg_content_len);
+            let score = score_stems(
+                Borrow::<KeywordStems>::borrow(doc),
+                &query_tokens,
+                &weights,
+                avg_content_len,
+            );
             if score > 0.0 {
                 Some((idx, score))
             } else {
@@ -209,7 +221,7 @@ fn content_density(tf: u32, len: usize, avg_len: f64) -> f64 {
 /// candidates these statistics are thin.
 ///
 /// [`normalize`]: crate::search::normalize
-fn idf_weights(query_tokens: &[String], stems: &[KeywordStems]) -> Vec<f64> {
+fn idf_weights<S: Borrow<KeywordStems>>(query_tokens: &[String], stems: &[S]) -> Vec<f64> {
     let n_terms = query_tokens.len();
     let uniform = vec![1.0; n_terms];
 
@@ -223,7 +235,10 @@ fn idf_weights(query_tokens: &[String], stems: &[KeywordStems]) -> Vec<f64> {
     let raw: Vec<f64> = query_tokens
         .iter()
         .map(|term| {
-            let df = stems.iter().filter(|d| d.contains(term)).count() as f64;
+            let df = stems
+                .iter()
+                .filter(|d| Borrow::<KeywordStems>::borrow(*d).contains(term))
+                .count() as f64;
             // BM25's IDF with the +0.5 smoothing, which stays positive even
             // for a term present in every document.
             (1.0 + (n_docs - df + 0.5) / (df + 0.5)).ln()

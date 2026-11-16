@@ -23,7 +23,7 @@
 // rebuilds it, so a review in progress keeps its state.
 
 import { h } from '../dom.js';
-import { fmt, label, shortId } from '../format.js';
+import { fmt, label, shortId, score } from '../format.js';
 import { scopeName, badge, kindIcon, TYPE_LABEL } from '../scopes.js';
 import { kindLabel } from '../relations.js';
 import { filtered } from './tally.js';
@@ -207,7 +207,7 @@ export function memoryPanel(o) {
       h('dt', null, t('panelScope')),
       h('dd', null, n.scope || t('panelNoScope')),
       h('dt', null, t('panelCriticality')),
-      h('dd', null, Number(n.criticality ?? 0).toFixed(2)),
+      h('dd', null, score(n.criticality)),
       h('dt', null, t('panelStatus')),
       h('dd', null, n.invalidated ? 'invalidated' : label(n.status)),
       h('dt', null, t('panelReads')),

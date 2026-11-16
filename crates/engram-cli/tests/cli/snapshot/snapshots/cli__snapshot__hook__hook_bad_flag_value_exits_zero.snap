@@ -1,0 +1,9 @@
+---
+source: crates/engram-cli/tests/cli/snapshot/hook.rs
+expression: "f.run_with_stdin(&[\"hook\", \"session-start\", \"--min-criticality\", \"x\"], \"{}\")"
+---
+$ engramdb --no-maintenance --dir [PROJECT] hook session-start --min-criticality x
+exit: 0
+--- stdout ---
+--- stderr ---
+engramdb hook: ignoring unparseable arguments (version skew?): error: invalid value 'x' for '--min-criticality <MIN_CRITICALITY>': invalid float literal

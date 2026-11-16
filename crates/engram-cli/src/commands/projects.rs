@@ -520,7 +520,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
         // Verify project was removed from registry
         let loaded = registry.load().await.unwrap();
         assert!(loaded.projects.is_empty());
@@ -679,7 +679,7 @@ mod tests {
     #[tokio::test]
     async fn test_projects_prune_json_with_force_and_nothing_to_prune_is_ok() {
         let registry = InMemoryRegistry::new();
-        let formatter = OutputFormatter::new(None, true, true);
+        let (formatter, cap) = crate::testutil::capturing_json();
         let prompter = MockPrompter::new(vec![]);
 
         let result = run_projects(
@@ -691,7 +691,10 @@ mod tests {
             ProjectListGrouping::default(),
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
+        let v: serde_json::Value = serde_json::from_str(cap.stdout().trim()).unwrap();
+        assert_eq!(v["orphans_removed"], 0, "{v}");
+        assert_eq!(v["stale_removed"], 0, "{v}");
     }
 
     #[tokio::test]

@@ -62,8 +62,8 @@ exit: 0
         },
         {
           "details": [
-            "shared: [SIZE] (0 memories)",
-            "personal: [SIZE] (0 memories)",
+            "shared: 0 B (0 memories)",
+            "personal: 0 B (0 memories)",
             "index: [SIZE]"
           ],
           "message": "[SIZE]",
@@ -113,7 +113,7 @@ exit: 0
           "name": "Claude Code plugin",
           "passed": true,
           "status": "warn",
-          "suggestion": "Install with `claude plugin add https://github.com/egeapak/engramdb`"
+          "suggestion": "Install in Claude Code with `/plugin marketplace add egeapak/engramdb`, then `/plugin install engram@engramdb`"
         },
         {
           "message": "not configured",

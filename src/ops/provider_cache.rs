@@ -142,10 +142,14 @@ pub(crate) fn model_demands(
         },
         embedding_pool_size.max(1),
     )];
-    if *nli_enabled {
+    // The model policy decides here, upstream of the loader: a repository a
+    // project config may not select produces no demand, so it is never
+    // loaded, never leased by a `Ping`, and never part of the signature.
+    let _ = (nli_enabled, nli_model);
+    if let Some(model) = super::model_policy::permitted_nli_model(&config.nli) {
         demands.push((
             ModelKey::Nli {
-                model: nli_model.clone(),
+                model: model.to_string(),
             },
             1,
         ));
@@ -636,6 +640,64 @@ impl ProviderCache {
         known
     }
 
+    /// The embedding model `config` selects, only if it is already loaded.
+    ///
+    /// Never loads, never resizes, and records a demand of **1** (never the
+    /// config's pool size), so a latency-bound caller (the daemon's
+    /// UserPromptSubmit hook) can neither stall on a load nor grow a pool.
+    pub async fn loaded_embedding(
+        &self,
+        config: &EngramConfig,
+        backend_override: Option<EmbeddingBackend>,
+    ) -> Option<Arc<dyn EmbeddingProvider>> {
+        let (key, _) = model_demands(config, backend_override, 1, self.inner.cores)
+            .into_iter()
+            .find(|(k, _)| matches!(k, ModelKey::Embedding { .. }))?;
+        let slot = lock(&self.inner.slots).get(&key).cloned()?;
+        let mut st = lock(&slot.state);
+        let provider = match &st.loaded {
+            Some((ModelHandle::Embedding(p), _)) => Arc::clone(p),
+            _ => return None,
+        };
+        st.demands.insert(1, Instant::now());
+        Some(provider)
+    }
+
+    /// The embedding model for a daemon-served UserPromptSubmit hook.
+    ///
+    /// Returns the model only when it is already loaded ([`Self::loaded_embedding`]),
+    /// and never an Ollama provider (parity with the in-process path, which
+    /// never falls back to Ollama). When nothing is loaded and `warm` is set
+    /// (the caller checked the model can load locally), starts one load in the
+    /// background at a pool of one so the *next* prompt has it; the slot's
+    /// single-flight lock and the failed-load backoff keep these from stacking.
+    /// The hook never waits for it.
+    pub async fn embedding_for_hook(
+        &self,
+        config: &EngramConfig,
+        backend: EmbeddingBackend,
+        warm: bool,
+    ) -> Option<Arc<dyn EmbeddingProvider>> {
+        if let Some(p) = self.loaded_embedding(config, Some(backend)).await {
+            if p.model_id().starts_with("ollama/") {
+                return None;
+            }
+            return Some(p);
+        }
+        if warm {
+            let mut embedding_only = config.clone();
+            embedding_only.nli.enabled = false;
+            embedding_only.rerank.enabled = false;
+            embedding_only.title.strategy = crate::title::TitleStrategy::Keyword;
+            embedding_only.embeddings.pool_size = Some(1);
+            let cache = self.clone();
+            tokio::spawn(async move {
+                let _ = cache.get(&embedding_only, Some(backend)).await;
+            });
+        }
+        None
+    }
+
     /// Expire demands older than `max_idle`, shrink pools whose largest
     /// demand expired, and unload models with no demand left.
     ///
@@ -744,19 +806,59 @@ pub(crate) mod test_support {
         }
     }
 
+    /// A gate a [`FakeLoader`] load waits on while armed, so a test decides
+    /// when a load returns instead of racing a wall-clock delay.
+    #[derive(Default)]
+    pub(crate) struct LoadGate {
+        open: Mutex<bool>,
+        opened: std::sync::Condvar,
+        /// Loads currently blocked on the gate.
+        pub waiting: std::sync::atomic::AtomicUsize,
+    }
+
+    impl LoadGate {
+        /// Let every blocked (and every later) load through.
+        pub(crate) fn open(&self) {
+            *lock(&self.open) = true;
+            self.opened.notify_all();
+        }
+
+        fn pass(&self) {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.waiting.fetch_add(1, SeqCst);
+            let mut open = lock(&self.open);
+            while !*open {
+                open = self
+                    .opened
+                    .wait(open)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            self.waiting.fetch_sub(1, SeqCst);
+        }
+    }
+
     /// Records every load; loads fail while `fail` is set, and pools come
     /// up with at most `max_sessions` sessions when it is non-zero. Each load
-    /// sleeps `delay_ms`, so a test can overlap requests with a load. NLI is
-    /// never loadable (tests don't need it).
+    /// sleeps `delay_ms`, so a test can overlap requests with a load, and
+    /// waits on `gate` while one is armed, so a test can hold a load until it
+    /// says so. NLI is never loadable (tests don't need it).
     #[derive(Default)]
     pub(crate) struct FakeLoader {
         pub loads: Mutex<Vec<(ModelKey, usize)>>,
         pub fail: std::sync::atomic::AtomicBool,
         pub max_sessions: std::sync::atomic::AtomicUsize,
         pub delay_ms: std::sync::atomic::AtomicU64,
+        pub gate: Mutex<Option<Arc<LoadGate>>>,
     }
 
     impl FakeLoader {
+        /// Arm a gate: every load from now on blocks until it is opened.
+        pub(crate) fn arm_gate(&self) -> Arc<LoadGate> {
+            let gate = Arc::new(LoadGate::default());
+            *lock(&self.gate) = Some(Arc::clone(&gate));
+            gate
+        }
+
         pub(crate) fn loads_of(&self, pred: impl Fn(&ModelKey) -> bool) -> Vec<usize> {
             lock(&self.loads)
                 .iter()
@@ -773,6 +875,10 @@ pub(crate) mod test_support {
             let delay = self.delay_ms.load(SeqCst);
             if delay > 0 {
                 std::thread::sleep(Duration::from_millis(delay));
+            }
+            let gate = lock(&self.gate).clone();
+            if let Some(gate) = gate {
+                gate.pass();
             }
             if self.fail.load(SeqCst) {
                 return None;
@@ -852,6 +958,70 @@ mod tests {
             .model_id()
     }
 
+    /// `loaded_embedding` is a lookup, not a load: nothing on an empty
+    /// cache, and once loaded it records a demand of one without resizing.
+    #[tokio::test]
+    async fn loaded_embedding_never_loads() {
+        let (loader, cache) = fake_cache(8);
+        assert!(cache.loaded_embedding(&embed_only(4), None).await.is_none());
+        assert!(loader.loads_of(is_embedding).is_empty());
+        let empty_demands = cache
+            .all_slots()
+            .iter()
+            .all(|s| lock(&s.state).demands.is_empty());
+        assert!(empty_demands, "a lookup on an empty cache records nothing");
+
+        embed_id(&cache, 2).await;
+        let p = cache.loaded_embedding(&embed_only(8), None).await;
+        assert!(p.is_some());
+        assert_eq!(loader.loads_of(is_embedding), vec![2], "no second load");
+        assert_eq!(
+            embedding_pool(&cache),
+            Some(2),
+            "no resize to the config's pool"
+        );
+        let slot = cache
+            .all_slots()
+            .into_iter()
+            .find(|s| is_embedding(&s.key))
+            .unwrap();
+        assert!(lock(&slot.state).demands.contains_key(&1));
+        assert!(!lock(&slot.state).demands.contains_key(&8));
+    }
+
+    /// The hook path returns at once on a cold cache and loads in the
+    /// background (pool of one), so a later prompt gets the model.
+    #[tokio::test]
+    async fn embedding_for_hook_warms_in_the_background() {
+        let (loader, cache) = fake_cache(8);
+        loader.delay_ms.store(300, Ordering::SeqCst);
+        let config = embed_only(4);
+        let started = Instant::now();
+        let first = cache
+            .embedding_for_hook(&config, EmbeddingBackend::Onnx, true)
+            .await;
+        assert!(first.is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "the hook waited for the load"
+        );
+        eventually(|| embedding_pool(&cache).is_some()).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![1]);
+        let later = cache
+            .embedding_for_hook(&config, EmbeddingBackend::Onnx, true)
+            .await;
+        assert!(later.is_some());
+
+        // `warm = false` (model not loadable locally): no load at all.
+        let (loader, cache) = fake_cache(8);
+        assert!(cache
+            .embedding_for_hook(&config, EmbeddingBackend::Onnx, false)
+            .await
+            .is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(loader.loads_of(is_embedding).is_empty());
+    }
+
     #[test]
     fn pool_class_rounds_up_to_a_power_of_two_capped_at_cores() {
         assert_eq!(pool_class(0, 8), 1);
@@ -910,7 +1080,8 @@ mod tests {
         let mut enabled = base.clone();
         enabled.nli.enabled = true;
         let mut c = enabled.clone();
-        c.nli.model = "other-nli".to_string();
+        c.nli.model = crate::nli::NLI_DEBERTA_XSMALL.repo.to_string();
+        assert_ne!(c.nli.model, enabled.nli.model);
         assert_ne!(
             provider_cache_key(&enabled, None, 2),
             provider_cache_key(&c, None, 2)
@@ -924,6 +1095,55 @@ mod tests {
         let mut c = base.clone();
         c.legacy_daemon = Some(toml::from_str("idle_timeout_secs = 61").unwrap());
         assert_eq!(k, provider_cache_key(&c, None, 2));
+    }
+
+    /// A project config is committed, so its author picks `[nli].model`. An
+    /// unlisted repository must never reach the loader: not on a request and
+    /// not on a lease. Before the policy, one `ModelKey::Nli` load was
+    /// recorded here.
+    #[tokio::test]
+    async fn an_unlisted_nli_repo_is_never_loaded() {
+        let (loader, cache) = fake_cache(4);
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "attacker/repo".to_string();
+
+        assert!(!model_demands(&config, None, 1, 4)
+            .iter()
+            .any(|(k, _)| matches!(k, ModelKey::Nli { .. })));
+        let providers = cache.get(&config, None).await;
+        assert!(providers.nli.is_none());
+        cache.touch(&config, None).await;
+        assert!(
+            loader
+                .loads_of(|k| matches!(k, ModelKey::Nli { .. }))
+                .is_empty(),
+            "an unlisted NLI repository reached the loader"
+        );
+
+        // A built-in repository still does.
+        config.nli.model = crate::nli::DEFAULT_NLI_MODEL.repo.to_string();
+        cache.get(&config, None).await;
+        assert_eq!(
+            loader.loads_of(|k| matches!(k, ModelKey::Nli { .. })).len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn the_global_opt_in_allows_a_custom_nli_repo() {
+        crate::ops::model_policy::set_custom_repos_allowed_for_test(true);
+        let (loader, cache) = fake_cache(4);
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "someone/custom-nli".to_string();
+        cache.get(&config, None).await;
+        assert_eq!(
+            loader
+                .loads_of(|k| matches!(k, ModelKey::Nli { model } if model == "someone/custom-nli"))
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1107,6 +1327,91 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(loader.loads_of(is_embedding), vec![1, 4], "no retry storm");
+    }
+
+    fn same_model(a: &Arc<dyn EmbeddingProvider>, b: &Arc<dyn EmbeddingProvider>) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
+    }
+
+    fn embedding_slot(cache: &ProviderCache) -> Arc<Slot> {
+        cache.slot(&model_demands(&embed_only(1), None, 1, 8)[0].0)
+    }
+
+    /// A grow whose demand expires while its pool is being built is
+    /// discarded when the load returns: the original pool keeps serving, and
+    /// the pool built for nothing is freed and counted released.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_grow_overtaken_by_a_shrinking_demand_is_discarded() {
+        let (loader, cache) = fake_cache(8);
+        let original = cache
+            .get(&embed_only(1), None)
+            .await
+            .embedding
+            .expect("embedding");
+        let gate = loader.arm_gate();
+
+        // A demand of 4 is served by the current pool and starts a rebuild,
+        // which the gate holds inside the loader.
+        assert_eq!(embed_id(&cache, 4).await, "test/fake-x1");
+        eventually(|| gate.waiting.load(Ordering::SeqCst) == 1).await;
+        assert_eq!(loader.loads_of(is_embedding), vec![1, 4]);
+
+        // The demand of 4 expires before the load returns; the 1 stays.
+        {
+            let slot = embedding_slot(&cache);
+            let mut st = lock(&slot.state);
+            let old = Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("an instant two minutes in the past");
+            for (want, at) in st.demands.iter_mut() {
+                if *want != 1 {
+                    *at = old;
+                }
+            }
+        }
+        assert_eq!(cache.evict_idle(Duration::from_secs(60)).await, 0);
+        gate.open();
+
+        eventually(|| cache.take_released() == 1).await;
+        assert!(!lock(&embedding_slot(&cache).state).resizing);
+        assert_eq!(embedding_pool(&cache), Some(1), "the original pool stays");
+        let now = cache
+            .get(&embed_only(1), None)
+            .await
+            .embedding
+            .expect("embedding");
+        assert!(
+            same_model(&now, &original),
+            "the original handle must still be the one served"
+        );
+        assert_eq!(loader.loads_of(is_embedding), vec![1, 4], "no further load");
+    }
+
+    /// A pool replaced by a grow is not counted released while a request
+    /// still holds it — the daemon would trim before the memory is free —
+    /// and is counted once the request lets go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replaced_pool_is_not_counted_released_while_a_request_holds_it() {
+        let (_loader, cache) = fake_cache(8);
+        let held = cache
+            .get(&embed_only(1), None)
+            .await
+            .embedding
+            .expect("embedding");
+        assert_eq!(held.model_id(), "test/fake-x1");
+
+        let _ = embed_id(&cache, 4).await;
+        eventually(|| embedding_pool(&cache) == Some(4)).await;
+        eventually(|| !lock(&embedding_slot(&cache).state).resizing).await;
+        // The old pool was handed to `retire`; give its blocking drop time
+        // to run, then check it is still alive in `held`.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(cache.take_released(), 0, "still held by a request");
+        assert_eq!(embed_id(&cache, 4).await, "test/fake-x4");
+
+        drop(held);
+        assert_eq!(cache.take_released(), 1);
+        assert_eq!(cache.take_released(), 0, "counted once");
     }
 
     /// A pool that comes up short reports its real size and is not rebuilt

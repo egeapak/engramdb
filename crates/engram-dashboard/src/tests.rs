@@ -248,6 +248,29 @@ async fn static_files_are_public_and_never_set_a_cookie_or_redirect() {
     assert_eq!(page.header(header::REFERRER_POLICY), "no-referrer");
 }
 
+#[tokio::test]
+async fn the_page_declares_an_icon_it_serves() {
+    // Without one a browser asks for `/favicon.ico` and logs its 404 as a
+    // console error on every page.
+    let index = std::str::from_utf8(crate::assets::find("index.html").unwrap().bytes).unwrap();
+    assert!(
+        index.contains(r#"<link rel="icon" href="favicon.svg" type="image/svg+xml">"#),
+        "index.html must declare the icon"
+    );
+    let app = app(None);
+    let r = send(
+        &app,
+        req(Method::GET, "/favicon.svg")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK);
+    assert_eq!(r.header(header::CONTENT_TYPE), "image/svg+xml");
+    let svg = String::from_utf8_lossy(&r.body);
+    assert!(svg.starts_with("<svg ") && !svg.contains("<script") && !svg.contains("style"));
+}
+
 #[test]
 fn the_launch_url_carries_the_token_in_the_fragment_only() {
     let url = security().launch_url();
@@ -3001,6 +3024,31 @@ async fn the_graph_and_detail_views_write_nothing() {
 }
 
 #[tokio::test]
+async fn a_zero_layout_width_is_refused() {
+    // E13: 0 was laid out at a default width, one more cache key for a box
+    // nobody measured. The page sends 800 for an unmeasured box instead.
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let app = app(Some(fx.current.clone()));
+    for w in ["0", "20"] {
+        let uri = format!(
+            "/api/projects/{}/graph?layout=grid&layout_aspect=0.6&layout_width={w}",
+            fx.id
+        );
+        let (s, v) = get_json(&app, &uri).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{w}: {v}");
+        assert!(v.to_string().contains("from 40 to 20000"), "{v}");
+    }
+    let uri = format!(
+        "/api/projects/{}/graph?layout=grid&layout_aspect=0.6&layout_width=40",
+        fx.id
+    );
+    let (s, v) = get_json(&app, &uri).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["layout"]["name"], "grid");
+}
+
+#[tokio::test]
 async fn the_server_layout_fits_the_response_and_is_cached_outside_the_store() {
     let ef = edge_fixture().await;
     let fx = &ef.fx;
@@ -4066,4 +4114,462 @@ async fn a_hung_probe_is_single_flight_and_not_retried_at_once() {
     let other = off_runtime("test:fine".into(), limit, async { 7 }).await;
     assert_eq!(other, Ok(7));
     release.wait();
+}
+
+// ---------------------------------------------------------------------------
+// Counts and values a page must be able to trust
+// ---------------------------------------------------------------------------
+
+/// Every id of a `/memories` walk by `next_cursor`, page size 1; panics on
+/// a non-200 answer or a criticality that is not a JSON number.
+async fn walk_memories(app: &axum::Router, id: &str, extra: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..100 {
+        let uri = format!(
+            "/api/projects/{id}/memories?limit=1{extra}{}",
+            cursor
+                .as_ref()
+                .map_or(String::new(), |c| format!("&cursor={c}"))
+        );
+        let (s, p) = get_json(app, &uri).await;
+        assert_eq!(s, StatusCode::OK, "{uri}: {p}");
+        for m in p["items"].as_array().unwrap() {
+            assert!(
+                m["criticality"].is_number(),
+                "criticality not a number: {m}"
+            );
+            ids.push(m["id"].as_str().unwrap().to_string());
+        }
+        match p["next_cursor"].as_str() {
+            Some(c) => cursor = Some(c.to_string()),
+            None => return ids,
+        }
+    }
+    panic!("the walk never ended: {ids:?}");
+}
+
+/// An index row can hold a `NaN` or `inf` criticality (one written before
+/// the parser read non-finite scores as absent). serde_json writes those as
+/// `null`: the page's `toFixed` threw on it, and the keyset cursor built
+/// from it could not be read back, so page 2 was a 400.
+#[tokio::test]
+async fn a_non_finite_criticality_never_breaks_the_list_or_its_cursor() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // `MemoryStore::create` writes the row from the value as given.
+    let mut nan = memory(MemoryType::Decision, "Not a number", &["storage"], &[]);
+    nan.criticality = f64::NAN;
+    let mut inf = memory(MemoryType::Hazard, "Infinitely critical", &["storage"], &[]);
+    inf.criticality = f64::INFINITY;
+    for m in [&nan, &inf] {
+        store.create(m).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    for sort in [
+        "",
+        "&sort=criticality&dir=asc",
+        "&sort=criticality&dir=desc",
+    ] {
+        let ids = walk_memories(&app, &fx.id, sort).await;
+        let unique: std::collections::BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "an id repeated: {ids:?}");
+        for m in [&nan, &inf] {
+            assert!(ids.contains(&m.id), "{} missing from {sort:?}", m.summary);
+        }
+    }
+    let (s, g) = get_json(&app, &format!("/api/projects/{}/graph", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{g}");
+    for n in g["nodes"].as_array().unwrap() {
+        assert!(n["criticality"].is_number(), "{n}");
+    }
+    let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    assert!(
+        st["avg_criticality"].is_number(),
+        "{}",
+        st["avg_criticality"]
+    );
+}
+
+/// `attention` lists at most a dozen items per reason; the tile and the
+/// banner used to count that list, so 15 challenged memories read as 12.
+#[tokio::test]
+async fn attention_totals_count_the_store_not_the_capped_list() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // The fixture has one challenged memory; 14 more make 15.
+    for i in 0..14 {
+        let mut m = memory(MemoryType::Decision, &format!("Contested {i}"), &[], &[]);
+        m.status = Status::Challenged;
+        m.challenges = vec![Challenge::new(format!("seen otherwise {i}"))];
+        store.create(&m).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    let (s, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{st}");
+    let listed = st["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["reason"] == "challenged")
+        .count();
+    assert_eq!(listed, 12, "the list stays capped");
+    let totals = &st["attention_totals"];
+    assert_eq!(totals["challenged"], 15, "{totals}");
+    for reason in [
+        "proposed_contradiction",
+        "proposed_edge",
+        "needs_review",
+        "stale",
+        "never_read",
+    ] {
+        assert!(totals[reason].is_u64(), "{reason} missing from {totals}");
+    }
+}
+
+/// "N of `live` read at least once": reads of an invalidated memory and of
+/// an id with no row were counted in N, so N could exceed `live`.
+#[tokio::test]
+async fn memories_in_use_never_exceeds_live() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let owner = StoreRef::of(&store);
+    let ev = |id: &str| MemoryEvent::new(id, &store.project_id, UsageKind::Fetched, Surface::Cli);
+    // The fixture read `a` and `b` (live); `e` is invalidated.
+    engramdb::ops::usage::write_events(
+        &owner,
+        &[ev(&fx.ids[4]), ev("0bdeadbe-0000-7000-8000-000000000000")],
+    );
+    let app = app(Some(fx.current.clone()));
+    let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    assert_eq!(st["usage"]["used_memories"], 2, "{}", st["usage"]);
+    assert!(st["usage"]["used_memories"].as_u64() <= st["live"].as_u64());
+    // The lifetime sums still count every read.
+    assert_eq!(st["usage"]["fetched"], 4, "{}", st["usage"]);
+}
+
+/// Overview's relation total used to count every stored edge, rejected ones
+/// and ones with an invalidated end included, so it never matched the
+/// Relations tab it links to.
+#[tokio::test]
+async fn the_overview_relation_total_is_what_the_relations_tab_lists() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let params = |src: &str, kind, dst: &str, status| LinkParams {
+        src: src.to_string(),
+        kind,
+        dst: dst.to_string(),
+        dst_store: None,
+        confidence: Some(0.7),
+        origin: LinkOrigin::Human,
+        status: Some(status),
+        note: None,
+    };
+    // A rejected relation, and one whose end (`e`) is invalidated.
+    for p in [
+        params(
+            &fx.ids[0],
+            LinkKind::RelatedTo,
+            &fx.ids[1],
+            LinkStatus::Rejected,
+        ),
+        params(
+            &fx.ids[1],
+            LinkKind::RelatedTo,
+            &fx.ids[4],
+            LinkStatus::Confirmed,
+        ),
+    ] {
+        ops_links::link(&store, p, Surface::Cli).await.unwrap();
+    }
+    let app = app(Some(fx.current.clone()));
+    let (_, st) = get_json(&app, &format!("/api/projects/{}/stats", fx.id)).await;
+    let (s, rel) = get_json(&app, &format!("/api/projects/{}/relations", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{rel}");
+    assert_eq!(
+        st["edges"]["total"], rel["total"],
+        "stats {} vs relations {}",
+        st["edges"], rel["total"]
+    );
+    assert!(st["edges"]["total"].as_u64().unwrap() > 0);
+}
+
+/// "Not drawn here" counted every undrawn-end relation, rejected ones too,
+/// whatever the chips showed. The count now comes by kind and status.
+#[tokio::test]
+async fn hidden_relations_are_counted_by_kind_and_status() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    ops_links::link(
+        &store,
+        LinkParams {
+            src: fx.ids[1].clone(),
+            kind: LinkKind::RelatedTo,
+            dst: fx.ids[0].clone(),
+            dst_store: None,
+            confidence: Some(0.6),
+            origin: LinkOrigin::Human,
+            status: Some(LinkStatus::Rejected),
+            note: None,
+        },
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let (s, g) = get_json(
+        &app,
+        &format!(
+            "/api/projects/{}/graph?limit=1&include_rejected=true",
+            fx.id
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{g}");
+    let counts = &g["counts"];
+    let hidden = counts["hidden"].as_u64().unwrap();
+    let by: &serde_json::Map<String, serde_json::Value> =
+        counts["hidden_kinds"].as_object().unwrap();
+    let mut sum = 0;
+    let mut statuses = std::collections::BTreeSet::new();
+    for per in by.values() {
+        for (st, n) in per.as_object().unwrap() {
+            sum += n.as_u64().unwrap();
+            statuses.insert(st.clone());
+        }
+    }
+    assert!(hidden > 0, "{counts}");
+    assert_eq!(sum, hidden, "{counts}");
+    assert!(statuses.contains("rejected"), "{counts}");
+    assert!(
+        statuses.contains("confirmed") || statuses.contains("proposed"),
+        "{counts}"
+    );
+}
+
+/// A relation kind is any string, and the server sends it as written: a
+/// kind named like an `Object.prototype` member reaches the page's tallies
+/// (which is why tally.js keeps null-prototype maps; bench/unit.mjs).
+#[tokio::test]
+async fn a_kind_named_constructor_reaches_the_scope_tallies() {
+    let ef = edge_fixture().await;
+    let fx = &ef.fx;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    // `link` refuses a kind it does not know; a newer binary (or a hand
+    // edit) writes it into the file, as this does.
+    let mut m = memory(
+        MemoryType::Context,
+        "Names a future kind",
+        &["storage"],
+        &[],
+    );
+    let mut l = engramdb::types::Link::new(
+        fx.ids[1].clone(),
+        LinkKind::parse_lenient("constructor"),
+        LinkOrigin::Human,
+    );
+    l.status = LinkStatus::Confirmed;
+    m.links.push(l);
+    store.create(&m).await.unwrap();
+    let app = app(Some(fx.current.clone()));
+    let (s, g) = get_json(&app, &format!("/api/projects/{}/graph", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{g}");
+    let carried = g["scope_edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["kinds"]["constructor"]["confirmed"] == 1);
+    assert!(carried, "{}", g["scope_edges"]);
+}
+
+/// `-` names "no scope" in `top_scope=` lists, and the list is
+/// comma-joined: a scope named `-` was filtered with the scope-less
+/// memories, and one named `a,b` matched nothing. Names now travel
+/// percent-encoded (`scopes.js::scopeKey`; `%2D` for a literal `-`), and
+/// the query string encodes that once more.
+#[tokio::test]
+async fn a_scope_named_dash_or_with_a_comma_filters_alone() {
+    let fx = fixture().await;
+    let store = MemoryStore::open(&fx.dir).await.unwrap();
+    let dash = memory(MemoryType::Decision, "In the dash scope", &["-"], &[]);
+    let comma = memory(MemoryType::Decision, "In the comma scope", &["a,b"], &[]);
+    let none = memory(MemoryType::Decision, "In no scope at all", &[], &[]);
+    for m in [&dash, &comma, &none] {
+        store.create(m).await.unwrap();
+    }
+    ops_links::link(
+        &store,
+        LinkParams {
+            src: dash.id.clone(),
+            kind: LinkKind::RelatedTo,
+            dst: comma.id.clone(),
+            dst_store: None,
+            confidence: Some(1.0),
+            origin: LinkOrigin::Human,
+            status: Some(LinkStatus::Confirmed),
+            note: None,
+        },
+        Surface::Cli,
+    )
+    .await
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let ids = |v: &serde_json::Value, key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for (param, want, not) in [
+        ("%252D", &dash, vec![&none, &comma]),
+        ("a%252Cb", &comma, vec![&none, &dash]),
+        ("-", &none, vec![&dash, &comma]),
+    ] {
+        let (s, p) = get_json(
+            &app,
+            &format!("/api/projects/{}/memories?top_scope={param}", fx.id),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{p}");
+        let got = ids(&p, "items");
+        assert!(got.contains(&want.id), "{param}: {got:?}");
+        for m in &not {
+            assert!(!got.contains(&m.id), "{param} listed {}", m.summary);
+        }
+        let (s, g) = get_json(
+            &app,
+            &format!("/api/projects/{}/graph?top_scope={param}", fx.id),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{g}");
+        let got = ids(&g, "nodes");
+        assert!(got.contains(&want.id), "graph {param}: {got:?}");
+        for m in &not {
+            assert!(!got.contains(&m.id), "graph {param} drew {}", m.summary);
+        }
+    }
+    // Both escaped names in one list.
+    let (_, p) = get_json(
+        &app,
+        &format!("/api/projects/{}/memories?top_scope=%252D,a%252Cb", fx.id),
+    )
+    .await;
+    let got = ids(&p, "items");
+    assert!(
+        got.contains(&dash.id) && got.contains(&comma.id) && !got.contains(&none.id),
+        "{got:?}"
+    );
+    // The Relations tab's scope filters read the same keys.
+    let listed = |v: &serde_json::Value| -> bool {
+        v["items"].as_array().unwrap().iter().any(|r| {
+            (r["src"] == dash.id.as_str() || r["dst"] == dash.id.as_str())
+                && r["kind"] == "related_to"
+        })
+    };
+    for (param, want) in [("%252D", true), ("a%252Cb", true), ("-", false)] {
+        let (s, r) = get_json(
+            &app,
+            &format!("/api/projects/{}/relations?from_scope={param}", fx.id),
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK, "{r}");
+        assert_eq!(listed(&r), want, "from_scope={param}: {r}");
+    }
+    // An invalid escape is the caller's mistake.
+    let (s, _) = get_json(
+        &app,
+        &format!("/api/projects/{}/memories?top_scope=%25zz", fx.id),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+/// A review's delayed refresh must not run once the user has moved on: it
+/// would render the view they left over the one they went to (a second
+/// fetch; on the graph, a second layout). Every `setTimeout(...)` call in a
+/// view that refreshes checks `isStale` inside it (or goes through
+/// `ctx.refreshSoon`, which does).
+#[test]
+fn views_never_refresh_from_a_bare_timer() {
+    let mut problems = Vec::new();
+    let mut scanned = 0;
+    for a in crate::assets::embedded() {
+        if !(a.path.starts_with("js/views/") && a.path.ends_with(".js")) {
+            continue;
+        }
+        scanned += 1;
+        let src = std::str::from_utf8(a.bytes).unwrap();
+        let mut from = 0;
+        while let Some(at) = src[from..].find("setTimeout(") {
+            let start = from + at + "setTimeout".len();
+            // The call's own parentheses, balanced.
+            let mut depth = 0usize;
+            let mut end = src.len();
+            for (i, c) in src[start..].char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = start + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let call = &src[start..end];
+            if call.contains("ctx.refresh(") && !call.contains("isStale") {
+                let line = src[..start].matches('\n').count() + 1;
+                problems.push(format!("{}:{line}: {}", a.path, call.trim()));
+            }
+            from = start;
+        }
+    }
+    assert!(scanned >= 8, "only {scanned} view modules scanned");
+    assert!(
+        problems.is_empty(),
+        "a timer refreshes without checking isStale (use ctx.refreshSoon):\n  {}",
+        problems.join("\n  ")
+    );
+}
+
+/// The Health page lists the files the parser refuses from
+/// `result.unparseable` (id + reason): this pins the contract it reads.
+#[tokio::test]
+async fn doctor_names_unparseable_files() {
+    let fx = fixture().await;
+    let id = &fx.ids[1];
+    let mdir = paths::memories_dir(&fx.dir);
+    let file = std::fs::read_dir(&mdir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains(id.as_str())))
+        .expect("the memory's file");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let start = text.find("<!-- engramdb").expect("a hidden block");
+    let block = &text[start..];
+    std::fs::write(
+        &file,
+        format!(
+            "{}<<<<<<< HEAD\n{block}=======\n{block}>>>>>>> topic\n",
+            &text[..start]
+        ),
+    )
+    .unwrap();
+    let app = app(Some(fx.current.clone()));
+    let (s, d) = get_json(&app, &format!("/api/projects/{}/doctor", fx.id)).await;
+    assert_eq!(s, StatusCode::OK, "{d}");
+    let bad = d["result"]["unparseable"].as_array().unwrap();
+    assert_eq!(bad.len(), 1, "{d}");
+    assert_eq!(bad[0]["id"], id.as_str());
+    assert!(
+        bad[0]["error"].as_str().unwrap().contains("merge conflict"),
+        "{}",
+        bad[0]
+    );
 }

@@ -289,12 +289,20 @@ pub async fn compress_apply(
         }
     }
 
+    // "Closed by this compress": invalidated *and* superseded by the new
+    // summary. A source another memory had already superseded is not a
+    // failure (above), but it was not merged here and its edges are not ours
+    // to move.
+    let closed_here = |m: &crate::types::Memory| {
+        m.is_invalidated() && m.superseded_by.as_deref() == Some(result.id.as_str())
+    };
+
     if super::usage::usage_enabled(store).await {
         // Only sources this compress actually closed: one whose
         // invalidation failed is still active and was not merged.
         for id in source_ids
             .iter()
-            .filter(|id| verified.get(*id).is_some_and(|m| m.is_invalidated()))
+            .filter(|id| verified.get(*id).is_some_and(closed_here))
         {
             super::usage::record_resolved(
                 store,
@@ -313,15 +321,16 @@ pub async fn compress_apply(
     // its edges, like it keeps everything else.
     let closed: Vec<crate::types::Memory> = source_ids
         .iter()
-        .filter_map(|id| verified.get(id).filter(|m| m.is_invalidated()).cloned())
+        .filter_map(|id| verified.get(id).filter(|m| closed_here(m)).cloned())
         .collect();
     super::links::carry_links_onto(store, &result.id, &closed).await;
 
     if !failed_sources.is_empty() {
         bail!(
             "Compressed memory {} was created, but {} source memor{} could not be invalidated: {}. \
-             Re-run compress or `resolve --action invalidate` the listed memories manually \
-             (the compressed memory is valid and supersedes them).",
+             Re-run compress, or invalidate the listed memories yourself (CLI: \
+             `engramdb update <id> --invalidate`; MCP: `resolve` with `action: \"invalidate\"`); \
+             the compressed memory is valid and supersedes them.",
             result.id,
             failed_sources.len(),
             if failed_sources.len() == 1 { "y" } else { "ies" },
@@ -770,6 +779,101 @@ mod tests {
         }
     }
 
+    /// A source another memory had already superseded is not a failure, but
+    /// it was not closed by this compress: its outbound edges stay where they
+    /// are (they used to move onto the summary).
+    #[tokio::test]
+    async fn compress_leaves_edges_of_a_source_another_memory_superseded() {
+        use crate::types::{LinkKind, LinkOrigin};
+        let (_temp, store) = setup_store().await;
+        let a = add_memory(&store, MemoryType::Debug, "source a", 0.1, vec![]).await;
+        let b = add_memory(&store, MemoryType::Debug, "source b", 0.1, vec![]).await;
+        let c = add_memory(&store, MemoryType::Decision, "target c", 0.9, vec![]).await;
+        crate::ops::links::link(
+            &store,
+            crate::ops::links::LinkParams {
+                src: a.clone(),
+                kind: LinkKind::Supports,
+                dst: c.clone(),
+                dst_store: None,
+                confidence: None,
+                origin: LinkOrigin::Human,
+                status: None,
+                note: None,
+            },
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        // `x` supersedes `a` before the compress runs.
+        let x = create_memory(
+            &store,
+            CreateParams {
+                type_: MemoryType::Decision,
+                content: "replaces a".to_string(),
+                summary: "x".to_string(),
+                title: None,
+                physical: vec!["/".to_string()],
+                logical: vec![],
+                tags: vec![],
+                criticality: 0.5,
+                confidence: 0.8,
+                details: None,
+                visibility: Visibility::Shared,
+                provenance: Provenance::human(),
+                supersedes: vec![a.clone()],
+                audience: None,
+                epistemic: None,
+                premise: None,
+                invalidated_by: vec![],
+                origin_task: None,
+                generality: None,
+                valid_from: None,
+                decay_strategy: None,
+                decay_half_life: None,
+                decay_ttl: None,
+                decay_floor: None,
+                title_strategy: TitleStrategy::None,
+                embed_async: false,
+            },
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap()
+        .id;
+        assert_eq!(
+            store.get(&a).await.unwrap().superseded_by.as_deref(),
+            Some(x.as_str())
+        );
+
+        let result = compress_apply(
+            &store,
+            CompressApplyParams {
+                source_ids: vec![a.clone(), b.clone()],
+                summary: "Summary".to_string(),
+                content: "Content".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: false,
+            },
+            None,
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+
+        let summary = store.get(&result.new_id).await.unwrap();
+        assert!(
+            !summary.links.iter().any(|l| l.to == c),
+            "a's edge must not move onto the summary: {:?}",
+            summary.links
+        );
+        let a_mem = store.get(&a).await.unwrap();
+        assert!(a_mem.links.iter().any(|l| l.to == c), "a keeps its edge");
+        assert_eq!(a_mem.superseded_by.as_deref(), Some(x.as_str()));
+    }
+
     /// A source whose index row is missing (half-deleted by a crash) is
     /// still invalidated through its on-disk file — the window-closing pass
     /// operates on files, so nothing is skipped and the summary stays valid.
@@ -874,6 +978,13 @@ mod tests {
         assert!(
             msg.contains("could not be invalidated"),
             "partial failure must be reported: {}",
+            msg
+        );
+        // The remedy must name commands that exist on both front ends
+        // (the CLI has no `resolve` command; MCP has no `update --invalidate`).
+        assert!(
+            msg.contains("engramdb update <id> --invalidate") && !msg.contains("resolve --"),
+            "remedy must name real commands: {}",
             msg
         );
         assert!(
@@ -1920,6 +2031,75 @@ mod consolidation_tests {
         fn model_id(&self) -> String {
             "onnx/marker-stub".to_string()
         }
+    }
+
+    /// `compress apply` with `embed_async` (the MCP path) creates the summary,
+    /// starts its embed in the background, then carries the sources' edges
+    /// onto it — an `update_with` racing that embed. The summary must keep
+    /// its vectors (the `updated_at` guard dropped them).
+    #[tokio::test]
+    async fn compress_apply_async_summary_keeps_its_vectors() {
+        use crate::types::{LinkKind, LinkOrigin};
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for summary in ["source a", "source b", "target c"] {
+            let m = Memory::new(MemoryType::Debug, summary, "body", Provenance::human());
+            ids.push(m.id.clone());
+            store.create(&m).await.unwrap();
+        }
+        crate::ops::links::link(
+            &store,
+            crate::ops::links::LinkParams {
+                src: ids[0].clone(),
+                kind: LinkKind::Supports,
+                dst: ids[2].clone(),
+                dst_store: None,
+                confidence: None,
+                origin: LinkOrigin::Human,
+                status: None,
+                note: None,
+            },
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        let engine = crate::retrieval::engine::RetrievalEngine::new(
+            store.clone(),
+            crate::types::EngramConfig::default(),
+        )
+        .with_embedding_provider(std::sync::Arc::new(MarkerEmbedding));
+
+        let result = compress_apply(
+            &store,
+            CompressApplyParams {
+                source_ids: vec![ids[0].clone(), ids[1].clone()],
+                summary: "Summary".to_string(),
+                content: "Merged".to_string(),
+                scope: None,
+                tags: None,
+                embed_async: true,
+            },
+            Some(&engine),
+            crate::ops::Surface::Cli,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::retrieval::drain_ingests(std::time::Duration::from_secs(60)).await,
+            0
+        );
+        let summary = store.get(&result.new_id).await.unwrap();
+        assert!(
+            summary.links.iter().any(|l| l.to == ids[2]),
+            "the edge was carried onto the summary"
+        );
+        assert!(
+            store.has_chunks_for(&result.new_id).await.unwrap(),
+            "the summary must keep its vectors"
+        );
     }
 
     /// Stub NLI: any pair where either side contains "flaky" is a full

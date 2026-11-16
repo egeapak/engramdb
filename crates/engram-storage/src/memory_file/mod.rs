@@ -104,12 +104,22 @@ pub fn slugify(title: &str) -> String {
 
 /// Generate a memory filename from the memory's title and ID.
 ///
-/// If the memory has a title, the filename is `<slug>_<uuid>.md`.
-/// Otherwise, falls back to `<uuid>.md` for backward compatibility.
+/// If the memory has a title **and a UUID-shaped id**, the filename is
+/// `<slug>_<uuid>.md`. Otherwise it is `<id>.md`.
+///
+/// The slug is only added to a UUID-shaped id because that shape is how
+/// [`extract_id_from_stem`] finds where the slug ends. A hand-authored id
+/// (`auth-decision`) with a slug in front (`my-title_auth-decision`) read
+/// back as the id `my-title_auth-decision`, so the memory became unreachable
+/// by its own id the moment it was given a title.
+///
+/// One shape stays ambiguous by construction and is not supported: a
+/// non-UUID id that itself ends in `_<36 chars with 4 hyphens>` reads back
+/// as that tail.
 pub fn memory_filename(memory: &Memory) -> String {
     if let Some(ref title) = memory.title {
         let slug = slugify(title);
-        if slug.is_empty() {
+        if slug.is_empty() || !is_uuid_shaped(&memory.id) {
             format!("{}.md", memory.id)
         } else {
             format!("{}_{}.md", slug, memory.id)
@@ -119,6 +129,14 @@ pub fn memory_filename(memory: &Memory) -> String {
     }
 }
 
+/// The shape [`extract_id_from_stem`] recognises as an id after a slug:
+/// 36 bytes with exactly 4 hyphens (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+/// and no underscore — the slug separator is the LAST underscore of the
+/// stem, so an id with one of its own could not be told from its slug.
+pub fn is_uuid_shaped(id: &str) -> bool {
+    id.len() == 36 && id.chars().filter(|c| *c == '-').count() == 4 && !id.contains('_')
+}
+
 /// Extract the memory ID (UUID) from a file stem.
 ///
 /// Handles both old format (`<uuid>`) and new format (`<slug>_<uuid>`).
@@ -126,7 +144,7 @@ pub fn memory_filename(memory: &Memory) -> String {
 pub fn extract_id_from_stem(stem: &str) -> &str {
     if let Some(pos) = stem.rfind('_') {
         let candidate = &stem[pos + 1..];
-        if candidate.len() == 36 && candidate.chars().filter(|c| *c == '-').count() == 4 {
+        if is_uuid_shaped(candidate) {
             return candidate;
         }
     }
@@ -150,6 +168,16 @@ pub fn stem_matches_id_prefix(stem: &str, id_prefix: &str) -> bool {
 pub trait MemoryParser {
     /// Parse raw file content into a Memory.
     fn parse(&self, content: &str) -> Result<Memory>;
+
+    /// [`Self::parse`], with a source for a timestamp the file does not
+    /// record. Formats that always record their timestamps ignore it.
+    fn parse_with_fallback(
+        &self,
+        content: &str,
+        _fallback_created: &dyn Fn() -> Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Memory> {
+        self.parse(content)
+    }
 
     /// The format version this parser handles.
     /// Returns `None` for legacy (v1) files without an explicit version field.
@@ -215,13 +243,48 @@ pub fn writer_for_version(version: Option<u32>) -> Box<dyn MemoryWriter> {
 
 /// Parse a memory file. Auto-detects the version and dispatches to the
 /// correct parser.
+///
+/// A file with no `Created` field gets the current time, so two parses of
+/// such a file disagree. That is right for a pure caller with nothing better
+/// to offer; anything that read the content from a file should call
+/// [`parse_memory_file_at`] or [`parse_memory_file_from`] instead.
 pub fn parse_memory_file(content: &str) -> Result<Memory> {
+    parse_memory_file_with(content, &|| None)
+}
+
+/// [`parse_memory_file`] with a fixed fallback for a missing `Created`
+/// timestamp (and for `Updated`, which falls back to `Created`).
+pub fn parse_memory_file_at(
+    content: &str,
+    fallback_created: chrono::DateTime<chrono::Utc>,
+) -> Result<Memory> {
+    parse_memory_file_with(content, &|| Some(fallback_created))
+}
+
+/// [`parse_memory_file`] for content read from `path`: a missing `Created`
+/// falls back to the file's modification time, so the same file parses to
+/// the same timestamps every time. The file is only `stat`ed when the field
+/// is actually missing.
+pub fn parse_memory_file_from(content: &str, path: &std::path::Path) -> Result<Memory> {
+    parse_memory_file_with(content, &|| {
+        std::fs::metadata(path)
+            .ok()?
+            .modified()
+            .ok()
+            .map(chrono::DateTime::<chrono::Utc>::from)
+    })
+}
+
+fn parse_memory_file_with(
+    content: &str,
+    fallback_created: &dyn Fn() -> Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<Memory> {
     // Validate that frontmatter exists before version detection
     helpers::split_frontmatter(content)?;
 
     let version = detect_format_version(content);
     let parser = parser_for_version(version);
-    parser.parse(content)
+    parser.parse_with_fallback(content, fallback_created)
 }
 
 /// Best-effort recovery of the memory id of a file that does not parse.

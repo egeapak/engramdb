@@ -680,7 +680,7 @@ mod tests {
         let mem = Memory::new(MemoryType::Decision, "Test", "Content", Provenance::human());
         store.create(&mem).await.unwrap();
 
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
         let result = run_doctor(
             temp_dir.path(),
             false,
@@ -692,7 +692,11 @@ mod tests {
             &formatter,
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
+        assert_eq!(
+            cap.stdout(),
+            "Store is healthy. 1 memories indexed, 1 on disk.\n"
+        );
     }
 
     #[tokio::test]
@@ -869,7 +873,7 @@ mod tests {
         store.create(&mem).await.unwrap();
 
         // JSON formatter — exercises the json output path
-        let formatter = OutputFormatter::new(None, true, true);
+        let (formatter, cap) = crate::testutil::capturing_json();
         let result = run_doctor(
             temp_dir.path(),
             false,
@@ -881,7 +885,13 @@ mod tests {
             &formatter,
         )
         .await;
-        assert!(result.is_ok());
+        result.unwrap();
+        let v: serde_json::Value = serde_json::from_str(cap.stdout().trim()).unwrap();
+        assert_eq!(v["success"], true, "{v}");
+        assert_eq!(
+            v["message"],
+            "Store is healthy. 1 memories indexed, 1 on disk."
+        );
     }
 
     #[tokio::test]

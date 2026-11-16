@@ -62,6 +62,9 @@ where
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    // Run against the per-process temp data/config dirs, never the user's
+    // (the `#[ctor]` in engram-test-support, linked by this reference).
+    engram_test_support::arm();
     let tmp = tempfile::TempDir::new().unwrap();
     let dir = tmp.path();
     let registry = InMemoryRegistry::new();

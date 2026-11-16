@@ -5,10 +5,8 @@
 //! - [`RetrievalConfig`] - retrieval settings (thresholds, max results)
 //! - [`ScoringConfig`] - scoring mode weights (with_query, scope_only, degraded)
 //! - [`ScoringWeights`] - component weights for semantic, relevance, scope
-//! - [`ScopeProximityConfig`] - physical scope bonuses (exact file, same dir, etc.)
-//! - [`LogicalBonusConfig`] - logical scope bonuses (exact, parent, sibling)
 //! - [`TrustWeights`] - trust scores by provenance source
-//! - [`ThresholdsConfig`] - thresholds for needs_review, gc, compress
+//! - [`ThresholdsConfig`] - thresholds for gc and compress
 //!
 //! All structs provide sensible defaults and can be loaded from TOML files.
 
@@ -550,56 +548,6 @@ impl ScoringConfig {
     }
 }
 
-/// Physical scope proximity bonuses
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScopeProximityConfig {
-    /// Exact file match bonus
-    pub exact_file: f64,
-
-    /// Same directory bonus
-    pub same_directory: f64,
-
-    /// Same module/subtree bonus
-    pub same_module: f64,
-
-    /// Project root (default) bonus
-    pub project_root: f64,
-}
-
-impl Default for ScopeProximityConfig {
-    fn default() -> Self {
-        Self {
-            exact_file: 1.0,
-            same_directory: 0.85,
-            same_module: 0.6,
-            project_root: 0.4,
-        }
-    }
-}
-
-/// Logical scope bonuses
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogicalBonusConfig {
-    /// Exact logical scope match bonus
-    pub exact: f64,
-
-    /// Parent scope match bonus
-    pub parent: f64,
-
-    /// Sibling scope match bonus
-    pub sibling: f64,
-}
-
-impl Default for LogicalBonusConfig {
-    fn default() -> Self {
-        Self {
-            exact: 0.3,
-            parent: 0.2,
-            sibling: 0.15,
-        }
-    }
-}
-
 /// Trust weights by provenance source
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustWeights {
@@ -647,9 +595,11 @@ impl Default for TrustWeights {
 /// Search-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    /// Weight applied to semantic (cosine) similarity in search scoring.
-    /// Higher values make semantic matches dominate over keyword matches.
-    pub semantic_weight: f64,
+    /// Retired: read by nothing (no blend formula ever took a weight). Still
+    /// parsed so a config that sets it loads; the loader warns and `doctor`
+    /// reports it ([`EngramConfig::retired_keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_weight: Option<f64>,
 
     /// Minimum score threshold for search results (results below this are filtered out).
     pub threshold: f64,
@@ -658,7 +608,7 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            semantic_weight: 3.0,
+            semantic_weight: None,
             threshold: 0.2,
         }
     }
@@ -667,8 +617,11 @@ impl Default for SearchConfig {
 /// Thresholds for various operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThresholdsConfig {
-    /// Score threshold for needs_review status
-    pub needs_review: f64,
+    /// Retired: read by nothing (no code marks a memory needs-review from a
+    /// score). Still parsed so a config that sets it loads; the loader warns
+    /// and `doctor` reports it ([`EngramConfig::retired_keys`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_review: Option<f64>,
 
     /// Score threshold for garbage collection
     pub gc: f64,
@@ -680,7 +633,7 @@ pub struct ThresholdsConfig {
 impl Default for ThresholdsConfig {
     fn default() -> Self {
         Self {
-            needs_review: 0.3,
+            needs_review: None,
             gc: 0.05,
             compress: 0.4,
         }
@@ -1028,6 +981,26 @@ pub struct NliConfig {
     pub similarity_threshold: f64,
 }
 
+/// Whether `id` has the shape of a Hugging Face repository id:
+/// `owner/name`, each part made of ASCII letters, digits, `.`, `_` and `-`,
+/// and no `..` anywhere.
+///
+/// A model repository id from a config file is joined into a path under the
+/// model cache, so the shape is checked before it gets there.
+pub fn is_valid_hf_repo_id(id: &str) -> bool {
+    let part_ok = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let mut parts = id.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    part_ok(owner) && part_ok(name) && !id.contains("..")
+}
+
 impl NliConfig {
     /// Validate that NLI configuration values are within acceptable ranges.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
@@ -1045,6 +1018,12 @@ impl NliConfig {
         }
         if self.max_comparisons == 0 {
             anyhow::bail!("nli.max_comparisons must be > 0");
+        }
+        if !is_valid_hf_repo_id(&self.model) {
+            anyhow::bail!(
+                "nli.model ({:?}) must be a Hugging Face repository id of the form owner/name",
+                self.model
+            );
         }
         Ok(())
     }
@@ -1214,13 +1193,27 @@ pub struct EngramConfig {
     #[serde(default)]
     pub embeddings: EmbeddingsConfig,
 
-    /// Physical scope proximity bonuses
-    #[serde(default)]
-    pub scope_proximity: ScopeProximityConfig,
+    /// A retired `[scope_proximity]` table. Its four-bucket model never
+    /// existed in the scorer (physical scope is depth decay,
+    /// `[retrieval.scoring] depth_decay_base/floor`), so nothing read it. Kept
+    /// as raw TOML so a config that has it (even partly) still loads; see
+    /// [`EngramConfig::retired_keys`].
+    #[serde(
+        rename = "scope_proximity",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_scope_proximity: Option<toml::Table>,
 
-    /// Logical scope bonuses
-    #[serde(default)]
-    pub logical_bonus: LogicalBonusConfig,
+    /// A retired `[logical_bonus]` table, read by nothing (the logical scope
+    /// tiers are fixed in `scope::logical`). Raw TOML, like
+    /// [`Self::legacy_scope_proximity`].
+    #[serde(
+        rename = "logical_bonus",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub legacy_logical_bonus: Option<toml::Table>,
 
     /// Trust weights by source
     #[serde(default)]
@@ -1265,9 +1258,18 @@ pub struct EngramConfig {
     #[serde(default)]
     pub maintenance: MaintenanceConfig,
 
-    /// Security / access-control settings
-    #[serde(default)]
-    pub security: SecurityConfig,
+    /// A `[security]` table left over in a **project** config.
+    ///
+    /// The security gates decide what an agent may do outside its own
+    /// project, and a project's config file is committed: in a cloned
+    /// repository it is written by whoever wrote the repository. So
+    /// `[security]` is read only from the global config file
+    /// ([`GlobalConfig`]). The table is still parsed so an old project config
+    /// keeps loading, but it is kept as raw TOML on purpose: nothing can read
+    /// it as settings by mistake. The loader warns and `doctor` reports when
+    /// it is set; see [`EngramConfig::legacy_security_keys`].
+    #[serde(rename = "security", default, skip_serializing_if = "Option::is_none")]
+    pub legacy_security: Option<toml::Table>,
 
     /// Epistemic-class lifecycle settings (verification, demotion,
     /// promotion, consolidation, invalidation retention)
@@ -2039,9 +2041,10 @@ impl Default for DaemonConfig {
 
 /// The global, per-user config file: `<global_config_dir>/config.toml`.
 ///
-/// It holds the settings that belong to the user rather than to a project.
-/// Today that is only `[daemon]`: the daemon is one process shared by every
-/// project and session, so its settings must come from one place. Model
+/// It holds the settings that belong to the user rather than to a project:
+/// `[daemon]` (the daemon is one process shared by every project and session,
+/// so its settings must come from one place) and `[security]` (a permission a
+/// project's own committed config could grant would be no permission). Model
 /// selection (`[embeddings]`, `[nli]`, `[rerank]`, `[title]`) stays per
 /// project, because vectors are stored per project and checked against the
 /// project's manifest fingerprint.
@@ -2050,12 +2053,17 @@ pub struct GlobalConfig {
     /// Shared embedding daemon settings.
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    /// Security / access-control settings.
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl GlobalConfig {
     /// Validate every section.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
-        self.daemon.validate()
+        self.daemon.validate()?;
+        self.security.validate()
     }
 
     /// Top-level keys of a global config file that this version does not
@@ -2064,7 +2072,7 @@ impl GlobalConfig {
     pub fn unknown_top_level_keys(table: &toml::Table) -> Vec<String> {
         table
             .keys()
-            .filter(|k| k.as_str() != "daemon")
+            .filter(|k| !matches!(k.as_str(), "daemon" | "security"))
             .cloned()
             .collect()
     }
@@ -2076,6 +2084,45 @@ impl EngramConfig {
     /// project config has no `[daemon]` table (or an empty one).
     pub fn legacy_daemon_keys(&self) -> Vec<String> {
         self.legacy_daemon
+            .as_ref()
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+
+impl EngramConfig {
+    /// Retired keys this config still sets, as dotted names
+    /// (`scope_proximity.exact_file`, `thresholds.needs_review`, …). They
+    /// parse and have no effect; the loader warns once per file and `doctor`
+    /// reports them. Empty for a config that sets none.
+    pub fn retired_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        for (section, table) in [
+            ("scope_proximity", &self.legacy_scope_proximity),
+            ("logical_bonus", &self.legacy_logical_bonus),
+        ] {
+            match table {
+                Some(t) if t.is_empty() => keys.push(section.to_string()),
+                Some(t) => keys.extend(t.keys().map(|k| format!("{section}.{k}"))),
+                None => {}
+            }
+        }
+        if self.thresholds.needs_review.is_some() {
+            keys.push("thresholds.needs_review".to_string());
+        }
+        if self.search.semantic_weight.is_some() {
+            keys.push("search.semantic_weight".to_string());
+        }
+        keys
+    }
+}
+
+impl EngramConfig {
+    /// The `[security]` keys a project config still sets. They are ignored:
+    /// security settings come only from the global config file. Empty when
+    /// the project config has no `[security]` table (or an empty one).
+    pub fn legacy_security_keys(&self) -> Vec<String> {
+        self.legacy_security
             .as_ref()
             .map(|t| t.keys().cloned().collect())
             .unwrap_or_default()
@@ -2173,11 +2220,15 @@ impl Default for MaintenanceConfig {
 /// project. An MCP agent operating in project A, if steered (e.g. by injected
 /// memory content) with project B's path/id, could otherwise mutate a
 /// different registered project B on the same machine.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Read **only** from the global config file ([`GlobalConfig::security`]),
+/// never from a project's `.engramdb/config.toml`: that file is committed, so
+/// in a cloned repository it is the repository author's, and a gate the
+/// gated party can open is no gate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Whether MCP mutating tools may write to a *different* registered
-    /// project than the session's own. Default `true` (preserves historical
-    /// behavior — cross-project writes allowed). When `false`, MCP mutating
+    /// project than the session's own. Default `false`. Unless `true`, MCP mutating
     /// tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`,
     /// `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) are
     /// rejected when their `project` override resolves to a project id other
@@ -2192,7 +2243,7 @@ pub struct SecurityConfig {
     /// Keep this list in step with the `check_cross_project_write` call sites
     /// in `engram_mcp::server` and with `docs/users/configuration.md`; the
     /// three drifted apart once already.
-    #[serde(default = "default_allow_cross_project_writes")]
+    #[serde(default)]
     pub allow_cross_project_writes: bool,
 
     /// Whether the **MCP** harvest tools may read transcripts beyond the
@@ -2214,33 +2265,30 @@ pub struct SecurityConfig {
     /// `harvest_mark` rides this too, even though it is a write. It resolves
     /// a session-id *prefix* against the target's transcripts and ledger and
     /// names every match in its ambiguity error, so under the write gate
-    /// alone (which defaults to allow) it answered the question `harvest_list`
-    /// refuses: which sessions does that project have?
+    /// alone it answered the question `harvest_list` refuses: which sessions
+    /// does that project have?
     ///
     /// The CLI's `--all-projects` is deliberately **not** gated: a human
     /// typing the flag is the request. This only governs an agent asking on
     /// its own behalf.
     #[serde(default)]
     pub allow_all_projects_harvest: bool,
-}
 
-fn default_allow_cross_project_writes() -> bool {
-    true
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            allow_cross_project_writes: default_allow_cross_project_writes(),
-            allow_all_projects_harvest: false,
-        }
-    }
+    /// Whether a project's `[nli].model` may name a Hugging Face repository
+    /// that is not one of the built-in NLI models. Default `false`.
+    ///
+    /// A project config is committed, and the model it names is downloaded
+    /// and loaded (in the shared daemon when one is up) as soon as a session
+    /// starts. Without this, opening a cloned repository could make the
+    /// daemon fetch and parse any repository its author chose.
+    #[serde(default)]
+    pub allow_custom_model_repos: bool,
 }
 
 impl SecurityConfig {
     /// Validate security configuration. There are no numeric bounds, so this
     /// is trivially `Ok`; it exists to mirror the other sections' `validate`
-    /// pattern and give `EngramConfig::validate` a uniform call site.
+    /// pattern and give `GlobalConfig::validate` a uniform call site.
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         Ok(())
     }
@@ -2371,7 +2419,6 @@ impl EngramConfig {
         self.nli.validate()?;
         self.rerank.validate()?;
         self.stats.validate()?;
-        self.security.validate()?;
         self.review.validate()?;
         self.harvest.validate()?;
         self.index.validate()?;
@@ -2832,19 +2879,10 @@ mod tests {
         assert_eq!(config.trust_weights.inferred, 0.6);
         assert_eq!(config.trust_weights.imported, 0.7);
 
-        // Scope proximity
-        assert_eq!(config.scope_proximity.exact_file, 1.0);
-        assert_eq!(config.scope_proximity.same_directory, 0.85);
-        assert_eq!(config.scope_proximity.same_module, 0.6);
-        assert_eq!(config.scope_proximity.project_root, 0.4);
-
-        // Logical bonus
-        assert_eq!(config.logical_bonus.exact, 0.3);
-        assert_eq!(config.logical_bonus.parent, 0.2);
-        assert_eq!(config.logical_bonus.sibling, 0.15);
+        // Retired keys are absent by default
+        assert!(config.retired_keys().is_empty());
 
         // Thresholds
-        assert_eq!(config.thresholds.needs_review, 0.3);
         assert_eq!(config.thresholds.gc, 0.05);
         assert_eq!(config.thresholds.compress, 0.4);
 
@@ -2880,7 +2918,6 @@ mod tests {
         assert_eq!(config.retrieval.scoring.depth_decay_floor, 0.3);
 
         // Search config
-        assert_eq!(config.search.semantic_weight, 3.0);
         assert_eq!(config.search.threshold, 0.2);
 
         // Scoring weights - with_keyword
@@ -2921,15 +2958,8 @@ mod tests {
         // Verify all values match
         assert_eq!(loaded.retrieval.max_results, original.retrieval.max_results);
         assert_eq!(loaded.trust_weights.human, original.trust_weights.human);
-        assert_eq!(
-            loaded.scope_proximity.exact_file,
-            original.scope_proximity.exact_file
-        );
-        assert_eq!(loaded.logical_bonus.exact, original.logical_bonus.exact);
-        assert_eq!(
-            loaded.thresholds.needs_review,
-            original.thresholds.needs_review
-        );
+        assert_eq!(loaded.thresholds.gc, original.thresholds.gc);
+        assert_eq!(loaded.thresholds.compress, original.thresholds.compress);
         assert_eq!(
             loaded.retrieval.scoring.scope_multiplier_floor,
             original.retrieval.scoring.scope_multiplier_floor
@@ -3007,9 +3037,8 @@ relevance = 1.0
 
         // Verify other sections use defaults (thanks to #[serde(default)])
         assert_eq!(config.trust_weights.human, 1.0);
-        assert_eq!(config.scope_proximity.exact_file, 1.0);
-        assert_eq!(config.logical_bonus.exact, 0.3);
-        assert_eq!(config.thresholds.needs_review, 0.3);
+        assert_eq!(config.thresholds.compress, 0.4);
+        assert!(config.retired_keys().is_empty());
     }
 
     #[test]
@@ -3183,63 +3212,64 @@ interval_secs = 60
         assert_eq!(c.effective_digest_budget(), usize::MAX, "0 means unlimited");
     }
 
+    /// Every security gate is closed by default, also when the section is
+    /// present but silent about a key.
     #[test]
-    fn test_security_config_defaults() {
-        // Default: cross-project writes allowed (preserves historical behavior).
-        let config = EngramConfig::default();
-        assert!(config.security.allow_cross_project_writes);
-        assert!(SecurityConfig::default().allow_cross_project_writes);
+    fn cross_project_writes_default_to_refused() {
+        let default = SecurityConfig::default();
+        assert!(!default.allow_cross_project_writes);
+        assert!(!default.allow_all_projects_harvest);
+        assert!(!default.allow_custom_model_repos);
 
-        // A config.toml with NO [security] section parses to the default true.
-        let from_empty: EngramConfig = toml::from_str("").unwrap();
-        assert!(from_empty.security.allow_cross_project_writes);
-
-        // The machine-wide harvest read is opt-in, and stays opt-in when the
-        // section is present but silent about it. A default of `true` here
-        // would let an auto-approved MCP tool pull every conversation on the
-        // machine into context without anyone asking.
-        assert!(!config.security.allow_all_projects_harvest);
-        assert!(!SecurityConfig::default().allow_all_projects_harvest);
-        assert!(!from_empty.security.allow_all_projects_harvest);
-        let partial: EngramConfig =
-            toml::from_str("[security]\nallow_cross_project_writes = false\n").unwrap();
-        assert!(!partial.security.allow_all_projects_harvest);
-        let enabled: EngramConfig =
+        let from_empty: GlobalConfig = toml::from_str("").unwrap();
+        assert!(!from_empty.security.allow_cross_project_writes);
+        let partial: GlobalConfig =
             toml::from_str("[security]\nallow_all_projects_harvest = true\n").unwrap();
-        assert!(enabled.security.allow_all_projects_harvest);
+        assert!(partial.security.allow_all_projects_harvest);
+        assert!(!partial.security.allow_cross_project_writes);
+        assert!(!partial.security.allow_custom_model_repos);
     }
 
     #[test]
-    fn test_security_config_partial_toml_defaults_field() {
-        // A partial [security] section (present but empty) still defaults the
-        // field to true via the field-level `#[serde(default = "...")]`.
-        let config: EngramConfig = toml::from_str("[security]\n").unwrap();
-        assert!(config.security.allow_cross_project_writes);
+    fn global_config_reads_security() {
+        let cfg: GlobalConfig = toml::from_str(
+            "[security]\nallow_cross_project_writes = true\nallow_custom_model_repos = true\n",
+        )
+        .unwrap();
+        assert!(cfg.security.allow_cross_project_writes);
+        assert!(cfg.security.allow_custom_model_repos);
+        assert!(!cfg.security.allow_all_projects_harvest);
+        assert!(cfg.validate().is_ok());
+
+        let table: toml::Table = toml::from_str("[security]\n[daemon]\n").unwrap();
+        assert!(GlobalConfig::unknown_top_level_keys(&table).is_empty());
     }
 
+    /// A project config's `[security]` still parses (an old config keeps
+    /// loading) but grants nothing: it is kept as a raw table, reported by
+    /// key, and never written back out.
     #[test]
-    fn test_security_config_custom_toml() {
-        let toml = r#"
-[security]
-allow_cross_project_writes = false
-"#;
-        let config: EngramConfig = toml::from_str(toml).unwrap();
-        assert!(!config.security.allow_cross_project_writes);
-        // Validation is trivially Ok regardless of the flag.
-        config.validate().unwrap();
-    }
+    fn a_project_security_table_is_kept_raw() {
+        let cfg: EngramConfig = toml::from_str(
+            "[security]\nallow_all_projects_harvest = true\nallow_cross_project_writes = true\n",
+        )
+        .unwrap();
+        let mut keys = cfg.legacy_security_keys();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["allow_all_projects_harvest", "allow_cross_project_writes"]
+        );
+        assert!(cfg.validate().is_ok());
+        // A value of the wrong type cannot make the project config unreadable.
+        let odd: EngramConfig =
+            toml::from_str("[security]\nallow_cross_project_writes = \"yes\"\n").unwrap();
+        assert_eq!(odd.legacy_security_keys(), ["allow_cross_project_writes"]);
 
-    #[test]
-    fn test_security_config_toml_roundtrip() {
-        let mut config = EngramConfig::default();
-        config.security.allow_cross_project_writes = false;
-
-        let temp_path = std::env::temp_dir().join("test_security_config_roundtrip.toml");
-        config.to_toml_file(&temp_path).unwrap();
-        let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
-        std::fs::remove_file(&temp_path).ok();
-
-        assert!(!loaded.security.allow_cross_project_writes);
+        let none: EngramConfig = toml::from_str("").unwrap();
+        assert!(none.legacy_security_keys().is_empty());
+        let out = toml::to_string_pretty(&EngramConfig::default()).unwrap();
+        assert!(!out.contains("[security]"), "{out}");
     }
 
     #[test]
@@ -3283,22 +3313,22 @@ semantic_weight = 5.0
 threshold = 0.25
 "#;
         let config: EngramConfig = toml::from_str(toml).unwrap();
-        assert_eq!(config.search.semantic_weight, 5.0);
+        assert_eq!(config.search.semantic_weight, Some(5.0));
         assert_eq!(config.search.threshold, 0.25);
+        assert_eq!(config.retired_keys(), ["search.semantic_weight"]);
     }
 
     #[test]
     fn test_search_config_defaults_when_omitted() {
         // Empty TOML: all sections use #[serde(default)] on EngramConfig
         let config: EngramConfig = toml::from_str("").unwrap();
-        assert_eq!(config.search.semantic_weight, 3.0);
+        assert_eq!(config.search.semantic_weight, None);
         assert_eq!(config.search.threshold, 0.2);
     }
 
     #[test]
     fn test_search_config_roundtrip() {
         let mut config = EngramConfig::default();
-        config.search.semantic_weight = 7.5;
         config.search.threshold = 0.1;
 
         let temp_path = std::env::temp_dir().join("test_search_config_roundtrip.toml");
@@ -3306,8 +3336,69 @@ threshold = 0.25
         let loaded = EngramConfig::from_toml_file(&temp_path).unwrap();
         std::fs::remove_file(&temp_path).ok();
 
-        assert_eq!(loaded.search.semantic_weight, 7.5);
         assert_eq!(loaded.search.threshold, 0.1);
+    }
+
+    #[test]
+    fn retired_sections_parse_partially_and_are_reported() {
+        // One key of a retired section: a parse error while the section was
+        // a struct with required fields.
+        let config: EngramConfig = toml::from_str(
+            r#"
+[scope_proximity]
+exact_file = 0.9
+
+[logical_bonus]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.retired_keys(),
+            ["scope_proximity.exact_file", "logical_bonus"]
+        );
+    }
+
+    #[test]
+    fn retired_scalar_keys_are_optional() {
+        // `[thresholds]` without `needs_review` and `[search]` without
+        // `semantic_weight` used to be parse errors.
+        let config: EngramConfig = toml::from_str(
+            r#"
+[thresholds]
+gc = 0.1
+compress = 0.5
+
+[search]
+threshold = 0.3
+"#,
+        )
+        .unwrap();
+        assert!(config.retired_keys().is_empty());
+        assert_eq!(config.thresholds.compress, 0.5);
+
+        let old: EngramConfig = toml::from_str(
+            r#"
+[thresholds]
+needs_review = 0.3
+gc = 0.05
+compress = 0.4
+"#,
+        )
+        .unwrap();
+        assert_eq!(old.retired_keys(), ["thresholds.needs_review"]);
+    }
+
+    #[test]
+    fn a_default_config_serializes_without_retired_keys() {
+        let text = toml::to_string(&EngramConfig::default()).unwrap();
+        for key in [
+            "scope_proximity",
+            "logical_bonus",
+            "needs_review",
+            "semantic_weight",
+        ] {
+            assert!(!text.contains(key), "{key} in:\n{text}");
+        }
     }
 
     #[test]
@@ -3346,6 +3437,40 @@ threshold = 0.25
         assert!(!config.nli.enabled);
         assert_eq!(config.nli.contradiction_threshold, 0.7);
         assert_eq!(config.nli.max_comparisons, 10);
+    }
+
+    /// `[nli].model` is joined into a path under the model cache, so it must
+    /// have the shape of a repository id.
+    #[test]
+    fn nli_model_must_be_a_repo_id() {
+        for ok in [
+            DEFAULT_NLI_MODEL_REPO,
+            "cross-encoder/nli-deberta-v3-xsmall",
+            "a/b",
+            "Org_1/model.v2-q",
+        ] {
+            assert!(is_valid_hf_repo_id(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "noslash",
+            "a/b/c",
+            "../x",
+            "a/..",
+            "a/b..c",
+            "/abs/path",
+            "a/",
+            "/b",
+            "a b/c",
+            "a/b\\c",
+            "a/b?x",
+        ] {
+            assert!(!is_valid_hf_repo_id(bad), "{bad:?}");
+        }
+        let mut nli = NliConfig::default();
+        assert!(nli.validate().is_ok());
+        nli.model = "../../somewhere".to_string();
+        assert!(nli.validate().is_err());
     }
 
     #[test]

@@ -197,7 +197,8 @@ fn the_page_never_asks_for_a_width_the_server_refuses() {
         )),
         "graph/input.js must clamp roundWidth to the server's MAX_LAYOUT_WIDTH"
     );
-    assert!(js.contains("Math.min(MAX_LAYOUT_WIDTH, w)"));
+    // Both ends: the server refuses under 40 too (E13).
+    assert!(js.contains("Math.min(MAX_LAYOUT_WIDTH, Math.max(40, w))"));
     assert_eq!(MAX_LAYOUT_WIDTH % 40, 0, "the cap is itself a valid width");
 }
 
@@ -634,21 +635,18 @@ fn a_layout_that_is_not_finite_is_an_error_never_sent() {
 // Cache
 // ---------------------------------------------------------------------------
 
-fn temp_cache_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "engram-layout-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    dir.join("layouts")
+/// A fresh cache dir (not yet created: the cache makes it) under a temp dir
+/// that is removed when the returned guard drops. Keep the guard alive for
+/// the whole test.
+fn temp_cache_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+    let guard = tempfile::TempDir::new().unwrap();
+    let dir = guard.path().join("layouts");
+    (guard, dir)
 }
 
 #[test]
 fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let input = LayoutInput::Force(sample(20));
     let key = input.digest();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
@@ -720,7 +718,7 @@ fn the_disk_cache_is_private_and_replaces_a_corrupt_file() {
 
 #[test]
 fn the_disk_cache_evicts_the_oldest_past_its_cap() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     for k in 0..6 {
         let key = format!("{k:064x}");
@@ -771,7 +769,7 @@ fn prune_touches_only_the_caches_own_file_names() {
     }
     // A directory the user pointed the cache at keeps their files, however
     // old, under any cap.
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     assert!(c.dir().is_some());
     let theirs = ["notes.json", "photo.bin", "editor.tmp"];
@@ -794,7 +792,7 @@ fn prune_touches_only_the_caches_own_file_names() {
 
 #[test]
 fn a_corrupt_overview_on_disk_is_a_miss() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     let key = "b".repeat(64);
     let c = cache::LayoutCache::new(Some(dir.clone()), true);
     c.fill(&key, || Ok(Cached::Overview("{\"v\":3,".into())))
@@ -892,7 +890,7 @@ async fn a_lead_waits_its_turn_for_a_computing_slot() {
 
 #[test]
 fn a_shared_cache_dir_is_refused() {
-    let dir = temp_cache_dir();
+    let (_guard, dir) = temp_cache_dir();
     std::fs::create_dir_all(&dir).unwrap();
     #[cfg(unix)]
     {
@@ -1022,5 +1020,329 @@ fn grid_keeps_its_contract_and_is_deterministic() {
             input.nodes.len()
         );
         assert_eq!(v["chains"].as_array().unwrap().len(), out.lines.len());
+    }
+}
+
+#[test]
+fn a_cache_file_with_a_damaged_payload_is_recomputed() {
+    let (_guard, dir) = temp_cache_dir();
+    let input = LayoutInput::Force(sample(20));
+    let key = input.digest();
+    let c = cache::LayoutCache::new(Some(dir.clone()), true);
+    let first = c.fill(&key, || input.run(&key)).unwrap();
+    let file = dir.join(format!("{key}.bin"));
+    let good = std::fs::read(&file).unwrap();
+    // One low mantissa bit of the first position: still a finite number,
+    // the same length, the same header; only the checksum can tell.
+    let mut bad = good.clone();
+    bad[4 + 4 + 64 + 1 + 8] ^= 1;
+    std::fs::write(&file, &bad).unwrap();
+    let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
+    let mut ran = false;
+    let again = c2
+        .fill(&key, || {
+            ran = true;
+            input.run(&key)
+        })
+        .unwrap();
+    assert!(ran, "a damaged file is a miss");
+    assert_eq!(*again, *first);
+    assert_eq!(std::fs::read(&file).unwrap(), good, "the file is rewritten");
+    // forget() drops it from memory and disk.
+    c2.forget(&key);
+    assert!(c2.get_mem(&key).is_none());
+    assert!(!file.exists());
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_non_finite_core_never_reads_back() {
+    let core = scope_force::layout_core(&sample(20));
+    let ok = Cached::Force(Box::new(core.clone()));
+    assert_eq!(Cached::from_bytes(&ok.to_bytes()), Some(ok));
+    for damage in [
+        |c: &mut ForceCore| c.x[0] = f64::NAN,
+        |c: &mut ForceCore| c.r[1] = f64::INFINITY,
+        |c: &mut ForceCore| c.name_size = f64::NAN,
+        |c: &mut ForceCore| c.max[0] = f64::NEG_INFINITY,
+        |c: &mut ForceCore| c.labels[0].w = f64::NAN,
+    ] {
+        let mut bad = core.clone();
+        damage(&mut bad);
+        assert!(!bad.is_finite());
+        assert_eq!(
+            Cached::from_bytes(&Cached::Force(Box::new(bad)).to_bytes()),
+            None
+        );
+    }
+    // An empty graph's bounds stay at their ±infinity start: still a layout.
+    let empty = scope_force::layout_core(&sample(0));
+    assert!(empty.x.is_empty() && empty.is_finite());
+}
+
+#[test]
+fn a_pre_checksum_cache_file_is_replaced() {
+    let (_guard, dir) = temp_cache_dir();
+    let input = LayoutInput::Force(sample(20));
+    let key = input.digest();
+    let c = cache::LayoutCache::new(Some(dir.clone()), true);
+    let v = c.fill(&key, || input.run(&key)).unwrap();
+    let file = dir.join(format!("{key}.bin"));
+    // The same layout in the format before the checksum.
+    let mut old = b"EDLC".to_vec();
+    old.extend_from_slice(&LAYOUT_VERSION.to_le_bytes());
+    old.extend_from_slice(key.as_bytes());
+    old.extend_from_slice(&v.to_bytes());
+    std::fs::write(&file, &old).unwrap();
+    let c2 = cache::LayoutCache::new(Some(dir.clone()), true);
+    let mut ran = false;
+    c2.fill(&key, || {
+        ran = true;
+        input.run(&key)
+    })
+    .unwrap();
+    assert!(ran, "an EDLC file is foreign");
+    assert!(std::fs::read(&file).unwrap().starts_with(b"EDL2"));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn a_core_that_does_not_fit_the_graph_is_not_rendered() {
+    let small = scope_force::layout_core(&sample(20));
+    let input = LayoutInput::Force(sample(21));
+    let key = input.digest();
+    let err = input
+        .render(&Cached::Force(Box::new(small)), &key, Groups::Top, None)
+        .unwrap_err();
+    assert!(err.contains("does not fit"), "{err}");
+}
+
+#[test]
+fn the_overview_holds_its_contract_at_5000_scopes() {
+    // E16: nothing caps a store's top-scope count. Past PACK_MAX the discs
+    // sit on a spiral (where large ones may touch, so no overlap check
+    // here), and the m × m affinity matrix is not built.
+    let m = 5000;
+    let input = overview::OverviewInput {
+        nodes: (0..m)
+            .map(|i| overview::OverviewNode {
+                id: format!("scope-{i}"),
+                count: (1 + 5000 / (i + 1)) as f64,
+                full_len: 14,
+                short_len: 7,
+            })
+            .collect(),
+        edges: (1..m)
+            .map(|i| overview::OverviewEdge {
+                s: i - 1,
+                t: i,
+                n: (i % 9 + 1) as f64,
+            })
+            .collect(),
+        aspect: 0.6,
+        width: 1240.0,
+    };
+    let out = overview::layout(&input);
+    let b = &out.bounds;
+    assert_eq!(out.pos.len(), 2 * m);
+    assert_eq!(out.r.len(), m);
+    assert_eq!(out.labels.len(), m, "a label per scope");
+    assert_eq!(out.routes.len(), input.edges.len());
+    assert!([b.x, b.y, b.w, b.h].iter().all(|v| v.is_finite()));
+    assert!(out.routes.iter().flatten().flatten().all(|v| v.is_finite()));
+    assert!(out
+        .labels
+        .iter()
+        .all(|l| l.x.is_finite() && l.y.is_finite()));
+    for i in 0..m {
+        let (x, y, r) = (out.pos[2 * i], out.pos[2 * i + 1], out.r[i]);
+        assert!(x.is_finite() && y.is_finite() && r > 0.0, "disc {i}");
+        assert!(
+            x - r >= b.x - 1e-6 && x + r <= b.x + b.w + 1e-6,
+            "disc {i} outside"
+        );
+        assert!(
+            y - r >= b.y - 1e-6 && y + r <= b.y + b.h + 1e-6,
+            "disc {i} outside"
+        );
+    }
+}
+
+/// The `LAYOUT_VERSION` the [`PINNED`] digests were recorded at.
+const PINNED_AT: u32 = 4;
+
+/// (case, SHA-256 of the rendered layout text with its cache key blanked).
+/// Any change here means the layout's output changed: bump `LAYOUT_VERSION`
+/// and update the digests and [`PINNED_AT`] together. The cache key is
+/// blanked because it is salted with the crate version, which a release
+/// changes without changing a single position.
+const PINNED: &[(&str, &str)] = &[
+    (
+        "force-top/top",
+        "80f03c38e6661e92fdaf2e3cad4e7dd5ca088acd08be41fd898e0919929a4bb6",
+    ),
+    (
+        "force-top/sub",
+        "a46d0c79c3c2c9bf981260aa3e4219950d4ea618f38252a1560036242aabf342",
+    ),
+    (
+        "force-sub/top",
+        "be2bc08835391e0fc5825e7139996237b76d081b31e39dd4abab67601101342e",
+    ),
+    (
+        "force-sub/sub",
+        "558a12b1e42e49f57059f252300d26ddfd1d10892660991d95380b9daffd7344",
+    ),
+    (
+        "overview",
+        "455867bdfa66dfb326496c8332723a02d9f957e5ec093fc16090d51ef89f4f42",
+    ),
+    (
+        "grid/sample-60",
+        "2230ef78b6f0f65f29f404878563f37f39dd1a3f69d7718d0bd2f5f18ed21857",
+    ),
+];
+
+/// Every pinned case's rendered text: the three fixtures (each scope-force
+/// one under both groupings, at the fixture's own width), and a generated
+/// graph through `grid`.
+fn pinned_cases() -> Vec<(String, String)> {
+    let mut cases = Vec::new();
+    for (name, text) in FIXTURES {
+        let fx: Value = serde_json::from_str(text).unwrap();
+        match fx["layout"].as_str().unwrap() {
+            "scope-force" => {
+                let input = fixture_force(&fx);
+                for (g, groups) in [("top", Groups::Top), ("sub", Groups::Sub)] {
+                    let li = LayoutInput::Force(input.clone());
+                    let key = li.digest();
+                    let text = li.render(&li.run(&key).unwrap(), &key, groups, None);
+                    cases.push((format!("{name}/{g}"), text.unwrap().replace(&key, "KEY")));
+                }
+            }
+            "scope-overview" => {
+                let li = LayoutInput::Overview(fixture_overview(&fx));
+                let key = li.digest();
+                let text = li.render(&li.run(&key).unwrap(), &key, Groups::Top, None);
+                cases.push((name.to_string(), text.unwrap().replace(&key, "KEY")));
+            }
+            other => panic!("{name}: unknown layout {other}"),
+        }
+    }
+    let li = LayoutInput::Grid(sample(60));
+    let key = li.digest();
+    let text = li.render(&li.run(&key).unwrap(), &key, Groups::Top, None);
+    cases.push(("grid/sample-60".into(), text.unwrap().replace(&key, "KEY")));
+    cases
+}
+
+#[test]
+fn the_fixture_layouts_match_their_pinned_digests() {
+    assert_eq!(
+        PINNED_AT, LAYOUT_VERSION,
+        "LAYOUT_VERSION changed: re-record PINNED and set PINNED_AT to it"
+    );
+    let actual: Vec<(String, String)> = pinned_cases()
+        .into_iter()
+        .map(|(name, text)| {
+            let digest = Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>();
+            (name, digest)
+        })
+        .collect();
+    let table: String = actual
+        .iter()
+        .map(|(n, d)| format!("    (\"{n}\", \"{d}\"),\n"))
+        .collect();
+    assert_eq!(
+        actual.len(),
+        PINNED.len(),
+        "PINNED does not list every case; the current digests are:\n{table}"
+    );
+    for ((name, digest), (pinned_name, pinned)) in actual.iter().zip(PINNED) {
+        assert_eq!(name, pinned_name, "PINNED is out of order:\n{table}");
+        assert_eq!(
+            digest, pinned,
+            "layout output changed for {name}: bump LAYOUT_VERSION and update PINNED \
+             (current digests:\n{table})"
+        );
+    }
+}
+
+/// xorshift64*: reproducible bytes for the cache-decoder test.
+struct Gen(u64);
+
+impl Gen {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+}
+
+/// A cache file is read back from a directory the user may point anywhere,
+/// so its payload is untrusted. Random bytes, huge length prefixes and a
+/// valid payload with any one byte flipped must each decode to nothing or to
+/// a value that re-encodes to exactly those bytes, never panic, and never
+/// allocate on a length the input cannot back.
+#[test]
+fn the_cache_decoder_rejects_generated_bytes() {
+    let check = |bytes: &[u8], what: &str| {
+        if let Some(v) = Cached::from_bytes(bytes) {
+            assert_eq!(
+                v.to_bytes(),
+                bytes,
+                "{what}: accepted bytes re-encode differently"
+            );
+        }
+    };
+    let mut g = Gen(0xdead_beef_f00d_0001);
+    for case in 0..5000 {
+        let len = (g.next() % 200) as usize;
+        let mut bytes: Vec<u8> = (0..len).map(|_| g.next() as u8).collect();
+        if let Some(first) = bytes.first_mut() {
+            *first %= 4; // mostly a known tag, sometimes not
+        }
+        check(&bytes, &format!("random case {case}"));
+    }
+    // A length prefix claiming far more than the input holds.
+    for tag in 0u8..3 {
+        for n in [u64::MAX, u64::MAX / 8, 1 << 40, 4096] {
+            let mut bytes = vec![tag];
+            bytes.extend_from_slice(&n.to_le_bytes());
+            bytes.extend_from_slice(&[0u8; 32]);
+            assert_eq!(Cached::from_bytes(&bytes), None, "tag {tag}, length {n}");
+        }
+    }
+    // Every single-byte flip of valid payloads of each kind.
+    let force = LayoutInput::Force(sample(8));
+    let key = force.digest();
+    let grid = LayoutInput::Grid(sample(8));
+    let gkey = grid.digest();
+    for (what, valid) in [
+        ("force", force.run(&key).unwrap()),
+        ("grid", grid.run(&gkey).unwrap()),
+        (
+            "overview",
+            Cached::Overview("{\"ids\":[\"a\"]}".to_string()),
+        ),
+    ] {
+        let bytes = valid.to_bytes();
+        assert_eq!(Cached::from_bytes(&bytes).as_ref(), Some(&valid), "{what}");
+        for at in 0..bytes.len() {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 1 << (g.next() % 8);
+            check(&flipped, &format!("{what} flipped at {at}"));
+        }
+        for cut in 0..bytes.len() {
+            assert_eq!(
+                Cached::from_bytes(&bytes[..cut]),
+                None,
+                "{what} cut at {cut}"
+            );
+        }
     }
 }

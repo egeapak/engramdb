@@ -59,6 +59,40 @@ pub(crate) fn query(raw: Option<String>) -> HashMap<String, String> {
     .unwrap_or_default()
 }
 
+/// One top-scope key from a query value (`top_scope=`, `from_scope=`, …):
+/// `-` is "no logical scope" (`""`), anything else a percent-encoded name
+/// (the page writes them with `scopes.js::scopeKey`), so a scope literally
+/// named `-`, or one holding a comma, is told apart (`%2D`, `%2C`). An
+/// unencoded name decodes to itself unless it holds a `%`.
+pub(crate) fn scope_key(raw: &str) -> Result<String, ApiError> {
+    let raw = raw.trim();
+    if raw == "-" {
+        return Ok(String::new());
+    }
+    let bad =
+        || ApiError::bad_request(format!("{raw:?} is not a valid percent-encoded scope name"));
+    let b = raw.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' {
+            let hex = b.get(i + 1..i + 3).ok_or_else(bad)?;
+            let hex = std::str::from_utf8(hex).map_err(|_| bad())?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| bad())?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| bad())
+}
+
+/// A comma-joined list of [`scope_key`]s.
+pub(crate) fn scope_keys(raw: &str) -> Result<Vec<String>, ApiError> {
+    raw.split(',').map(scope_key).collect()
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/session", get(session))
@@ -253,7 +287,7 @@ fn row(
         epistemic: e.epistemic.as_str(),
         status: status_str(e.status),
         visibility: wire(&e.visibility).to_lowercase(),
-        criticality: e.criticality,
+        criticality: finite(e.criticality),
         top_scope,
         logical: e.logical.clone(),
         physical: e.physical.clone(),
@@ -263,6 +297,21 @@ fn row(
         invalidated_at: e.invalidated_at,
         expires_at: e.expires_at,
         usage: usage.map(UsageCols::from).unwrap_or_default(),
+    }
+}
+
+/// A score as the API sends it: a non-finite one (`NaN`, `inf`) is `0.0`.
+///
+/// The parser reads a non-finite score in a file as absent, but an index
+/// row written before that keeps its `NaN` until the next reindex.
+/// serde_json writes a non-finite `f64` as `null`, which the page cannot
+/// format and a keyset cursor cannot read back, so every score leaves here
+/// finite. No clamp: an out-of-range finite value renders and pages fine.
+pub(crate) fn finite(v: f64) -> f64 {
+    if v.is_finite() {
+        v
+    } else {
+        0.0
     }
 }
 
@@ -378,9 +427,7 @@ async fn list_memories(
     };
     // `top_scope=`, not `scope=`: `scope` is the older substring filter over
     // every physical and logical scope, kept as it was.
-    let top_scopes: Option<Vec<&str>> = q
-        .get("top_scope")
-        .map(|l| l.split(',').map(str::trim).collect());
+    let top_scopes: Option<Vec<String>> = q.get("top_scope").map(|l| scope_keys(l)).transpose()?;
     let scope = q.get("scope");
     let tag = q.get("tag");
     let text = q.get("q").map(|s| s.to_lowercase());
@@ -417,9 +464,8 @@ async fn list_memories(
         .filter(|e| epistemic.as_ref().is_none_or(|k| k.contains(&e.epistemic)))
         .filter(|e| {
             top_scopes.as_ref().is_none_or(|ls| {
-                // `-` names "no logical scope", so it survives a comma join.
-                let l = top_scope_of(&e.logical).unwrap_or_else(|| "-".to_string());
-                ls.contains(&l.as_str())
+                // `""` is "no logical scope" (`-` in the query).
+                ls.contains(&top_scope_of(&e.logical).unwrap_or_default())
             })
         })
         .filter(|e| {
@@ -448,7 +494,7 @@ async fn list_memories(
     let micros = |t: DateTime<Utc>| SortKey::Num(t.timestamp_micros() as f64);
     let key = |e: &IndexFilterable| -> Option<SortKey> {
         Some(match sort {
-            "criticality" => SortKey::Num(e.criticality),
+            "criticality" => SortKey::Num(finite(e.criticality)),
             "created" => micros(e.created_at),
             "updated" => micros(e.updated_at),
             "summary" => SortKey::text(e.summary.to_lowercase()),
@@ -633,7 +679,9 @@ pub(crate) fn hex_json<T: Serialize>(v: &T) -> String {
 
 /// The inverse of [`hex_json`]; `None` for anything it did not produce.
 pub(crate) fn unhex_json<T: serde::de::DeserializeOwned>(s: &str) -> Option<T> {
-    if !s.len().is_multiple_of(2) || s.len() > 4096 {
+    // Only hex digits: `from_str_radix` also takes a leading `+`, so a pair
+    // such as `+7` would decode.
+    if !s.len().is_multiple_of(2) || s.len() > 4096 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let bytes: Option<Vec<u8>> = (0..s.len())
@@ -684,6 +732,8 @@ struct AttentionEdge {
 /// The store's edges at a glance.
 #[derive(Serialize, Default)]
 struct EdgeTotals {
+    /// What the Relations tab lists by default: no rejected relation and
+    /// none with an invalidated end (dangling ones included).
     total: usize,
     proposed: usize,
     proposed_contradictions: usize,
@@ -696,7 +746,9 @@ struct UsageTotals {
     fetched: u64,
     updated: u64,
     challenged: u64,
-    /// Memories with at least one read of any kind.
+    /// Live memories with at least one read of any kind (the page prints
+    /// it as "N of `live`"). The lifetime sums above count every memory's
+    /// reads, invalidated and deleted ones included.
     used_memories: usize,
     /// Per signal, never summed: a retrieval, a hook injection and a fetch
     /// by id are three different things (see `stats` in the CLI reference).
@@ -746,6 +798,9 @@ struct StatsPage {
     /// Oldest first; the last 30 days, today included.
     series: Vec<DailyUsage>,
     attention: Vec<AttentionItem>,
+    /// Per attention reason, how many items the store has: `attention`
+    /// lists at most [`ATTENTION_PER_KIND`] of each.
+    attention_totals: BTreeMap<&'static str, usize>,
     /// See `MemoryPage::rebuilding`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     rebuilding: bool,
@@ -768,6 +823,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
 
     let slots = color_slots(&all);
     let live: Vec<&IndexFilterable> = all.iter().filter(|e| !is_invalidated(e, now)).collect();
+    let live_ids: std::collections::HashSet<&str> = live.iter().map(|e| e.id.as_str()).collect();
     let mut by_epistemic = BTreeMap::new();
     let mut by_scope = BTreeMap::new();
     for e in &live {
@@ -790,14 +846,14 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         previous_7_days: Signals::default(),
         last_read_at: None,
     };
-    for m in usage.by_memory.values() {
+    for (mid, m) in &usage.by_memory {
         let c = &m.counts;
         totals.returned += c.returned;
         totals.injected += c.injected;
         totals.fetched += c.fetched;
         totals.updated += c.updated;
         totals.challenged += c.challenged;
-        if c.returned + c.injected + c.fetched > 0 {
+        if c.returned + c.injected + c.fetched > 0 && live_ids.contains(mid.as_str()) {
             totals.used_memories += 1;
         }
         totals.last_read_at = totals.last_read_at.max(last_read(c));
@@ -812,10 +868,23 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
     let mut attention = Vec::new();
     let edges = store.edges().await?;
     let by_id: HashMap<&str, &IndexFilterable> = all.iter().map(|e| (e.id.as_str(), e)).collect();
+    // The Relations tab's default list (`relations.rs`): every kind,
+    // proposed included, no rejected one, no invalidated end.
+    let listed = engramdb::ops::links::graph_of(
+        &all,
+        edges.clone(),
+        &engramdb::ops::links::GraphFilter {
+            kinds: None,
+            include_proposed: true,
+            include_rejected: false,
+            include_invalidated: false,
+        },
+    );
     let mut edge_totals = EdgeTotals {
-        total: edges.len(),
+        total: listed.edges.len() + listed.dangling_edges.len(),
         ..EdgeTotals::default()
     };
+    let mut attention_totals: BTreeMap<&'static str, usize> = BTreeMap::new();
     let proposed_items = |contradictions: bool, out: &mut Vec<AttentionItem>| {
         let mut n = 0;
         for e in edges.iter().filter(|e| {
@@ -859,13 +928,20 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
                     dst_store: e.dst_store.clone(),
                     dst_summary: dst.map(|d| d.summary.clone()),
                     origin: e.origin.clone(),
-                    confidence: e.confidence,
+                    confidence: finite(e.confidence),
                 }),
             });
         }
         n
     };
     edge_totals.proposed_contradictions = proposed_items(true, &mut attention);
+    attention_totals.insert(
+        "proposed_contradiction",
+        edge_totals.proposed_contradictions,
+    );
+    let count_status = |status: Status| live.iter().filter(|e| e.status == status).count();
+    attention_totals.insert("challenged", count_status(Status::Challenged));
+    attention_totals.insert("needs_review", count_status(Status::NeedsReview));
     let challenged: Vec<String> = live
         .iter()
         .filter(|e| e.status == Status::Challenged)
@@ -912,6 +988,7 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         });
     }
     let other_proposed = proposed_items(false, &mut attention);
+    attention_totals.insert("proposed_edge", other_proposed);
     edge_totals.proposed = edge_totals.proposed_contradictions + other_proposed;
     let cutoff = now - Duration::days(STALE_DAYS);
     let mut stale: Vec<(&IndexFilterable, Option<DateTime<Utc>>)> = live
@@ -926,6 +1003,9 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         })
         .filter(|(_, lr)| lr.is_none_or(|t| t < cutoff))
         .collect();
+    let stale_read = stale.iter().filter(|(_, lr)| lr.is_some()).count();
+    attention_totals.insert("stale", stale_read);
+    attention_totals.insert("never_read", stale.len() - stale_read);
     // Never read first (oldest first), then the longest unread.
     stale.sort_by(|a, b| match (a.1, b.1) {
         (None, None) => a.0.created_at.cmp(&b.0.created_at),
@@ -972,11 +1052,12 @@ async fn project_stats(State(state): State<Arc<AppState>>, Path(id): Path<String
         by_scope: scope_counts(by_scope, &slots),
         oldest: stats.oldest,
         newest: stats.newest,
-        avg_criticality: stats.avg_criticality,
+        avg_criticality: finite(stats.avg_criticality),
         usage: totals,
         edges: edge_totals,
         series,
         attention,
+        attention_totals,
         rebuilding,
         schema: store.schema_state().await,
         staleness: store.staleness().await,
@@ -1164,4 +1245,96 @@ async fn project_doctor(State(state): State<Arc<AppState>>, Path(id): Path<Strin
             .await
             .map(|p| p.display().to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift64*: a reproducible stream of garbage.
+    struct Gen(u64);
+
+    impl Gen {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+
+    /// `from_str_radix` takes a leading `+`, so `+9` decoded to a tab and
+    /// `31+9` (`1` then a tab) parsed as the JSON number 1. Only hex digits
+    /// are accepted.
+    #[test]
+    fn unhex_json_accepts_only_hex_digits() {
+        assert_eq!(unhex_json::<u32>("3109"), Some(1));
+        assert_eq!(unhex_json::<u32>("31+9"), None);
+        assert_eq!(unhex_json::<u32>("+931"), None);
+    }
+
+    /// A cursor arrives in a query string, so `unhex_json` sees whatever a
+    /// client sends: odd lengths, non-hex, multibyte text, over the cap, and
+    /// valid hex of invalid JSON. None of it may panic, and none of it may be
+    /// accepted except what decodes to JSON within the cap. What `hex_json`
+    /// writes always comes back.
+    #[test]
+    fn unhex_json_rejects_generated_garbage_without_panicking() {
+        let alphabet: Vec<char> = "0123456789abcdefABCDEF+- xzé中\u{0}".chars().collect();
+        let mut g = Gen(0x1234_5678_9abc_def0);
+        for case in 0..5000 {
+            let len = g.below(80);
+            let s: String = (0..len)
+                .map(|_| alphabet[g.below(alphabet.len())])
+                .collect();
+            if let Some(v) = unhex_json::<serde_json::Value>(&s) {
+                assert!(
+                    s.len().is_multiple_of(2)
+                        && s.len() <= 4096
+                        && s.bytes().all(|b| b.is_ascii_hexdigit()),
+                    "case {case}: accepted {s:?} as {v}"
+                );
+            }
+        }
+        // Over the cap, even when it is valid.
+        let big = hex_json(&"x".repeat(2100));
+        assert!(big.len() > 4096);
+        assert_eq!(unhex_json::<String>(&big), None);
+        // Odd length of otherwise valid hex.
+        let ok = hex_json(&serde_json::json!({"k": [1, 2]}));
+        assert_eq!(unhex_json::<serde_json::Value>(&ok[..ok.len() - 1]), None);
+        // Valid hex, invalid JSON.
+        let not_json: String = b"{\"k\": [1, 2"
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(unhex_json::<serde_json::Value>(&not_json), None);
+        // Random bytes, hex-encoded: JSON or nothing, never a panic.
+        for case in 0..2000 {
+            let bytes: Vec<u8> = (0..g.below(64)).map(|_| g.next() as u8).collect();
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let decoded = unhex_json::<serde_json::Value>(&hex);
+            assert_eq!(
+                decoded.is_some(),
+                serde_json::from_slice::<serde_json::Value>(&bytes).is_ok(),
+                "case {case}: {hex}"
+            );
+        }
+        // Round trip.
+        for case in 0..500 {
+            let v = serde_json::json!({
+                "f": format!("{:016x}", g.next()),
+                "key": [g.next() % 1000, g.below(7)],
+                "s": "é中\u{1b}",
+            });
+            assert_eq!(
+                unhex_json::<serde_json::Value>(&hex_json(&v)),
+                Some(v),
+                "case {case}"
+            );
+        }
+    }
 }

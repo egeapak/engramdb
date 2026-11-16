@@ -85,6 +85,20 @@ fn scope_benchmarks(c: &mut Criterion) {
         b.iter(|| physical::matches(&patterns, "src/api/auth/handlers.rs"));
     });
 
+    // A store whose memories each name one file: the Filter predicate runs
+    // `matches` once per memory, and each literal misses the path.
+    group.bench_function("physical_matches/2000_literal_scopes", |b| {
+        let scopes: Vec<Vec<String>> = (0..2000)
+            .map(|i| vec![format!("crates/c{}/src/m{i}.rs", i % 40)])
+            .collect();
+        b.iter(|| {
+            scopes
+                .iter()
+                .filter(|s| physical::matches(s, "src/api/auth/handlers.rs"))
+                .count()
+        });
+    });
+
     // --- Logical proximity ---
 
     // 3 scopes (typical)

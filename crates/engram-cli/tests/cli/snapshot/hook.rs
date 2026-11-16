@@ -257,3 +257,30 @@ fn hook_calls_are_not_recorded_on_uninitialized_store() {
     f.run_with_stdin(&["hook", "pre-compact"], "{}");
     assert!(!f.path().join(".engramdb/state/hook_stats.jsonl").exists());
 }
+
+/// A flag this binary does not know, on a known hook subcommand: version skew
+/// between the hook wiring and the binary. Exit 0 with one warning, and the
+/// hook does not run (stdout stays empty).
+#[test]
+fn hook_unknown_flag_exits_zero() {
+    let f = Fixture::new();
+    seeded(&f);
+    insta::assert_snapshot!(
+        "hook_unknown_flag_exits_zero",
+        f.run_with_stdin(
+            &["hook", "pre-tool-use", "--bogus", "--dir", "."],
+            &pre_tool_use_event("src/main.rs")
+        )
+    );
+}
+
+/// A known flag with a value this binary cannot parse exits 0 the same way.
+#[test]
+fn hook_bad_flag_value_exits_zero() {
+    let f = Fixture::new();
+    seeded(&f);
+    insta::assert_snapshot!(
+        "hook_bad_flag_value_exits_zero",
+        f.run_with_stdin(&["hook", "session-start", "--min-criticality", "x"], "{}")
+    );
+}

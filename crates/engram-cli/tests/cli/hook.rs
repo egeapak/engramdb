@@ -175,6 +175,17 @@ fn hook_all_subcommands_malformed_stdin_exit_zero() {
                 "hook {sub} must exit 0 on stdin {stdin:?}; stderr: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            // The same event from newer hook wiring that passes a flag this
+            // binary does not know: still exit 0, never clap's exit 2.
+            let output = hook_cmd(project.path(), &[sub, "--bogus"], &empty_cache)
+                .write_stdin(stdin)
+                .output()
+                .unwrap_or_else(|e| panic!("failed to run hook {sub} --bogus: {e}"));
+            assert!(
+                output.status.success(),
+                "hook {sub} --bogus must exit 0 on stdin {stdin:?}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 }
@@ -437,4 +448,215 @@ fn supported_hook_subcommands_matches_cli() {
     // The `external_subcommand` catch-all has no name of its own and must not
     // leak into the list.
     assert_eq!(names.len(), 6, "unexpected hook subcommands: {names:?}");
+}
+
+/// Claude Code can give up on a hook and close its end of stdout before the
+/// hook prints. `println!` panics on that write (exit 101 in debug, an abort
+/// under the release profile's `panic = "abort"`); the hook must exit 0.
+#[cfg(unix)]
+#[test]
+fn hook_with_closed_stdout_exits_zero() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    #[allow(deprecated)]
+    let bin = assert_cmd::cargo::cargo_bin("engramdb");
+    let mut child = std::process::Command::new(bin)
+        .args([
+            "--dir",
+            project.path().to_str().unwrap(),
+            "hook",
+            "session-start",
+        ])
+        .env("ENGRAMDB_REGISTRY_PATH", state.path().join("registry.json"))
+        .env("ENGRAMDB_DATA_DIR", state.path().join("data"))
+        .env("ENGRAMDB_CONFIG_DIR", state.path().join("config"))
+        .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
+        .env("ENGRAMDB_OFFLINE", "1")
+        .env("ENGRAMDB_IN_PROCESS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Close the read end before the hook can write: it is still blocked on
+    // stdin, which only reaches EOF below.
+    drop(child.stdout.take());
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        let _ = stdin.write_all(b"{\"session_id\":\"s1\"}");
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "hook must exit 0 with stdout closed: {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A background `engramdb daemon run`, killed when dropped so a failed
+/// assertion never leaves it running.
+#[cfg(unix)]
+struct DaemonChild(std::process::Child);
+
+#[cfg(unix)]
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The same environment for the daemon and the hook client: every
+/// `HOOK_ENV_KEYS` value must match or the daemon refuses the hook (and the
+/// client then runs it in-process, which this test must not mistake for a
+/// served hook). No `ENGRAMDB_IN_PROCESS`, which would keep the hook local.
+#[cfg(unix)]
+fn daemon_env(c: &mut std::process::Command, socket: &std::path::Path, empty_cache: &TempDir) {
+    c.env_remove("ENGRAMDB_IN_PROCESS");
+    c.env("ENGRAMDB_DAEMON_SOCKET", socket);
+    c.env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path());
+    c.env("ENGRAMDB_OFFLINE", "1");
+}
+
+/// `engramdb hook` offers the event to a running daemon (never spawning one)
+/// and prints what the daemon answered: the same document the in-process
+/// run prints, and the daemon, not this process, records the call.
+#[cfg(unix)]
+#[test]
+fn a_hook_is_served_by_a_running_daemon() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let project = seed_project();
+    let empty_cache = TempDir::new().unwrap();
+    let sock_dir = crate::helpers::private_tempdir();
+    let socket = sock_dir.path().join("d.sock");
+
+    // The in-process answer first, the reference.
+    let local = hook_cmd(
+        project.path(),
+        &["session-start", "--min-criticality", "0.7"],
+        &empty_cache,
+    )
+    .write_stdin(r#"{"session_id":"local"}"#)
+    .output()
+    .unwrap();
+    assert!(local.status.success(), "{local:?}");
+
+    let mut daemon = crate::helpers::std_cmd();
+    daemon_env(&mut daemon, &socket, &empty_cache);
+    daemon
+        .args(["daemon", "run", "--socket", socket.to_str().unwrap()])
+        .args(["--idle-timeout", "120"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _daemon = DaemonChild(daemon.spawn().expect("spawn the daemon"));
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let mut status = crate::helpers::std_cmd();
+        daemon_env(&mut status, &socket, &empty_cache);
+        let out = status
+            .args(["daemon", "status", "--format", "json"])
+            .args(["--socket", socket.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        if json["running"] != false && json["pid"].is_number() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon never answered: {json}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut hook = crate::helpers::std_cmd();
+    daemon_env(&mut hook, &socket, &empty_cache);
+    let served = hook
+        .args(["--dir", project.path().to_str().unwrap()])
+        .args(["hook", "session-start", "--min-criticality", "0.7"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(br#"{"session_id":"local"}"#)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(served.status.success(), "{served:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&served.stdout),
+        String::from_utf8_lossy(&local.stdout),
+        "the daemon's answer differs from the in-process one"
+    );
+
+    // Proof the daemon ran it: each path records the call under its own
+    // name, `in_process` or `daemon`. The daemon buffers its events and
+    // flushes them on shutdown (and it may drain this process's JSONL line
+    // into the table meanwhile, so the file alone proves nothing); `stats`
+    // reads the table and any undrained lines together.
+    let mut stop = crate::helpers::std_cmd();
+    daemon_env(&mut stop, &socket, &empty_cache);
+    let stopped = stop
+        .args(["daemon", "stop", "--socket", socket.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(stopped.status.success(), "{stopped:?}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let by_path = loop {
+        let out = crate::helpers::std_cmd()
+            .args(["--dir", project.path().to_str().unwrap(), "--json", "stats"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let by_path = find_by_path(&json, "session-start").unwrap_or_default();
+        let calls = |p: &str| by_path.get(p).and_then(|v| v["calls"].as_u64());
+        if calls("daemon").is_some() || Instant::now() >= deadline {
+            break by_path;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let calls = |p: &str| by_path.get(p).and_then(|v| v["calls"].as_u64());
+    assert_eq!(
+        (calls("in_process"), calls("daemon")),
+        (Some(1), Some(1)),
+        "the reference ran in-process and the second call in the daemon: {by_path:?}"
+    );
+}
+
+/// The `by_path` object of the hook named `hook` anywhere in a `stats`
+/// document.
+fn find_by_path(
+    v: &serde_json::Value,
+    hook: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match v {
+        serde_json::Value::Object(map) => {
+            if let Some(found) = map
+                .get(hook)
+                .and_then(|h| h.get("by_path"))
+                .and_then(|b| b.as_object())
+            {
+                return Some(found.clone());
+            }
+            map.values().find_map(|c| find_by_path(c, hook))
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(|c| find_by_path(c, hook)),
+        _ => None,
+    }
 }

@@ -1,0 +1,2 @@
+A @{"type": "user", "cwd": "/work/app", "sessionId": "s1", "timestamp": "2026-08-07T10:00:00Z", "message": {"role": "user", "content": "How do we run the tests?"}}
+{"type": "assistant", "cwd": "/work/app", "sessionId": "s1", "timestamp": "2026-08-07T10:00:05Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Use cargo nextest run --workspace."}]}}

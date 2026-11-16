@@ -233,8 +233,9 @@ a memory you cannot see is dropped too. Hooks never expand.
   one branch can come back with a checkout.
 - **Invalidated memories keep their links**, hidden by default. A link into a
   superseded memory names its successor.
-- **Links are not challenges.** `resolve --keep` clears a memory's challenges
-  and leaves its links alone. `gc` never edits links. The one crossing point:
+- **Links are not challenges.** Resolving a challenge with *keep* (the MCP `resolve`
+  tool with `action: "keep"`, or *Keep* in `engramdb review`) clears a memory's
+  challenges and leaves its links alone. `gc` never edits links. The one crossing point:
   a reviewer's verdict on a `contradicts` link (`link --winner`, `link
   --status confirmed|rejected`, MCP `link_status`, the dashboard) settles the
   pair, so it also clears the NLI challenge each memory carries about the

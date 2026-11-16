@@ -331,11 +331,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a local Ollama server with the model pulled"]
     async fn test_embed_single_ollama() {
-        if !ollama_available(ALL_MINILM).await {
-            eprintln!("Skipping: Ollama not available with all-minilm");
-            return;
-        }
+        // Ignored, so it runs only when asked for (`--run-ignored only -E
+        // 'test(ollama::)'`), and then a missing server is a failure rather
+        // than a pass.
+        assert!(
+            ollama_available(ALL_MINILM).await,
+            "Ollama not available with all-minilm"
+        );
         let provider = OllamaProvider::new(ALL_MINILM).unwrap();
         let result = provider.embed("Hello, world!").await;
         assert!(
@@ -349,11 +353,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a local Ollama server with the model pulled"]
     async fn test_embed_batch_ollama() {
-        if !ollama_available(ALL_MINILM).await {
-            eprintln!("Skipping: Ollama not available with all-minilm");
-            return;
-        }
+        // Ignored, so it runs only when asked for (`--run-ignored only -E
+        // 'test(ollama::)'`), and then a missing server is a failure rather
+        // than a pass.
+        assert!(
+            ollama_available(ALL_MINILM).await,
+            "Ollama not available with all-minilm"
+        );
         let provider = OllamaProvider::new(ALL_MINILM).unwrap();
         let texts = vec!["First text", "Second text", "Third text"];
         let result = provider.embed_batch(&texts).await;
@@ -366,11 +374,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "needs a local Ollama server with the model pulled"]
     async fn test_embed_nomic_embed_text() {
-        if !ollama_available(NOMIC_EMBED_TEXT).await {
-            eprintln!("Skipping: Ollama not available with nomic-embed-text");
-            return;
-        }
+        // Ignored, so it runs only when asked for (`--run-ignored only -E
+        // 'test(ollama::)'`), and then a missing server is a failure rather
+        // than a pass.
+        assert!(
+            ollama_available(NOMIC_EMBED_TEXT).await,
+            "Ollama not available with nomic-embed-text"
+        );
         let provider = OllamaProvider::new(NOMIC_EMBED_TEXT).unwrap();
         let result = provider.embed("Hello, world!").await;
         assert!(

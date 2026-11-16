@@ -69,6 +69,9 @@ impl ReadStore {
                 ApiError::unavailable(format!("{} has no EngramDB store", location.root.display()))
             }
             StorageError::Validation(msg) => ApiError::unavailable(msg),
+            // An index that will not open (unreadable, another vector
+            // width) is this store being unavailable, not a server fault.
+            e @ StorageError::Index { .. } => ApiError::unavailable(e.to_string()),
             other => ApiError::internal(other),
         })?;
         Ok(Self {
@@ -98,14 +101,14 @@ impl ReadStore {
         .await
     }
 
-    /// Map a failed *index* read. The storage layer reports every LanceDB
-    /// failure as `Validation`, which would read as the caller's fault (400).
-    /// A store whose schema is behind this binary is the usual cause — the
-    /// dashboard does not migrate (it opens read-only), so a pre-0.3.0 table
-    /// is missing columns this binary selects — and that is a 409 naming the
-    /// fix; anything else is a 500. A 404 passes through.
+    /// Map a failed *index* read. Storage types a LanceDB failure as
+    /// `StorageError::Index`, which arrives here as a 500. A store whose
+    /// schema is behind this binary is the usual cause — the dashboard does
+    /// not migrate (it opens read-only), so a pre-0.3.0 table is missing
+    /// columns this binary selects — and that is a 409 naming the fix. The
+    /// caller's own errors (404, 400) pass through.
     async fn index_error(&self, e: ApiError) -> ApiError {
-        if e.status == axum::http::StatusCode::NOT_FOUND {
+        if e.status != axum::http::StatusCode::INTERNAL_SERVER_ERROR {
             return e;
         }
         let schema = self.schema_state().await;
@@ -123,9 +126,6 @@ impl ReadStore {
                     e.message
                 ),
             );
-        }
-        if e.status == axum::http::StatusCode::BAD_REQUEST {
-            return ApiError::internal(format!("cannot read the index: {}", e.message));
         }
         e
     }
@@ -166,14 +166,11 @@ impl ReadStore {
             .map_err(ApiError::from_anyhow)
     }
 
-    /// One memory by id or unique prefix. An ambiguous prefix is the one
-    /// `Validation` here that is the caller's (400); see [`Self::index_error`].
+    /// One memory by id or unique prefix. An ambiguous prefix is the
+    /// caller's (400 `ambiguous_id`); see [`Self::index_error`].
     pub async fn get(&self, id: &str) -> Result<Memory, ApiError> {
         match self.inner.get(id).await {
             Ok(m) => Ok(m),
-            Err(StorageError::Validation(msg)) if msg.starts_with("Ambiguous ID prefix") => Err(
-                ApiError::new(axum::http::StatusCode::BAD_REQUEST, "ambiguous_id", msg),
-            ),
             Err(e) => Err(self.index_error(ApiError::from_storage(e)).await),
         }
     }

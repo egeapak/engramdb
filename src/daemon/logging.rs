@@ -12,6 +12,16 @@
 //! ([`super::daemon_log_path`] — beside the socket and the reclaim lock), and
 //! `engramdb doctor` surfaces its tail. A daemon run by hand in a terminal keeps writing to that terminal
 //! — see [`stderr_target`].
+//!
+//! # Size cap and its loss path
+//!
+//! The log is capped at [`MAX_LOG_BYTES`] when it is opened and, while a
+//! daemon runs, every minute by [`cap_in_place`]. Every writer holds an
+//! `O_APPEND` descriptor, so after a truncation the next write lands at offset
+//! 0 (no sparse file). Declared loss: a cap discards the whole log, including
+//! lines written in the last minute; between checks a hot loop can still
+//! write up to ~60 s of warnings, which the accept loop's rate limit keeps to
+//! a handful of lines.
 
 use std::fs::{File, OpenOptions};
 use std::io::Seek;
@@ -61,19 +71,31 @@ pub fn open_capped(path: &Path) -> std::io::Result<File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let oversized = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_LOG_BYTES);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(!oversized)
-        .write(true)
-        .truncate(oversized)
-        .open(path)?;
-    // `append(false) + truncate(true)` leaves the cursor at 0; be explicit for
-    // the non-truncating case so callers always write at the end.
-    if !oversized {
-        file.seek(std::io::SeekFrom::End(0))?;
+    // Always `O_APPEND`: a descriptor opened without it keeps writing at its
+    // own offset after a later truncation and leaves a sparse file.
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    if file.metadata()?.len() > MAX_LOG_BYTES {
+        file.set_len(0)?;
     }
+    file.seek(std::io::SeekFrom::End(0))?;
     Ok(file)
+}
+
+/// Truncate the log at `path` to empty if it has grown past [`MAX_LOG_BYTES`].
+///
+/// Returns whether it truncated. A missing file is `Ok(false)`. Safe while the
+/// daemon is writing to it, because every writer appends.
+pub fn cap_in_place(path: &Path) -> std::io::Result<bool> {
+    let file = match OpenOptions::new().write(true).open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if file.metadata()?.len() > MAX_LOG_BYTES {
+        file.set_len(0)?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Open the daemon log for the daemon serving `socket`, applying the size cap.
@@ -223,5 +245,24 @@ mod tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(daemon_log_for_spawn(&dir.join("d.sock")).is_err());
         assert!(!dir.join("daemon.log").exists());
+    }
+
+    /// A cap while a writer holds the file must not leave the writer at its
+    /// old offset: the next write lands at 0 because the descriptor appends.
+    #[test]
+    fn cap_in_place_truncates_and_appends_resume_at_zero() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("daemon.log");
+        // Oversized before open: the variant that used to open without
+        // `O_APPEND`.
+        std::fs::write(&path, vec![b'y'; MAX_LOG_BYTES as usize + 10]).unwrap();
+        let mut file = open_capped(&path).unwrap();
+        file.write_all(&vec![b'x'; MAX_LOG_BYTES as usize + 1])
+            .unwrap();
+        assert!(cap_in_place(&path).unwrap());
+        file.write_all(b"x\n").unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 2);
+        assert!(!cap_in_place(&path).unwrap(), "below the cap: untouched");
+        assert!(!cap_in_place(&tmp.path().join("missing.log")).unwrap());
     }
 }

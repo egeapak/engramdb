@@ -20,6 +20,7 @@ pub mod link_proposals;
 pub mod links;
 pub mod list;
 pub mod maintenance;
+pub mod model_policy;
 pub mod parsing;
 pub mod projects;
 pub(crate) mod provider_cache;
@@ -132,6 +133,51 @@ use crate::storage::{embedding_status, EmbeddingFingerprint, EmbeddingModelStatu
 use crate::types::{EmbeddingBackend, EngramConfig};
 use std::sync::Arc;
 
+/// Resolve a caller-supplied `supersedes` list to full memory ids.
+///
+/// Each entry is either a full id or a unique prefix. An entry that matches
+/// nothing, or more than one memory, fails the whole call (before anything is
+/// written): a `supersedes` that supersedes nothing is never what the caller
+/// meant, and storing it verbatim left the old memory live and a permanent
+/// dangling entry, both silently. Entries listed in `keep` are kept verbatim
+/// without a lookup, so an update that re-sends a list naming a since-deleted
+/// target does not start failing. An entry equal to `own_id` is refused. The
+/// result is de-duplicated, order preserved.
+pub(crate) async fn resolve_supersedes(
+    store: &MemoryStore,
+    ids: &[String],
+    own_id: Option<&str>,
+    keep: &[String],
+) -> anyhow::Result<Vec<String>> {
+    // An exact id whose file is on disk is taken as is: the prefix lookup
+    // below reads the index, which can lack a row for a file that exists
+    // (a crash between the file write and the index write; `compress`
+    // supersedes such sources by their full ids).
+    let on_disk = store.batch_exists(ids).await.unwrap_or_default();
+    let mut out: Vec<String> = Vec::with_capacity(ids.len());
+    for raw in ids {
+        let id = raw.trim();
+        let full = if keep.iter().any(|k| k == id) || on_disk.contains(id) {
+            id.to_string()
+        } else {
+            match store.resolve_id(id).await {
+                Ok(full) => full,
+                Err(crate::storage::StorageError::NotFound(_)) => {
+                    anyhow::bail!("supersedes: no memory matches '{id}'")
+                }
+                Err(e) => return Err(anyhow::anyhow!("supersedes: {e}")),
+            }
+        };
+        if own_id == Some(full.as_str()) {
+            anyhow::bail!("supersedes: a memory cannot supersede itself ('{id}')");
+        }
+        if !out.contains(&full) {
+            out.push(full);
+        }
+    }
+    Ok(out)
+}
+
 /// Close the validity windows of memories superseded by `new_id` (§2.4
 /// writer 1): each referenced LIVE memory gets `invalidated_at = now`,
 /// `superseded_by = new_id`. Missing and already-invalidated ids are skipped
@@ -143,6 +189,9 @@ pub(crate) async fn close_superseded_windows(
     supersedes: &[String],
     new_id: &str,
 ) {
+    if supersedes.is_empty() {
+        return;
+    }
     let now = chrono::Utc::now();
     // One batched read for the whole supersedes list. `supersedes` is
     // caller-supplied and unbounded (an agent can pass an arbitrarily long
@@ -230,6 +279,62 @@ struct ProviderSpecs {
     onnx: OnnxModelSpec,
     #[cfg(feature = "ollama")]
     ollama: OllamaModelSpec,
+    /// Rough download size of the ONNX model, for `init`'s progress line.
+    approx_download: &'static str,
+}
+
+/// Every provider string [`provider_specs`] accepts, in documentation order.
+///
+/// The `match` cannot be iterated, so this list is the enumeration and
+/// `known_providers_all_resolve` ties the two together: a name added to one
+/// and not the other fails that test.
+pub const KNOWN_PROVIDERS: &[&str] = &[
+    "onnx",
+    "all-minilm",
+    "all-minilm-l6",
+    "all-minilm-l12",
+    "all-minilm-l12-int8",
+    "all-minilm-l6-int8",
+    "all-minilm-l12-fp32",
+    "nomic-embed-text",
+    "mxbai-embed-large",
+    "mxbai-embed-large-q",
+    "bge-large-en-q",
+    "gte-large-en-q",
+];
+
+/// What a front end needs to know about a configured provider string, read
+/// from the one [`provider_specs`] table (so `stats` and `init` can never
+/// accept a different set of names than the resolver).
+#[derive(Debug, Clone)]
+pub struct ProviderInfo {
+    /// The name to show: `"all-minilm"` for the `onnx` alias, else the
+    /// configured string.
+    pub display_name: &'static str,
+    #[cfg(feature = "onnxruntime")]
+    pub onnx: OnnxModelSpec,
+    #[cfg(feature = "ollama")]
+    pub ollama: OllamaModelSpec,
+    /// Rough download size of the ONNX model (e.g. `"~33MB"`).
+    pub approx_download: &'static str,
+}
+
+/// Look up a configured provider string. `None` ⇒ unknown provider.
+pub fn provider_info(provider: &str) -> Option<ProviderInfo> {
+    let specs = provider_specs(provider)?;
+    let display_name = KNOWN_PROVIDERS
+        .iter()
+        .copied()
+        .find(|name| *name == provider)
+        .map(|name| if name == "onnx" { "all-minilm" } else { name })?;
+    Some(ProviderInfo {
+        display_name,
+        #[cfg(feature = "onnxruntime")]
+        onnx: specs.onnx,
+        #[cfg(feature = "ollama")]
+        ollama: specs.ollama,
+        approx_download: specs.approx_download,
+    })
 }
 
 /// Map a configured provider string to its ONNX / Ollama model spec
@@ -245,18 +350,21 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: DEFAULT_ONNX_EMBEDDING,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~33MB",
         },
         "all-minilm-l6" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L6_U8,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~22MB",
         },
         "all-minilm-l12" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_L12_U8,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~33MB",
         },
         // The signed-int8 exports. Kept selectable so an existing store can
         // stay on its current vectors without a reindex, and so the
@@ -268,12 +376,14 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: ONNX_ALL_MINILM_L12_Q,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~33MB",
         },
         "all-minilm-l6-int8" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_ALL_MINILM_Q,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~22MB",
         },
         // fp32: bit-exact like uint8, but 4x the disk and ~1.4x the latency.
         "all-minilm-l12-fp32" => ProviderSpecs {
@@ -281,18 +391,21 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: ONNX_ALL_MINILM_L12,
             #[cfg(feature = "ollama")]
             ollama: ALL_MINILM,
+            approx_download: "~127MB",
         },
         "nomic-embed-text" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_NOMIC_EMBED_TEXT,
             #[cfg(feature = "ollama")]
             ollama: NOMIC_EMBED_TEXT,
+            approx_download: "~270MB",
         },
         "mxbai-embed-large" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_MXBAI_EMBED_LARGE,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~650MB",
         },
         // The quantized 1024-dim family. Selectable, never a default: each is
         // 4-13x the shipped model's 34 MB on disk and resident in the daemon,
@@ -303,18 +416,21 @@ fn provider_specs(provider: &str) -> Option<ProviderSpecs> {
             onnx: ONNX_MXBAI_EMBED_LARGE_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~337MB",
         },
         "bge-large-en-q" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_BGE_LARGE_EN_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~638MB",
         },
         "gte-large-en-q" => ProviderSpecs {
             #[cfg(feature = "onnxruntime")]
             onnx: ONNX_GTE_LARGE_EN_Q,
             #[cfg(feature = "ollama")]
             ollama: MXBAI_EMBED_LARGE,
+            approx_download: "~446MB",
         },
         _ => return None,
     })
@@ -536,10 +652,16 @@ fn resolve_provider(
     // Auto / Onnx: try ONNX Runtime first when it is compiled in.
     #[cfg(feature = "onnxruntime")]
     {
-        if let Some(p) = OnnxProvider::try_with_model_intra(specs.onnx.clone(), intra_threads)
-            .map(|p| Arc::new(p) as Arc<dyn EmbeddingProvider>)
-        {
-            return Some(p);
+        match OnnxProvider::with_model_on_intra(
+            specs.onnx.clone(),
+            engram_onnx::default_backend(),
+            intra_threads,
+        ) {
+            Ok(p) => return Some(Arc::new(p) as Arc<dyn EmbeddingProvider>),
+            // Debug, not warn: a machine without a runtime takes this path on
+            // every command (the documented fallback, which `doctor` reports),
+            // and the CLI prints WARN on stderr. `RUST_LOG=debug` shows why.
+            Err(e) => tracing::debug!("ONNX embedding model unavailable: {e:#}"),
         }
         if backend == EmbeddingBackend::Onnx {
             return None; // explicit Onnx: no fallback
@@ -585,6 +707,30 @@ pub fn cached_onnx_embedding_provider(
     {
         let _ = config;
         None
+    }
+}
+
+/// Whether `config`'s embedding model can be loaded locally without a
+/// download or an Ollama fallback: ONNX Runtime is compiled in, the resolved
+/// backend is not Ollama, and the model files are already in the cache.
+///
+/// The daemon's UserPromptSubmit path uses this to decide whether warming
+/// the model in the background is worth starting.
+pub fn onnx_embedding_cached(
+    config: &crate::types::EngramConfig,
+    backend: crate::types::EmbeddingBackend,
+) -> bool {
+    #[cfg(feature = "onnxruntime")]
+    {
+        if backend == crate::types::EmbeddingBackend::Ollama {
+            return false;
+        }
+        provider_specs(config.embeddings.provider.as_str()).is_some_and(|s| s.onnx.is_cached())
+    }
+    #[cfg(not(feature = "onnxruntime"))]
+    {
+        let _ = (config, backend);
+        false
     }
 }
 
@@ -645,8 +791,8 @@ pub fn resolve_engine_providers(
         .map(|(pool, _)| pool),
         ..EngineProviders::default()
     };
-    if config.nli.enabled {
-        providers.nli = build_nli(&config.nli.model);
+    if let Some(model) = model_policy::permitted_nli_model(&config.nli) {
+        providers.nli = build_nli(model);
     }
     if config.rerank.enabled {
         providers.reranker = build_reranker(&config.rerank.model);
@@ -727,7 +873,18 @@ pub(crate) fn build_embedding_pool(
 }
 
 /// Load the NLI contradiction model. ONNX-Runtime-only. Blocking.
+///
+/// Refuses a repository the model policy does not permit
+/// ([`model_policy::nli_repo_permitted`]) before anything touches the model
+/// cache or the network. The callers ask the policy first; this is the last
+/// line, so no path can load an unlisted repository by calling here directly.
 pub(crate) fn build_nli(model: &str) -> Option<Arc<dyn NliProvider>> {
+    if let Err(reason) =
+        model_policy::nli_repo_permitted(model, model_policy::custom_repos_allowed())
+    {
+        tracing::warn!("{reason}");
+        return None;
+    }
     #[cfg(feature = "onnxruntime")]
     {
         match OnnxNliProvider::try_new(model) {
@@ -881,6 +1038,34 @@ pub async fn build_engine_without_providers(
 mod tests {
     use super::*;
 
+    /// The direct path refuses an unlisted NLI repository on policy, before
+    /// the loader looks at the model cache or the network. (One process per
+    /// test under nextest, so the env changes are isolated.)
+    #[test]
+    fn build_nli_refuses_an_unlisted_repo_without_touching_the_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        std::env::set_var("ENGRAMDB_MODEL_CACHE_DIR", cache.path());
+        std::env::set_var("ENGRAMDB_OFFLINE", "1");
+
+        assert!(model_policy::nli_repo_permitted(
+            "attacker/repo",
+            model_policy::custom_repos_allowed()
+        )
+        .unwrap_err()
+        .contains("allow_custom_model_repos"));
+        assert!(build_nli("attacker/repo").is_none());
+        assert_eq!(
+            std::fs::read_dir(cache.path()).unwrap().count(),
+            0,
+            "a refused repository must leave the model cache untouched"
+        );
+
+        let mut config = EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "attacker/repo".to_string();
+        assert!(model_policy::permitted_nli_model(&config.nli).is_none());
+    }
+
     /// Pooled embedding sessions split the cores; a single session keeps
     /// ORT's default; `ENGRAMDB_ONNX_INTRA_THREADS` wins over both.
     /// (nextest runs each test in its own process, so the env change is
@@ -908,6 +1093,26 @@ mod tests {
         // regardless of the `ollama` feature / backend auto-resolution.
         config.embeddings.backend = EmbeddingBackend::Onnx;
         config
+    }
+
+    /// `KNOWN_PROVIDERS` is the only enumeration of the `provider_specs`
+    /// match: every entry must resolve (spec and fingerprint), and a name
+    /// outside it must not.
+    #[test]
+    fn known_providers_all_resolve() {
+        for name in KNOWN_PROVIDERS {
+            let info = provider_info(name).unwrap_or_else(|| panic!("{name} does not resolve"));
+            assert!(info.approx_download.starts_with('~'), "{name}");
+            let mut config = EngramConfig::default();
+            config.embeddings.provider = (*name).to_string();
+            assert!(
+                expected_embedding_fingerprint(&config).is_some(),
+                "{name} has no fingerprint"
+            );
+        }
+        assert_eq!(provider_info("onnx").unwrap().display_name, "all-minilm");
+        assert!(provider_info("definitely-not-a-model").is_none());
+        assert!(provider_specs("definitely-not-a-model").is_none());
     }
 
     #[test]

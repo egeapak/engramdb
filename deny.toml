@@ -1,4 +1,9 @@
-# cargo-deny configuration, checked in CI by .github/workflows/audit.yml.
+# cargo-deny configuration. Checked twice in CI:
+#   - `bans licenses sources` on every pull request (ci.yml, job `deny`,
+#     part of the required `CI result` check);
+#   - all four checks, `advisories` included, on master pushes and weekly
+#     (.github/workflows/audit.yml), which files an issue on a failed
+#     scheduled run.
 # Run locally with:
 #   cargo install cargo-deny --locked
 #   cargo deny check

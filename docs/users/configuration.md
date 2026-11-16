@@ -1,24 +1,24 @@
 # Configuration
 
-EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, the three `[retrieval.scoring]` weight sub-tables (`with_query`, `scope_only`, `degraded`) and their `relevance` weights, all of `[thresholds]` (`needs_review` / `gc` / `compress`), all of `[search]`, `[scope_proximity]`, `[logical_bonus]`, `[trust_weights]`, `[nli]`, and `[rerank]`. The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override.
+EngramDB reads per-project config from `<project>/.engramdb/config.toml`. Each section is optional — omit any section to take its defaults. But a section you *do* write must be complete: once a section header appears, every field in it that has no built-in default becomes required (TOML deserialization rejects the section otherwise). The fields without defaults are `[embeddings]`'s `provider` / `dimensions` / `max_tokens`, `[thresholds]`' `gc` and `compress`, `[search]`'s `threshold`, all of `[trust_weights]`, `[nli]` and `[rerank]`, and `relevance` in a weight sub-table you write (`[retrieval.scoring.with_query]` and its siblings). The full schema below lists every field, so copying the section you want to change (in full) is the safe way to override.
 
-One section is the exception: `[daemon]` is read only from the **global** config file, `<global config dir>/config.toml` (Linux: `~/.config/engramdb/config.toml`; macOS: `~/Library/Application Support/engramdb/config.toml`; `$ENGRAMDB_CONFIG_DIR/config.toml` when that variable is set). The daemon is one process shared by every project, so its settings cannot come from a project. The global file holds only `[daemon]`; a missing file means the defaults. A project config that still has a `[daemon]` section loads, but EngramDB ignores the keys, warns once naming each one, and `engramdb doctor` reports them. See [daemon.md](./daemon.md#configuration).
+Two sections are the exception: `[daemon]` and `[security]` are read only from the **global** config file, `<global config dir>/config.toml` (Linux: `~/.config/engramdb/config.toml`; macOS: `~/Library/Application Support/engramdb/config.toml`; `$ENGRAMDB_CONFIG_DIR/config.toml` when that variable is set). The daemon is one process shared by every project, so its settings cannot come from a project. `[security]` decides what a project's agent may do outside that project, and a project config is committed with the repository, so a cloned repository must not be able to grant itself anything. The global file holds only these two sections; a missing file means the defaults. A project config that still has a `[daemon]` or `[security]` section loads, but EngramDB ignores the keys, warns once naming each one, and `engramdb doctor` reports them. A `[security]` key set to `true` in a project config grants nothing. See [daemon.md](./daemon.md#configuration) and [`[security]`](#security) below.
 
 ## Override precedence
 
 | Layer | Source |
 |-------|--------|
 | Built-in defaults | `crates/engram-types/src/config.rs` |
-| `config.toml` | `<project>/.engramdb/config.toml` — every section except `[daemon]` |
-| Global `config.toml` | `<global config dir>/config.toml` — `[daemon]` only |
-| Environment | `ENGRAMDB_DAEMON_SOCKET`, `ENGRAMDB_EMBEDDING_BACKEND`, `ENGRAMDB_DATA_DIR`, `ENGRAMDB_CONFIG_DIR`, `CLAUDE_CONFIG_DIR` |
+| `config.toml` | `<project>/.engramdb/config.toml` — every section except `[daemon]` and `[security]` |
+| Global `config.toml` | `<global config dir>/config.toml` — `[daemon]` and `[security]` only |
+| Environment | See [Environment variables](#environment-variables) |
 | CLI flag | `--embedding-backend`, `--socket`, etc. |
 
 Higher rows lose to lower rows.
 
 ## Full schema
 
-Every field with its default. All sections go in `<project>/.engramdb/config.toml`, except `[daemon]`, which goes in the global config file:
+Every field with its default. All sections go in `<project>/.engramdb/config.toml`, except `[daemon]` and `[security]`, which go in the global config file:
 
 ```toml
 [retrieval]
@@ -81,8 +81,7 @@ observation = 0.7
 decision = 1.0
 
 [search]
-semantic_weight = 3.0          # weight on semantic similarity vs keyword
-threshold = 0.2                # minimum keyword-search score
+threshold = 0.2                # minimum keyword-search score in filter mode
 
 [embeddings]
 backend = "auto"               # "auto" | "onnx" | "ollama"
@@ -97,17 +96,6 @@ metadata_vector = true         # embed "{title}. {summary}. tags: ..." as an ext
 #                               # The daemon shares one pool per embedding model between projects, sized to the largest
 #                               # pool_size an open project asks for, rounded up to a power of two (3 -> 4) and capped at cores.
 
-[scope_proximity]
-exact_file = 1.0
-same_directory = 0.85
-same_module = 0.6
-project_root = 0.4
-
-[logical_bonus]
-exact = 0.3
-parent = 0.2
-sibling = 0.15
-
 [trust_weights]
 human = 1.0
 agent = 0.85
@@ -115,9 +103,10 @@ inferred = 0.6
 imported = 0.7
 
 [thresholds]
-needs_review = 0.3             # composite score below this → mark needs-review
 gc = 0.05                      # score below this → eligible for gc
 compress = 0.4                 # criticality below this → eligible for compression
+                               # (default of `engramdb compress --threshold` and of
+                               # the MCP `compress_candidates` tool's `threshold`)
 
 [review]
 recency_days = 90              # active memories not updated in > N days are suggested
@@ -159,22 +148,23 @@ interval_secs = 21600               # 6h throttle on the full housekeeping pass
 compaction_fragment_threshold = 32  # uncompacted fragments that trigger early compaction (0 = time-based only)
 compaction_min_interval_secs = 120  # floor between compaction firings
 
-# [daemon] goes in the GLOBAL config file (<global config dir>/config.toml),
-# never in a project config — see daemon.md.
+# [daemon] and [security] go in the GLOBAL config file
+# (<global config dir>/config.toml), never in a project config — see daemon.md.
 [daemon]
 enabled = true
 idle_timeout_secs = 900        # 15 min idle → daemon exits
 use_for_cli = true             # route model-needing CLI commands through a running daemon
 # socket_path = "/run/user/1000/engramdb/daemon.sock"   # optional override; the folder must be yours, mode 0700
 
+[security]                          # GLOBAL config file only
+allow_cross_project_writes = false  # allow MCP tools to write to (or link) a different registered project
+allow_all_projects_harvest = false  # allow MCP harvest tools to read other projects' transcripts
+allow_custom_model_repos = false    # allow [nli].model to name a repository that is not built in
+
 [title]
 strategy = "t5"                # "t5" (default) | "keyword" | "none"
 # pool_size = 2                # T5 sessions to pool when strategy = "t5"; omit to auto-size (2, clamped to cores).
 #                               # Shared between projects like the embedding pool: largest request, rounded up to a power of two.
-
-[security]
-allow_cross_project_writes = true   # allow MCP tools to write to a different registered project
-allow_all_projects_harvest = false  # allow MCP harvest tools to set all_projects (machine-wide read)
 
 [epistemic]
 observation_review_days = 90        # observations unverified for longer than this get a
@@ -218,10 +208,10 @@ project_list_grouping = "auto"      # projects-list layout: auto | always | none
 digest_budget = 200000              # char budget for one `harvest show`; 0 = unlimited
 include_thinking = false            # include assistant reasoning blocks in digests
 include_sidechains = false          # include subagent turns in digests
-archive = true                      # archive each session's transcript at SessionEnd
-archive_retention_days = 365        # drop archives older than this (1–3650); 3650 ≈ keep until the size cap
+archive = true                      # keep a copy of each session's transcript at SessionEnd
+archive_retention_days = 365        # drop copies older than this (1–3650); 3650 ≈ keep until the size cap
 archive_max_bytes = 2147483648      # 2 GiB total, oldest-first eviction; 0 = no size limit
-archive_max_transcript_bytes = 16777216  # skip archiving a transcript larger than this; 0 = no limit
+archive_max_transcript_bytes = 16777216  # skip a transcript larger than this; 0 = no limit
 index = true                        # build the `harvest search` conversation index during maintenance
 index_after_hours = 24              # index a session nobody reviewed once it is this old
 index_batch = 25                    # most conversations one automatic pass will embed
@@ -233,6 +223,10 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 
 ## Notes on selected sections
 
+- **Retired keys.** `[scope_proximity]` (all four keys), `[logical_bonus]` (all three keys), `[thresholds].needs_review` and `[search].semantic_weight` change nothing. No code ever read them. EngramDB still accepts them so that old config files load, also when a section sets only some of its keys. When your config sets one, EngramDB warns once per file, naming each key, and `engramdb doctor` reports them as a warning under "Config file". Delete them from your config to stop the warning. To tune scope scoring, use `[retrieval.scoring]` `depth_decay_base`, `depth_decay_floor` and `scope_multiplier_floor`.
+
+- **`[thresholds]`** — `gc` is the default of `engramdb gc --threshold`. `compress` is the default criticality threshold of `engramdb compress` and of the MCP `compress_candidates` tool; an explicit `--threshold` / `threshold` wins. Before this release `compress` was read by nothing and the threshold was always 0.4, which is still the default.
+
 - **`[retrieval.scoring]`** — composite formula: `score = base * scope_multiplier * trust_multiplier * situation_multiplier - challenge_penalty`, clamped to `[0, 1]`. `base` comes from whichever weight set applies (`with_query` / `with_keyword` / `scope_only` / `degraded`). The scope multiplier is the depth-decayed `path` match plus a logical bonus (≤ 0.3) when a `path` is supplied; with only `logical` context it is `scope_multiplier_floor + bonus` for related memories (bare floor for unscoped memories, 0 for unrelated ones); 1.0 (neutral) when no scope context is given. The situation multiplier is 1.0 (neutral) when the query carries no situation.
 - **`challenge_penalty`** — per-epistemic-class by default: a contradicted observation is cheap to re-measure (0.20, suppressed hardest), a contradicted fact is probably stale (0.15), a contested decision must remain visible together with its dispute (0.05, mildest). The legacy scalar form (`challenge_penalty = 0.10`) still parses and applies flat to every class. All values must be in `[0, 1]`.
 - **`[retrieval.scoring.situation]`** — situation-conditioned class weighting, applied as a post-multiplier when a query (or hook) declares a situation (`session_start`, `file_edit`, `debugging`, `design_choice`): `multiplier = floor + (1 - floor) * profile[situation][class]`. Each profile value is in `[0, 1]`; with the default `floor = 0.6` a class can be down-weighted at most 40%. Set `floor = 1.0` to disable situation weighting entirely. Defaults per situation: session start favors facts, file edits favor decisions, debugging favors observations, design choices favor decisions.
@@ -240,9 +234,9 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
 - **`[hooks]`** — rendering knobs for the Claude Code hooks. `prompt_context_budget` (default **3000** chars) caps the UserPromptSubmit and PreToolUse injections (SessionStart has its own fixed 2000-char budget). `preview_chars` (default **1000**, enough for most bodies in full) is how much of each injected memory's body appears under its summary line; the top-ranked memory gets 2.5x that. Within one session the hooks inject each memory once: a memory the conversation already holds is skipped, and the record is cleared on SessionStart and PreCompact (`.engramdb/state/hook_seen/`). A body cut short costs Claude a `get` round-trip, and a repeat is re-read on every later turn, so full bodies once are cheaper than previews every time. A body cut at the limit ends with `(truncated; full text: get the id above)`, and every injected line carries the memory's `id` so the agent can `get`, `challenge` or `update` it. Under budget pressure every summary line is placed first; then each memory gets a body preview in score order, shortened rather than dropped when it does not fit whole, and the top-scoring memory gets the longer preview only if room is left. `0` shows summaries only. `class_order` optionally replaces the per-situation epistemic-class ordering of injected memories (SessionStart: fact → decision → observation; file edits: decision → fact → observation) with one uniform list. `situation_classifier` (default **true**) lets UserPromptSubmit infer the prompt's situation with an embedding classifier instead of keyword tables. It uses the shared daemon's embedding model when a daemon is already running (it never starts one), and otherwise loads the embedding model alone inside the hook process, which adds about 300 ms per prompt (about 55 ms with a running daemon); `--in-process` / `ENGRAMDB_IN_PROCESS` always loads it in-process. Nothing is cached between prompts. When no embedding model loads, the keyword tables decide; `false` always uses them. `previous_message_chars` (default **300**, `0` = off) is how much of the end of the agent's previous message UserPromptSubmit searches when the prompt's own matches leave room, so a short reply such as "push it" or "yes" finds memories about what it answers; the prompt's own matches always rank first.
 - **`[retrieval]`** — `relevance_threshold` (default **0.45**) is the minimum score a memory needs to be returned. In `rank` mode with query text it is applied to the score **after** the cross-encoder reranker blends in (when the reranker is enabled), because the pre-rerank composite is not on the scale the threshold was set for. When nothing clears it, `rank` mode returns the best `rank_fallback` (default **3**) candidates marked `below_threshold: true`, with a `hint`, instead of an empty result; `0` restores the empty result. Every rank result reports `dropped_below_threshold`, the number of candidates the threshold removed. `filter` mode is unchanged: it keeps its own `[search].threshold` and keyword-match requirement, and an empty filter result carries a `hint`. A `[retrieval]` or `[retrieval.scoring]` section may name only the fields it changes; the rest keep their defaults. Hooks and the MCP `memory://context/` resources never use the fallback: they present memories as relevant, and a weak match is not.
 - **`[mcp]`** — the MCP tool surface. `always_load` (default `["query", "get", "create", "update", "challenge"]`) lists the tools the server marks with `_meta["anthropic/alwaysLoad"] = true`. Claude Code defers MCP tools behind ToolSearch by default: the model sees only their names and must load a schema before it can call one, and in practice it often skips that step and reads `.engramdb/memories/` directly. A listed tool's schema is sent with every request instead, which costs tokens. The list replaces the default; `[]` defers every tool, and an unknown name is ignored with a warning. Other MCP clients ignore the key.
-- **`[content]`** — memory-content constraints. `summary_max_chars` (default **200**) is the maximum length, in characters, of a memory's one-line summary; it is enforced on every `create` / `update` / `resolve --update` path and bounds the auto-generated summary of a `compress`/consolidate merge. Measured in characters (not bytes), so multibyte summaries are not penalized.
+- **`[content]`** — memory-content constraints. `summary_max_chars` (default **200**) is the maximum length, in characters, of a memory's one-line summary; it is enforced on every `create`, `update` and `resolve` (action `update`) path and bounds the auto-generated summary of a `compress`/consolidate merge. Measured in characters (not bytes), so multibyte summaries are not penalized.
 - **`[cli]`** — human-readable CLI output preferences (ignored by the MCP surface and every `--json` path). `project_list_grouping` controls how `engramdb projects list` lays out its directory tree: `auto` (default) prints a folder header only for directories holding two or more projects and renders a lone project inline on a full-path line; `always` prints a header above every project (rows show just the basename); `none` prints a flat list of full-path rows with no headers. In all three modes worktree sub-projects nest under their real parent and rows are sorted by path. A single run can override the configured default with `engramdb projects list --group auto|always|none`.
-- **`[harvest]`** — mining past Claude Code sessions. `digest_budget` (default **200000** chars, `0` = unlimited) caps a single `harvest show` and is sized so a typical session digests completely — a 2.9 MB transcript renders to roughly 60 KB, so the budget is a ceiling against a pathological session rather than a routine constraint. Both the CLI and the `harvest_show` MCP tool use it; a caller scanning several sessions at once should pass an explicit smaller `--max-chars` / `max_chars`. `archive` (default **true**) has the SessionEnd hook compress each ending session's transcript — so `harvest show` can still read it after Claude Code prunes its own, via `harvest ledger list` to find the id — into `<global_data_dir>/projects/<root_id>/transcripts/`, never into the repo-adjacent `.engramdb/` — transcripts routinely contain echoed environment variables and pasted keys, and `.engramdb/` gets committed. Archiving happens at session end rather than at harvest time because Claude Code prunes its own transcripts; archiving something you already hold would protect nothing. `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, oldest-first) bound the total, and `archive_max_transcript_bytes` (16 MiB) skips any single transcript above it — compression is synchronous on the session-teardown path, so an unbounded one delays every exit in proportion to file size. Skipping still runs the retention sweep. Neither budget applies to a copy some memory cites as its source (`harvest mark --memory` records that link): those are **pinned**, the budget is measured over the unpinned copies only, and pinned bytes past the cap are reported by `harvest ledger prune` and `doctor` rather than enforced. `harvest ledger rm <id> --unpin` is the deliberate, confirmed way to release one. A retention sweep that cannot determine which copies are cited — an unreadable store, an unresolvable project scope — evicts nothing that run rather than guessing, because an unknown pin and an absent one are indistinguishable right up until the transcript is gone.
+- **`[harvest]`** — mining past Claude Code sessions. `digest_budget` (default **200000** chars, `0` = unlimited) caps a single `harvest show` and is sized so a typical session digests completely — a 2.9 MB transcript renders to roughly 60 KB, so the budget is a ceiling against a pathological session rather than a routine constraint. Both the CLI and the `harvest_show` MCP tool use it; a caller scanning several sessions at once should pass an explicit smaller `--max-chars` / `max_chars`. `archive` (default **true**) has the SessionEnd hook keep a compressed copy of each ending session's transcript — so `harvest show` can still read it after Claude Code prunes its own, via `harvest ledger list` to find the id — into `<global_data_dir>/projects/<root_id>/transcripts/`, never into the repo-adjacent `.engramdb/` — transcripts routinely contain echoed environment variables and pasted keys, and `.engramdb/` gets committed. The copy is taken at session end rather than at harvest time because Claude Code prunes its own transcripts; copying something you already hold would protect nothing. (The config keys and flags still say `archive`.) `archive_retention_days` (365) and `archive_max_bytes` (2 GiB, oldest-first) bound the total, and `archive_max_transcript_bytes` (16 MiB) skips any single transcript above it — compression is synchronous on the session-teardown path, so an unbounded one delays every exit in proportion to file size. Skipping still runs the retention sweep. Neither budget applies to a copy some memory cites as its source (`harvest mark --memory` records that link): those are **pinned**, the budget is measured over the unpinned copies only, and pinned bytes past the cap are reported by `harvest ledger prune` and `doctor` rather than enforced. `harvest ledger rm <id> --unpin` is the deliberate, confirmed way to release one. A retention sweep that cannot determine which copies are cited — an unreadable store, an unresolvable project scope — evicts nothing that run rather than guessing, because an unknown pin and an absent one are indistinguishable right up until the transcript is gone.
 
 - **`[maintenance]`** — `interval_secs` (default **21600**, six hours) throttles the full housekeeping pass: an orphan/stale-project sweep plus a store health check. Compaction rides a **second, much shorter** trigger, because query latency tracks LanceDB fragment count rather than row count and a write-heavy session degrades every scan several-fold long before six hours elapse. `compaction_fragment_threshold` (default **32**) is the number of uncompacted fragments that makes compaction due early; `compaction_min_interval_secs` (default **120**) is the floor between firings so a burst of writes cannot compact on every command. Set the threshold to `0` to disable the pressure trigger and keep compaction purely time-based. The check itself costs one file stat unless it fires. Measured worth 4x on a full query — see `docs/contributors/query-latency-profile.md`.
 
@@ -260,31 +254,54 @@ staleness_max_bytes = 8388608       # 8 MiB budget for the "content" tier's hash
   A warning from this check always names the tier that produced it, because a clean `size` result is not proof of currency. For the exact, unbudgeted answer use `engramdb doctor` (content drift) or `engramdb reindex --dry-run` (content drift **and** stale vectors). Neither of these fields affects the provider cache key — index-currency checking loads no model.
 - **`[embeddings]`** — changing `provider` or `dimensions` requires `engramdb reindex --embeddings-only`. See [embeddings.md](./embeddings.md) for fingerprinting and the model-change policy.
 - **`[trust_weights]`** — `Provenance` source maps to a trust weight (`human` highest, `inferred` lowest). The multiplier is `floor + (1 - floor) * weight`, so even fully `inferred` memories keep ≥50% of their raw score.
-- **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`.
+- **`[nli]`** — off by default. Downloads ~50 MB and adds latency to `create`. When enabled, every `create` checks the top-`max_comparisons` similar memories and auto-challenges contradictions above `contradiction_threshold`. `model` must be one of the built-in NLI models (`Xenova/nli-deberta-v3-xsmall`, the default, or `cross-encoder/nli-deberta-v3-xsmall`). Any other repository is refused and NLI stays off for that project, unless the global config sets `[security] allow_custom_model_repos = true`. A project config is committed with the repository, so without this rule a cloned repository could make EngramDB download and parse any model its author chose. `model` must look like `owner/name`. The daemon reads the opt-in once at start, so after you change it run `engramdb daemon restart`.
 - **`[links]`** — the automatic edge proposers ([links.md](./links.md#automatic-proposals)). They run when a memory is created (and when an MCP `update` re-embeds it), never in a hook, and only *propose*: a proposed edge changes no score until someone confirms it (`engramdb link … --status confirmed`, or the dashboard with `--allow-writes`). Defaults are conservative: a neighbour must reach `related_threshold` (0.80) to be proposed at all, and `max_proposals_per_memory` (3) caps the unreviewed proposals on each end of an edge, contradictions first. Similarity is the vector index's score, `1 / (1 + d²)` over the embeddings' squared L2 distance — for the default normalized MiniLM vectors, 0.80 is a cosine of about 0.88 and 0.92 about 0.96. Contradiction proposals ride `[nli]` and need it enabled; similarity proposals need only embeddings, but a neighbour is proposed as `duplicates` only when NLI also ran on the pair and found no contradiction (without NLI it is `related_to`). Proposing makes no extra model call: the search reuses the vectors `create` just computed. An existing edge of any kind or status between two memories — including a rejected one — blocks every proposal for that pair. Every field is optional; set `max_proposals_per_memory = 0`, or both `propose_*` to `false`, to switch proposals off. Validation requires both thresholds in `[0, 1]` with `duplicate_threshold >= related_threshold`.
 - **`[rerank]`** — on by default since the quantized cross-encoder (`jina-turbo-q`, ~36.5 MB, uint8) never lost to the unreranked baseline on any measured corpus, at an estimated ~150 ms/query (noisy; see the linked doc for the range). `top_n = 10` is both cheaper and more accurate than the historical default of 50 — reranking is deep-or-not-at-all, so there is no partial/gated mode. Final score blends original and reranker: `(1 - weight) * original + weight * rerank_score`. Set `enabled = false` to opt back out. This never affects the Claude Code hook handlers (`PreToolUse` / `SessionStart` / `UserPromptSubmit`): they build their retrieval engine with no model providers at all, so they cannot pay reranker latency regardless of this config. See [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) for the measured evidence.
 - **`[review]`** — the recency trigger for reviewing old memories. `recency_days` (default **90**) is the age past which an *active* memory that hasn't been updated (every edit and every `resolve`/keep/update bumps `updated_at`) is suggested for review. It never deletes or hides anything — it only surfaces a suggestion: the MCP `review` tool folds these stale memories in alongside flagged (challenged / needs-review) ones by default, and the MCP `memory-session-end` prompt reports how many are due so an agent can offer to revisit them. Stale memories are ranked by criticality so the ones most worth re-verifying come first. Omit the field to keep the 90-day default; validation accepts 1–3650. On the CLI, `engramdb review --stale-after-days [N]` opts a single run into the trigger (bare flag = 90).
 - **`[stats]`** — telemetry events persist to a per-project LanceDB table. `retention_days` defaults to **90** so the event log cannot grow without bound; events older than the window are pruned periodically (by the background flush task and by `engramdb gc`). Set up to the maximum of 3650 (10 years) to effectively retain forever. `0` is rejected by validation — older versions documented it as "retain forever" but actually deleted everything, so an explicit positive value is now required. Lifetime counters in `engramdb stats` cover "since the oldest non-pruned event". Hook call stats (the per-project `hook_events` table and `.engramdb/state/hook_stats.jsonl`) honor the same switch and window: `enabled = false` stops hooks from recording, and rows older than `retention_days` are pruned and left out of the summary. Per-memory usage events (`memory_events` / `memory_usage`, `.engramdb/state/memory_events.jsonl`; see `stats --memory` in the [CLI reference](./cli-reference.md)) follow the same switch; raw events are pruned at `retention_days`, but each memory's lifetime counts are kept in the rollup.
 - **`[title]`** — how a memory's title is generated when the caller doesn't supply one. `t5` (default) is abstractive T5-small summarization; the shared daemon / MCP server loads (and pools) the encoder+decoder **once machine-wide**, so the per-`create` cost is amortized. `keyword` is in-process RAKE extraction (no model); `none` skips automatic titling. The one-shot CLI's `engramdb add` always uses `keyword` so a single command never pays a cold T5 load. The MCP `create` tool's per-call `title_strategy` overrides this.
 - **`[daemon]`** — **global config file only**; see [daemon.md](./daemon.md#configuration). `use_for_cli` (default `true`) lets model-needing CLI commands route through a *running* daemon; `--in-process` / `ENGRAMDB_IN_PROCESS` / `use_for_cli = false` force in-process loading. `enabled` and `use_for_cli` are per user, so the daemon is used the same way in every project; for a one-off opt-out use `--in-process` or `ENGRAMDB_IN_PROCESS=1`.
-- **`[security]`** — `allow_cross_project_writes` (default `true`, preserving historical behavior) gates the MCP server's confused-deputy surface. Nearly every MCP tool accepts an optional `project` override that resolves to *any* project in the global registry, so a steered agent operating in project A could otherwise mutate a different registered project B on the same machine. Setting it to `false` blocks the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`, `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) from writing to a **different** registered project. `doctor` is gated as well, but only when called with `fix: true` — reading the diagnosis is not a write, flipping memories to `needs_review` is. The session's own project (`project` omitted) and the shared global store (`project = "global"`) are always allowed; a linked worktree of the session's own project is not treated as cross-project. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_*`, `doctor` without `fix`, `harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search`) are never gated. `allow_all_projects_harvest` (default **false**) is separate because it gates a *read*: the harvest tools' `all_projects` option reads every Claude Code conversation on the machine rather than this project's, and naming another `project` reads that project's raw transcripts. Both need this flag — it gates the *read* tools (`harvest_list`, `harvest_show`, `harvest_ledger`, `harvest_search` — search returns conversation-derived text, and even a result *count* says something about a project you may not read), and also `harvest_mark`, which despite being a write resolves a session-id prefix against the target's transcripts and names every match in its error, so the write gate alone made it a session-id oracle for a project the read gate refuses; `harvest_mark` therefore needs **both** flags for a cross-project target — and both read it from **your own** project's config — never the target's, so a permissive setting in one repo cannot open the gate for the rest. Cross-project *memory* reads are unaffected: memories are curated, a transcript is the raw conversation.
+- **`[security]`** — **global config file only.** <a id="security"></a> A project config is committed with its repository, so it cannot open these gates; a project-level `[security]` is ignored, warned about once and reported by `doctor`.
+
+  `allow_cross_project_writes` (default **`false`**) gates the MCP server's confused-deputy surface. Nearly every MCP tool takes an optional `project` override that resolves to *any* project in the global registry, so a steered agent working in project A could otherwise change project B on the same machine. Unless it is `true`, the MCP mutating tools (`create`, `update`, `delete`, `challenge`, `resolve`, `verify`, `task_complete`, `compress_apply`, `gc`, `reindex`, `harvest_mark`) refuse to write to a **different** registered project. `doctor` is gated only with `fix: true`: reading the diagnosis is not a write, flipping memories to `needs_review` is. The session's own project (`project` omitted), its own linked worktrees, group stores and the global store are always allowed. Read-only tools (`query`, `get`, `list`, `stats`, `review`, `compress_candidates`, `projects_list`, `projects_info`, `doctor` without `fix`) are never gated.
+
+  `projects_link` and `projects_unlink` change the registry's hierarchy, and a project's harvest scope is its root plus everything linked under it. Re-parenting inside the session's own hierarchy is always allowed. Linking anything else needs both `allow_cross_project_writes` and `allow_all_projects_harvest`; unlinking a project outside the session's hierarchy needs `allow_cross_project_writes`. `engramdb setup` no longer auto-approves these two tools, and removes an old approval. The CLI `engramdb projects link` is not gated: it is the user's own request.
+
+  `allow_all_projects_harvest` (default **`false`**) gates a *read*: the harvest tools' `all_projects` option reads every Claude Code conversation on the machine, and naming another `project` reads that project's raw transcripts. It gates `harvest_list`, `harvest_show`, `harvest_ledger` and `harvest_search` (search returns conversation-derived text, and even a result count says something about a project you may not read). `harvest_mark` needs **both** flags for another project: it is a write, but it resolves a session-id prefix against the target's transcripts and names every match in its error. Cross-project *memory* reads are not gated: memories are curated, a transcript is the raw conversation.
+
+  `allow_custom_model_repos` (default **`false`**) lets `[nli].model` name a repository that is not built in (see `[nli]` above).
+
+  **Upgrading:** cross-project MCP writes used to be allowed by default and were read from the session's own project config. They now stop until you set `allow_cross_project_writes = true` in the global file. The refusal message names that file.
 
 ## Environment variables
 
+"Truthy" means one of `1`, `true`, `yes`, `on`.
+
 | Variable | Effect |
 |----------|--------|
-| `ENGRAMDB_DAEMON_SOCKET` | Override daemon socket path. Outranks the global `[daemon].socket_path`. The socket's folder (which also holds the daemon's lock and log) must be yours with mode 0700. |
-| `ENGRAMDB_EMBEDDING_BACKEND` | Override `[embeddings].backend` (`auto`/`onnx`/`ollama`). CLI flag wins. |
-| `ENGRAMDB_IN_PROCESS` | Truthy (`1`/`true`/`yes`/`on`) forces CLI model loading in-process instead of via the daemon. The `--in-process` flag wins. |
-| `ENGRAMDB_DATA_DIR` | Override platform global data dir. Used by tests for isolation. |
-| `ENGRAMDB_CONFIG_DIR` | Override platform global config dir (the registry and the global `config.toml` with `[daemon]`). Used by tests. |
-| `ENGRAMDB_MODEL_CACHE_DIR` | Override the model-download cache dir (used verbatim). Separate from the data dir. |
-| `ENGRAMDB_OFFLINE` | Truthy makes the embedding/NLI/T5 loaders refuse to download uncached models (fail fast instead). |
+| `ENGRAMDB_DATA_DIR` | Global data directory. Overrides the platform default. Tests use it for isolation. |
+| `ENGRAMDB_CONFIG_DIR` | Global config directory (the registry and the global `config.toml` with `[daemon]` and `[security]`). Overrides the platform default. Tests use it. |
+| `ENGRAMDB_REGISTRY_PATH` | Path of the registry file itself. Overrides `<config dir>/registry.json`. Meant for tests. |
+| `ENGRAMDB_MODEL_CACHE_DIR` | Model cache directory (used verbatim). Separate from the data directory. |
+| `ENGRAMDB_OFFLINE` | Truthy: the embedding, NLI and T5 loaders never download a model that is not cached. They fail at once instead. |
+| `ENGRAMDB_EMBEDDING_BACKEND` | Overrides `[embeddings].backend` (`auto` / `onnx` / `ollama`). The `--embedding-backend` flag wins. |
+| `ENGRAMDB_IN_PROCESS` | Truthy: the CLI loads models in its own process and never uses the daemon. The same as `--in-process`. |
+| `ENGRAMDB_DAEMON_SOCKET` | Daemon socket path. Outranks the global `[daemon].socket_path`; the `--socket` flag wins. The socket's folder (which also holds the daemon's lock and log) must be yours with mode 0700. |
+| `ENGRAMDB_DISABLE_AUTO_MAINTENANCE` | Truthy: skip the automatic maintenance pass. The same as `--no-maintenance`. |
+| `ENGRAMDB_AUTO_MAINTENANCE_INTERVAL_SECS` | Seconds between automatic maintenance passes. Overrides `[maintenance].interval_secs`. `0` makes a pass due on every command. A value that is not a whole number is ignored. |
+| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
 | `ENGRAMDB_DASHBOARD_CACHE_DIR` | Where `engramdb dashboard` keeps its layout cache (default `<cache dir>/engramdb/dashboard/layouts/`; must be yours with mode 0700). See [dashboard.md](./dashboard.md#what-it-reads-and-what-it-never-does). |
 | `ENGRAMDB_DASHBOARD_LAYOUT_CACHE` | `0` turns the dashboard's layout cache off (memory and disk). |
-| `CLAUDE_CONFIG_DIR` | Claude Code's own config root (default `~/.claude`). Read, never written — it is how `harvest` locates session transcripts. |
-| `ENGRAMDB_ONNX_INTRA_THREADS` | Intra-op thread count for every ONNX session (embeddings, reranker, NLI, T5). Unset leaves ONNX Runtime's default for a single embedding session and for the reranker; pooled embedding sessions (daemon / MCP) then get `cores / pool_size` threads each. Lowering it does **not** make int8 embeddings reproducible — see [embedding-model-alternatives.md](../contributors/embedding-model-alternatives.md) (R6). |
+| `ORT_DYLIB_PATH` | Full path of the ONNX Runtime library to load. It is checked before every other location. See [installation.md](./installation.md#onnx-runtime). |
+| `OLLAMA_HOST` | Address of the Ollama server. Default `http://localhost:11434`. |
+| `CLAUDE_CONFIG_DIR` | Claude Code's own config directory (default `~/.claude`). Read, never written. `harvest` uses it to find session transcripts. |
+| `CLAUDE_SESSION_ID`, `MCP_SESSION_ID` | The session id. The first one that is set and not empty wins. The MCP server and `engramdb task` use it, and the CLI attaches it to the usage events of `query` and `get`. Without one, the MCP server makes a new id per process, and CLI usage events have no session. |
+| `EDITOR` | Editor for `add -e`, `update -e` and the `harvest` editor flow. Default `vi`. |
+| `HF_ENDPOINT` | Hugging Face mirror for model downloads. The download library reads it, not EngramDB. A daemon that EngramDB starts keeps it. |
+| `XDG_RUNTIME_DIR` | On Linux, the daemon folder is `$XDG_RUNTIME_DIR/engramdb` when this is set. |
 | `RUST_LOG` | Standard `tracing` filter (e.g. `RUST_LOG=engramdb=debug`). |
+
+Variables read only by benches and examples are not listed.
 
 ## Links and usage in scoring
 

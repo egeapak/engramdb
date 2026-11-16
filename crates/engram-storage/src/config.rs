@@ -33,6 +33,10 @@ pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
     let content = tokio::fs::read_to_string(config_path).await?;
     let config: EngramConfig = toml::from_str(&content)?;
     warn_legacy_daemon_keys(config_path, &config);
+    warn_legacy_security_keys(config_path, &config);
+    if let Some(message) = retired_keys_message(config_path, &config) {
+        warn_once(config_path, WarnKind::RetiredKeys, &message);
+    }
     if let Err(e) = config.validate() {
         warn_once(
             config_path,
@@ -107,6 +111,57 @@ fn warn_legacy_daemon_keys(config_path: &Path, config: &EngramConfig) {
     }
 }
 
+/// The message for a project config that sets `[security]` keys, or `None`
+/// when it sets none. Shared by the loader's warning and `doctor`.
+///
+/// A project config is committed, so in a cloned repository its author wrote
+/// it. `[security]` there grants nothing; the message says so, because a key
+/// set to `true` used to open a gate.
+pub fn legacy_security_message(config_path: &Path, config: &EngramConfig) -> Option<String> {
+    let mut keys = config.legacy_security_keys();
+    if keys.is_empty() {
+        return None;
+    }
+    keys.sort();
+    let keys = keys
+        .iter()
+        .map(|k| format!("security.{k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let global = crate::paths::global_config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "the global config file".to_string());
+    Some(format!(
+        "{} sets {keys}, which is ignored: a project config is committed with the \
+         repository, so [security] is read only from the global config {global}. A key \
+         set to true here grants nothing. Set it in the global config if you want it, \
+         and delete it from the project config",
+        config_path.display()
+    ))
+}
+
+/// The message for a config that still sets retired keys (see
+/// [`EngramConfig::retired_keys`]), or `None` when it sets none. Shared by the
+/// loader's warning and `doctor`.
+pub fn retired_keys_message(config_path: &Path, config: &EngramConfig) -> Option<String> {
+    let keys = config.retired_keys();
+    if keys.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: these keys are no longer read and have no effect: {} (remove them)",
+        config_path.display(),
+        keys.join(", ")
+    ))
+}
+
+/// Warn once per path when a project config sets `[security]` keys.
+fn warn_legacy_security_keys(config_path: &Path, config: &EngramConfig) {
+    if let Some(message) = legacy_security_message(config_path, config) {
+        warn_once(config_path, WarnKind::LegacySecurity, &message);
+    }
+}
+
 /// Load the global, per-user config file at `config_path`, or defaults when
 /// it does not exist.
 ///
@@ -127,8 +182,8 @@ pub async fn load_global_config(config_path: &Path) -> Result<GlobalConfig> {
             config_path,
             WarnKind::UnknownGlobalKeys,
             &format!(
-                "global config file {} sets [{}], which is ignored: only [daemon] is \
-                 read from the global config — model settings stay in each project's \
+                "global config file {} sets [{}], which is ignored: only [daemon] and \
+                 [security] are read from the global config — model settings stay in each project's \
                  .engramdb/config.toml",
                 config_path.display(),
                 unknown.join("], [")
@@ -153,7 +208,7 @@ pub async fn load_global_config(config_path: &Path) -> Result<GlobalConfig> {
 /// Load the global config from [`crate::paths::global_config_path`], falling
 /// back to defaults on ANY failure — loudly, once per path per process.
 ///
-/// This is what every `[daemon]` read goes through: the client resolve path,
+/// This is what every `[daemon]` and `[security]` read goes through: the client resolve path,
 /// the MCP heartbeat, `daemon run/status/stop/restart`, `doctor` and
 /// `stats --daemon`. Daemon failures must never break an operation, so a bad
 /// file means defaults, not an error.
@@ -191,6 +246,8 @@ enum WarnKind {
     Invalid,
     Unreadable,
     LegacyDaemon,
+    LegacySecurity,
+    RetiredKeys,
     UnknownGlobalKeys,
 }
 
@@ -319,6 +376,126 @@ imported = 0.65
 
         let cfg = EngramConfig::default();
         assert!(legacy_daemon_message(Path::new("/p"), &cfg).is_none());
+    }
+
+    #[test]
+    fn legacy_security_message_names_each_key_and_the_global_path() {
+        let cfg: EngramConfig = toml::from_str(
+            "[security]\nallow_all_projects_harvest = true\nallow_cross_project_writes = true\n",
+        )
+        .unwrap();
+        let msg = legacy_security_message(Path::new("/p/.engramdb/config.toml"), &cfg).unwrap();
+        assert!(msg.contains("security.allow_all_projects_harvest"), "{msg}");
+        assert!(msg.contains("security.allow_cross_project_writes"), "{msg}");
+        assert!(msg.contains("grants nothing"), "{msg}");
+        let global = crate::paths::global_config_path().unwrap();
+        assert!(msg.contains(&global.display().to_string()), "{msg}");
+
+        let cfg = EngramConfig::default();
+        assert!(legacy_security_message(Path::new("/p"), &cfg).is_none());
+    }
+
+    /// Each project config with `[security]` keys gets one warning, however
+    /// often it is reloaded, and it is not masked by a `[daemon]` warning
+    /// for the same file.
+    #[tokio::test]
+    async fn each_project_with_security_keys_warns_once() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let path_a = a.path().join("config.toml");
+        let path_b = b.path().join("config.toml");
+        tokio::fs::write(&path_a, "[security]\nallow_all_projects_harvest = true\n")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path_b,
+            "[security]\nallow_cross_project_writes = true\n[daemon]\nenabled = false\n",
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            load_config_or_default(&path_a).await;
+            load_config_or_default(&path_b).await;
+        }
+        let log = emitted().lock().unwrap().clone();
+        let about = |p: &Path, key: &str| {
+            log.iter()
+                .filter(|m| m.contains(&p.display().to_string()) && m.contains(key))
+                .count()
+        };
+        assert_eq!(
+            about(&path_a, "security.allow_all_projects_harvest"),
+            1,
+            "{log:?}"
+        );
+        assert_eq!(
+            about(&path_b, "security.allow_cross_project_writes"),
+            1,
+            "{log:?}"
+        );
+        assert_eq!(about(&path_b, "daemon.enabled"), 1, "{log:?}");
+    }
+
+    /// Retired keys are named once per file, beside (not instead of) the
+    /// `[daemon]` warning for the same file.
+    #[tokio::test]
+    async fn retired_keys_warn_once_per_path() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let path_a = a.path().join("config.toml");
+        let path_b = b.path().join("config.toml");
+        tokio::fs::write(
+            &path_a,
+            "[scope_proximity]
+exact_file = 1.0
+",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(
+            &path_b,
+            "[search]
+semantic_weight = 3.0
+threshold = 0.2
+[daemon]
+enabled = false
+",
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            load_config_or_default(&path_a).await;
+            load_config_or_default(&path_b).await;
+        }
+        let log = emitted().lock().unwrap().clone();
+        let about = |p: &Path, key: &str| {
+            log.iter()
+                .filter(|m| m.contains(&p.display().to_string()) && m.contains(key))
+                .count()
+        };
+        assert_eq!(about(&path_a, "scope_proximity.exact_file"), 1, "{log:?}");
+        assert_eq!(about(&path_b, "search.semantic_weight"), 1, "{log:?}");
+        assert_eq!(about(&path_b, "daemon.enabled"), 1, "{log:?}");
+        assert!(log.iter().any(|m| m.contains("no longer read")), "{log:?}");
+    }
+
+    /// `[security]` in the global file is read, and is not reported as an
+    /// unknown section.
+    #[tokio::test]
+    async fn security_is_a_known_global_section() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        tokio::fs::write(&path, "[security]\nallow_all_projects_harvest = true\n")
+            .await
+            .unwrap();
+        let cfg = load_global_config(&path).await.unwrap();
+        assert!(cfg.security.allow_all_projects_harvest);
+        assert!(!cfg.security.allow_cross_project_writes);
+        let log = emitted().lock().unwrap().clone();
+        assert!(
+            !log.iter().any(|m| m.contains(&path.display().to_string())),
+            "{log:?}"
+        );
     }
 
     #[tokio::test]

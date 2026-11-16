@@ -159,7 +159,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_existing_memory() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         let result = run_get(
             temp_dir.path(),
@@ -172,13 +172,19 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        let out = cap.stdout();
+        assert!(out.starts_with("ID: mem-test-001-aaa\n"), "{out}");
+        assert!(
+            out.contains("Summary: Test summary for mem-test-001-aaa\n"),
+            "{out}"
+        );
     }
 
     #[tokio::test]
     async fn test_get_prefix_match() {
         let (temp_dir, _store) = setup_test_store().await;
-        let formatter = OutputFormatter::new(None, false, true);
+        let (formatter, cap) = crate::testutil::capturing_plain();
 
         // Use a unique prefix that matches only one memory
         let result = run_get(
@@ -192,7 +198,12 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_ok());
+        result.unwrap();
+        let out = cap.stdout();
+        assert!(
+            out.starts_with("ID: mem-test-001-aaa\n"),
+            "the prefix resolves to the full id: {out}"
+        );
     }
 
     #[tokio::test]

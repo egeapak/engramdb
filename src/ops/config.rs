@@ -78,8 +78,6 @@ pub struct RetrievalView {
     pub relevance_threshold: f64,
     /// Minimum score a keyword `search` result must clear.
     pub search_threshold: f64,
-    /// Weight applied to semantic similarity in keyword search scoring.
-    pub search_semantic_weight: f64,
     /// Whether expired memories are included by default.
     pub include_expired: bool,
 }
@@ -146,7 +144,6 @@ impl AgentConfigView {
                 default_max_results: config.retrieval.max_results,
                 relevance_threshold: config.retrieval.relevance_threshold,
                 search_threshold: config.search.threshold,
-                search_semantic_weight: config.search.semantic_weight,
                 include_expired: config.retrieval.include_expired,
             },
             features: FeaturesView {
@@ -270,5 +267,29 @@ mod tests {
         assert!(view.features.contradiction_detection_enabled);
         assert_eq!(view.retrieval.default_max_results, 25);
         assert_eq!(view.limits.summary_max_chars, 320);
+    }
+
+    /// Every `[thresholds]` and `[search]` field has a reader, or is
+    /// declared retired. Destructured exhaustively so a new field fails the
+    /// build here until it is given one (the `model_demands` pattern): these
+    /// two sections once carried keys that nothing read for several releases.
+    #[test]
+    fn every_thresholds_and_search_field_is_classified() {
+        let crate::types::ThresholdsConfig {
+            // Read by `ops::gc`.
+            gc: _,
+            // Read by the CLI `compress` command and the MCP
+            // `compress_candidates` tool as the default threshold.
+            compress: _,
+            // Retired: `EngramConfig::retired_keys`.
+            needs_review: _,
+        } = crate::types::ThresholdsConfig::default();
+        let crate::types::SearchConfig {
+            // Read by the retrieval engine's keyword search.
+            threshold: _,
+            // Retired: `EngramConfig::retired_keys`.
+            semantic_weight: _,
+        } = crate::types::SearchConfig::default();
+        assert!(EngramConfig::default().retired_keys().is_empty());
     }
 }

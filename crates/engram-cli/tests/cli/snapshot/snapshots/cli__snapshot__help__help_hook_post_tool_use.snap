@@ -5,7 +5,7 @@ expression: "f.run_bare(& [\"hook\", \"post-tool-use\", \"--help\"])"
 $ engramdb hook post-tool-use --help
 exit: 0
 --- stdout ---
-Handle PostToolUse hook events (warn when an edit touches a memory's watch paths)
+Handle PostToolUse / PostToolUseFailure hook events (watch-path warnings on edits; the Bash retry prompt)
 
 Usage: engramdb hook post-tool-use [OPTIONS]
 

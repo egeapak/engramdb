@@ -82,6 +82,17 @@ fn arm_test_isolation() {
     engram_test_support::arm();
 }
 
+/// The `#[ctor]` above really ran in this test binary: the product resolves
+/// its data and config dirs under the temp dir, never the user's.
+#[cfg(test)]
+#[test]
+fn the_data_and_config_dirs_are_isolated() {
+    engram_test_support::assert_isolated(
+        &engramdb::storage::paths::global_data_dir().unwrap(),
+        &engramdb::storage::paths::global_config_dir().unwrap(),
+    );
+}
+
 use anyhow::Result;
 use std::env;
 use std::io::IsTerminal;
@@ -127,6 +138,171 @@ pub fn supported_hook_subcommands() -> Vec<String> {
         .get_subcommands()
         .map(|sub| sub.get_name().to_string())
         .collect()
+}
+
+/// Parse the command line, failing open for hook invocations.
+///
+/// Claude Code runs `engramdb hook <event> …` from wiring that updates
+/// independently of the binary, so a newer plugin can pass a flag (or a flag
+/// value) this binary does not know. clap would exit 2, which Claude Code
+/// treats as a *blocking* hook error. For a hook invocation, any parse error
+/// other than help/version prints one warning and exits 0 **without running
+/// the hook** (a flag the binary does not know may change what the hook
+/// would do, so running it with the flag dropped is a guess; no context is
+/// the fail-open contract). Every other command keeps clap's own exit.
+pub fn parse_cli<I, T>(args: I) -> std::result::Result<Cli, std::process::ExitCode>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    use clap::error::ErrorKind;
+    use clap::Parser;
+    let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    match Cli::try_parse_from(&args) {
+        Ok(cli) => Ok(cli),
+        Err(e) => {
+            let informational = matches!(
+                e.kind(),
+                ErrorKind::DisplayHelp
+                    | ErrorKind::DisplayVersion
+                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            );
+            if informational || !is_hook_invocation(args.get(1..).unwrap_or_default()) {
+                e.exit();
+            }
+            let rendered = e.to_string();
+            let first = rendered.lines().next().unwrap_or("").trim();
+            commands::hook::warn_unparseable_hook_args(first);
+            Err(std::process::ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Whether a command runs the throttled compaction pass: every command that
+/// works on a project store, from the main checkout or a linked worktree
+/// alike, except hooks (they sit on Claude Code's per-tool-call hot path) and
+/// the exempt commands that own their own store handling or none.
+fn should_auto_compact(is_exempt: bool, is_hook: bool) -> bool {
+    !is_exempt && !is_hook
+}
+
+/// Whether `args` (without `argv[0]`) invoke `engramdb hook …`: the first
+/// argument that is neither a flag nor the value of a value-taking **global**
+/// flag is `hook`.
+///
+/// The value-taking globals come from clap's own definition, so a new global
+/// flag cannot desync this list.
+pub fn is_hook_invocation(args: &[std::ffi::OsString]) -> bool {
+    use clap::CommandFactory;
+    let command = Cli::command();
+    let mut long_with_value: Vec<String> = Vec::new();
+    let mut short_with_value: Vec<char> = Vec::new();
+    for arg in command.get_arguments() {
+        if !(arg.is_global_set() && arg.get_action().takes_values()) {
+            continue;
+        }
+        if let Some(long) = arg.get_long() {
+            long_with_value.push(long.to_string());
+        }
+        long_with_value.extend(
+            arg.get_all_aliases()
+                .unwrap_or_default()
+                .into_iter()
+                .map(String::from),
+        );
+        if let Some(short) = arg.get_short() {
+            short_with_value.push(short);
+        }
+    }
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let Some(text) = arg.to_str() else {
+            return false;
+        };
+        if text == "--" {
+            return iter.next().is_some_and(|next| next == "hook");
+        }
+        if let Some(long) = text.strip_prefix("--") {
+            if !long.contains('=') && long_with_value.iter().any(|l| l == long) {
+                iter.next();
+            }
+            continue;
+        }
+        if let Some(short) = text.strip_prefix('-') {
+            if short.chars().count() == 1
+                && short_with_value.contains(&short.chars().next().unwrap_or(' '))
+            {
+                iter.next();
+            }
+            continue;
+        }
+        return text == "hook";
+    }
+    false
+}
+
+/// The global registry, or — for a hook only — `None` with a warning when it
+/// cannot be resolved (no config directory). A hook then runs unresolved
+/// rather than exiting non-zero, which Claude Code would report on every
+/// tool call.
+fn registry_or_hook_fallback(
+    registry: engramdb::storage::Result<FileRegistry>,
+    is_hook: bool,
+) -> Result<Option<FileRegistry>> {
+    match registry {
+        Ok(registry) => Ok(Some(registry)),
+        Err(e) if is_hook => {
+            tracing::warn!("engramdb hook: registry unavailable (continuing unresolved): {e}");
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Run a hook in this process: the `Hook` arm of [`run`], also reached early
+/// when the registry cannot be opened. Fails open: every error is logged and
+/// `Ok(())` returned.
+async fn dispatch_hook(
+    command: Option<HookCommand>,
+    dir: &std::path::Path,
+    hook_input: Option<String>,
+    in_process_flag: bool,
+    stats_enabled: bool,
+    started: std::time::Instant,
+) -> Result<()> {
+    // Hooks fire on every Read/Write/Edit and never create memories —
+    // they deliberately skip provider resolution (no `backend`), see
+    // `build_engine_without_providers`. The one model use is
+    // UserPromptSubmit's situation classifier: a running daemon's
+    // embedding model, else the embedding model alone in-process
+    // (`--in-process` skips the daemon).
+    let Some(call) = command.as_ref().and_then(commands::hook::hook_call) else {
+        // Version skew: the Claude Code hook config names an event
+        // this binary predates (or is a bare `engramdb hook`). Report
+        // on stderr and exit 0 — see `warn_unknown_hook`.
+        let name = match &command {
+            Some(HookCommand::Unknown(args)) => args.first().map(String::as_str),
+            _ => None,
+        };
+        commands::hook::warn_unknown_hook(name);
+        return Ok(());
+    };
+    let input = hook_input.unwrap_or_else(commands::hook::read_stdin);
+    let result = commands::hook::run_in_process(&call, dir, &input, in_process_flag).await;
+    if stats_enabled {
+        let session_id = commands::hook::event_session_id(&input);
+        commands::hook::record_hook_stats(
+            dir,
+            call.name(),
+            started.elapsed(),
+            result.is_ok(),
+            session_id.as_deref(),
+        );
+    }
+    if let Err(e) = result {
+        tracing::warn!("engramdb hook failed (continuing without context): {e}");
+    }
+    Ok(())
 }
 
 /// Run the CLI application with parsed arguments.
@@ -210,8 +386,32 @@ pub async fn run(cli: Cli) -> Result<()> {
     // Create output formatter
     let formatter = OutputFormatter::new(cli.format, cli.json, cli.no_color);
 
-    // Create global file-backed registry for all commands
-    let registry = FileRegistry::global()?;
+    // Create global file-backed registry for all commands. A hook must not
+    // fail on it (no resolvable config dir, an unwritable one): it runs
+    // unresolved with no registry, the same degraded mode as a failed
+    // worktree resolution below.
+    let registry = match registry_or_hook_fallback(
+        FileRegistry::global(),
+        matches!(cli.command, Command::Hook { .. }),
+    )? {
+        Some(registry) => registry,
+        None => {
+            if let Command::Hook { command } = cli.command {
+                let config_path = dir.join(".engramdb").join("config.toml");
+                let config = engramdb::storage::config::load_config_or_default(&config_path).await;
+                return dispatch_hook(
+                    command,
+                    &dir,
+                    hook_input,
+                    in_process_flag,
+                    config.stats.enabled,
+                    started,
+                )
+                .await;
+            }
+            unreachable!("registry_or_hook_fallback returns None only for a hook");
+        }
+    };
 
     // If we're inside a linked git worktree, transparently route memory
     // operations to the main worktree's project: ensure it is initialized,
@@ -282,12 +482,16 @@ pub async fn run(cli: Cli) -> Result<()> {
         // actually runs.
         engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
             .await;
+    }
 
-        // Compaction rides a much shorter cadence than the full pass above,
-        // because query latency tracks LanceDB fragment count and a
-        // write-heavy session degrades every scan several-fold long before the
-        // 6-hour window expires. The common case is one file stat: the
-        // throttle is checked before the store is opened.
+    // Compaction rides a much shorter cadence than the full pass above,
+    // because query latency tracks LanceDB fragment count and a write-heavy
+    // session degrades every scan several-fold long before the 6-hour window
+    // expires. The common case is one file stat: the throttle is checked
+    // before the store is opened. Unlike the full pass it also runs from a
+    // linked worktree: `dir` is already the main project there, which is the
+    // store a worktree session writes to and fragments.
+    if should_auto_compact(is_exempt, is_hook) {
         engramdb::ops::auto_compact(&dir, &config.maintenance, cli.no_maintenance).await;
     }
 
@@ -821,39 +1025,15 @@ pub async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Hook { command } => {
-            // Hooks fire on every Read/Write/Edit and never create memories —
-            // they deliberately skip provider resolution (no `backend`), see
-            // `build_engine_without_providers`. The one model use is
-            // UserPromptSubmit's situation classifier: a running daemon's
-            // embedding model, else the embedding model alone in-process
-            // (`--in-process` skips the daemon).
-            let Some(call) = command.as_ref().and_then(commands::hook::hook_call) else {
-                // Version skew: the Claude Code hook config names an event
-                // this binary predates (or is a bare `engramdb hook`). Report
-                // on stderr and exit 0 — see `warn_unknown_hook`.
-                let name = match &command {
-                    Some(HookCommand::Unknown(args)) => args.first().map(String::as_str),
-                    _ => None,
-                };
-                commands::hook::warn_unknown_hook(name);
-                return Ok(());
-            };
-            let input = hook_input.take().unwrap_or_else(commands::hook::read_stdin);
-            let result = commands::hook::run_in_process(&call, &dir, &input, in_process_flag).await;
-            if config.stats.enabled {
-                let session_id = commands::hook::event_session_id(&input);
-                commands::hook::record_hook_stats(
-                    &dir,
-                    call.name(),
-                    started.elapsed(),
-                    result.is_ok(),
-                    session_id.as_deref(),
-                );
-            }
-            if let Err(e) = result {
-                tracing::warn!("engramdb hook failed (continuing without context): {e}");
-            }
-            Ok(())
+            dispatch_hook(
+                command,
+                &dir,
+                hook_input,
+                in_process_flag,
+                config.stats.enabled,
+                started,
+            )
+            .await
         }
         // `discover` is the one `projects` subcommand that rebuilds an index
         // and therefore needs model providers, so it is dispatched here
@@ -946,6 +1126,46 @@ mod tests {
     use super::*;
     use engramdb::daemon::DaemonPolicy;
     use engramdb::types::DaemonConfig;
+
+    /// A hook must not exit non-zero because the registry path cannot be
+    /// resolved (on Linux `dirs` falls back to the passwd entry, so the real
+    /// failure cannot be forced from a tier-2 test; the branch is tested here).
+    #[test]
+    fn a_hook_without_a_registry_falls_back() {
+        let err = || {
+            Err(engramdb::storage::StorageError::Validation(
+                "Could not determine config directory".to_string(),
+            ))
+        };
+        assert!(matches!(registry_or_hook_fallback(err(), true), Ok(None)));
+        assert!(registry_or_hook_fallback(err(), false).is_err());
+    }
+
+    #[test]
+    fn worktree_commands_compact_the_main_store() {
+        // The decision no longer looks at whether the cwd is a linked
+        // worktree: only exempt commands and hooks skip compaction.
+        assert!(should_auto_compact(false, false));
+        assert!(!should_auto_compact(true, false));
+        assert!(!should_auto_compact(false, true));
+    }
+
+    #[test]
+    fn is_hook_invocation_table() {
+        let os = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert!(is_hook_invocation(&os(&["hook", "pre-tool-use"])));
+        assert!(is_hook_invocation(&os(&["--format", "json", "hook", "x"])));
+        assert!(is_hook_invocation(&os(&["--format=json", "hook", "x"])));
+        assert!(is_hook_invocation(&os(&[
+            "--dir",
+            ".",
+            "hook",
+            "session-start"
+        ])));
+        assert!(!is_hook_invocation(&os(&["query", "hook"])));
+        assert!(!is_hook_invocation(&os(&["--dir", "hook", "list"])));
+        assert!(!is_hook_invocation(&os(&[])));
+    }
 
     #[test]
     fn cli_policy_precedence() {

@@ -100,3 +100,16 @@ Existing tools (`create_memory`, `query`) are the template — implement once in
 
 5. **Test.** Pipe a fixture event JSON into the new subcommand and assert the output.
 
+## Add a graph style
+
+A graph style is one look of the dashboard's graph view. The rules are in [dashboard.md](./dashboard.md), sections [Graph styles](./dashboard.md#graph-styles) and [Surfaces](./dashboard.md#surfaces-svg-and-canvas). Paths below are relative to `crates/engram-dashboard/`.
+
+1. **`web/js/graph/themes/<id>/index.js`**: create the style. It exports, as named exports, `id` (equal to the folder name), `name`, `strings`, `layout`, `drawBackdrop`, `drawNode`, `drawEdge`, `edgeSample` and `legend`. `layout.name` must be a key of `LAYOUTS` in `web/js/graph/layouts.js`. The server computes every layout; a style does not.
+
+2. **`web/js/graph/themes/index.js`**: add the style to `STYLES`.
+
+3. **`web/css/themes/<id>.css`**: write the style's CSS. Put every rule under `[data-graph-style="<id>"]`. Link the file from `web/index.html`.
+
+4. **Wording.** Use the neutral words: graph, memory, relation, scope. Only `themes/grid/` may use other words.
+
+5. **Test.** These tests in `src/tests.rs` must pass: `every_graph_style_exports_the_interface`, `every_graph_style_css_is_linked_and_scoped`, `the_core_frontend_uses_neutral_words`, `every_import_resolves_to_an_embedded_file`. If the style draws on canvas (`renderer = 'canvas'`), `a_canvas_style_exports_every_canvas_hook` must also pass. Then run the browser checks in `bench/browser/checks.mjs` by hand.

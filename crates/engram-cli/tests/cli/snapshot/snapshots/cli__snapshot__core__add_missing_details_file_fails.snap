@@ -9,4 +9,4 @@ exit: 1
 Error: Failed to read details file
 
 Caused by:
-    No such file or directory (os error 2)
+    No such file or directory (os error [ERRNO])

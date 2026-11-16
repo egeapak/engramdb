@@ -278,6 +278,26 @@ either way; s2k opened scope 29.3 → 12.8, show all 39.4 → 14.1, overview
 8.7 → 8.1. So the Rust layout itself costs ≈ 12–26 ms per 800 memories,
 against 50–122 ms for the worker in the browser.
 
+### The overview at many top scopes
+
+A store's top-scope count has no cap, and the overview's work grows with
+it. `pack` lays more than `PACK_MAX` (100) scopes on a spiral and never
+reads the affinity matrix, which `overview::layout` (and scope-force's
+`top_aff`) still built at m × m doubles: 200 MB at 5k scopes, 3.2 GB at
+20k. Both are now built only up to `PACK_MAX`, with bit-identical output
+(the fixtures and generated 50/101/500/3000-scope overviews and 50/150-top
+force layouts hashed before and after). `dashboard_graph`'s
+`overview_layout/<m>` case, the layout alone (dev profile with the
+dashboard crate at `opt-level = 3`, no debug assertions; this machine):
+1k scopes 5.2 → 4.7 ms, 5k 96 → 85 ms, 20k 1.13 s (not run before: the
+matrix alone was 3.2 GB). What is left is the label search, a pass over
+every placed box and disc per candidate spot, so quadratic; at 20k
+scopes it is ≈ 1.1 s once, then cached. The plan's cap on that search
+(first 2000 scopes search, the rest take the forced spot; changes output
+and `LAYOUT_VERSION`) was not made: the owner asked for it only if the
+measurement called for it, and a one-time 1.1 s at 20,000 top scopes did
+not.
+
 ## Canvas surface (Plain)
 
 Plain now draws the graph on a canvas (`web/js/graph/canvas/host.js`, the

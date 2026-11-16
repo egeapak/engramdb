@@ -78,3 +78,16 @@ the target, path data bounded per relation, and an inherited-property kind
 drawn like an unknown one. It then times building 2,000 relations at Fit and
 at maximum zoom against the 100 ms filter-toggle budget (JS share only).
 Exits 1 on a failed check.
+
+## Unit checks of the frontend's pure functions
+
+`node bench/unit.mjs` imports the pure exports of `web/js/` (no browser
+global at their top level, so node loads them; `app.js` boots at import,
+which is why its pure parts live in `route.js`) and compares what they
+return: the relation tallies with prototype-named kinds (`graph/tally.js`),
+the keyboard walk's ends (`graph/walk.js`), the layout box rounding
+(`graph/input.js`), number and score formatting, the scope keys and their
+round trip (`scopes.js`), hash routing (`route.js`), the Memories filters'
+helpers, the Overview's "more" links and the Relations tab's *Show in
+graph* link. It prints every failure and exits 1 if there was one. CI's
+`frontend` job runs it with `details.mjs`.

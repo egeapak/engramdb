@@ -69,10 +69,15 @@ fn config_default_decay(
 ) -> Option<Decay> {
     use crate::types::Epistemic;
     if epistemic == Epistemic::Observation && type_.default_epistemic() != Epistemic::Observation {
-        Some(
-            Decay::exponential(Duration::days(cfg.observation_half_life_days as i64))
-                .with_floor(cfg.observation_decay_floor),
-        )
+        let half_life =
+            super::parsing::config_days(cfg.observation_half_life_days).unwrap_or_else(|| {
+                tracing::warn!(
+                    "[epistemic] observation_half_life_days = {} is out of range; using 90",
+                    cfg.observation_half_life_days
+                );
+                Duration::days(90)
+            });
+        Some(Decay::exponential(half_life).with_floor(cfg.observation_decay_floor))
     } else {
         crate::types::default_decay(type_, epistemic)
     }

@@ -144,7 +144,7 @@ If a memory disagrees with what you just observed, **don't update or delete it**
 }
 ```
 
-The memory's status becomes `Challenged`. It stays in the store; the challenge penalty in scoring (`challenge_penalty`, default −0.10) suppresses it without hiding it.
+The memory's status becomes `Challenged`. It stays in the store; the challenge penalty in scoring (`challenge_penalty`: 0.15 for a fact, 0.20 for an observation, 0.05 for a decision by default) suppresses it without hiding it.
 
 Later (next session, or right then), use `resolve` to decide:
 
@@ -171,9 +171,15 @@ Most operations take an optional `project` parameter. Pass:
 - omit it → current project (the one engramdb resolved from CWD),
 - an absolute path → that project,
 - a 16-char hex ID → that project (find IDs with `projects_list`),
-- `"global"` → the cross-project global store.
+- `"global"` → the machine-wide global store,
+- `"group:<name>"` → a named group store shared by a set of projects.
+
+Group membership is set up by the user with `engramdb groups subscribe <name>`; there is no MCP tool for it. A project's subscribed groups are already included in its queries.
 
 ```jsonc
+// Write a memory to a group store
+{ "tool": "create", "arguments": { "type": "convention", "summary": "…", "content": "…", "project": "group:backend" } }
+
 // Query the global store
 { "tool": "query", "arguments": { "mode": "filter", "query": "git workflow", "project": "global" } }
 

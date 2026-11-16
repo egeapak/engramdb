@@ -586,7 +586,16 @@ pub async fn doctor_environment(
         }
         if let Some(s) = store {
             project_checks.push(check_chunk_orphans(s).await);
+            if let Some(check) = check_memory_vectors(s).await {
+                project_checks.push(check);
+            }
+            if let Some(check) = check_store_data_dir(s) {
+                project_checks.push(check);
+            }
             if let Some(check) = check_memory_edges(s).await {
+                project_checks.push(check);
+            }
+            if let Some(check) = check_cross_dir_duplicates(s).await {
                 project_checks.push(check);
             }
         }
@@ -808,6 +817,11 @@ fn claude_plugin_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// How to install the plugin, as README.md and docs/users/claude-code.md give
+/// it: the marketplace is `engramdb` (`.claude-plugin/marketplace.json`) and
+/// the plugin in it `engram`.
+const PLUGIN_INSTALL_HINT: &str = "Install in Claude Code with `/plugin marketplace add egeapak/engramdb`, then `/plugin install engram@engramdb`";
+
 /// Check if the Claude Code plugin is installed.
 fn check_claude_plugin() -> EnvironmentCheck {
     let found = claude_plugin_installed();
@@ -823,7 +837,7 @@ fn check_claude_plugin() -> EnvironmentCheck {
         suggestion: if found {
             None
         } else {
-            Some("Install with `claude plugin add https://github.com/egeapak/engramdb`".to_string())
+            Some(PLUGIN_INSTALL_HINT.to_string())
         },
         details: vec![],
         status: if found { None } else { Some(CheckStatus::Warn) },
@@ -967,7 +981,11 @@ pub struct HarvestHealth {
     /// Until one exists, `harvest search` cannot find that conversation and a
     /// miss is indistinguishable from the topic never coming up.
     pub pending_index: usize,
-    /// Ledger lines, and the live entries they fold down to.
+    /// Sessions the automatic index pass failed on and has not indexed
+    /// since; it retries each at most once a day.
+    pub index_failed: usize,
+    /// Ledger lines, and the entries a compaction would keep: live sessions
+    /// plus the removal tombstones kept within the 365-day window.
     pub ledger_lines: usize,
     pub ledger_entries: usize,
     /// Cited conversations with no bytes left, and the memories citing them.
@@ -983,6 +1001,7 @@ impl HarvestHealth {
     /// Nothing to say: no ledger, no pins, nothing waiting.
     fn is_quiet(&self) -> bool {
         self.pending_index == 0
+            && self.index_failed == 0
             && self.ledger_lines == 0
             && self.expired.is_empty()
             && self.pinned_count == 0
@@ -1027,6 +1046,23 @@ pub fn build_harvest_checks(health: &HarvestHealth) -> Vec<EnvironmentCheck> {
         }
     });
 
+    if health.index_failed > 0 {
+        checks.push(EnvironmentCheck {
+            name: "Conversation index failures".to_string(),
+            passed: true,
+            message: format!(
+                "{} session{} could not be indexed (retried daily)",
+                health.index_failed,
+                if health.index_failed == 1 { "" } else { "s" }
+            ),
+            suggestion: Some(
+                "Run `engramdb harvest index <session>` on one to see why it fails.".to_string(),
+            ),
+            details: vec![],
+            status: Some(CheckStatus::Warn),
+        });
+    }
+
     let pending_compaction = crate::storage::harvest_state::compaction_is_pending(
         health.ledger_lines,
         health.ledger_entries,
@@ -1035,7 +1071,7 @@ pub fn build_harvest_checks(health: &HarvestHealth) -> Vec<EnvironmentCheck> {
         name: "Harvest ledger".to_string(),
         passed: true,
         message: format!(
-            "{} line(s) for {} live entr{}{}",
+            "{} line(s), which compact to {} entr{} (sessions plus kept removal records){}",
             health.ledger_lines,
             health.ledger_entries,
             if health.ledger_entries == 1 {
@@ -1149,11 +1185,12 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
 
     // Due-ness uses the same `index_after_hours` the automatic pass does, so
     // the count doctor reports is exactly what that pass would pick up.
-    let after = chrono::Duration::hours(config.harvest.index_after_hours as i64);
+    let after = config.harvest.index_after();
     let pending_index =
         crate::ops::harvest_index::pending_sessions(&scope, after, chrono::Utc::now())
             .map(|v| v.len())
             .unwrap_or(0);
+    let index_failed = crate::ops::harvest_index::index_failures(&scope);
 
     // Both fallible halves bail rather than default. An empty `with_bytes`
     // would report every citation in the store as expired evidence, which is
@@ -1177,6 +1214,7 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
 
     let health = HarvestHealth {
         pending_index,
+        index_failed,
         ledger_lines,
         ledger_entries,
         expired,
@@ -1185,6 +1223,43 @@ async fn gather_harvest_health(dir: &Path) -> Option<HarvestHealth> {
         archive_max_bytes: config.harvest.archive_max_bytes,
     };
     (!health.is_quiet()).then_some(health)
+}
+
+/// The sections of a project config that are read only from the global
+/// config file (`[daemon]`, `[security]`) and are set here anyway: their
+/// names joined for a headline, and one message per section.
+fn ignored_sections(
+    config_path: &Path,
+    config: &crate::types::EngramConfig,
+) -> Option<(String, Vec<String>)> {
+    let mut names = Vec::new();
+    let mut details = Vec::new();
+    if let Some(message) = crate::storage::config::legacy_daemon_message(config_path, config) {
+        names.push("[daemon]");
+        details.push(message);
+    }
+    if let Some(message) = crate::storage::config::legacy_security_message(config_path, config) {
+        names.push("[security]");
+        details.push(message);
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some((names.join(" and "), details))
+    }
+}
+
+/// A project config that turns NLI on with a repository the model policy
+/// refuses: the message for `doctor`, or `None`.
+fn refused_nli_model(config: &crate::types::EngramConfig) -> Option<String> {
+    if !config.nli.enabled {
+        return None;
+    }
+    super::model_policy::nli_repo_permitted(
+        &config.nli.model,
+        super::model_policy::custom_repos_allowed(),
+    )
+    .err()
 }
 
 /// Check `.engramdb/config.toml` syntax and values.
@@ -1202,21 +1277,45 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     }
     match crate::storage::config::load_config(&config_path).await {
         Ok(config) => match config.validate() {
-            // A leftover `[daemon]` table is ignored, not invalid: warn (the
-            // user's settings are silently not applying) without failing the
-            // check or the exit code.
-            Ok(()) => match crate::storage::config::legacy_daemon_message(&config_path, &config) {
-                Some(message) => EnvironmentCheck {
+            // A leftover `[daemon]` or `[security]` table is ignored, not
+            // invalid: warn (the user's settings are silently not applying)
+            // without failing the check or the exit code.
+            Ok(()) => match ignored_sections(&config_path, &config) {
+                Some((sections, details)) => EnvironmentCheck {
                     name: "Config file".to_string(),
                     passed: true,
-                    message: ".engramdb/config.toml sets [daemon] keys that are ignored"
-                        .to_string(),
-                    suggestion: Some(
-                        "Move the [daemon] keys to the global config file and delete them \
+                    message: format!(".engramdb/config.toml sets {sections} keys that are ignored"),
+                    suggestion: Some(format!(
+                        "Move the {sections} keys to the global config file and delete them \
                          from .engramdb/config.toml"
+                    )),
+                    details,
+                    status: Some(CheckStatus::Warn),
+                },
+                None if !config.retired_keys().is_empty() => EnvironmentCheck {
+                    name: "Config file".to_string(),
+                    passed: true,
+                    message: ".engramdb/config.toml sets keys that are no longer read".to_string(),
+                    suggestion: Some(
+                        "Delete the listed keys from .engramdb/config.toml; they have no effect"
                             .to_string(),
                     ),
-                    details: vec![message],
+                    details: crate::storage::config::retired_keys_message(&config_path, &config)
+                        .into_iter()
+                        .collect(),
+                    status: Some(CheckStatus::Warn),
+                },
+                None if refused_nli_model(&config).is_some() => EnvironmentCheck {
+                    name: "Config file".to_string(),
+                    passed: true,
+                    message: ".engramdb/config.toml selects an NLI model that is not loaded"
+                        .to_string(),
+                    suggestion: Some(
+                        "Use a built-in [nli].model, or set [security] \
+                         allow_custom_model_repos = true in the global config file"
+                            .to_string(),
+                    ),
+                    details: refused_nli_model(&config).into_iter().collect(),
                     status: Some(CheckStatus::Warn),
                 },
                 None => EnvironmentCheck {
@@ -2544,6 +2643,161 @@ async fn check_write_lock(project_id: &str) -> EnvironmentCheck {
     }
 }
 
+/// Ids with a file in both the shared and the personal directory
+/// (`MemoryStore::cross_dir_duplicates`). One copy is indexed and read; the
+/// other stays on disk, shadowed, because which one the user meant is not
+/// something an unattended pass may decide. A `Warn`: nothing is lost yet,
+/// but an edit to the shadowed copy would be invisible. `None` when there
+/// are none.
+async fn check_cross_dir_duplicates(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let duplicates = match store.cross_dir_duplicates().await {
+        Ok(d) if d.is_empty() => return None,
+        Ok(d) => d,
+        Err(e) => {
+            return Some(EnvironmentCheck {
+                name: "Shared/personal duplicates".to_string(),
+                passed: true,
+                message: format!("not checked: {e}"),
+                suggestion: None,
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            })
+        }
+    };
+    let details = duplicates
+        .iter()
+        .map(|d| {
+            let (kept, shadowed) = match d.winner {
+                crate::storage::CrossDirWinner::Shared => (&d.shared, &d.personal),
+                crate::storage::CrossDirWinner::Personal => (&d.personal, &d.shared),
+            };
+            format!(
+                "{}: using {}, shadowed {}",
+                d.id,
+                kept.display(),
+                shadowed.display()
+            )
+        })
+        .collect();
+    Some(EnvironmentCheck {
+        name: "Shared/personal duplicates".to_string(),
+        passed: true,
+        message: format!(
+            "{} memor{} a file in both the shared and the personal directory",
+            duplicates.len(),
+            if duplicates.len() == 1 {
+                "y has"
+            } else {
+                "ies have"
+            }
+        ),
+        suggestion: Some(
+            "Only the newer copy (the personal one on a tie) is read. Delete the copy you do not \
+             want; an `engramdb update` of the memory also removes the other one."
+                .to_string(),
+        ),
+        details,
+        status: Some(CheckStatus::Warn),
+    })
+}
+
+/// Live memories with no vectors are invisible to semantic search.
+///
+/// Reported only for a store that uses embeddings (a recorded fingerprint or
+/// any chunk row): a keyword-only store legitimately has none. A `Warn`, never
+/// a failure — a memory created a moment ago may still be embedding, and the
+/// MCP shutdown drain is a bound, not a guarantee. A non-forced
+/// `reindex --embeddings-only` embeds exactly these (no digest recorded ⇒
+/// rebuild); `doctor --fix` forces a re-embed, which repairs it too.
+async fn check_memory_vectors(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let uses_embeddings = matches!(store.embedding_fingerprint().await, Ok(Some(_)))
+        || matches!(store.has_any_chunks().await, Ok(true));
+    if !uses_embeddings {
+        return None;
+    }
+    let rows = match store.list_for_filtering().await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return Some(EnvironmentCheck {
+                name: "Memory vectors".to_string(),
+                passed: true,
+                message: format!("not checked: {e}"),
+                suggestion: None,
+                details: vec![],
+                status: Some(CheckStatus::Warn),
+            })
+        }
+    };
+    let live: Vec<_> = rows.iter().filter(|r| r.invalidated_at.is_none()).collect();
+    let missing: Vec<&str> = live
+        .iter()
+        .filter(|r| !r.has_embedding)
+        .map(|r| r.id.as_str())
+        .collect();
+    if missing.is_empty() {
+        return Some(EnvironmentCheck {
+            name: "Memory vectors".to_string(),
+            passed: true,
+            message: format!("all {} live memories have vectors", live.len()),
+            suggestion: None,
+            details: vec![],
+            status: None,
+        });
+    }
+    let mut details: Vec<String> = missing
+        .iter()
+        .take(5)
+        .map(|id| id.chars().take(8).collect())
+        .collect();
+    if missing.len() > 5 {
+        details.push(format!("… and {} more", missing.len() - 5));
+    }
+    Some(EnvironmentCheck {
+        name: "Memory vectors".to_string(),
+        passed: true,
+        message: format!(
+            "{} memor{} no vectors and {} invisible to semantic search",
+            missing.len(),
+            if missing.len() == 1 {
+                "y has"
+            } else {
+                "ies have"
+            },
+            if missing.len() == 1 { "is" } else { "are" },
+        ),
+        suggestion: Some("Run `engramdb reindex --embeddings-only`".to_string()),
+        details,
+        status: Some(CheckStatus::Warn),
+    })
+}
+
+/// A per-store data directory other accounts can read (it holds personal
+/// memories, conversation summaries and transcript copies). Writable opens
+/// tighten one the user owns; this reports what is still loose, read-only.
+fn check_store_data_dir(store: &MemoryStore) -> Option<EnvironmentCheck> {
+    let root = crate::storage::paths::global_data_dir().ok()?;
+    let dir = if store.is_global() {
+        root.join("global")
+    } else if store.is_group() {
+        root.join("groups").join(&store.project_id)
+    } else {
+        root.join("projects").join(&store.project_id)
+    };
+    let problem = crate::storage::paths::private_dir_problem(&dir)?;
+    Some(EnvironmentCheck {
+        name: "Store data directory".to_string(),
+        passed: true,
+        message: problem,
+        suggestion: Some(format!(
+            "Restrict it to your account: `chmod 700 {}` (any writable command does this for a \
+             directory you own)",
+            dir.display()
+        )),
+        details: vec![],
+        status: Some(CheckStatus::Warn),
+    })
+}
+
 /// Check for orphaned chunks (chunk memory_ids not in the memories table).
 async fn check_chunk_orphans(store: &MemoryStore) -> EnvironmentCheck {
     let memory_ids = match store.list_ids().await {
@@ -2874,6 +3128,35 @@ async fn check_embedding_model_cached(dir: &Path, cache_dir: &Path) -> Environme
         false
     };
 
+    // A cached built-in file whose SHA-256 does not match is refused by its
+    // loader (that model then falls back as if missing), and deleting it is
+    // the fix, so it is a failure. Hashing is memoized under the cache.
+    let mismatches = {
+        let cache_dir = cache_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || engram_models::integrity::check_cache(&cache_dir))
+            .await
+            .unwrap_or_default()
+    };
+    if !mismatches.is_empty() {
+        return EnvironmentCheck {
+            name: "Embedding model cache".to_string(),
+            passed: false,
+            message: format!(
+                "{} cached model file(s) fail the SHA-256 check and will not load",
+                mismatches.len()
+            ),
+            suggestion: Some(format!(
+                "Delete the listed files under {} so they download again",
+                cache_dir.display()
+            )),
+            details: mismatches
+                .into_iter()
+                .map(|(file, reason)| format!("{file}: {reason}"))
+                .collect(),
+            status: Some(CheckStatus::Fail),
+        };
+    }
+
     // Advisory: an uncached model is downloaded on first use, so a cold cache
     // doesn't mean the store is broken — render it as a warning, not a failure
     // that flips the exit code.
@@ -2924,10 +3207,34 @@ fn check_global_gitignore() -> EnvironmentCheck {
             }
         })
         .or_else(|| {
-            // Default location: $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore
-            dirs::config_dir().map(|c| c.join("git").join("ignore"))
+            git_default_excludes_path(
+                std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+                dirs::home_dir(),
+            )
         });
+    check_global_gitignore_at(excludes_path.as_deref())
+}
 
+/// Where git reads global excludes when `core.excludesFile` is unset:
+/// `$XDG_CONFIG_HOME/git/ignore` when that variable is set and not empty,
+/// else `~/.config/git/ignore`. Git uses this rule on every platform.
+///
+/// `dirs::config_dir()` is not this path off Linux (`~/Library/Application
+/// Support` on macOS, `%APPDATA%` on Windows), so `doctor` told macOS and
+/// Windows users to edit a file git never reads.
+fn git_default_excludes_path(
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    xdg_config_home
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| home.map(|h| h.join(".config")))
+        .map(|c| c.join("git").join("ignore"))
+}
+
+/// [`check_global_gitignore`] against a resolved excludes file (`None`: none
+/// configured), so tests can drive it without the machine's git config.
+fn check_global_gitignore_at(excludes_path: Option<&Path>) -> EnvironmentCheck {
     let Some(excludes_path) = excludes_path else {
         return EnvironmentCheck {
             name: "Global gitignore".to_string(),
@@ -2943,7 +3250,7 @@ fn check_global_gitignore() -> EnvironmentCheck {
         };
     };
 
-    let content = std::fs::read_to_string(&excludes_path).unwrap_or_default();
+    let content = std::fs::read_to_string(excludes_path).unwrap_or_default();
     let has_engramdb = content
         .lines()
         .any(|line| line.trim() == ".engramdb" || line.trim() == ".engramdb/");
@@ -3052,6 +3359,67 @@ mod tests {
     use crate::storage::{InMemoryRegistry, MemoryStore};
     use crate::types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
+
+    /// An edge row missing from the derived table (what a failed edge write
+    /// leaves) is a Warn naming the drift, and `reindex` clears it.
+    #[tokio::test]
+    async fn doctor_reports_table_drift_and_reindex_clears_it() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let a = store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "a",
+                "c",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        let b = store
+            .create(&Memory::new(
+                MemoryType::Decision,
+                "b",
+                "c",
+                Provenance::human(),
+            ))
+            .await
+            .unwrap();
+        store
+            .update_with(&a, |m| {
+                m.links.push(crate::types::Link::new(
+                    b.clone(),
+                    crate::types::LinkKind::Supports,
+                    crate::types::LinkOrigin::Human,
+                ));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let lance = crate::storage::paths::lancedb_dir(&store.project_id).unwrap();
+        let conn = lancedb::connect(lance.to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        crate::storage::edge_index::delete_owned(&conn, std::slice::from_ref(&a))
+            .await
+            .unwrap();
+
+        let check = check_memory_edges(&store)
+            .await
+            .expect("a check is reported");
+        assert_eq!(check.status, Some(CheckStatus::Warn), "{check:?}");
+        assert!(
+            check.message.contains("table row(s) out of step"),
+            "{check:?}"
+        );
+
+        store.reindex().await.unwrap();
+        let check = check_memory_edges(&store).await.expect("one edge remains");
+        assert_ne!(check.status, Some(CheckStatus::Warn), "{check:?}");
+        assert_eq!(check.message, "consistent");
+    }
 
     /// Synthetic daemon check injected into `doctor_environment` in tests, so the
     /// `ops` test suite does not depend "upward" on `daemon` (the real probe is
@@ -4094,6 +4462,32 @@ mod tests {
         assert!(result.suggestion.is_some());
     }
 
+    /// A cached built-in model file with the wrong SHA-256 is refused by its
+    /// loader, so doctor fails the cache check and names the file.
+    #[tokio::test]
+    async fn test_check_embedding_model_cached_flags_a_tampered_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache_dir = TempDir::new().unwrap();
+        let root = cache_dir.path().join("models--Xenova--t5-small");
+        std::fs::create_dir_all(root.join("refs")).unwrap();
+        std::fs::write(root.join("refs/main"), "main").unwrap();
+        std::fs::create_dir_all(root.join("snapshots/main")).unwrap();
+        std::fs::write(root.join("snapshots/main/tokenizer.json"), b"{}").unwrap();
+
+        let result = check_embedding_model_cached(temp_dir.path(), cache_dir.path()).await;
+
+        assert!(!result.passed, "{}", result.message);
+        assert_eq!(result.status, Some(CheckStatus::Fail));
+        assert!(
+            result
+                .details
+                .iter()
+                .any(|d| d.contains("Xenova/t5-small/tokenizer.json")),
+            "{:?}",
+            result.details
+        );
+    }
+
     // `validate_models` (added in #54) is otherwise only exercised end-to-end
     // by one happy-path CLI integration test, so its failure/skip branches were
     // uncovered. Force the embedding model unavailable (empty model cache +
@@ -4212,6 +4606,85 @@ mod tests {
         let detail = result.details.join("\n");
         assert!(detail.contains("daemon.enabled"), "{detail}");
         assert!(detail.contains("daemon.idle_timeout_secs"), "{detail}");
+        let global = crate::storage::paths::global_config_path().unwrap();
+        assert!(detail.contains(&global.display().to_string()), "{detail}");
+    }
+
+    /// Retired keys load and are reported as a warning naming each one,
+    /// without failing the check.
+    #[tokio::test]
+    async fn test_check_config_file_flags_retired_keys() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[logical_bonus]\nexact = 0.3\n[thresholds]\nneeds_review = 0.3\ngc = 0.05\ncompress = 0.4\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "a retired key must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        let detail = result.details.join("\n");
+        assert!(detail.contains("logical_bonus.exact"), "{detail}");
+        assert!(detail.contains("thresholds.needs_review"), "{detail}");
+    }
+
+    /// `[nli].model` outside the built-in list is not loaded; doctor says why.
+    #[tokio::test]
+    async fn test_check_config_file_flags_a_refused_nli_model() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        let mut config = crate::types::EngramConfig::default();
+        config.nli.enabled = true;
+        config.nli.model = "someone/custom-nli".to_string();
+        config
+            .to_toml_file(engramdb_dir.join("config.toml"))
+            .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        let detail = result.details.join("\n");
+        assert!(detail.contains("someone/custom-nli"), "{detail}");
+        assert!(detail.contains("allow_custom_model_repos"), "{detail}");
+
+        // With the model built in, the config is plainly valid.
+        config.nli.model = crate::types::config::DEFAULT_NLI_MODEL_REPO.to_string();
+        config
+            .to_toml_file(engramdb_dir.join("config.toml"))
+            .unwrap();
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.status, None, "{}", result.message);
+    }
+
+    /// A project config with `[security]` grants nothing. Doctor says so as
+    /// a warning that names each key and the global file.
+    #[tokio::test]
+    async fn test_check_config_file_flags_legacy_security_section() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[security]\nallow_all_projects_harvest = true\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "an ignored section must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(result.message.contains("[security]"), "{}", result.message);
+        let detail = result.details.join("\n");
+        assert!(
+            detail.contains("security.allow_all_projects_harvest"),
+            "{detail}"
+        );
+        assert!(detail.contains("grants nothing"), "{detail}");
         let global = crate::storage::paths::global_config_path().unwrap();
         assert!(detail.contains(&global.display().to_string()), "{detail}");
     }
@@ -5080,6 +5553,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn doctor_reports_shared_personal_duplicates() {
+        let tmp = TempDir::new().unwrap();
+        let store = MemoryStore::init(tmp.path(), &InMemoryRegistry::new())
+            .await
+            .unwrap();
+        let m = Memory::new(
+            MemoryType::Decision,
+            "duplicated",
+            "in both directories",
+            Provenance::human(),
+        );
+        store.create(&m).await.unwrap();
+        assert!(check_cross_dir_duplicates(&store).await.is_none());
+
+        let shared = std::fs::read_dir(tmp.path().join(".engramdb/memories"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().contains(&m.id))
+            .unwrap();
+        let personal = crate::storage::paths::personal_memories_dir(&store.project_id).unwrap();
+        std::fs::create_dir_all(&personal).unwrap();
+        std::fs::copy(&shared, personal.join(shared.file_name().unwrap())).unwrap();
+
+        let check = check_cross_dir_duplicates(&store).await.expect("reported");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert_eq!(
+            check.message,
+            "1 memory has a file in both the shared and the personal directory"
+        );
+        assert_eq!(check.details.len(), 1);
+        assert!(check.details[0].contains(&m.id), "{:?}", check.details);
+        assert!(
+            check.details[0].contains(&format!("shadowed {}", shared.display())),
+            "a tie keeps the personal copy: {:?}",
+            check.details
+        );
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_memories_without_vectors() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let embedded = Memory::new(MemoryType::Decision, "With", "vectors", Provenance::human());
+        let bare = Memory::new(
+            MemoryType::Decision,
+            "Without",
+            "vectors",
+            Provenance::human(),
+        );
+        store.create(&embedded).await.unwrap();
+        store.create(&bare).await.unwrap();
+        store
+            .upsert_chunks(&embedded.id, vec![vec![0.5f32; 384]])
+            .await
+            .unwrap();
+
+        let check = check_memory_vectors(&store).await.expect("store embeds");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert!(check.passed, "a warning, never a failure");
+        assert!(
+            check.message.starts_with("1 memory has no vectors"),
+            "{}",
+            check.message
+        );
+        assert_eq!(check.details, vec![bare.id[..8].to_string()]);
+        assert!(check
+            .suggestion
+            .as_deref()
+            .unwrap()
+            .contains("reindex --embeddings-only"));
+    }
+
+    #[tokio::test]
+    async fn doctor_is_silent_about_vectors_in_a_store_that_never_embedded() {
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        let mem = Memory::new(MemoryType::Decision, "Keyword", "only", Provenance::human());
+        store.create(&mem).await.unwrap();
+        assert!(check_memory_vectors(&store).await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn doctor_warns_about_a_store_data_dir_others_can_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let registry = InMemoryRegistry::new();
+        let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
+        assert!(check_store_data_dir(&store).is_none(), "born 0700");
+        let dir = crate::storage::paths::global_data_dir()
+            .unwrap()
+            .join("projects")
+            .join(&store.project_id);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let check = check_store_data_dir(&store).expect("loose dir reported");
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert!(check.message.contains("accessible by other accounts"));
+    }
+
+    #[tokio::test]
     async fn test_check_chunk_orphans_empty_store() {
         let temp_dir = TempDir::new().unwrap();
         let registry = InMemoryRegistry::new();
@@ -5224,10 +5799,57 @@ mod tests {
     }
 
     #[test]
-    fn test_check_global_gitignore_runs() {
-        // Just verify it doesn't panic — actual global state varies
-        let result = check_global_gitignore();
-        assert!(result.passed);
+    fn global_gitignore_that_ignores_engramdb_is_reported() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("ignore");
+        std::fs::write(&file, "*.swp\n.engramdb/\n").unwrap();
+        let r = check_global_gitignore_at(Some(&file));
+        assert!(r.passed);
+        assert_eq!(r.message, ".engramdb ignored globally");
+        assert!(r.suggestion.is_none());
+    }
+
+    #[test]
+    fn global_gitignore_without_the_entry_passes() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join("ignore");
+        std::fs::write(&file, "*.swp\n.engramdb-other\n").unwrap();
+        let r = check_global_gitignore_at(Some(&file));
+        assert!(r.passed);
+        assert_eq!(r.message, ".engramdb not in global excludes");
+        assert!(r
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains(&file.display().to_string())));
+        assert_eq!(r.status, Some(CheckStatus::Info));
+    }
+
+    /// Git's own default, on every platform: `$XDG_CONFIG_HOME/git/ignore`,
+    /// else `~/.config/git/ignore` (an empty `XDG_CONFIG_HOME` is unset).
+    #[test]
+    fn git_default_excludes_path_follows_git_on_every_platform() {
+        let home = PathBuf::from("home");
+        assert_eq!(
+            git_default_excludes_path(Some(PathBuf::from("xdg")), Some(home.clone())),
+            Some(PathBuf::from("xdg").join("git").join("ignore"))
+        );
+        assert_eq!(
+            git_default_excludes_path(Some(PathBuf::new()), Some(home.clone())),
+            Some(home.join(".config").join("git").join("ignore"))
+        );
+        assert_eq!(
+            git_default_excludes_path(None, Some(home.clone())),
+            Some(home.join(".config").join("git").join("ignore"))
+        );
+        assert_eq!(git_default_excludes_path(None, None), None);
+    }
+
+    #[test]
+    fn no_global_gitignore_passes() {
+        let r = check_global_gitignore_at(None);
+        assert!(r.passed);
+        assert_eq!(r.message, "no global excludes file configured");
+        assert_eq!(r.status, Some(CheckStatus::Info));
     }
 
     #[tokio::test]
@@ -5484,7 +6106,7 @@ pub async fn doctor_epistemic(
         // §10.2 stale-observation (report-only, never flips).
         if memory.epistemic == Epistemic::Observation
             && review_days > 0
-            && now - anchor > chrono::Duration::days(review_days as i64)
+            && super::parsing::config_days(review_days).is_some_and(|d| now - anchor > d)
         {
             findings.push(EpistemicFinding {
                 id: memory.id.clone(),
@@ -5898,6 +6520,25 @@ mod harvest_doctor_tests {
         assert!(!ledger.message.contains("compaction pending"));
         assert!(find(&checks, "Harvest evidence").is_none());
         assert!(find(&checks, "Pinned transcripts").is_none());
+    }
+
+    #[test]
+    fn index_failures_are_reported_apart_from_the_backlog() {
+        let health = HarvestHealth {
+            index_failed: 3,
+            ..Default::default()
+        };
+        let checks = build_harvest_checks(&health);
+        let check = find(&checks, "Conversation index failures").unwrap();
+        assert!(check.passed);
+        assert_eq!(check.status, Some(CheckStatus::Warn));
+        assert_eq!(
+            check.message,
+            "3 sessions could not be indexed (retried daily)"
+        );
+        assert!(build_harvest_checks(&HarvestHealth::default())
+            .iter()
+            .all(|c| c.name != "Conversation index failures"));
     }
 
     /// A backlog is a warning to act on, not a failure: the automatic pass

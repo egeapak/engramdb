@@ -8,7 +8,7 @@ use crate::types::{
     Visibility,
 };
 use anyhow::Result;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 
 /// Parameters for updating a memory.
 ///
@@ -84,7 +84,7 @@ pub async fn update_memory(
 async fn update_memory_unrecorded(
     store: &MemoryStore,
     id: &str,
-    params: UpdateParams,
+    mut params: UpdateParams,
     engine: Option<&RetrievalEngine>,
 ) -> Result<bool> {
     // Validate score fields in the shared core so every front-end path is
@@ -116,14 +116,21 @@ async fn update_memory_unrecorded(
         Some(strategy_str) => Some(parse_decay_strategy(strategy_str)?),
         None => None,
     };
+    // Out-of-range durations fail here too, before the lock, instead of
+    // panicking inside `Duration::seconds`.
+    let parsed_half_life = params
+        .decay_half_life
+        .map(|s| super::parsing::decay_seconds("decay_half_life", s))
+        .transpose()?;
+    let parsed_ttl = params
+        .decay_ttl
+        .map(|s| super::parsing::decay_seconds("decay_ttl", s))
+        .transpose()?;
     let wants_decay_update = parsed_decay_strategy.is_some()
         || params.decay_half_life.is_some()
         || params.decay_ttl.is_some()
         || params.decay_floor.is_some();
     let embed_async = params.embed_async;
-    // Keep a copy for the post-update supersession pass (§2.4 writer 1) —
-    // the list itself is moved into the update closure below.
-    let supersedes_for_close = params.supersedes.clone();
 
     // Scope hygiene (cross-repo correctness): a group/everyone(global) store is
     // shared across repos, so a repo-relative physical scope is meaningless (and
@@ -141,6 +148,21 @@ async fn update_memory_unrecorded(
     // several files, which `update_with`'s one-file closure cannot.
     if params.visibility.is_some() || params.supersedes.is_some() {
         let current = store.get(id).await?;
+        // New `supersedes` entries may be prefixes: resolve them (or fail the
+        // call) before anything is written. Entries the memory already lists
+        // are kept verbatim, so re-sending a list that names a since-deleted
+        // target does not start failing.
+        if let Some(requested) = params.supersedes.take() {
+            params.supersedes = Some(
+                super::resolve_supersedes(
+                    store,
+                    &requested,
+                    Some(&current.id),
+                    &current.supersedes,
+                )
+                .await?,
+            );
+        }
         let visibility = params.visibility.unwrap_or(current.visibility);
         let supersedes = params
             .supersedes
@@ -165,12 +187,22 @@ async fn update_memory_unrecorded(
         .await?;
     }
 
+    // Keep a copy for the post-update supersession pass (§2.4 writer 1) —
+    // the list itself is moved into the update closure below. Taken after
+    // the ids were resolved above.
+    let supersedes_for_close = params.supersedes.clone();
+
     // Merge the params into the memory atomically: `update_with` re-reads the
     // memory inside the per-project write lock, so two concurrent updates
     // cannot snapshot the same old state and silently erase each other's
     // changes (the old get-merge-update flow did exactly that).
+    // The list the memory held under the lock, so targets the update drops
+    // can be released after the write (finding 14).
+    let mut previous_supersedes: Vec<String> = Vec::new();
+    let previous_slot = &mut previous_supersedes;
     let saved = store
         .update_with(id, move |memory| {
+            *previous_slot = memory.supersedes.clone();
             // Apply direct field updates
             let mut update = MemoryUpdate::new();
             update.type_ = params.type_;
@@ -245,14 +277,14 @@ async fn update_memory_unrecorded(
                 let mut decay = Decay::new(strategy);
 
                 // Merge numeric fields: prefer params, fall back to existing
-                if let Some(half_life_secs) = params.decay_half_life {
-                    decay.half_life = Some(Duration::seconds(half_life_secs as i64));
+                if let Some(half_life) = parsed_half_life {
+                    decay.half_life = Some(half_life);
                 } else if let Some(existing) = &existing_decay {
                     decay.half_life = existing.half_life;
                 }
 
-                if let Some(ttl_secs) = params.decay_ttl {
-                    decay.ttl = Some(Duration::seconds(ttl_secs as i64));
+                if let Some(ttl) = parsed_ttl {
+                    decay.ttl = Some(ttl);
                 } else if let Some(existing) = &existing_decay {
                     decay.ttl = existing.ttl;
                 }
@@ -278,11 +310,10 @@ async fn update_memory_unrecorded(
             // clears `expires_at`: the decay config is authoritative for
             // expiry whenever a decay field is updated.
             if wants_decay_update {
-                memory.expires_at = memory
-                    .decay
-                    .as_ref()
-                    .and_then(|d| d.ttl)
-                    .map(|ttl| memory.created_at + ttl);
+                memory.expires_at = match memory.decay.as_ref().and_then(|d| d.ttl) {
+                    Some(ttl) => Some(super::parsing::expiry_from(memory.created_at, ttl)?),
+                    None => None,
+                };
             }
 
             // Then handle tag additions (after replacement)
@@ -307,6 +338,21 @@ async fn update_memory_unrecorded(
     // are skipped inside the helper, so re-sending the same list is a no-op.
     if let Some(ref supersedes) = supersedes_for_close {
         super::close_superseded_windows(store, supersedes, &saved.id).await;
+        // A target the update dropped is released the way `unlink` releases
+        // it: reopened unless another memory still supersedes it. Best-effort
+        // like the window close — the update itself is already written.
+        for dropped in previous_supersedes
+            .iter()
+            .filter(|old| !saved.supersedes.contains(old))
+        {
+            if let Err(e) = super::links::release_superseded(store, &saved.id, dropped).await {
+                tracing::warn!(
+                    superseded = %dropped,
+                    by = %saved.id,
+                    "failed to release a target dropped from supersedes: {e:#}"
+                );
+            }
+        }
     }
 
     // Re-embed the updated memory if an engine with embeddings is available.
@@ -340,6 +386,7 @@ mod tests {
     use super::*;
     use crate::storage::{InMemoryRegistry, MemoryStore};
     use crate::types::{Memory, MemoryType, Provenance};
+    use chrono::Duration;
     use tempfile::TempDir;
 
     async fn setup_test_store() -> (TempDir, MemoryStore) {
@@ -347,6 +394,124 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let store = MemoryStore::init(temp_dir.path(), &registry).await.unwrap();
         (temp_dir, store)
+    }
+
+    async fn create_memory_with_id(store: &MemoryStore, id: &str) {
+        let mut m = Memory::new(MemoryType::Decision, id, "content", Provenance::human());
+        m.id = id.to_string();
+        store.create(&m).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_dropping_a_supersedes_target_reopens_it() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        create_memory_with_id(&store, "drop-target").await;
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["drop-target".into()]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        assert!(store
+            .get("drop-target")
+            .await
+            .unwrap()
+            .invalidated_at
+            .is_some());
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec![]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let target = store.get("drop-target").await.unwrap();
+        assert!(target.invalidated_at.is_none(), "window reopened");
+        assert!(target.superseded_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_dropping_a_supersedes_target_keeps_it_closed_when_another_memory_supersedes_it()
+    {
+        let (_temp, store) = setup_test_store().await;
+        let first = create_test_memory(&store).await;
+        let second = create_test_memory(&store).await;
+        create_memory_with_id(&store, "shared-target").await;
+
+        for holder in [&first, &second] {
+            let mut p = empty_update_params();
+            p.supersedes = Some(vec!["shared-target".into()]);
+            update_memory(&store, holder, p, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap();
+        }
+        // `first` closed the window and holds the mirror.
+        assert_eq!(
+            store
+                .get("shared-target")
+                .await
+                .unwrap()
+                .superseded_by
+                .as_deref(),
+            Some(first.as_str())
+        );
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec![]);
+        update_memory(&store, &first, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let target = store.get("shared-target").await.unwrap();
+        assert!(target.invalidated_at.is_some(), "still superseded");
+        assert_eq!(target.superseded_by.as_deref(), Some(second.as_str()));
+    }
+
+    #[tokio::test]
+    async fn update_resolves_new_supersedes_entries_and_keeps_existing_dangling_ones() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        create_memory_with_id(&store, "gone-target").await;
+        create_memory_with_id(&store, "fresh-target-123").await;
+
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["gone-target".into()]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        store.delete("gone-target").await.unwrap();
+
+        // Re-send the list (now naming a deleted target) plus a new prefix.
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["gone-target".into(), "fresh-tar".into()]);
+        update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap();
+        let m = store.get(&id).await.unwrap();
+        assert_eq!(
+            m.supersedes,
+            vec!["gone-target".to_string(), "fresh-target-123".to_string()]
+        );
+        let fresh = store.get("fresh-target-123").await.unwrap();
+        assert_eq!(fresh.superseded_by.as_deref(), Some(id.as_str()));
+
+        // A new unknown id still fails, and nothing changes.
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec!["gone-target".into(), "never-was".into()]);
+        let err = update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no memory matches 'never-was'"), "{err}");
+        assert_eq!(store.get(&id).await.unwrap().supersedes, m.supersedes);
+
+        // Its own id is refused.
+        let mut p = empty_update_params();
+        p.supersedes = Some(vec![id.clone()]);
+        assert!(
+            update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+                .await
+                .is_err()
+        );
     }
 
     async fn create_test_memory(store: &MemoryStore) -> String {
@@ -454,6 +619,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_rejects_an_out_of_range_decay_ttl() {
+        let (_temp, store) = setup_test_store().await;
+        let id = create_test_memory(&store).await;
+        let before = store.get(&id).await.unwrap();
+        for ttl in [99_999_999_999_999, u64::MAX] {
+            let mut p = empty_update_params();
+            p.decay_ttl = Some(ttl);
+            let err = update_memory(&store, &id, p, None, crate::ops::Surface::Cli)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("decay_ttl must be at most"), "{err}");
+        }
+        let after = store.get(&id).await.unwrap();
+        assert_eq!(format!("{:?}", before.decay), format!("{:?}", after.decay));
+        assert_eq!(before.updated_at, after.updated_at);
+    }
+
+    #[tokio::test]
     async fn test_update_tags_add_appends_and_deduplicates() {
         let (_temp, store) = setup_test_store().await;
         let id = create_test_memory(&store).await;
@@ -536,6 +720,9 @@ mod tests {
     async fn test_update_supersedes_persists() {
         let (_temp, store) = setup_test_store().await;
         let id = create_test_memory(&store).await;
+        for old in ["old-id-1", "old-id-2"] {
+            create_memory_with_id(&store, old).await;
+        }
 
         // Set supersedes
         let mut params = empty_update_params();
@@ -555,6 +742,7 @@ mod tests {
     async fn test_update_supersedes_roundtrip() {
         let (_temp, store) = setup_test_store().await;
         let id = create_test_memory(&store).await;
+        create_memory_with_id(&store, "prev-memory").await;
 
         // Set supersedes
         let mut params = empty_update_params();

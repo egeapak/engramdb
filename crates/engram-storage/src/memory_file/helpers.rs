@@ -271,7 +271,15 @@ fn flush_section(
     current_content: &mut Vec<&str>,
 ) {
     if let Some(name) = current_section.take() {
-        let text = current_content.join("\n").trim().to_string();
+        // Drop leading blank lines and trailing whitespace — not `trim()`,
+        // which also ate the first line's indentation (an indented code
+        // block or list continuation at the top of a section came back
+        // flush left).
+        let start = current_content
+            .iter()
+            .position(|line| !line.trim().is_empty())
+            .unwrap_or(current_content.len());
+        let text = current_content[start..].join("\n").trim_end().to_string();
         // First occurrence wins: the writer emits each section once, so a
         // duplicate heading can only come from content in old unescaped files
         // (or hand edits) and must not override the real section.
@@ -294,14 +302,18 @@ fn field_value_at_line_start<'a>(line: &'a str, marker: &str) -> Option<&'a str>
 /// Parse a numeric score from a line like `- **Criticality:** 0.95`
 pub fn parse_score_field(text: &str, field: &str) -> Option<f64> {
     let marker = format!("**{field}:**");
+    // A non-finite value (`NaN`, `inf` — both parse as `f64`) reads as
+    // absent, so the caller's default applies: stored, it poisons every
+    // score the memory takes part in.
     let parse_after = |after: &str| -> Option<f64> {
         after
             .trim_start()
             .split(|c: char| c == '|' || c == '*' || c.is_whitespace())
             .next()?
             .trim()
-            .parse()
+            .parse::<f64>()
             .ok()
+            .filter(|score| score.is_finite())
     };
     // Anchored pass: field at line start (the current writer's layout).
     for line in text.lines() {
