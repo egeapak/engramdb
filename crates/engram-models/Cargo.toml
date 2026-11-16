@@ -37,11 +37,14 @@ engram-storage = { path = "../engram-storage" }
 # ONNX Runtime stack, optional under `onnxruntime` (default). A
 # `--no-default-features` build excludes both.
 fastembed = { version = "7.5", default-features = false, features = ["hf-hub-rustls-tls"], optional = true }
-# `tls-rustls` is needed with `download-binaries` so this crate builds in
-# isolation: the `ort-sys` build script's download path calls `ureq`'s
-# `tls_config(..)`, which only exists when a TLS feature is on. See the longer
-# note in `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.15", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"], optional = true }
+# `download-binaries` is enabled only by the `bundled-onnxruntime` strategy
+# (above): under `load-dynamic` nothing is downloaded or linked, so the
+# `ort-sys` build script's download path and its build dependencies (`ureq`,
+# `lzma-rust2`, `hmac-sha256`) stay out of a default build. `tls-rustls` is
+# kept so that, when `bundled-onnxruntime` does turn the download on, its
+# `ureq` has a TLS backend (`tls_config(..)` only exists with one). See the
+# longer note in `crates/engram-onnx/Cargo.toml`.
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["ndarray", "std", "tls-rustls"], optional = true }
 # `tokenizers` and `hf-hub` are declared unconditionally, although today only
 # the `onnxruntime`-gated loaders (embeddings override, reranker, NLI, T5) use
 # them to tokenize and fetch models.
