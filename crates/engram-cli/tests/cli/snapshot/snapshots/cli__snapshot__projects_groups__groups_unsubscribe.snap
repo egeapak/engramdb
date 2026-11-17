@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] groups unsubscribe backend --yes
 exit: 0
 --- stdout ---
 {
-  "message": "Unsubscribed project '[PROJECT_ID]' from group 'backend' (id: __g_10e08a419e85).",
-  "success": true
+  "success": true,
+  "message": "Unsubscribed project '[PROJECT_ID]' from group 'backend' (id: __g_10e08a419e85)."
 }
 --- stderr ---

@@ -6,9 +6,9 @@ $ engramdb --no-maintenance --dir [PROJECT] task complete refactor-output
 exit: 0
 --- stdout ---
 {
+  "task": "refactor-output",
   "demoted": [],
   "kept_custom_decay": [],
-  "project_wide_review": [],
-  "task": "refactor-output"
+  "project_wide_review": []
 }
 --- stderr ---

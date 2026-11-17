@@ -6,8 +6,8 @@ $ engramdb --no-maintenance --dir [PROJECT] compress --threshold 0.1
 exit: 0
 --- stdout ---
 {
-  "candidates": [],
+  "total": 0,
   "threshold": 0.1,
-  "total": 0
+  "candidates": []
 }
 --- stderr ---

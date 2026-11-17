@@ -73,7 +73,7 @@ use sha2::{Digest, Sha256};
 /// The encoding and algorithm version: part of every digest, so a change to
 /// either (bump it) never serves an old cached layout. Bump it for any
 /// change to a layout's output or to the wire format.
-pub const LAYOUT_VERSION: u32 = 4;
+pub const LAYOUT_VERSION: u32 = 5;
 
 /// An axis-aligned box.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]

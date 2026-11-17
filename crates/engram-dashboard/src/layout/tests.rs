@@ -1169,7 +1169,7 @@ fn the_overview_holds_its_contract_at_5000_scopes() {
 }
 
 /// The `LAYOUT_VERSION` the [`PINNED`] digests were recorded at.
-const PINNED_AT: u32 = 4;
+const PINNED_AT: u32 = 5;
 
 /// (case, SHA-256 of the rendered layout text with its cache key blanked).
 /// Any change here means the layout's output changed: bump `LAYOUT_VERSION`
@@ -1179,27 +1179,27 @@ const PINNED_AT: u32 = 4;
 const PINNED: &[(&str, &str)] = &[
     (
         "force-top/top",
-        "80f03c38e6661e92fdaf2e3cad4e7dd5ca088acd08be41fd898e0919929a4bb6",
+        "ef03eae578ecb3e4acaacb38d4f28a9a3545f00615b337f1f69736c2a10b49c7",
     ),
     (
         "force-top/sub",
-        "a46d0c79c3c2c9bf981260aa3e4219950d4ea618f38252a1560036242aabf342",
+        "9495591bf669ab26a4fe76c53552bfea024ad9a0aeb3b0e6df09d4f783daf3f9",
     ),
     (
         "force-sub/top",
-        "be2bc08835391e0fc5825e7139996237b76d081b31e39dd4abab67601101342e",
+        "4949517779f45ce0f60b60a9b5224bf872c25f6eb5c342458d067df7ab619173",
     ),
     (
         "force-sub/sub",
-        "558a12b1e42e49f57059f252300d26ddfd1d10892660991d95380b9daffd7344",
+        "83bc21344723d841a0c56dd89a42ee2506205ca31dba0852639af5ac1329acb2",
     ),
     (
         "overview",
-        "455867bdfa66dfb326496c8332723a02d9f957e5ec093fc16090d51ef89f4f42",
+        "ceb52ca664d57a4b2bc9b733e794082c4fd21f9a6fb19f0078c0bbeae66b2fcc",
     ),
     (
         "grid/sample-60",
-        "2230ef78b6f0f65f29f404878563f37f39dd1a3f69d7718d0bd2f5f18ed21857",
+        "640c7c12b91abbbe76d1dc51ec198cbe4e7bd98a06b8f9974f0f6a4b91e152b3",
     ),
 ];
 

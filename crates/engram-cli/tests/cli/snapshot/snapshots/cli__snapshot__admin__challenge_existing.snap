@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] challenge [UUID] -e Contradicted by 
 exit: 0
 --- stdout ---
 {
-  "message": "Challenged memory [UUID] (status: Challenged, 1 total challenges)",
-  "success": true
+  "success": true,
+  "message": "Challenged memory [UUID] (status: Challenged, 1 total challenges)"
 }
 --- stderr ---

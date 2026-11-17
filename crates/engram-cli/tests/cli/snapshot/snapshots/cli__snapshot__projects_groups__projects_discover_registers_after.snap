@@ -7,14 +7,14 @@ exit: 0
 --- stdout ---
 [
   {
-    "exists": true,
     "project_id": "[PROJECT_ID]",
-    "project_path": "[PROJECT]"
+    "project_path": "[PROJECT]",
+    "exists": true
   },
   {
-    "exists": true,
     "project_id": "[PROJECT_ID]",
-    "project_path": "[PROJECT]/nested"
+    "project_path": "[PROJECT]/nested",
+    "exists": true
   }
 ]
 --- stderr ---

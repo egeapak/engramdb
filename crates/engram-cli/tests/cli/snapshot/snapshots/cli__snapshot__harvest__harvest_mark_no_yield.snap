@@ -6,18 +6,18 @@ $ engramdb --no-maintenance --dir [PROJECT] harvest mark session-alpha --note No
 exit: 0
 --- stdout ---
 {
-  "archive": null,
+  "session_id": "session-alpha",
   "decision": "skipped",
+  "stage": "collected",
   "harvested_at": "[TIMESTAMP]",
   "memories_created": 0,
   "memory_ids": [],
   "note": "Nothing durable — all of it is already in the daemon docs.",
+  "archive": null,
   "pinned": 0,
-  "session_id": "session-alpha",
-  "stage": "collected",
-  "summary_error": null,
+  "unresolved_memories": [],
   "summary_recorded": false,
-  "superseded": false,
-  "unresolved_memories": []
+  "summary_error": null,
+  "superseded": false
 }
 --- stderr ---

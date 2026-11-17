@@ -625,6 +625,7 @@ impl ConversationIndex {
             .column(column)
             .limit(limit)
             .nprobes(NPROBES)
+            .context("Failed to set the conversation search's nprobes")?
             .refine_factor(REFINE_FACTOR);
         if let Some(filter) = filter {
             // Prefilter (LanceDB's default for `only_if`), so `limit` is spent

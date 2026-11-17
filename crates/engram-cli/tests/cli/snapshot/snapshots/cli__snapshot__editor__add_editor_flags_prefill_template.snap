@@ -6,8 +6,8 @@ $ engramdb --no-maintenance --dir [PROJECT] add -e -t decision -s Keep the modul
 exit: 0
 --- stdout ---
 {
-  "message": "Created memory [UUID]",
-  "success": true
+  "success": true,
+  "message": "Created memory [UUID]"
 }
 --- stderr ---
 editing [ADD_TEMPLATE]

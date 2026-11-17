@@ -6,40 +6,40 @@ $ engramdb --no-maintenance --dir [PROJECT] get [UUID]
 exit: 0
 --- stdout ---
 {
-  "accessed_at": "[TIMESTAMP]",
-  "challenges": [],
-  "confidence": 0.8,
-  "content": "Edited before the tag update.",
-  "created_at": "[TIMESTAMP]",
-  "criticality": 0.5,
-  "decay": {
-    "floor": 0.0,
-    "strategy": "none"
-  },
-  "edges": {
-    "hidden": 0,
-    "id": "[UUID]",
-    "inbound": [],
-    "outbound": []
-  },
-  "epistemic": "fact",
   "id": "[UUID]",
-  "logical": [],
+  "type": "convention",
+  "epistemic": "fact",
+  "summary": "Prefer explicit imports",
+  "title": "Prefer Explicit Imports",
+  "content": "Edited before the tag update.",
   "physical": [
     "/"
   ],
-  "provenance": {
-    "source": "human"
-  },
-  "status": "Active",
-  "summary": "Prefer explicit imports",
-  "supersedes": [],
+  "logical": [],
   "tags": [
     "imports"
   ],
-  "title": "Prefer Explicit Imports",
-  "type": "convention",
+  "criticality": 0.5,
+  "decay": {
+    "strategy": "none",
+    "floor": 0.0
+  },
+  "provenance": {
+    "source": "human"
+  },
+  "confidence": 0.8,
+  "supersedes": [],
+  "status": "Active",
+  "visibility": "Shared",
+  "challenges": [],
+  "created_at": "[TIMESTAMP]",
   "updated_at": "[TIMESTAMP]",
-  "visibility": "Shared"
+  "accessed_at": "[TIMESTAMP]",
+  "edges": {
+    "id": "[UUID]",
+    "outbound": [],
+    "inbound": [],
+    "hidden": 0
+  }
 }
 --- stderr ---

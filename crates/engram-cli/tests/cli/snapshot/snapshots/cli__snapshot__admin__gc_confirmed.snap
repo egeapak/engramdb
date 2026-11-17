@@ -6,15 +6,15 @@ $ engramdb --no-maintenance --dir [PROJECT] gc --confirm
 exit: 0
 --- stdout ---
 {
-  "count": 0,
   "dry_run": false,
-  "maintenance": {
-    "bytes_removed": 0,
-    "old_versions_removed": 0
-  },
+  "count": 0,
   "removed": [],
   "skipped": [],
   "stale_entries": 0,
-  "unparseable": []
+  "unparseable": [],
+  "maintenance": {
+    "bytes_removed": 0,
+    "old_versions_removed": 0
+  }
 }
 --- stderr ---

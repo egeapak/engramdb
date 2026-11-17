@@ -6,12 +6,12 @@ $ engramdb --no-maintenance --dir [PROJECT] harvest ledger prune
 exit: 0
 --- stdout ---
 {
+  "dry_run": true,
+  "removed": [],
   "bytes_freed": 0,
   "bytes_remaining": 0,
-  "dry_run": true,
-  "failed": [],
   "pinned_bytes": 0,
   "pinned_count": 0,
-  "removed": []
+  "failed": []
 }
 --- stderr ---
