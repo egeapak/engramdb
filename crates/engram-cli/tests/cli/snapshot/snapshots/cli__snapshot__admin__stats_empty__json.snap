@@ -6,13 +6,13 @@ $ engramdb --no-maintenance --dir [PROJECT] --format json stats
 exit: 0
 --- stdout ---
 {
-  "avg_criticality": 0.0,
-  "by_scope": [],
-  "by_status": [],
+  "total": 0,
   "by_type": [],
+  "by_status": [],
+  "by_scope": [],
   "expired": 0,
-  "newest": null,
   "oldest": null,
-  "total": 0
+  "newest": null,
+  "avg_criticality": 0.0
 }
 --- stderr ---

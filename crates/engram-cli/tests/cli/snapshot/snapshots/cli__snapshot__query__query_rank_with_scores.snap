@@ -6,60 +6,60 @@ $ engramdb --no-maintenance --dir [PROJECT] query --mode rank -p src/main.rs --s
 exit: 0
 --- stdout ---
 {
-  "dropped_below_threshold": 1,
   "memories": [
     {
-      "breakdown": {
-        "criticality": 0.9,
-        "decay": 0.0,
-        "final_score": 0.9,
-        "keyword": null,
-        "relevance": 0.9,
-        "rerank": null,
-        "scope": 1.0,
-        "scope_multiplier": 1.0,
-        "semantic": null,
-        "situation_multiplier": 1.0,
-        "trust": 1.0,
-        "trust_multiplier": 1.0
-      },
       "memory": {
-        "accessed_at": "[TIMESTAMP]",
-        "challenges": [],
-        "confidence": 0.8,
-        "content": "Chosen for the memory-safety guarantees.",
-        "created_at": "[TIMESTAMP]",
-        "criticality": 0.9,
-        "decay": {
-          "floor": 0.0,
-          "strategy": "none"
-        },
-        "epistemic": "decision",
         "id": "[UUID]",
-        "logical": [
-          "core.lang"
-        ],
+        "type": "decision",
+        "epistemic": "decision",
+        "summary": "Use Rust for the backend",
+        "title": "Use Rust Backend",
+        "content": "Chosen for the memory-safety guarantees.",
         "physical": [
           "src/main.rs"
         ],
-        "provenance": {
-          "source": "human"
-        },
-        "status": "Active",
-        "summary": "Use Rust for the backend",
-        "supersedes": [],
+        "logical": [
+          "core.lang"
+        ],
         "tags": [
           "rust",
           "backend"
         ],
-        "title": "Use Rust Backend",
-        "type": "decision",
+        "criticality": 0.9,
+        "decay": {
+          "strategy": "none",
+          "floor": 0.0
+        },
+        "provenance": {
+          "source": "human"
+        },
+        "confidence": 0.8,
+        "supersedes": [],
+        "status": "Active",
+        "visibility": "Shared",
+        "challenges": [],
+        "created_at": "[TIMESTAMP]",
         "updated_at": "[TIMESTAMP]",
-        "visibility": "Shared"
+        "accessed_at": "[TIMESTAMP]"
       },
-      "score": 0.9
+      "score": 0.9,
+      "breakdown": {
+        "final_score": 0.9,
+        "semantic": null,
+        "keyword": null,
+        "rerank": null,
+        "relevance": 0.9,
+        "scope": 1.0,
+        "scope_multiplier": 1.0,
+        "trust": 1.0,
+        "trust_multiplier": 1.0,
+        "situation_multiplier": 1.0,
+        "decay": 0.0,
+        "criticality": 0.9
+      }
     }
   ],
-  "total": 1
+  "total": 1,
+  "dropped_below_threshold": 1
 }
 --- stderr ---

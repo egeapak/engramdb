@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] delete [UUID] --force
 exit: 0
 --- stdout ---
 {
-  "message": "Deleted memory [UUID]",
-  "success": true
+  "success": true,
+  "message": "Deleted memory [UUID]"
 }
 --- stderr ---

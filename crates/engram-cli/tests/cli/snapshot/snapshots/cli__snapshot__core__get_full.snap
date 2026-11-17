@@ -6,41 +6,41 @@ $ engramdb --no-maintenance --dir [PROJECT] get [UUID] --full
 exit: 0
 --- stdout ---
 {
-  "accessed_at": "[TIMESTAMP]",
-  "challenges": [],
-  "confidence": 0.8,
-  "content": "Its content.",
-  "created_at": "[TIMESTAMP]",
-  "criticality": 0.5,
-  "decay": {
-    "floor": 0.0,
-    "strategy": "none"
-  },
-  "edges": {
-    "hidden": 0,
-    "id": "[UUID]",
-    "inbound": [],
-    "outbound": []
-  },
-  "epistemic": "decision",
   "id": "[UUID]",
-  "logical": [],
+  "type": "decision",
+  "epistemic": "decision",
+  "summary": "The one memory",
+  "title": "One Memory",
+  "content": "Its content.",
   "physical": [
     "/"
   ],
-  "provenance": {
-    "source": "human"
-  },
-  "status": "Active",
-  "summary": "The one memory",
-  "supersedes": [],
+  "logical": [],
   "tags": [
     "alpha",
     "beta"
   ],
-  "title": "One Memory",
-  "type": "decision",
+  "criticality": 0.5,
+  "decay": {
+    "strategy": "none",
+    "floor": 0.0
+  },
+  "provenance": {
+    "source": "human"
+  },
+  "confidence": 0.8,
+  "supersedes": [],
+  "status": "Active",
+  "visibility": "Shared",
+  "challenges": [],
+  "created_at": "[TIMESTAMP]",
   "updated_at": "[TIMESTAMP]",
-  "visibility": "Shared"
+  "accessed_at": "[TIMESTAMP]",
+  "edges": {
+    "id": "[UUID]",
+    "outbound": [],
+    "inbound": [],
+    "hidden": 0
+  }
 }
 --- stderr ---

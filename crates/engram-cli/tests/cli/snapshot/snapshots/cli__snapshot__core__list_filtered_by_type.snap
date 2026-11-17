@@ -7,18 +7,18 @@ exit: 0
 --- stdout ---
 [
   {
-    "created_at": "[TIMESTAMP]",
-    "criticality": 0.3,
-    "epistemic": "fact",
     "id": "[UUID]",
+    "type": "hazard",
+    "epistemic": "fact",
+    "summary": "Never unwrap in production paths",
     "physical": [
       "/"
     ],
+    "criticality": 0.3,
     "status": "Active",
-    "summary": "Never unwrap in production paths",
-    "type": "hazard",
-    "updated_at": "[TIMESTAMP]",
-    "visibility": "Shared"
+    "visibility": "Shared",
+    "created_at": "[TIMESTAMP]",
+    "updated_at": "[TIMESTAMP]"
   }
 ]
 --- stderr ---

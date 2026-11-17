@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] harvest ledger rm session-alpha --fo
 exit: 0
 --- stdout ---
 {
-  "message": "Removed ledger entry for session session-alpha.",
-  "success": true
+  "success": true,
+  "message": "Removed ledger entry for session session-alpha."
 }
 --- stderr ---

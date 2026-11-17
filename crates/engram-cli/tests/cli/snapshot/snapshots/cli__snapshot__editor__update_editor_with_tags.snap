@@ -6,8 +6,8 @@ $ engramdb --no-maintenance --dir [PROJECT] update [UUID] -e --tags imports
 exit: 1
 --- stdout ---
 {
-  "message": "Edited memory [UUID] with [PROJECT]/widen-content.sh",
-  "success": true
+  "success": true,
+  "message": "Edited memory [UUID] with [PROJECT]/widen-content.sh"
 }
 --- stderr ---
 editing [PROJECT]/.engramdb/memories/prefer-explicit-imports_[UUID].md

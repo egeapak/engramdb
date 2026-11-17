@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] update [UUID] -e
 exit: 0
 --- stdout ---
 {
-  "message": "Edited memory [UUID] with [PROJECT]/look-only.sh",
-  "success": true
+  "success": true,
+  "message": "Edited memory [UUID] with [PROJECT]/look-only.sh"
 }
 --- stderr ---

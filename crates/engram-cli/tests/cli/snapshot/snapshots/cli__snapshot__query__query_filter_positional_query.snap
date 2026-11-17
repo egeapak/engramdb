@@ -9,37 +9,37 @@ exit: 0
   "memories": [
     {
       "memory": {
-        "accessed_at": "[TIMESTAMP]",
-        "challenges": [],
-        "confidence": 0.8,
-        "content": "Applies to every crate in the workspace.",
-        "created_at": "[TIMESTAMP]",
-        "criticality": 0.6,
-        "decay": {
-          "floor": 0.0,
-          "strategy": "none"
-        },
-        "epistemic": "fact",
         "id": "[UUID]",
-        "logical": [
-          "core.style"
-        ],
+        "type": "convention",
+        "epistemic": "fact",
+        "summary": "Name variables in snake_case",
+        "title": "Name Variables Snake Case",
+        "content": "Applies to every crate in the workspace.",
         "physical": [
           "/"
         ],
-        "provenance": {
-          "source": "human"
-        },
-        "status": "Active",
-        "summary": "Name variables in snake_case",
-        "supersedes": [],
+        "logical": [
+          "core.style"
+        ],
         "tags": [
           "style"
         ],
-        "title": "Name Variables Snake Case",
-        "type": "convention",
+        "criticality": 0.6,
+        "decay": {
+          "strategy": "none",
+          "floor": 0.0
+        },
+        "provenance": {
+          "source": "human"
+        },
+        "confidence": 0.8,
+        "supersedes": [],
+        "status": "Active",
+        "visibility": "Shared",
+        "challenges": [],
+        "created_at": "[TIMESTAMP]",
         "updated_at": "[TIMESTAMP]",
-        "visibility": "Shared"
+        "accessed_at": "[TIMESTAMP]"
       },
       "score": 0.[PROJECT_ID]
     }

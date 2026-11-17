@@ -1012,9 +1012,10 @@ fn defang_json(value: &mut serde_json::Value) {
 /// defanged ([`defang_json`]) and `trust` as the **first** key.
 ///
 /// `body` must be a JSON object; its keys keep their names. `trust` leads
-/// because serde_json is built without `preserve_order`: inside a `json!{}`
-/// object it would sort behind `total`. The harvest listings are structs for
-/// the same reason.
+/// because the wrapper is a struct: inside a `json!{}` object its place would
+/// depend on serde_json's `preserve_order` feature (on since lancedb 0.41;
+/// without it, `trust` sorted behind `total`). The harvest listings are
+/// structs for the same reason.
 fn trusted_payload(mut body: serde_json::Value) -> Result<String, String> {
     #[derive(serde::Serialize)]
     struct Trusted {
@@ -4479,10 +4480,10 @@ impl EngramDbServer {
         let digest = ops::harvest::digest_session(&transcript_path, params)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
-        // A declaration-ordered struct, not `json!{}`: serde_json is built
-        // without `preserve_order`, so a `json!{}` object sorts its keys and
+        // A declaration-ordered struct, not `json!{}`: without serde_json's
+        // `preserve_order` feature a `json!{}` object sorts its keys and
         // would emit `markdown` before `trust` — burying the marking the
-        // field exists to surface.
+        // field exists to surface. The struct does not depend on the feature.
         let (markdown, fence) = ops::harvest::render_digest_markdown_traced(&digest);
         let r = serde_json::to_string(&ops::harvest::DigestJson::new(&digest, &fence, markdown))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
@@ -4923,10 +4924,11 @@ impl EngramDbServer {
 // ---------------------------------------------------------------------------
 //
 // `struct`s rather than `serde_json::json!{}`, for the reason
-// `ops::harvest::DigestJson` already documents: `serde_json` is built without
-// `preserve_order`, so a `json!{}` object serializes its keys alphabetically —
-// which would bury `trust` in the middle of the payload it is supposed to
-// introduce. A derived `Serialize` writes fields in declaration order.
+// `ops::harvest::DigestJson` already documents: without serde_json's
+// `preserve_order` feature a `json!{}` object serializes its keys
+// alphabetically — which would bury `trust` in the middle of the payload it is
+// supposed to introduce. A derived `Serialize` writes fields in declaration
+// order whether the feature is on (it is, since lancedb 0.41) or off.
 
 /// `harvest_list`.
 #[derive(Serialize)]

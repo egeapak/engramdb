@@ -6,15 +6,15 @@ $ engramdb --no-maintenance --dir [PROJECT] compress
 exit: 0
 --- stdout ---
 {
+  "total": 1,
+  "threshold": 0.4,
   "candidates": [
     {
-      "criticality": 0.3,
       "id": "[UUID]",
+      "type": "hazard",
       "summary": "Never unwrap in production paths",
-      "type": "hazard"
+      "criticality": 0.3
     }
-  ],
-  "threshold": 0.4,
-  "total": 1
+  ]
 }
 --- stderr ---

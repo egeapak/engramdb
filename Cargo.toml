@@ -93,7 +93,7 @@ engram-models = { path = "crates/engram-models", default-features = false }
 # Vector DB (the core's daemon metrics + LanceDB index). The embedding /
 # reranker / NLI models all live in the `engram-models` crate, so the core
 # no longer depends on `fastembed` directly.
-lancedb = { version = "0.37", default-features = false }
+lancedb = { version = "0.41", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
 arrow-array = "58"
 arrow-schema = "58"
@@ -300,9 +300,9 @@ codegen-units = 16
 # dependencies. Measure any change to this list: the list is the full set of
 # matching names in `Cargo.lock`, so a new `lance-*` / `datafusion-*` /
 # `arrow-*` crate from an upgrade is built at `3` until it is added here.
-# Checked against `Cargo.lock` again at lancedb 0.40 (lance 13): no new names.
-# `lance-linalg`, `lance-index` and `sqlparser_derive` (a proc macro) are the
-# matching names deliberately left out.
+# Checked against `Cargo.lock` again at lancedb 0.41 (lance 14), which added
+# `lance-jsonb`. `lance-linalg`, `lance-index` and `sqlparser_derive` (a proc
+# macro) are the matching names deliberately left out.
 [profile.release.package.arrow]
 opt-level = "z"
 [profile.release.package.arrow-arith]
@@ -416,6 +416,8 @@ opt-level = "z"
 [profile.release.package.lance-index-core]
 opt-level = "z"
 [profile.release.package.lance-io]
+opt-level = "z"
+[profile.release.package.lance-jsonb]
 opt-level = "z"
 [profile.release.package.lance-namespace]
 opt-level = "z"

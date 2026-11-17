@@ -45,16 +45,6 @@ updates:
       # alongside it rather than replacing it.
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
-      # No lancedb after 0.37 builds here yet. 0.38-0.40 do not compile with
-      # `default-features = false` (`job.rs` names `Error::Http`, which exists
-      # only with the `remote` feature). 0.41 compiles but turns on
-      # serde_json's `preserve_order` feature, which Cargo unifies into every
-      # crate: JSON objects stop sorting their keys, so CLI/MCP JSON output,
-      # the insta snapshots and the dashboard's pinned layout digests change.
-      # `serde_json_maps_sort_their_keys` in engram-storage fails if it gets
-      # in. Bump by hand once a release fixes one of the two.
-      - dependency-name: "lancedb"
-        versions: [">= 0.38"]
 
   # `fuzz/` declares its own `[workspace]` (the cargo-fuzz layout, so libfuzzer
   # and its nightly sanitizer flags stay out of ordinary builds), which makes it
@@ -91,16 +81,6 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "hf-hub"
         update-types: ["version-update:semver-major"]
-      # No lancedb after 0.37 builds here yet. 0.38-0.40 do not compile with
-      # `default-features = false` (`job.rs` names `Error::Http`, which exists
-      # only with the `remote` feature). 0.41 compiles but turns on
-      # serde_json's `preserve_order` feature, which Cargo unifies into every
-      # crate: JSON objects stop sorting their keys, so CLI/MCP JSON output,
-      # the insta snapshots and the dashboard's pinned layout digests change.
-      # `serde_json_maps_sort_their_keys` in engram-storage fails if it gets
-      # in. Bump by hand once a release fixes one of the two.
-      - dependency-name: "lancedb"
-        versions: [">= 0.38"]
 
   # The one npm dependency in the repository: `playwright-core`, the driver of
   # the dashboard's browser checks (never embedded, never shipped). Pinned by

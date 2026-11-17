@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] --format json doctor store
 exit: 0
 --- stdout ---
 {
-  "message": "Store is healthy. 3 memories indexed, 3 on disk.",
-  "success": true
+  "success": true,
+  "message": "Store is healthy. 3 memories indexed, 3 on disk."
 }
 --- stderr ---

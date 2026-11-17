@@ -11,28 +11,28 @@ exit: 0
   ],
   "sessions": [
     {
-      "already_harvested": false,
+      "session_id": "session-beta",
+      "cwd": "[PROJECT]",
+      "git_branch": "main",
+      "started_at": "[TIMESTAMP]",
+      "ended_at": "[TIMESTAMP]",
+      "user_turns": 1,
       "assistant_turns": 0,
       "bytes": [BYTES],
-      "cwd": "[PROJECT]",
-      "ended_at": "[TIMESTAMP]",
       "first_prompt": "What is the default digest budget?",
-      "git_branch": "main",
-      "session_id": "session-beta",
-      "started_at": "[TIMESTAMP]",
-      "user_turns": 1
+      "already_harvested": false
     },
     {
-      "already_harvested": true,
+      "session_id": "session-alpha",
+      "cwd": "[PROJECT]",
+      "git_branch": "feat/harvest",
+      "started_at": "[TIMESTAMP]",
+      "ended_at": "[TIMESTAMP]",
+      "user_turns": 2,
       "assistant_turns": 2,
       "bytes": [BYTES],
-      "cwd": "[PROJECT]",
-      "ended_at": "[TIMESTAMP]",
       "first_prompt": "Why does the daemon reap while a session is still open?",
-      "git_branch": "feat/harvest",
-      "session_id": "session-alpha",
-      "started_at": "[TIMESTAMP]",
-      "user_turns": 2
+      "already_harvested": true
     }
   ]
 }

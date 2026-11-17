@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] groups create backend
 exit: 0
 --- stdout ---
 {
-  "message": "Group 'backend' ready (id: __g_10e08a419e85).",
-  "success": true
+  "success": true,
+  "message": "Group 'backend' ready (id: __g_10e08a419e85)."
 }
 --- stderr ---

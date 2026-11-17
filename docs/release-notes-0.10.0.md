@@ -183,6 +183,12 @@ grant its own agent access to other projects.
   double.
   Linux x86-64: about 79 MiB, was 60 MiB; the gzipped download is about
   31 MiB, was 24 MiB.
+- **JSON keys are no longer sorted alphabetically.** `--format json` output
+  and MCP tool results list an object's keys in the order the fields are
+  defined (for example `session_id` first in a harvest listing). Key names
+  and values are unchanged, so a script that parses the JSON is not affected;
+  one that compares the raw text is. This comes from LanceDB 0.41, which
+  turns on `serde_json`'s `preserve_order` feature for the whole build.
 - **YAML memory files are read with `serde-saphyr`**, a pure-Rust parser that
   does not panic on malformed input. Existing files keep the same bytes.
 - **Faster bulk paths.** Batched updates and reads in `task complete`,
@@ -190,10 +196,7 @@ grant its own agent access to other projects.
 
 ## Dependencies
 
-- LanceDB 0.31 → 0.37 (Lance 10, Arrow 58). Newer LanceDB releases are held back:
-  0.38 to 0.40 do not build without their `remote` feature, and 0.41 turns on
-  `serde_json`'s `preserve_order` feature, which would change the key order of
-  every JSON output.
+- LanceDB 0.31 → 0.41 (Lance 14, Arrow 58).
 - fastembed 7.7 with `ort` 2.0.0-rc.15 (ONNX Runtime C API 24).
 - rmcp 3.10.
 - Rust toolchain pinned in `rust-toolchain.toml` (1.100.0).

@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] harvest reset session-alpha
 exit: 0
 --- stdout ---
 {
-  "message": "Cleared the harvest record for session session-alpha. No archived transcript is held for it, so `harvest list` offers it again only while Claude Code still has the live one.",
-  "success": true
+  "success": true,
+  "message": "Cleared the harvest record for session session-alpha. No archived transcript is held for it, so `harvest list` offers it again only while Claude Code still has the live one."
 }
 --- stderr ---
