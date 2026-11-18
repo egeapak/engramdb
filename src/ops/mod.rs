@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod gc;
 pub mod get;
 pub mod harvest;
+pub mod harvest_archive;
 pub mod harvest_index;
 pub mod harvest_pin;
 pub mod link_proposals;
@@ -66,6 +67,7 @@ pub use harvest::{
     session_scope, DigestParams, SelectParams, SelectedSession, SessionDigest, SessionScope,
     DEFAULT_DIGEST_BUDGET,
 };
+pub use harvest_archive::archive_session_end;
 pub use harvest_index::{
     forget_session, index_pending, index_session, index_sessions, open_index_for_rebuild,
     reindex_from_copies, search as search_conversations, set_summary as set_conversation_summary,
