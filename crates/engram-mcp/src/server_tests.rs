@@ -6347,6 +6347,38 @@ async fn harvest_mark_refuses_unreviewed() {
     assert!(!ledger.contains_key("s-a"), "{ledger:?}");
 }
 
+/// `harvest_mark` shares the ledger's parser, so a decision is matched
+/// ASCII case-insensitively, as the CLI and `harvest_ledger` always did.
+#[tokio::test]
+async fn harvest_mark_decision_is_case_insensitive() {
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "s-a");
+    home.plant_session(dir.path(), "s-b");
+
+    let mut input = mark_input("s-a", None);
+    input.decision = Some("Deferred".into());
+    let marked = parse_ok(&server.harvest_mark(Parameters(input)).await);
+    assert_eq!(marked["decision"], "deferred");
+
+    let mut input = mark_input("s-b", None);
+    input.decision = Some("SKIPPED".into());
+    let marked = parse_ok(&server.harvest_mark(Parameters(input)).await);
+    assert_eq!(marked["decision"], "skipped");
+
+    // Still refused in any case.
+    let mut input = mark_input("s-a", None);
+    input.decision = Some("Unreviewed".into());
+    let err = parse_err(&server.harvest_mark(Parameters(input)).await);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected harvested, skipped, or deferred"),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn harvest_mark_rejects_a_traversing_session_id() {
     let (_dir, server) = setup().await;

@@ -4570,18 +4570,21 @@ impl EngramDbServer {
         }
 
         let memory_ids = input.memory_ids.unwrap_or_default();
+        // The ledger's own parser (ASCII case-insensitive, like the CLI and
+        // `harvest_ledger`), minus `unreviewed`: that is the state
+        // `clear=true` leaves, never a decision a caller records.
         let decision = match input.decision.as_deref() {
-            Some("deferred") => HarvestDecision::Deferred,
-            Some("skipped") => HarvestDecision::Skipped,
-            Some("harvested") => HarvestDecision::Harvested,
-            Some(other) => {
-                return Err(error_response(
-                    ErrorCode::ValidationError,
-                    &format!(
-                        "unknown decision '{other}' (expected harvested, skipped, or deferred)"
-                    ),
-                ))
-            }
+            Some(other) => match HarvestDecision::parse_known(other) {
+                Some(d) if d != HarvestDecision::Unreviewed => d,
+                _ => {
+                    return Err(error_response(
+                        ErrorCode::ValidationError,
+                        &format!(
+                            "unknown decision '{other}' (expected harvested, skipped, or deferred)"
+                        ),
+                    ))
+                }
+            },
             None if memory_ids.is_empty() => HarvestDecision::Skipped,
             None => HarvestDecision::Harvested,
         };
