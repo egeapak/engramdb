@@ -525,9 +525,12 @@ pub(crate) async fn probe_stores(
             let probe = crate::projects::off_runtime(key, crate::projects::ROW_TIMEOUT, {
                 let sid = sid.clone();
                 async move {
-                    let other = engramdb::ops::links::open_store_by_id(&sid, true)
-                        .await
-                        .ok()?;
+                    let other = engramdb::ops::links::open_store_by_id(
+                        &sid,
+                        engramdb::storage::OpenMode::ReadOnly,
+                    )
+                    .await
+                    .ok()?;
                     other.batch_exists(&ids).await.ok()
                 }
             })

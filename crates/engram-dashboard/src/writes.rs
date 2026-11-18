@@ -48,11 +48,11 @@ use engramdb::ops::links::{
     self, ContradictionVerdict, EdgeRef, LinkKind, LinkStatus, MAX_NOTE_CHARS,
 };
 use engramdb::ops::usage::Surface;
-use engramdb::storage::{MemoryStore, StorageError};
+use engramdb::storage::{MemoryStore, OpenMode, StorageError};
 use serde::Deserialize;
 
 use crate::api::{ok, ApiResult};
-use crate::projects::{Location, StoreKind};
+use crate::projects::Location;
 use crate::{ApiError, AppState};
 
 /// Largest request body accepted (a note is at most [`MAX_NOTE_CHARS`]).
@@ -118,11 +118,7 @@ fn parse(body: &Bytes) -> Result<(EdgeBody, LinkKind), ApiError> {
 /// Open `location` for writing (module docs: the one place the dashboard
 /// does).
 async fn open_writable(location: &Location) -> Result<MemoryStore, ApiError> {
-    let opened = match location.kind {
-        StoreKind::Global => MemoryStore::open_global().await,
-        StoreKind::Group => MemoryStore::open_group(&location.id).await,
-        StoreKind::Project => MemoryStore::open(&location.root).await,
-    };
+    let opened = MemoryStore::open_target(&location.target(), OpenMode::ReadWrite).await;
     opened.map_err(|e| match e {
         StorageError::NotInitialized => {
             ApiError::unavailable(format!("{} has no EngramDB store", location.root.display()))
