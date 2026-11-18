@@ -42,7 +42,6 @@ dirs = "7"
 # per-file transforms, and both were measurably the dominant cost of `reindex`
 # (see `benches/parallel_simd.rs`).
 rayon = "1"
-shell-words = "1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
 futures-util = { version = "0.3", default-features = false }

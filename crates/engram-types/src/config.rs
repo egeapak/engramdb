@@ -69,7 +69,12 @@ pub struct ScoringWeights {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic: Option<f64>,
 
-    /// Relevance weight (criticality * decay)
+    /// Relevance weight (criticality * decay).
+    ///
+    /// Required in every weight table a config writes, and the struct has
+    /// no container serde default on purpose: the weights must sum to 1, and
+    /// filling an absent `semantic` from [`ScoringWeights::default`] would
+    /// break a valid `scope_only = { relevance = 1.0 }`.
     pub relevance: f64,
 }
 
@@ -549,7 +554,11 @@ impl ScoringConfig {
 }
 
 /// Trust weights by provenance source
+///
+/// `#[serde(default)]`: a partial `[trust_weights]` section keeps the
+/// default of every weight it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrustWeights {
     /// Human-created memories
     pub human: f64,
@@ -593,7 +602,11 @@ impl Default for TrustWeights {
 }
 
 /// Search-specific configuration
+///
+/// `#[serde(default)]`: a partial `[search]` section keeps the default of
+/// every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SearchConfig {
     /// Retired: read by nothing (no blend formula ever took a weight). Still
     /// parsed so a config that sets it loads; the loader warns and `doctor`
@@ -615,7 +628,11 @@ impl Default for SearchConfig {
 }
 
 /// Thresholds for various operations
+///
+/// `#[serde(default)]`: a partial `[thresholds]` section keeps the default
+/// of every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ThresholdsConfig {
     /// Retired: read by nothing (no code marks a memory needs-review from a
     /// score). Still parsed so a config that sets it loads; the loader warns
@@ -814,23 +831,66 @@ pub enum ReindexOnModelChange {
     Error,
 }
 
+/// Every embedding provider name a config may select, with the width of the
+/// vectors it produces, in documentation order.
+///
+/// The one list of provider names: `engramdb::ops`' `provider_specs` table
+/// must resolve exactly these (its test checks both backends' widths against
+/// this table), and `ops::KNOWN_PROVIDERS` is derived from it. `"onnx"` is the
+/// backward-compatible alias of `"all-minilm"`.
+pub const EMBEDDING_PROVIDERS: &[(&str, usize)] = &[
+    ("onnx", 384),
+    ("all-minilm", 384),
+    ("all-minilm-l6", 384),
+    ("all-minilm-l12", 384),
+    ("all-minilm-l12-int8", 384),
+    ("all-minilm-l6-int8", 384),
+    ("all-minilm-l12-fp32", 384),
+    ("nomic-embed-text", 768),
+    ("mxbai-embed-large", 1024),
+    ("mxbai-embed-large-q", 1024),
+    ("bge-large-en-q", 1024),
+    ("gte-large-en-q", 1024),
+];
+
+/// The provider name that turns embeddings off on purpose (documented in
+/// `docs/users/troubleshooting.md`). Like any name outside
+/// [`EMBEDDING_PROVIDERS`] it resolves to no model, but it is not reported as
+/// a problem by [`EmbeddingsConfig::problems`].
+pub const EMBEDDINGS_OFF: &str = "none";
+
+/// The vector width `provider` produces, or `None` for a name outside
+/// [`EMBEDDING_PROVIDERS`] (which disables embeddings).
+pub fn embedding_provider_dimensions(provider: &str) -> Option<usize> {
+    EMBEDDING_PROVIDERS
+        .iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, dimensions)| *dimensions)
+}
+
 /// Embeddings provider configuration
+///
+/// Deserialized through [`RawEmbeddingsConfig`]: every field may be left out.
+/// A missing `dimensions` is the provider's own width
+/// ([`embedding_provider_dimensions`]); a written one is kept verbatim, right
+/// or wrong, and [`EmbeddingsConfig::problems`] reports a mismatch.
+/// Serialization is the plain derived form (it always writes `dimensions`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "RawEmbeddingsConfig")]
 pub struct EmbeddingsConfig {
     /// Transport backend: "auto" (default), "onnx", or "ollama".
-    #[serde(default)]
     pub backend: EmbeddingBackend,
-    /// Embedding model name.
-    /// Supported: "all-minilm" (default, 384d), "nomic-embed-text" (768d), "mxbai-embed-large" (1024d).
-    /// "onnx" is a backward-compat alias for "all-minilm".
+    /// Embedding model name, one of [`EMBEDDING_PROVIDERS`] (default
+    /// `"onnx"`, the alias of `"all-minilm"`). Any other name disables
+    /// embeddings; [`EMBEDDINGS_OFF`] does so on purpose.
     pub provider: String,
-    /// Embedding vector dimensionality (384 for MiniLM, 768 for nomic, etc.)
+    /// Embedding vector dimensionality. Defaults to the provider's width
+    /// (384 for an unknown provider).
     pub dimensions: usize,
-    /// Maximum input tokens before truncation (256 for MiniLM)
+    /// Maximum input tokens before truncation (default 256, MiniLM's limit)
     pub max_tokens: usize,
     /// What to do when the store's embeddings were produced by a
     /// different model than the one now in use (default: warn).
-    #[serde(default)]
     pub reindex_on_model_change: ReindexOnModelChange,
 
     /// Embed a per-memory metadata vector (`"{title}. {summary}. tags: …"`)
@@ -843,7 +903,6 @@ pub struct EmbeddingsConfig {
     /// text) is used. Toggling this changes what vectors *should* contain —
     /// run `engramdb reindex --embeddings-only` afterwards; it is not a
     /// model change, so the embedding fingerprint does not detect it.
-    #[serde(default = "default_metadata_vector")]
     pub metadata_vector: bool,
 
     /// Number of independent embedding model sessions to load and
@@ -860,8 +919,66 @@ pub struct EmbeddingsConfig {
     /// ([`EmbeddingsConfig::session_intra_threads`]), the same
     /// `pool_size × intra_threads ≤ cores` rule that bounds the NLI/T5
     /// sessions.
-    #[serde(default)]
     pub pool_size: Option<usize>,
+}
+
+/// The on-disk shape of `[embeddings]`: every field optional, so a partial
+/// section parses. Converted by `From`, which destructures it exhaustively so
+/// a field added to one struct and not the other fails to compile.
+#[derive(Deserialize)]
+struct RawEmbeddingsConfig {
+    #[serde(default)]
+    backend: EmbeddingBackend,
+    #[serde(default = "default_embedding_provider")]
+    provider: String,
+    #[serde(default)]
+    dimensions: Option<usize>,
+    #[serde(default = "default_embedding_max_tokens")]
+    max_tokens: usize,
+    #[serde(default)]
+    reindex_on_model_change: ReindexOnModelChange,
+    #[serde(default = "default_metadata_vector")]
+    metadata_vector: bool,
+    #[serde(default)]
+    pool_size: Option<usize>,
+}
+
+impl From<RawEmbeddingsConfig> for EmbeddingsConfig {
+    fn from(raw: RawEmbeddingsConfig) -> Self {
+        let RawEmbeddingsConfig {
+            backend,
+            provider,
+            dimensions,
+            max_tokens,
+            reindex_on_model_change,
+            metadata_vector,
+            pool_size,
+        } = raw;
+        let dimensions = dimensions.unwrap_or_else(|| {
+            embedding_provider_dimensions(&provider).unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS)
+        });
+        Self {
+            backend,
+            provider,
+            dimensions,
+            max_tokens,
+            reindex_on_model_change,
+            metadata_vector,
+            pool_size,
+        }
+    }
+}
+
+/// Width assumed for a provider outside [`EMBEDDING_PROVIDERS`] (the default
+/// provider's width, as before `dimensions` could be omitted).
+const DEFAULT_EMBEDDING_DIMENSIONS: usize = 384;
+
+fn default_embedding_provider() -> String {
+    "onnx".to_string()
+}
+
+fn default_embedding_max_tokens() -> usize {
+    256
 }
 
 /// Composition id recorded in the store manifest when the metadata-vector
@@ -871,6 +988,32 @@ pub struct EmbeddingsConfig {
 pub const COMPOSITION_METADATA_V1: &str = "metadata-v1";
 
 impl EmbeddingsConfig {
+    /// What is wrong with this section that still lets it load: an unknown
+    /// provider (embeddings are then off), or a `dimensions` that differs
+    /// from the provider's width. Deliberately not part of
+    /// [`EngramConfig::validate`]: a store runs with either today, so the
+    /// loader warns and `doctor` reports a Warn instead of refusing.
+    pub fn problems(&self) -> Vec<String> {
+        if self.provider == EMBEDDINGS_OFF {
+            return Vec::new();
+        }
+        match embedding_provider_dimensions(&self.provider) {
+            None => {
+                let known: Vec<&str> = EMBEDDING_PROVIDERS.iter().map(|(name, _)| *name).collect();
+                vec![format!(
+                    "`{}` is not a known embedding provider (known: {}); embeddings are off and search is keyword-only",
+                    self.provider,
+                    known.join(", ")
+                )]
+            }
+            Some(width) if width != self.dimensions => vec![format!(
+                "`{}` produces {}-dimensional vectors but `dimensions = {}`; set {} or delete the key, then run `engramdb reindex --embeddings-only`",
+                self.provider, width, self.dimensions, width
+            )],
+            Some(_) => Vec::new(),
+        }
+    }
+
     /// The embed-text composition id this config produces:
     /// [`COMPOSITION_METADATA_V1`] when the metadata vector is on, `None`
     /// for the legacy composition. The single config→manifest mapping — the
@@ -946,9 +1089,9 @@ impl Default for EmbeddingsConfig {
     fn default() -> Self {
         Self {
             backend: EmbeddingBackend::default(),
-            provider: "onnx".to_string(),
-            dimensions: 384,
-            max_tokens: 256,
+            provider: default_embedding_provider(),
+            dimensions: DEFAULT_EMBEDDING_DIMENSIONS,
+            max_tokens: default_embedding_max_tokens(),
             reindex_on_model_change: ReindexOnModelChange::default(),
             metadata_vector: true,
             pool_size: None,
@@ -963,7 +1106,11 @@ impl Default for EmbeddingsConfig {
 /// ever added, `ModelKey` / `model_demands` in `src/ops/provider_cache.rs`
 /// must be extended with the new field(s) or the cache will serve a stale
 /// model.
+///
+/// `#[serde(default)]`: a partial `[nli]` section (for example only
+/// `enabled = true`) keeps the default of every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct NliConfig {
     /// Whether NLI contradiction detection is enabled
     pub enabled: bool,
@@ -1060,7 +1207,11 @@ impl Default for NliConfig {
 /// the Claude Code hook handlers use `ops::build_engine_without_providers`,
 /// which never wires a reranker regardless of this config, so hook latency is
 /// unaffected.
+///
+/// `#[serde(default)]`: a partial `[rerank]` section keeps the default of
+/// every field it does not name.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RerankConfig {
     /// Whether reranking is enabled (default: true)
     pub enabled: bool,
@@ -4149,5 +4300,168 @@ weight = 0.7
             config_with_search_threshold(5.0).validate().is_ok(),
             "legacy >1.0 threshold must remain tolerated"
         );
+    }
+
+    #[test]
+    fn partial_trust_weights_section_parses() {
+        let config: EngramConfig = toml::from_str("[trust_weights]\nagent = 0.5\n").unwrap();
+        let d = TrustWeights::default();
+        assert_eq!(config.trust_weights.agent, 0.5);
+        assert_eq!(config.trust_weights.human, d.human);
+        assert_eq!(config.trust_weights.inferred, d.inferred);
+        assert_eq!(config.trust_weights.imported, d.imported);
+    }
+
+    #[test]
+    fn partial_nli_section_parses() {
+        let config: EngramConfig = toml::from_str("[nli]\nenabled = true\n").unwrap();
+        let d = NliConfig::default();
+        assert!(config.nli.enabled);
+        assert_eq!(config.nli.model, d.model);
+        assert_eq!(
+            config.nli.contradiction_threshold,
+            d.contradiction_threshold
+        );
+        assert_eq!(config.nli.max_comparisons, d.max_comparisons);
+        assert_eq!(config.nli.similarity_threshold, d.similarity_threshold);
+    }
+
+    #[test]
+    fn partial_rerank_section_parses() {
+        let config: EngramConfig = toml::from_str("[rerank]\nenabled = false\n").unwrap();
+        let d = RerankConfig::default();
+        assert!(!config.rerank.enabled);
+        assert_eq!(config.rerank.model, d.model);
+        assert_eq!(config.rerank.top_n, d.top_n);
+        assert_eq!(config.rerank.weight, d.weight);
+    }
+
+    #[test]
+    fn partial_search_section_parses() {
+        // A section holding only the retired key used to lose `threshold`.
+        let config: EngramConfig = toml::from_str("[search]\nsemantic_weight = 0.5\n").unwrap();
+        assert_eq!(config.search.semantic_weight, Some(0.5));
+        assert_eq!(config.search.threshold, SearchConfig::default().threshold);
+    }
+
+    #[test]
+    fn partial_thresholds_section_parses() {
+        let config: EngramConfig = toml::from_str("[thresholds]\ngc = 0.1\n").unwrap();
+        assert_eq!(config.thresholds.gc, 0.1);
+        assert_eq!(
+            config.thresholds.compress,
+            ThresholdsConfig::default().compress
+        );
+        assert_eq!(config.thresholds.needs_review, None);
+    }
+
+    #[test]
+    fn scoring_weights_still_require_relevance() {
+        // A container default on `ScoringWeights` would fill an absent
+        // `semantic` with 0.55 (the `with_query` default) and turn this
+        // valid table into one whose weights sum to 1.55. `relevance` stays
+        // required instead.
+        let config: EngramConfig =
+            toml::from_str("[retrieval.scoring.scope_only]\nrelevance = 1.0\n").unwrap();
+        let scope_only = &config.retrieval.scoring.scope_only;
+        assert_eq!(scope_only.semantic, None);
+        assert_eq!(scope_only.keyword, None);
+        assert_eq!(scope_only.relevance, 1.0);
+        assert!(scope_only.validate("scope_only").is_ok());
+
+        let err =
+            toml::from_str::<EngramConfig>("[retrieval.scoring.scope_only]\nsemantic = 1.0\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("relevance"), "{err}");
+    }
+
+    #[test]
+    fn embeddings_dimensions_default_from_provider() {
+        let config: EngramConfig =
+            toml::from_str("[embeddings]\nprovider = \"nomic-embed-text\"\n").unwrap();
+        assert_eq!(config.embeddings.dimensions, 768);
+        assert_eq!(config.embeddings.max_tokens, 256);
+        assert!(config.embeddings.problems().is_empty());
+
+        // A section without `provider` takes the default provider.
+        let config: EngramConfig = toml::from_str("[embeddings]\nbackend = \"onnx\"\n").unwrap();
+        assert_eq!(
+            config.embeddings.provider,
+            EmbeddingsConfig::default().provider
+        );
+        assert_eq!(config.embeddings.dimensions, 384);
+    }
+
+    #[test]
+    fn embeddings_explicit_dimensions_are_kept_verbatim() {
+        let config: EngramConfig =
+            toml::from_str("[embeddings]\nprovider = \"all-minilm\"\ndimensions = 128\n").unwrap();
+        assert_eq!(config.embeddings.dimensions, 128);
+        assert!(config.validate().is_ok());
+        let problems = config.embeddings.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("384") && problems[0].contains("128"));
+        assert!(problems[0].contains("reindex --embeddings-only"));
+    }
+
+    #[test]
+    fn embeddings_unknown_provider_is_reported_not_rejected() {
+        let config: EngramConfig =
+            toml::from_str("[embeddings]\nprovider = \"bogus-xyz\"\n").unwrap();
+        assert!(config.validate().is_ok());
+        assert_eq!(config.embeddings.dimensions, 384);
+        let problems = config.embeddings.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("`bogus-xyz`"));
+        assert!(
+            problems[0].contains("nomic-embed-text"),
+            "names the known set"
+        );
+
+        // The documented off switch is not a problem.
+        let off: EngramConfig =
+            toml::from_str(&format!("[embeddings]\nprovider = \"{EMBEDDINGS_OFF}\"\n")).unwrap();
+        assert!(off.embeddings.problems().is_empty());
+    }
+
+    #[test]
+    fn embeddings_config_round_trips_through_toml() {
+        let config = EmbeddingsConfig {
+            backend: EmbeddingBackend::Ollama,
+            provider: "mxbai-embed-large".to_string(),
+            dimensions: 512,
+            max_tokens: 1024,
+            reindex_on_model_change: ReindexOnModelChange::Error,
+            metadata_vector: false,
+            pool_size: Some(3),
+        };
+        let text = toml::to_string(&config).unwrap();
+        let back: EmbeddingsConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.backend, config.backend);
+        assert_eq!(back.provider, config.provider);
+        assert_eq!(back.dimensions, config.dimensions);
+        assert_eq!(back.max_tokens, config.max_tokens);
+        assert_eq!(back.reindex_on_model_change, config.reindex_on_model_change);
+        assert_eq!(back.metadata_vector, config.metadata_vector);
+        assert_eq!(back.pool_size, config.pool_size);
+
+        let json = serde_json::to_string(&config).unwrap();
+        let back: EmbeddingsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.dimensions, 512);
+        assert_eq!(back.pool_size, Some(3));
+    }
+
+    #[test]
+    fn embedding_provider_table_has_unique_names_and_sane_widths() {
+        let mut names: Vec<&str> = EMBEDDING_PROVIDERS.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), EMBEDDING_PROVIDERS.len());
+        assert!(!names.contains(&EMBEDDINGS_OFF));
+        for (name, width) in EMBEDDING_PROVIDERS {
+            assert!((1..=4096).contains(width), "{name}");
+        }
+        assert_eq!(embedding_provider_dimensions("all-minilm"), Some(384));
+        assert_eq!(embedding_provider_dimensions("nope"), None);
     }
 }

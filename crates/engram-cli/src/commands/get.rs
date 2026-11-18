@@ -42,7 +42,7 @@ pub async fn run_get(
         &store,
         &memory.id,
         engramdb::ops::Surface::Cli,
-        engramdb::ops::usage::cli_session_id().as_deref(),
+        engramdb::ops::usage::session_id_from_env().as_deref(),
     )
     .await;
 

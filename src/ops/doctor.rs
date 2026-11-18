@@ -1262,6 +1262,99 @@ fn refused_nli_model(config: &crate::types::EngramConfig) -> Option<String> {
     .err()
 }
 
+/// The "Config file" result for a config that parsed and validated: valid,
+/// or a Warn carrying every warning that applies (never a Fail: each of these
+/// loads and runs, so none flips the exit code). One warning keeps its own
+/// message and suggestion; several are listed together so none masks another.
+fn config_warnings(config_path: &Path, config: &crate::types::EngramConfig) -> EnvironmentCheck {
+    // (message, suggestion, details)
+    let mut warnings: Vec<(String, String, Vec<String>)> = Vec::new();
+    // A leftover `[daemon]` or `[security]` table is ignored, not invalid:
+    // warn (the user's settings are silently not applying).
+    if let Some((sections, details)) = ignored_sections(config_path, config) {
+        warnings.push((
+            format!(".engramdb/config.toml sets {sections} keys that are ignored"),
+            format!(
+                "Move the {sections} keys to the global config file and delete them \
+                 from .engramdb/config.toml"
+            ),
+            details,
+        ));
+    }
+    if !config.retired_keys().is_empty() {
+        warnings.push((
+            ".engramdb/config.toml sets keys that are no longer read".to_string(),
+            "Delete the listed keys from .engramdb/config.toml; they have no effect".to_string(),
+            crate::storage::config::retired_keys_message(config_path, config)
+                .into_iter()
+                .collect(),
+        ));
+    }
+    if let Some(refused) = refused_nli_model(config) {
+        warnings.push((
+            ".engramdb/config.toml selects an NLI model that is not loaded".to_string(),
+            "Use a built-in [nli].model, or set [security] \
+             allow_custom_model_repos = true in the global config file"
+                .to_string(),
+            vec![refused],
+        ));
+    }
+    // An unknown provider or a width mismatch loads and runs (embeddings are
+    // off, or vector writes are refused), so it is a Warn, not a Fail.
+    if let Some(detail) = crate::storage::config::embeddings_problems_message(config_path, config) {
+        let (message, suggestion) =
+            match crate::types::embedding_provider_dimensions(&config.embeddings.provider) {
+                None => (
+                    ".engramdb/config.toml names an unknown [embeddings].provider".to_string(),
+                    "Set [embeddings].provider to a known provider (or \"none\" to turn \
+                     embeddings off on purpose)"
+                        .to_string(),
+                ),
+                Some(width) => (
+                    ".engramdb/config.toml sets an [embeddings].dimensions that does not \
+                     match the provider"
+                        .to_string(),
+                    format!(
+                        "Set [embeddings].dimensions = {width} or delete the key, then run \
+                         `engramdb reindex --embeddings-only`"
+                    ),
+                ),
+            };
+        warnings.push((message, suggestion, vec![detail]));
+    }
+
+    let mut check = EnvironmentCheck {
+        name: "Config file".to_string(),
+        passed: true,
+        message: ".engramdb/config.toml valid".to_string(),
+        suggestion: None,
+        details: vec![],
+        status: None,
+    };
+    match warnings.len() {
+        0 => {}
+        1 => {
+            let (message, suggestion, details) = warnings.remove(0);
+            check.message = message;
+            check.suggestion = Some(suggestion);
+            check.details = details;
+            check.status = Some(CheckStatus::Warn);
+        }
+        n => {
+            check.message = format!(".engramdb/config.toml has {n} problems");
+            let mut suggestions = Vec::new();
+            for (message, suggestion, details) in warnings {
+                check.details.push(message);
+                check.details.extend(details);
+                suggestions.push(suggestion);
+            }
+            check.suggestion = Some(suggestions.join(". "));
+            check.status = Some(CheckStatus::Warn);
+        }
+    }
+    check
+}
+
 /// Check `.engramdb/config.toml` syntax and values.
 async fn check_config_file(dir: &Path) -> EnvironmentCheck {
     let config_path = dir.join(".engramdb").join("config.toml");
@@ -1280,53 +1373,7 @@ async fn check_config_file(dir: &Path) -> EnvironmentCheck {
             // A leftover `[daemon]` or `[security]` table is ignored, not
             // invalid: warn (the user's settings are silently not applying)
             // without failing the check or the exit code.
-            Ok(()) => match ignored_sections(&config_path, &config) {
-                Some((sections, details)) => EnvironmentCheck {
-                    name: "Config file".to_string(),
-                    passed: true,
-                    message: format!(".engramdb/config.toml sets {sections} keys that are ignored"),
-                    suggestion: Some(format!(
-                        "Move the {sections} keys to the global config file and delete them \
-                         from .engramdb/config.toml"
-                    )),
-                    details,
-                    status: Some(CheckStatus::Warn),
-                },
-                None if !config.retired_keys().is_empty() => EnvironmentCheck {
-                    name: "Config file".to_string(),
-                    passed: true,
-                    message: ".engramdb/config.toml sets keys that are no longer read".to_string(),
-                    suggestion: Some(
-                        "Delete the listed keys from .engramdb/config.toml; they have no effect"
-                            .to_string(),
-                    ),
-                    details: crate::storage::config::retired_keys_message(&config_path, &config)
-                        .into_iter()
-                        .collect(),
-                    status: Some(CheckStatus::Warn),
-                },
-                None if refused_nli_model(&config).is_some() => EnvironmentCheck {
-                    name: "Config file".to_string(),
-                    passed: true,
-                    message: ".engramdb/config.toml selects an NLI model that is not loaded"
-                        .to_string(),
-                    suggestion: Some(
-                        "Use a built-in [nli].model, or set [security] \
-                         allow_custom_model_repos = true in the global config file"
-                            .to_string(),
-                    ),
-                    details: refused_nli_model(&config).into_iter().collect(),
-                    status: Some(CheckStatus::Warn),
-                },
-                None => EnvironmentCheck {
-                    name: "Config file".to_string(),
-                    passed: true,
-                    message: ".engramdb/config.toml valid".to_string(),
-                    suggestion: None,
-                    details: vec![],
-                    status: None,
-                },
-            },
+            Ok(()) => config_warnings(&config_path, &config),
             Err(e) => EnvironmentCheck {
                 name: "Config file".to_string(),
                 passed: false,
@@ -4687,6 +4734,108 @@ mod tests {
         assert!(detail.contains("grants nothing"), "{detail}");
         let global = crate::storage::paths::global_config_path().unwrap();
         assert!(detail.contains(&global.display().to_string()), "{detail}");
+    }
+
+    /// An unknown embedding provider loads (embeddings are off), so doctor
+    /// reports a Warn naming the key, never a Fail.
+    #[tokio::test]
+    async fn config_file_warns_on_unknown_embedding_provider() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[embeddings]\nprovider = \"all-minlm\"\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "an unknown provider must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(
+            result.message.contains("[embeddings].provider"),
+            "{}",
+            result.message
+        );
+        assert!(result.details.join("\n").contains("`all-minlm`"));
+        assert!(result
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("[embeddings].provider")));
+
+        // The documented off switch is plainly valid.
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[embeddings]\nprovider = \"none\"\n",
+        )
+        .await
+        .unwrap();
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.status, None, "{}", result.message);
+    }
+
+    #[tokio::test]
+    async fn config_file_warns_on_dimension_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[embeddings]\nprovider = \"nomic-embed-text\"\ndimensions = 384\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed, "a width mismatch must not fail doctor");
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(
+            result.message.contains("[embeddings].dimensions"),
+            "{}",
+            result.message
+        );
+        assert!(result.details.join("\n").contains("768-dimensional"));
+        assert!(result
+            .suggestion
+            .as_deref()
+            .is_some_and(|s| s.contains("dimensions = 768")));
+
+        // Omitted, `dimensions` follows the provider.
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[embeddings]\nprovider = \"nomic-embed-text\"\n",
+        )
+        .await
+        .unwrap();
+        let result = check_config_file(temp_dir.path()).await;
+        assert_eq!(result.status, None, "{}", result.message);
+    }
+
+    /// Two warnings on one file are both reported: an ignored `[daemon]`
+    /// table must not hide an embeddings problem, nor the reverse.
+    #[tokio::test]
+    async fn config_file_reports_every_warning_that_applies() {
+        let temp_dir = TempDir::new().unwrap();
+        let engramdb_dir = temp_dir.path().join(".engramdb");
+        async_fs::create_dir_all(&engramdb_dir).await.unwrap();
+        async_fs::write(
+            engramdb_dir.join("config.toml"),
+            "[daemon]\nenabled = false\n[embeddings]\nprovider = \"bogus\"\n",
+        )
+        .await
+        .unwrap();
+
+        let result = check_config_file(temp_dir.path()).await;
+        assert!(result.passed);
+        assert_eq!(result.status, Some(CheckStatus::Warn));
+        assert!(result.message.contains("2 problems"), "{}", result.message);
+        let detail = result.details.join("\n");
+        assert!(detail.contains("daemon.enabled"), "{detail}");
+        assert!(detail.contains("`bogus`"), "{detail}");
+        let suggestion = result.suggestion.unwrap();
+        assert!(suggestion.contains("global config"), "{suggestion}");
+        assert!(suggestion.contains("[embeddings].provider"), "{suggestion}");
     }
 
     #[tokio::test]

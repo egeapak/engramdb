@@ -120,7 +120,6 @@ async-trait = "0.1"
 tracing = "0.1"
 
 # Error handling
-thiserror = "2"
 anyhow = "1"
 
 # Atomic file writes
@@ -165,7 +164,7 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = ["download
 # Must match `engram-models`' pin (which tracks fastembed's `^0.23.2`) —
 # otherwise the examples pull a second, non-unifying `tokenizers` build.
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
-hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "tokio", "ureq"] }
+hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "ureq"] }
 toml = "1"
 
 

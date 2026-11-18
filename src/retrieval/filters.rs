@@ -186,9 +186,8 @@ pub fn build_filter_predicate(
                 .map(|t| {
                     // `type` is persisted as the lowercased Debug name (see
                     // `batch_from_entries` in lance_index.rs). Format from the
-                    // enum, then reuse the single-quote escaping discipline.
-                    let name = format!("{:?}", t).to_lowercase().replace('\'', "''");
-                    format!("'{}'", name)
+                    // enum, then quote it like every other literal.
+                    crate::storage::sql::sql_str(&format!("{:?}", t).to_lowercase())
                 })
                 .collect::<Vec<_>>()
                 .join(", ");

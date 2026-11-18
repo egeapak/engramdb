@@ -22,6 +22,7 @@ pub mod memory_file;
 pub mod paths;
 pub mod project_id;
 pub mod registry;
+pub mod sql;
 pub mod staleness;
 mod state_file;
 pub mod store;

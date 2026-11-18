@@ -7,19 +7,17 @@ use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Resolve the session id for `task current`: explicit flag, else the env
-/// vars the MCP server also honors.
+/// vars the MCP server also honors, read the same way
+/// ([`ops::usage::session_id_from_env`]: trimmed, blank = unset), so a task
+/// declared here maps to the session id the MCP server sees.
 fn resolve_session_id(flag: Option<&str>) -> Result<String> {
     if let Some(sid) = flag {
         if !sid.is_empty() {
             return Ok(sid.to_string());
         }
     }
-    for var in ["CLAUDE_SESSION_ID", "MCP_SESSION_ID"] {
-        if let Ok(v) = std::env::var(var) {
-            if !v.is_empty() {
-                return Ok(v);
-            }
-        }
+    if let Some(sid) = ops::usage::session_id_from_env() {
+        return Ok(sid);
     }
     anyhow::bail!(
         "no session id: pass --session-id or set CLAUDE_SESSION_ID (the task \
@@ -123,5 +121,24 @@ mod tests {
         // Empty flag falls through to env; with no env either, errors.
         // (Env-var behavior is not asserted here to stay parallel-safe.)
         assert!(resolve_session_id(Some("")).is_err() || resolve_session_id(Some("")).is_ok());
+    }
+
+    /// The env value is trimmed like the MCP server's `resolve_session_id`,
+    /// so `CLAUDE_SESSION_ID="abc "` names the same task mapping on both
+    /// surfaces, and a blank value counts as unset. (Nextest runs each test
+    /// in its own process, so setting the variable here is isolated.)
+    #[test]
+    fn session_id_is_trimmed_like_the_mcp_server() {
+        std::env::remove_var("MCP_SESSION_ID");
+        std::env::set_var("CLAUDE_SESSION_ID", "  abc \n");
+        assert_eq!(resolve_session_id(None).unwrap(), "abc");
+        assert_eq!(resolve_session_id(Some("")).unwrap(), "abc");
+
+        std::env::set_var("CLAUDE_SESSION_ID", "   ");
+        std::env::set_var("MCP_SESSION_ID", " mcp-sid ");
+        assert_eq!(resolve_session_id(None).unwrap(), "mcp-sid");
+
+        std::env::remove_var("MCP_SESSION_ID");
+        assert!(resolve_session_id(None).is_err());
     }
 }

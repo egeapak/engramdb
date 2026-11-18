@@ -2635,10 +2635,9 @@ impl LanceIndex {
             // an `expect` because `tag` is user-supplied, and this crate's
             // contract is that no user-derived input can panic a public
             // function (the same property `fuzz/` asserts elsewhere). The
-            // escaping here is the one place it is still done by hand, which
-            // is why it lives next to the expression it mirrors.
+            // literal is quoted by the shared `sql::sql_str`.
             let json_token = serde_json::to_string(tag).unwrap_or_else(|_| format!("\"{tag}\""));
-            format!("contains(tags, '{}')", json_token.replace('\'', "''"))
+            format!("contains(tags, {})", crate::sql::sql_str(&json_token))
         })
     }
 

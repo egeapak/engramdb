@@ -77,7 +77,7 @@ First-run model download is failing. Check:
 The store's manifest fingerprint doesn't match the live provider. Run the exact command in the warning (typically `engramdb reindex --embeddings-only`). This is harmless to ignore short-term but means semantic search quality is degraded until you reindex.
 
 **Want to disable embeddings entirely.**
-Pass `--no-embeddings` at init, or set `[embeddings].provider = "none"` (or any unrecognized string) in `config.toml`. Queries fall back to keyword and relevance scoring.
+Pass `--no-embeddings` at init, or set `[embeddings].provider = "none"` in `config.toml` (any other unrecognized name has the same effect, but the loader and `doctor` warn about it as a likely typo). Queries fall back to keyword and relevance scoring.
 
 ## Daemon
 
