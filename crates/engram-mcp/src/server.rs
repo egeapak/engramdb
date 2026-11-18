@@ -4589,56 +4589,62 @@ impl EngramDbServer {
             None => HarvestDecision::Harvested,
         };
 
-        // Resolve exactly as `harvest_show` does, then fall back to the ledger
-        // for a session whose live transcript is already pruned. Recording the
-        // prefix verbatim wrote a key no session can ever match: the tool
-        // answered `{"decision":"harvested"}` while `harvest_list` kept
-        // re-offering the real session, forever.
-        let resolved = match self
+        // Resolve exactly as `harvest_show` does; `record_decision` then falls
+        // back to the ledger for a session whose live transcript is already
+        // pruned. Recording the prefix verbatim wrote a key no session can
+        // ever match: the tool answered `{"decision":"harvested"}` while
+        // `harvest_list` kept re-offering the real session, forever.
+        let resolved_live = self
             .resolve_harvest_session(&scope, &input.session_id, all_projects)
             .await
-        {
-            Ok(summary) => summary.session_id,
-            Err(live_err) => ops::harvest::resolve_ledger_key(ledger_dir, &input.session_id)
-                .map_err(|_| live_err)?,
-        };
-
-        let marked =
-            harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, input.note)
-                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
-        let entry = &marked.entry;
-
-        // The provenance link, from the one call that names both halves. Same
-        // ordering and the same reasoning as the summary below: reported, never
-        // fatal, because the ledger decision is already on disk. A failure is
-        // surfaced rather than swallowed — an unrecorded source means the
-        // transcript copy is not pinned, which is invisible until the day it is
-        // evicted.
+            .map(|summary| summary.session_id);
+        // The provenance link comes from the one call that names both halves.
+        // Same ordering and the same reasoning as the summary below: reported,
+        // never fatal, because the ledger decision is already on disk. A
+        // failure is surfaced rather than swallowed — an unrecorded source
+        // means the transcript copy is not pinned, which is invisible until the
+        // day it is evicted.
         //
         // The store open is inside the fallible half for that reason: `mark`
         // has always worked in a directory with no store (the ledger is the
         // only thing it needs), and making it fail there now would break
         // settling a session for anyone who has not run `init`.
-        let (pinned, provenance_error) = if memory_ids.is_empty() {
-            (0, None)
-        } else {
-            match self.open_store_for(input.project.as_deref()).await {
-                Ok(store) => match ops::link_memories(&store, &resolved, &memory_ids).await {
-                    Ok(report) => {
-                        let unresolved: Vec<String> =
-                            report.unresolved.iter().map(|(id, _)| id.clone()).collect();
-                        let err = (!unresolved.is_empty()).then(|| {
-                            format!(
-                                "these memory ids did not name a memory in this store, so the \
-                                 session is not recorded as their source: {}",
-                                unresolved.join(", ")
-                            )
-                        });
-                        (report.pinned(), err)
-                    }
-                    Err(e) => (0, Some(e.to_string())),
-                },
-                Err(e) => (0, Some(e)),
+        let report = ops::harvest::record_decision(
+            ledger_dir,
+            resolved_live,
+            &input.session_id,
+            decision,
+            &memory_ids,
+            input.note,
+            || self.open_store_for(input.project.as_deref()),
+        )
+        .await
+        .map_err(|e| match e {
+            ops::harvest::RecordError::Unresolved(live_err) => live_err,
+            ops::harvest::RecordError::Ledger(e) => {
+                error_response(ErrorCode::ValidationError, &e.to_string())
+            }
+        })?;
+        let resolved = report.resolved.clone();
+        let entry = &report.entry;
+        let pinned = report.links.pinned();
+        let provenance_error = match &report.provenance_error {
+            Some(ops::harvest::ProvenanceError::StoreOpen(e))
+            | Some(ops::harvest::ProvenanceError::Link(e)) => Some(e.clone()),
+            None => {
+                let unresolved: Vec<String> = report
+                    .links
+                    .unresolved
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                (!unresolved.is_empty()).then(|| {
+                    format!(
+                        "these memory ids did not name a memory in this store, so the \
+                         session is not recorded as their source: {}",
+                        unresolved.join(", ")
+                    )
+                })
             }
         };
 
@@ -4668,7 +4674,7 @@ impl EngramDbServer {
             // session `harvest_list` keeps offering after the model was told
             // it was settled — so `decision` above is the truth and this says
             // it is not what was asked for.
-            "superseded": marked.superseded,
+            "superseded": report.superseded,
             // How many memories now cite this session — and so how many
             // transcript copies this call pinned against eviction.
             "provenance_recorded": pinned,

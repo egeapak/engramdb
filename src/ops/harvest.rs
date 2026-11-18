@@ -336,6 +336,115 @@ pub fn resolve_ledger_key(ledger_dir: &Path, prefix: &str) -> Result<String> {
     }
 }
 
+/// What [`record_decision`] did. The front ends render it; nothing here
+/// prints.
+#[derive(Debug)]
+pub struct MarkReport {
+    /// The full session id the decision was recorded under.
+    pub resolved: String,
+    /// The session's state as the ledger now folds it, which is not
+    /// necessarily the decision asked for; see [`Self::superseded`].
+    pub entry: harvest_state::HarvestEntry,
+    /// The write lost the fold to a later-stamped decision already in the
+    /// log (a clock that stepped backwards). See
+    /// [`harvest_state::MarkOutcome::superseded`].
+    pub superseded: bool,
+    /// The provenance links written; empty when no memory id was given or
+    /// the link step failed.
+    pub links: crate::ops::harvest_pin::LinkReport,
+    /// Why the provenance link was not (fully) written, when it was not.
+    /// Never fatal: the decision is already on disk.
+    pub provenance_error: Option<ProvenanceError>,
+}
+
+/// Why [`record_decision`] could not record a session as its memories'
+/// source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvenanceError {
+    /// The memory store did not open (the front end's own error text).
+    StoreOpen(String),
+    /// `link_memories` failed.
+    Link(String),
+}
+
+/// Why [`record_decision`] recorded nothing.
+#[derive(Debug)]
+pub enum RecordError<E> {
+    /// The session named neither a live transcript nor a ledger entry; the
+    /// front end's own live-resolution error, unchanged.
+    Unresolved(E),
+    /// The ledger write was refused.
+    Ledger(anyhow::Error),
+}
+
+/// Record a reviewed session's decision: the orchestration both
+/// `harvest mark` and MCP `harvest_mark` run, in one place so its order
+/// cannot drift between them.
+///
+/// 1. `resolved_live` is the front end's resolution of `session_arg` against
+///    the live transcripts. It stays the front end's, because the two scope
+///    it differently (the CLI's `--all-projects`; MCP's
+///    `allow_all_projects_harvest` gate, which must run before any scope is
+///    built). On failure the ledger is tried, so a session whose transcript
+///    Claude Code has pruned can still be settled; when that fails too, the
+///    *live* error is returned.
+/// 2. The decision goes into the ledger. It is the thing that must not be
+///    lost, so it comes first.
+/// 3. Only then, and only when `memory_ids` is non-empty, the store is
+///    opened (`open_store`, so `mark` keeps working in a directory with no
+///    store) and the session is recorded as those memories' source, which
+///    pins its transcript copy. A failure there is reported in
+///    [`MarkReport::provenance_error`], never returned.
+///
+/// The curated summary is not part of this: the front end attaches it with
+/// [`crate::ops::harvest_index::set_summary`] after this returns, and a
+/// failed summary is reported, never fatal.
+pub async fn record_decision<E, F, Fut>(
+    ledger_dir: &Path,
+    resolved_live: std::result::Result<String, E>,
+    session_arg: &str,
+    decision: harvest_state::HarvestDecision,
+    memory_ids: &[String],
+    note: Option<String>,
+    open_store: F,
+) -> std::result::Result<MarkReport, RecordError<E>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<crate::storage::MemoryStore, String>>,
+{
+    let resolved = match resolved_live {
+        Ok(id) => id,
+        Err(live_err) => resolve_ledger_key(ledger_dir, session_arg)
+            .map_err(|_| RecordError::Unresolved(live_err))?,
+    };
+    let marked = harvest_state::mark_harvested(ledger_dir, &resolved, memory_ids, decision, note)
+        .map_err(|e| RecordError::Ledger(e.into()))?;
+
+    let (links, provenance_error) = if memory_ids.is_empty() {
+        (Default::default(), None)
+    } else {
+        match open_store().await {
+            Ok(store) => {
+                match crate::ops::harvest_pin::link_memories(&store, &resolved, memory_ids).await {
+                    Ok(report) => (report, None),
+                    Err(e) => (
+                        Default::default(),
+                        Some(ProvenanceError::Link(e.to_string())),
+                    ),
+                }
+            }
+            Err(e) => (Default::default(), Some(ProvenanceError::StoreOpen(e))),
+        }
+    };
+    Ok(MarkReport {
+        resolved,
+        entry: marked.entry,
+        superseded: marked.superseded,
+        links,
+        provenance_error,
+    })
+}
+
 /// Every ledger key `prefix` could name.
 ///
 /// Exposed alongside [`resolve_ledger_key`] so a caller that wants to treat
@@ -1426,6 +1535,147 @@ are lower bounds (a larger budget cannot recover {} — {} never parsed; \
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store opener that must not be reached: the tests below record
+    /// decisions without memory ids.
+    async fn no_store() -> std::result::Result<crate::storage::MemoryStore, String> {
+        panic!("record_decision opened a store with no memory ids to link")
+    }
+
+    #[tokio::test]
+    async fn record_decision_falls_back_to_the_ledger_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ledger = tmp.path();
+        // A session known only to the ledger (its live transcript is gone).
+        harvest_state::mark_harvested(
+            ledger,
+            "abcdef-0001",
+            &[],
+            harvest_state::HarvestDecision::Deferred,
+            None,
+        )
+        .unwrap();
+
+        let report = record_decision(
+            ledger,
+            Err::<String, _>("no live transcript"),
+            "abcdef",
+            harvest_state::HarvestDecision::Skipped,
+            &[],
+            Some("nothing here".into()),
+            no_store,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.resolved, "abcdef-0001");
+        assert_eq!(
+            report.entry.decision(),
+            harvest_state::HarvestDecision::Skipped
+        );
+        assert!(!report.superseded);
+        assert_eq!(report.links.pinned(), 0);
+        assert!(report.provenance_error.is_none());
+        assert_eq!(
+            harvest_state::read_harvested(ledger)["abcdef-0001"]
+                .note
+                .as_deref(),
+            Some("nothing here")
+        );
+
+        // Neither live nor in the ledger: the *live* error comes back and
+        // nothing is written.
+        let err = record_decision(
+            ledger,
+            Err::<String, _>("no live transcript"),
+            "zzz",
+            harvest_state::HarvestDecision::Skipped,
+            &[],
+            None,
+            no_store,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, RecordError::Unresolved("no live transcript")));
+        assert_eq!(harvest_state::read_harvested(ledger).len(), 1);
+
+        // A live resolution is used as is, without consulting the ledger.
+        let report = record_decision(
+            ledger,
+            Ok::<_, &str>("live-session".to_string()),
+            "live",
+            harvest_state::HarvestDecision::Skipped,
+            &[],
+            None,
+            no_store,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.resolved, "live-session");
+    }
+
+    #[tokio::test]
+    async fn record_decision_reports_a_superseded_write() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ledger = tmp.path();
+        // A decision stamped a day ahead: the clock has since stepped back.
+        let state = ledger.join(".engramdb").join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let ahead = (Utc::now() + Duration::days(1)).to_rfc3339();
+        std::fs::write(
+            state.join("harvest_ledger.jsonl"),
+            format!("{{\"session_id\":\"s1\",\"at\":\"{ahead}\",\"decision\":\"deferred\"}}\n"),
+        )
+        .unwrap();
+
+        let report = record_decision(
+            ledger,
+            Ok::<_, &str>("s1".to_string()),
+            "s1",
+            harvest_state::HarvestDecision::Skipped,
+            &[],
+            None,
+            no_store,
+        )
+        .await
+        .unwrap();
+        assert!(
+            report.superseded,
+            "a discarded review was reported as recorded"
+        );
+        assert_eq!(
+            report.entry.decision(),
+            harvest_state::HarvestDecision::Deferred,
+            "the report carries the fold's truth, not the request"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_decision_reports_a_store_that_will_not_open() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ledger = tmp.path();
+        let report = record_decision(
+            ledger,
+            Ok::<_, &str>("s1".to_string()),
+            "s1",
+            harvest_state::HarvestDecision::Harvested,
+            &["m1".to_string()],
+            None,
+            || async { Err("no store here".to_string()) },
+        )
+        .await
+        .unwrap();
+        // The decision is on disk even though the link could not be written.
+        assert_eq!(
+            harvest_state::read_harvested(ledger)["s1"].decision(),
+            harvest_state::HarvestDecision::Harvested
+        );
+        assert_eq!(
+            report.provenance_error,
+            Some(ProvenanceError::StoreOpen("no store here".into()))
+        );
+        assert_eq!(report.links.pinned(), 0);
+    }
 
     fn prompt(text: &str) -> Event {
         Event::UserPrompt {

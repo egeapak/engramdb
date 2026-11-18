@@ -140,13 +140,8 @@ pub async fn run_harvest(
             // `mark` must reach every session `show` can, or the ledger
             // silently re-offers one forever. That now includes sessions whose
             // live transcript is gone and which `show` reads from an archive,
-            // so fall back to the ledger exactly as `reset` does.
-            let resolved = match resolve_session(&scope, &session_id, all_projects) {
-                Ok(selected) => selected.session_id,
-                Err(live_err) => {
-                    resolve_ledger_key(ledger_dir, &session_id).map_err(|_| live_err)?
-                }
-            };
+            // so `record_decision` falls back to the ledger exactly as `reset`
+            // does.
             let decision = if defer {
                 HarvestDecision::Deferred
             } else if memory_ids.is_empty() {
@@ -154,10 +149,35 @@ pub async fn run_harvest(
             } else {
                 HarvestDecision::Harvested
             };
-            let marked =
-                harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, note)?;
-            let entry = &marked.entry;
-            if marked.superseded {
+            // The decision first, then the provenance link, written from the
+            // one call that already names both halves — the agent does nothing
+            // extra. After the ledger, for the same reason the summary is: the
+            // decision is what must not be lost, and a memory that failed to
+            // record its source is a weaker failure than a session that keeps
+            // being re-offered.
+            let report = harvest::record_decision(
+                ledger_dir,
+                resolve_session(&scope, &session_id, all_projects).map(|s| s.session_id),
+                &session_id,
+                decision,
+                &memory_ids,
+                note,
+                // The store at `dir`, which is where the memories being
+                // marked were just created — not `scope.root_dir`. Those
+                // differ only for a project linked with `projects link`, and
+                // there the memory genuinely lives in the sub-project's store;
+                // `evidence_links` walks the whole scope for exactly that
+                // reason, so a pin recorded here is still seen by the root's
+                // eviction pass.
+                || async { MemoryStore::open(dir).await.map_err(|e| e.to_string()) },
+            )
+            .await
+            .map_err(|e| match e {
+                harvest::RecordError::Unresolved(e) | harvest::RecordError::Ledger(e) => e,
+            })?;
+            let resolved = report.resolved.clone();
+            let entry = &report.entry;
+            if report.superseded {
                 // The fold orders by timestamp, not by file position, so a
                 // clock that stepped backwards puts this write behind a
                 // decision already in the log and it is silently dropped. The
@@ -172,12 +192,8 @@ pub async fn run_harvest(
                     entry.harvested_at.format("%Y-%m-%d %H:%M:%S UTC")
                 ));
             }
-            // The provenance link, written from the one call that already names
-            // both halves — the agent does nothing extra. After the ledger, for
-            // the same reason the summary is: the decision is what must not be
-            // lost, and a memory that failed to record its source is a weaker
-            // failure than a session that keeps being re-offered.
-            let links = link_marked_memories(dir, &resolved, &memory_ids, formatter).await;
+            warn_on_provenance(&report, memory_ids.len(), formatter);
+            let links = &report.links;
             // After the decision is recorded, never before: the ledger write
             // is the thing that must not be lost, and attaching a summary
             // needs a model that may not load. A session with a decision and
@@ -218,7 +234,7 @@ pub async fn run_harvest(
                 json["summary_recorded"] =
                     serde_json::json!(summary.is_some() && summary_error.is_none());
                 json["summary_error"] = serde_json::json!(summary_error);
-                json["superseded"] = serde_json::json!(marked.superseded);
+                json["superseded"] = serde_json::json!(report.superseded);
                 outln!(formatter, "{}", serde_json::to_string_pretty(&json)?);
             } else if summary_error.is_none() && summary.is_some() {
                 formatter.print_success(&format!("Summary recorded for session {resolved}."));
@@ -700,65 +716,42 @@ for it, so `harvest list` offers it again only while Claude Code still has the l
     }
 }
 
-/// Record `session_id` as the source of each marked memory.
-///
-/// Advisory, and loudly so. The ledger decision is already on disk when this
-/// runs, so a failure here must not be fatal — but it must not be silent
-/// either: a memory that failed to record its source keeps no pin, and the
-/// transcript copy behind it becomes evictable without anyone being told.
-///
-/// The store is the one at `dir`, which is where the memories being marked
-/// were just created — not `scope.root_dir`. Those differ only for a project
-/// linked with `projects link`, and there the memory genuinely lives in the
-/// sub-project's store; `evidence_links` walks the whole scope for exactly that
-/// reason, so a pin recorded here is still seen by the root's eviction pass.
-async fn link_marked_memories(
-    dir: &Path,
-    session_id: &str,
-    memory_ids: &[String],
-    formatter: &OutputFormatter,
-) -> engramdb::ops::LinkReport {
-    if memory_ids.is_empty() {
-        return engramdb::ops::LinkReport::default();
-    }
-    let store = match MemoryStore::open(dir).await {
-        Ok(store) => store,
-        Err(e) => {
+/// Warn about a provenance link [`harvest::record_decision`] could not
+/// (fully) write. Never fatal: the decision is already recorded.
+fn warn_on_provenance(report: &harvest::MarkReport, wanted: usize, formatter: &OutputFormatter) {
+    let session_id = &report.resolved;
+    match &report.provenance_error {
+        Some(harvest::ProvenanceError::StoreOpen(e)) => {
             formatter.print_warning(&format!(
                 "Recorded the decision, but could not open the memory store to record \
                  session {session_id} as the source of {} memor{} ({e}). Their transcript copy \
                  is not pinned.",
-                memory_ids.len(),
-                if memory_ids.len() == 1 { "y" } else { "ies" }
+                wanted,
+                if wanted == 1 { "y" } else { "ies" }
             ));
-            return engramdb::ops::LinkReport::default();
         }
-    };
-    match engramdb::ops::link_memories(&store, session_id, memory_ids).await {
-        Ok(report) => {
-            if !report.unresolved.is_empty() {
-                formatter.print_warning(&format!(
-                    "Recorded the decision, but {} of the memory id(s) given did not name a \
-                     memory in this store, so session {session_id} is not recorded as their \
-                     source: {}",
-                    report.unresolved.len(),
-                    report
-                        .unresolved
-                        .iter()
-                        .map(|(id, why)| format!("{id} ({why})"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            report
-        }
-        Err(e) => {
+        Some(harvest::ProvenanceError::Link(e)) => {
             formatter.print_warning(&format!(
                 "Recorded the decision, but could not record session {session_id} as the source \
                  of the marked memories ({e}). Their transcript copy is not pinned."
             ));
-            engramdb::ops::LinkReport::default()
         }
+        None if !report.links.unresolved.is_empty() => {
+            formatter.print_warning(&format!(
+                "Recorded the decision, but {} of the memory id(s) given did not name a \
+                 memory in this store, so session {session_id} is not recorded as their \
+                 source: {}",
+                report.links.unresolved.len(),
+                report
+                    .links
+                    .unresolved
+                    .iter()
+                    .map(|(id, why)| format!("{id} ({why})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        None => {}
     }
 }
 
