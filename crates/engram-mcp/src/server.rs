@@ -18,7 +18,9 @@ use crate::error::{error_response, ErrorCode};
 use engramdb::ops;
 use engramdb::retrieval::engine::{RetrievalEngine, RetrievalMode, RetrievalQuery};
 use engramdb::storage::config::{load_config_or_default, load_global_config_or_default};
-use engramdb::storage::{FileRegistry, MemoryStore, RegistryBackend};
+use engramdb::storage::{
+    FileRegistry, MemoryStore, OpenMode, RegistryBackend, StoreSpec, StoreTarget,
+};
 use engramdb::title::TitleStrategy;
 use engramdb::types::{EmbeddingBackend, Provenance, Status, Visibility};
 
@@ -1604,18 +1606,6 @@ impl EngramDbServer {
             .await;
     }
 
-    /// Returns `true` if the given project override refers to the global store.
-    fn is_global(project: Option<&str>) -> bool {
-        matches!(project, Some("global"))
-    }
-
-    /// Returns `true` if the given project override targets a named group store
-    /// (the `group:<name>` form). See [`Self::resolve_dir`] for how the group
-    /// name is turned into a group store directory.
-    fn is_group_target(project: Option<&str>) -> bool {
-        matches!(project, Some(s) if s.starts_with("group:"))
-    }
-
     /// Resolve the target project directory from an optional project override.
     ///
     /// - `None`: returns the effective (hierarchy-resolved) dir for the
@@ -1629,98 +1619,93 @@ impl EngramDbServer {
     ///   swaps to the main worktree's path.  The resulting project ID must
     ///   be present in the registry.
     async fn resolve_dir(&self, project: Option<&str>) -> Result<PathBuf, String> {
-        let input = match project {
-            None => return Ok(self.effective_dir.clone()),
-            Some("global") => {
-                return engramdb::storage::paths::global_store_dir()
-                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
-            }
+        match StoreSpec::parse(project) {
+            StoreSpec::Default => Ok(self.effective_dir.clone()),
+            StoreSpec::Global => engramdb::storage::paths::global_store_dir()
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string())),
             // `group:<name>` targets a named group store (the multi-project
             // memories tier between one project and machine-global). The name
             // is normalized into a stable group id and mapped to its store
-            // directory — checked before the 16-hex project-id form so a group
-            // name can never be misread as a project id.
-            Some(s) if s.strip_prefix("group:").is_some() => {
-                let name = s.strip_prefix("group:").unwrap();
-                let gid = engramdb::storage::paths::compute_group_id(name);
-                return engramdb::storage::paths::group_store_dir(&gid)
-                    .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()));
-            }
-            Some(s) => s,
-        };
-
-        let is_project_id = input.len() == 16 && input.chars().all(|c| c.is_ascii_hexdigit());
-
-        if is_project_id {
-            let registry = self
-                .registry
-                .load()
-                .await
-                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-            // Resolve parent chain so that passing a worktree's ID routes to
-            // the main project's storage.
-            let root_id = engramdb::storage::resolve_root_project_id(&registry, input);
-            match registry.projects.iter().find(|e| e.project_id == root_id) {
-                Some(e) => Ok(PathBuf::from(&e.project_path)),
-                None => Err(error_response(
-                    ErrorCode::ProjectNotFound,
-                    &format!(
-                        "Project ID '{}' not found in registry. Run `engramdb init` in the target project first.",
-                        input
-                    ),
-                )),
-            }
-        } else {
-            let path = PathBuf::from(input);
-            if !path.is_absolute() {
-                return Err(error_response(
-                    ErrorCode::ValidationError,
-                    "Project path must be absolute, not relative.",
-                ));
-            }
-            let canonical = path.canonicalize().map_err(|e| {
-                error_response(
-                    ErrorCode::ProjectNotFound,
-                    &format!("Cannot access directory '{}': {}.", input, e),
-                )
-            })?;
-            // If the caller pointed at a linked worktree, swap to the main
-            // worktree's project root so storage ops hit the right place.
-            let effective = engramdb::storage::project_id::detect_worktree_main(&canonical)
-                .unwrap_or(canonical);
-            let project_id = engramdb::storage::project_id::compute_project_id(&effective);
-            let registry = self
-                .registry
-                .load()
-                .await
-                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
-            if !registry.projects.iter().any(|e| e.project_id == project_id) {
-                return Err(error_response(
-                    ErrorCode::ProjectNotFound,
-                    &format!(
-                        "Project at '{}' (id: {}) not found in registry. Run `engramdb init` there first.",
-                        input, project_id
-                    ),
-                ));
-            }
-            Ok(effective)
+            // directory — `StoreSpec::parse` checks it before the 16-hex
+            // project-id form so a group name can never be misread as a
+            // project id.
+            StoreSpec::Group { id, .. } => engramdb::storage::paths::group_store_dir(&id)
+                .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string())),
+            StoreSpec::ProjectId(input) => self.resolve_project_id(&input).await,
+            StoreSpec::Path(path) => self.resolve_project_path(path).await,
         }
+    }
+
+    /// [`Self::resolve_dir`] for a 16-hex project id.
+    async fn resolve_project_id(&self, input: &str) -> Result<PathBuf, String> {
+        let registry = self
+            .registry
+            .load()
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        // Resolve parent chain so that passing a worktree's ID routes to
+        // the main project's storage.
+        let root_id = engramdb::storage::resolve_root_project_id(&registry, input);
+        match registry.projects.iter().find(|e| e.project_id == root_id) {
+            Some(e) => Ok(PathBuf::from(&e.project_path)),
+            None => Err(error_response(
+                ErrorCode::ProjectNotFound,
+                &format!(
+                    "Project ID '{}' not found in registry. Run `engramdb init` in the target project first.",
+                    input
+                ),
+            )),
+        }
+    }
+
+    /// [`Self::resolve_dir`] for a path.
+    async fn resolve_project_path(&self, path: PathBuf) -> Result<PathBuf, String> {
+        let input = path.display().to_string();
+        if !path.is_absolute() {
+            return Err(error_response(
+                ErrorCode::ValidationError,
+                "Project path must be absolute, not relative.",
+            ));
+        }
+        let canonical = path.canonicalize().map_err(|e| {
+            error_response(
+                ErrorCode::ProjectNotFound,
+                &format!("Cannot access directory '{}': {}.", input, e),
+            )
+        })?;
+        // If the caller pointed at a linked worktree, swap to the main
+        // worktree's project root so storage ops hit the right place.
+        let effective =
+            engramdb::storage::project_id::detect_worktree_main(&canonical).unwrap_or(canonical);
+        let project_id = engramdb::storage::project_id::compute_project_id(&effective);
+        let registry = self
+            .registry
+            .load()
+            .await
+            .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
+        if !registry.projects.iter().any(|e| e.project_id == project_id) {
+            return Err(error_response(
+                ErrorCode::ProjectNotFound,
+                &format!(
+                    "Project at '{}' (id: {}) not found in registry. Run `engramdb init` there first.",
+                    input, project_id
+                ),
+            ));
+        }
+        Ok(effective)
     }
 
     /// Open a MemoryStore for the given project override, auto-initializing only for the default project.
     async fn open_store_for(&self, project: Option<&str>) -> Result<MemoryStore, String> {
-        if Self::is_global(project) {
-            return MemoryStore::open_global()
-                .await
-                .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()));
-        }
-
-        // A `group:<name>` target opens (creating if necessary) the named group
-        // store, mirroring how `global` routes to `open_global` above.
-        if Self::is_group_target(project) {
-            let name = project.unwrap().strip_prefix("group:").unwrap();
-            let gid = engramdb::storage::paths::compute_group_id(name);
-            return MemoryStore::open_group(&gid)
+        // `global` and a `group:<name>` target open (creating if necessary)
+        // the shared store; only a project store must already exist.
+        let shared = match StoreSpec::parse(project) {
+            StoreSpec::Global => Some(StoreTarget::Global),
+            StoreSpec::Group { id, .. } => Some(StoreTarget::Group(id)),
+            _ => None,
+        };
+        if let Some(target) = shared {
+            return MemoryStore::open_target(&target, OpenMode::ReadWrite)
                 .await
                 .map_err(|e| error_response(ErrorCode::StoreNotInitialized, &e.to_string()));
         }
@@ -1885,10 +1870,10 @@ impl EngramDbServer {
     async fn check_cross_project_write(&self, project: Option<&str>) -> Result<(), String> {
         // The session's own project and the shared global store are always
         // permitted, without touching the registry or config.
-        match project {
-            None => return Ok(()),
-            Some("global") => return Ok(()),
-            Some(_) => {}
+        let spec = StoreSpec::parse(project);
+        match &spec {
+            StoreSpec::Default | StoreSpec::Global => return Ok(()),
+            _ => {}
         }
 
         // A `group:<name>` target is always allowed when the session's own
@@ -1896,9 +1881,7 @@ impl EngramDbServer {
         // built-in everyone group) is always allowed. A non-member group write
         // falls through to the `allow_cross_project_writes` config gate below,
         // so it is gated rather than hard-blocked.
-        if Self::is_group_target(project) {
-            let name = project.unwrap().strip_prefix("group:").unwrap();
-            let gid = engramdb::storage::paths::compute_group_id(name);
+        if let StoreSpec::Group { name, id: gid } = &spec {
             let registry = self
                 .registry
                 .load()
@@ -1910,7 +1893,7 @@ impl EngramDbServer {
             let own_id = engramdb::storage::project_id::compute_project_id(&self.effective_dir);
             if engramdb::storage::registry::subscriptions_of(&registry, &own_id)
                 .iter()
-                .any(|g| g == &gid)
+                .any(|g| g == gid)
             {
                 return Ok(());
             }
@@ -2583,7 +2566,7 @@ impl EngramDbServer {
     /// `engramdb::storage::paths::lancedb_dir`: the global store uses
     /// `GLOBAL_PROJECT_ID`; everything else hashes its directory.
     pub(crate) fn project_id_for_dir(&self, dir: &Path, project: Option<&str>) -> String {
-        if Self::is_global(project) {
+        if StoreSpec::parse(project) == StoreSpec::Global {
             return engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string();
         }
         engramdb::storage::project_id::compute_project_id(dir)
@@ -2616,11 +2599,17 @@ impl EngramDbServer {
     }
 
     fn resolve_pid_uncached(&self, project: Option<&str>) -> String {
-        match project {
-            None => engramdb::storage::project_id::compute_project_id(&self.effective_dir),
-            Some("global") => engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string(),
-            Some(s) if s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit()) => s.to_string(),
-            Some(p) => {
+        match StoreSpec::parse(project) {
+            StoreSpec::Default => {
+                engramdb::storage::project_id::compute_project_id(&self.effective_dir)
+            }
+            StoreSpec::Global => engramdb::storage::paths::GLOBAL_PROJECT_ID.to_string(),
+            StoreSpec::ProjectId(s) => s,
+            // A `group:<name>` input is bucketed exactly as before this used
+            // `StoreSpec`: as the relative path it spells, i.e. under the
+            // launching project, with the warning below.
+            StoreSpec::Group { .. } | StoreSpec::Path(_) => {
+                let p = project.unwrap_or_default();
                 let path = std::path::PathBuf::from(p);
                 if path.is_absolute() {
                     let canonical = path.canonicalize().unwrap_or(path);
@@ -2929,8 +2918,7 @@ impl EngramDbServer {
         // subscribed group — drives the per-memory `audience` filter so a
         // restricted shared memory only surfaces for a listed viewer. Like the
         // write gate, this visibility is registry-trust-level (advisory).
-        let targets_shared_store = Self::is_global(input.project.as_deref())
-            || Self::is_group_target(input.project.as_deref());
+        let targets_shared_store = StoreSpec::parse(input.project.as_deref()).is_shared();
         let (result, owners) = if targets_shared_store {
             let result = ops::query_memories(&engine, &query)
                 .await
@@ -4582,72 +4570,81 @@ impl EngramDbServer {
         }
 
         let memory_ids = input.memory_ids.unwrap_or_default();
+        // The ledger's own parser (ASCII case-insensitive, like the CLI and
+        // `harvest_ledger`), minus `unreviewed`: that is the state
+        // `clear=true` leaves, never a decision a caller records.
         let decision = match input.decision.as_deref() {
-            Some("deferred") => HarvestDecision::Deferred,
-            Some("skipped") => HarvestDecision::Skipped,
-            Some("harvested") => HarvestDecision::Harvested,
-            Some(other) => {
-                return Err(error_response(
-                    ErrorCode::ValidationError,
-                    &format!(
-                        "unknown decision '{other}' (expected harvested, skipped, or deferred)"
-                    ),
-                ))
-            }
+            Some(other) => match HarvestDecision::parse_known(other) {
+                Some(d) if d != HarvestDecision::Unreviewed => d,
+                _ => {
+                    return Err(error_response(
+                        ErrorCode::ValidationError,
+                        &format!(
+                            "unknown decision '{other}' (expected harvested, skipped, or deferred)"
+                        ),
+                    ))
+                }
+            },
             None if memory_ids.is_empty() => HarvestDecision::Skipped,
             None => HarvestDecision::Harvested,
         };
 
-        // Resolve exactly as `harvest_show` does, then fall back to the ledger
-        // for a session whose live transcript is already pruned. Recording the
-        // prefix verbatim wrote a key no session can ever match: the tool
-        // answered `{"decision":"harvested"}` while `harvest_list` kept
-        // re-offering the real session, forever.
-        let resolved = match self
+        // Resolve exactly as `harvest_show` does; `record_decision` then falls
+        // back to the ledger for a session whose live transcript is already
+        // pruned. Recording the prefix verbatim wrote a key no session can
+        // ever match: the tool answered `{"decision":"harvested"}` while
+        // `harvest_list` kept re-offering the real session, forever.
+        let resolved_live = self
             .resolve_harvest_session(&scope, &input.session_id, all_projects)
             .await
-        {
-            Ok(summary) => summary.session_id,
-            Err(live_err) => ops::harvest::resolve_ledger_key(ledger_dir, &input.session_id)
-                .map_err(|_| live_err)?,
-        };
-
-        let marked =
-            harvest_state::mark_harvested(ledger_dir, &resolved, &memory_ids, decision, input.note)
-                .map_err(|e| error_response(ErrorCode::ValidationError, &e.to_string()))?;
-        let entry = &marked.entry;
-
-        // The provenance link, from the one call that names both halves. Same
-        // ordering and the same reasoning as the summary below: reported, never
-        // fatal, because the ledger decision is already on disk. A failure is
-        // surfaced rather than swallowed — an unrecorded source means the
-        // transcript copy is not pinned, which is invisible until the day it is
-        // evicted.
+            .map(|summary| summary.session_id);
+        // The provenance link comes from the one call that names both halves.
+        // Same ordering and the same reasoning as the summary below: reported,
+        // never fatal, because the ledger decision is already on disk. A
+        // failure is surfaced rather than swallowed — an unrecorded source
+        // means the transcript copy is not pinned, which is invisible until the
+        // day it is evicted.
         //
         // The store open is inside the fallible half for that reason: `mark`
         // has always worked in a directory with no store (the ledger is the
         // only thing it needs), and making it fail there now would break
         // settling a session for anyone who has not run `init`.
-        let (pinned, provenance_error) = if memory_ids.is_empty() {
-            (0, None)
-        } else {
-            match self.open_store_for(input.project.as_deref()).await {
-                Ok(store) => match ops::link_memories(&store, &resolved, &memory_ids).await {
-                    Ok(report) => {
-                        let unresolved: Vec<String> =
-                            report.unresolved.iter().map(|(id, _)| id.clone()).collect();
-                        let err = (!unresolved.is_empty()).then(|| {
-                            format!(
-                                "these memory ids did not name a memory in this store, so the \
-                                 session is not recorded as their source: {}",
-                                unresolved.join(", ")
-                            )
-                        });
-                        (report.pinned(), err)
-                    }
-                    Err(e) => (0, Some(e.to_string())),
-                },
-                Err(e) => (0, Some(e)),
+        let report = ops::harvest::record_decision(
+            ledger_dir,
+            resolved_live,
+            &input.session_id,
+            decision,
+            &memory_ids,
+            input.note,
+            || self.open_store_for(input.project.as_deref()),
+        )
+        .await
+        .map_err(|e| match e {
+            ops::harvest::RecordError::Unresolved(live_err) => live_err,
+            ops::harvest::RecordError::Ledger(e) => {
+                error_response(ErrorCode::ValidationError, &e.to_string())
+            }
+        })?;
+        let resolved = report.resolved.clone();
+        let entry = &report.entry;
+        let pinned = report.links.pinned();
+        let provenance_error = match &report.provenance_error {
+            Some(ops::harvest::ProvenanceError::StoreOpen(e))
+            | Some(ops::harvest::ProvenanceError::Link(e)) => Some(e.clone()),
+            None => {
+                let unresolved: Vec<String> = report
+                    .links
+                    .unresolved
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                (!unresolved.is_empty()).then(|| {
+                    format!(
+                        "these memory ids did not name a memory in this store, so the \
+                         session is not recorded as their source: {}",
+                        unresolved.join(", ")
+                    )
+                })
             }
         };
 
@@ -4677,7 +4674,7 @@ impl EngramDbServer {
             // session `harvest_list` keeps offering after the model was told
             // it was settled — so `decision` above is the truth and this says
             // it is not what was asked for.
-            "superseded": marked.superseded,
+            "superseded": report.superseded,
             // How many memories now cite this session — and so how many
             // transcript copies this call pinned against eviction.
             "provenance_recorded": pinned,
@@ -4815,7 +4812,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<HarvestLedgerInput>,
     ) -> Result<String, String> {
-        use engramdb::storage::harvest_state;
+        use engramdb::storage::harvest_state::{self, HarvestDecision, HarvestStage};
         let _scope = self.scope("harvest_ledger", input.project.as_deref());
         reject_store_target(input.project.as_deref())?;
         // The ledger is metadata about exactly the sessions `harvest_list`
@@ -4836,45 +4833,38 @@ impl EngramDbServer {
         // Validated rather than silently non-matching: a typo'd stage would
         // otherwise return an empty ledger, which reads as "nothing is
         // indexed" — an answer about the store, not about the argument.
-        if let Some(stage) = input.stage.as_deref() {
-            if !["collected", "indexed", "compressed"].contains(&stage.to_lowercase().as_str()) {
-                return Err(error_response(
+        let wanted_stage = match input.stage.as_deref() {
+            None => None,
+            Some(stage) => Some(HarvestStage::parse_known(stage).ok_or_else(|| {
+                error_response(
                     ErrorCode::ValidationError,
                     &format!(
-                        "unknown stage '{stage}' (expected collected, indexed, or compressed)"
+                        "unknown stage '{stage}' (expected {})",
+                        HarvestStage::known_list()
                     ),
-                ));
-            }
-        }
-        if let Some(decision) = input.decision.as_deref() {
-            if !["harvested", "skipped", "deferred", "unreviewed"]
-                .contains(&decision.to_lowercase().as_str())
-            {
-                return Err(error_response(
+                )
+            })?),
+        };
+        let wanted_decision = match input.decision.as_deref() {
+            None => None,
+            Some(decision) => Some(HarvestDecision::parse_known(decision).ok_or_else(|| {
+                error_response(
                     ErrorCode::ValidationError,
                     &format!(
-                        "unknown decision '{decision}' (expected harvested, skipped, deferred, \
-                         or unreviewed)"
+                        "unknown decision '{decision}' (expected {})",
+                        HarvestDecision::known_list()
                     ),
-                ));
-            }
-        }
+                )
+            })?),
+        };
 
         let mut rows: Vec<serde_json::Value> = ledger
             .iter()
-            .filter(|(_, e)| {
-                input.decision.as_deref().is_none_or(|want| {
-                    format!("{:?}", e.decision()).to_lowercase() == want.to_lowercase()
-                })
-            })
+            .filter(|(_, e)| wanted_decision.is_none_or(|want| e.decision() == want))
             // The two axes the tool's own description advertises. Only
             // `decision` was ever applied, so an agent asking for the indexed
             // sessions got every session instead — and could not tell.
-            .filter(|(_, e)| {
-                input.stage.as_deref().is_none_or(|want| {
-                    format!("{:?}", e.stage).to_lowercase() == want.to_lowercase()
-                })
-            })
+            .filter(|(_, e)| wanted_stage.is_none_or(|want| e.stage == want))
             .filter(|(_, e)| !input.with_archive.unwrap_or(false) || e.archive.is_some())
             .map(|(id, e)| {
                 serde_json::json!({
@@ -4995,7 +4985,7 @@ fn harvest_hit_json(h: &engramdb::storage::ConversationHit) -> serde_json::Value
 /// `[security] allow_all_projects_harvest`, and aliasing would route around
 /// the gate.
 fn reject_store_target(project: Option<&str>) -> Result<(), String> {
-    if EngramDbServer::is_global(project) || EngramDbServer::is_group_target(project) {
+    if StoreSpec::parse(project).is_shared() {
         return Err(error_response(
             ErrorCode::ValidationError,
             "The harvest tools operate on a filesystem project, not a memory store: \

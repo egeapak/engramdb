@@ -157,6 +157,78 @@ pub enum HarvestStage {
     Compressed,
 }
 
+/// "a, b, or c" from the spellings, for the "expected …" half of a
+/// refusal.
+fn spelled_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+    }
+}
+
+impl HarvestDecision {
+    /// Every variant, in the order refusals list them.
+    pub const ALL: [Self; 4] = [
+        Self::Harvested,
+        Self::Skipped,
+        Self::Deferred,
+        Self::Unreviewed,
+    ];
+
+    /// The on-disk (serde) spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Harvested => "harvested",
+            Self::Skipped => "skipped",
+            Self::Deferred => "deferred",
+            Self::Unreviewed => "unreviewed",
+        }
+    }
+
+    /// Parse user input: a known spelling, ASCII case-insensitive, nothing
+    /// trimmed. `None` for anything else, so a typo is an error rather than
+    /// a filter that silently matches nothing. One parser for the CLI and
+    /// MCP, which used to accept different spellings of the same set.
+    pub fn parse_known(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|d| d.as_str().eq_ignore_ascii_case(s))
+    }
+
+    /// The known spellings as a refusal lists them:
+    /// `harvested, skipped, deferred, or unreviewed`.
+    pub fn known_list() -> String {
+        spelled_list(&Self::ALL.map(Self::as_str))
+    }
+}
+
+impl HarvestStage {
+    /// Every variant, in the order refusals list them.
+    pub const ALL: [Self; 3] = [Self::Collected, Self::Indexed, Self::Compressed];
+
+    /// The on-disk (serde) spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Collected => "collected",
+            Self::Indexed => "indexed",
+            Self::Compressed => "compressed",
+        }
+    }
+
+    /// [`HarvestDecision::parse_known`] for a stage.
+    pub fn parse_known(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|d| d.as_str().eq_ignore_ascii_case(s))
+    }
+
+    /// `collected, indexed, or compressed`.
+    pub fn known_list() -> String {
+        spelled_list(&Self::ALL.map(Self::as_str))
+    }
+}
+
 /// The state of one session, folded from every line written about it.
 #[derive(Debug, Clone)]
 pub struct HarvestEntry {
@@ -1342,6 +1414,62 @@ fn compaction_pause() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decision_and_stage_parse_known_round_trip() {
+        for d in HarvestDecision::ALL {
+            // `as_str` is the serde spelling, and every case parses back.
+            assert_eq!(serde_json::to_value(d).unwrap(), d.as_str());
+            assert_eq!(HarvestDecision::parse_known(d.as_str()), Some(d));
+            assert_eq!(
+                HarvestDecision::parse_known(&d.as_str().to_ascii_uppercase()),
+                Some(d)
+            );
+            assert!(HarvestDecision::known_list().contains(d.as_str()));
+        }
+        for st in HarvestStage::ALL {
+            assert_eq!(serde_json::to_value(st).unwrap(), st.as_str());
+            assert_eq!(HarvestStage::parse_known(st.as_str()), Some(st));
+            assert_eq!(
+                HarvestStage::parse_known("Indexed"),
+                Some(HarvestStage::Indexed)
+            );
+            assert!(HarvestStage::known_list().contains(st.as_str()));
+        }
+        // `ALL` names every variant: a new one fails to compile in these
+        // matches, and once given an index, fails here until `ALL` lists it.
+        let decision_index = |d: HarvestDecision| match d {
+            HarvestDecision::Harvested => 0,
+            HarvestDecision::Skipped => 1,
+            HarvestDecision::Deferred => 2,
+            HarvestDecision::Unreviewed => 3,
+        };
+        let stage_index = |s: HarvestStage| match s {
+            HarvestStage::Collected => 0,
+            HarvestStage::Indexed => 1,
+            HarvestStage::Compressed => 2,
+        };
+        for (i, d) in HarvestDecision::ALL.into_iter().enumerate() {
+            assert_eq!(decision_index(d), i);
+        }
+        for (i, s) in HarvestStage::ALL.into_iter().enumerate() {
+            assert_eq!(stage_index(s), i);
+        }
+        // The refusal text the front ends have always printed.
+        assert_eq!(
+            HarvestDecision::known_list(),
+            "harvested, skipped, deferred, or unreviewed"
+        );
+        assert_eq!(
+            HarvestStage::known_list(),
+            "collected, indexed, or compressed"
+        );
+        // Not trimmed, no look-alikes, no prefixes.
+        assert_eq!(HarvestDecision::parse_known(" skipped"), None);
+        assert_eq!(HarvestDecision::parse_known("skip"), None);
+        assert_eq!(HarvestDecision::parse_known(""), None);
+        assert_eq!(HarvestStage::parse_known("indexd"), None);
+    }
     use tempfile::TempDir;
 
     /// Is this session settled — i.e. would `list` stop offering it?

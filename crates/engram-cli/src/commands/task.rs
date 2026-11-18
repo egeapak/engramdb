@@ -3,7 +3,6 @@
 use crate::output::{outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops;
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Resolve the session id for `task current`: explicit flag, else the env
@@ -66,11 +65,7 @@ pub async fn run_task_complete(
     name: &str,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     let config = engramdb::storage::config::load_config_or_default(
         &store.project_dir.join(".engramdb").join("config.toml"),

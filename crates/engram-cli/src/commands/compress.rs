@@ -4,7 +4,6 @@ use crate::output::{outln, short_id, OutputFormatter};
 use crate::validation::validate_score;
 use anyhow::Result;
 use engramdb::ops;
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// List compression candidates and direct users to MCP mode.
@@ -19,11 +18,7 @@ pub async fn run_compress(
         validate_score(t, "threshold")?;
     }
 
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
     // An explicit `--threshold` wins; otherwise `[thresholds] compress`.
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = engramdb::storage::config::load_config_or_default(&config_path).await;

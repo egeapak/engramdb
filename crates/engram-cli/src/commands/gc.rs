@@ -4,7 +4,6 @@ use crate::output::{outln, short_id, OutputFormatter};
 use crate::validation::validate_score;
 use anyhow::Result;
 use engramdb::ops::gc_memories;
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Run garbage collection.
@@ -22,11 +21,7 @@ pub async fn run_gc(
         validate_score(t, "threshold")?;
     }
 
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
     let config_path = store.project_dir.join(".engramdb").join("config.toml");
     let config = engramdb::storage::config::load_config(&config_path).await?;
 

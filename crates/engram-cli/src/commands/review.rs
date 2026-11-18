@@ -4,7 +4,6 @@ use crate::output::{outln, OutputFormatter};
 use crate::prompter::Prompter;
 use anyhow::Result;
 use engramdb::ops::{self, parse_memory_type, review_memories, ReviewParams};
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Run interactive review of challenged/needs-review memories.
@@ -32,11 +31,7 @@ pub async fn run_review(
     formatter: &OutputFormatter,
     prompter: &dyn Prompter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     let type_filter = type_str.as_deref().map(parse_memory_type).transpose()?;
 
@@ -204,7 +199,7 @@ mod tests {
     use super::*;
     use crate::prompter::MockPrompter;
     use crate::testutil::{capturing_plain, interaction, snap_command, TempProject};
-    use engramdb::storage::{InMemoryRegistry, RegistryBackend};
+    use engramdb::storage::{InMemoryRegistry, MemoryStore, RegistryBackend};
     use engramdb::types::{Challenge, Memory, MemoryType, Provenance, Status};
     use tempfile::TempDir;
 

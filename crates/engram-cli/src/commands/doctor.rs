@@ -8,7 +8,6 @@ use engramdb::ops::{
     doctor, doctor_environment, validate_models, CheckStatus, DoctorSection,
     EnvironmentDoctorResult,
 };
-use engramdb::storage::MemoryStore;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -37,11 +36,7 @@ pub async fn run_doctor(
 
 /// Fast store-only health check (what MCP calls on session start).
 async fn run_store_check(dir: &Path, global: bool, formatter: &OutputFormatter) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
     let result = doctor(&store).await?;
 
     if result.healthy {
@@ -160,11 +155,7 @@ async fn run_environment_check(
     prompter: &dyn Prompter,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await.ok()
-    } else {
-        MemoryStore::open(dir).await.ok()
-    };
+    let store = super::open_store(dir, global).await.ok();
     let check_dir = store
         .as_ref()
         .map(|s| s.project_dir.clone())
@@ -295,11 +286,7 @@ async fn run_environment_check(
         // Re-run and report the POST-fix state. Without this, `doctor --fix
         // --yes` in CI exited 0 on a store the fixes did not actually repair,
         // and never told the user whether they worked.
-        let store = if global {
-            MemoryStore::open_global().await.ok()
-        } else {
-            MemoryStore::open(&check_dir).await.ok()
-        };
+        let store = super::open_store(&check_dir, global).await.ok();
         let daemon_check = engramdb::daemon::check_daemon().await;
         let after =
             doctor_environment(&check_dir, store.as_ref(), daemon_check, &supported_hooks).await;
@@ -361,11 +348,7 @@ fn print_enrichment_gaps(gaps: &engramdb::ops::EnrichmentGaps, formatter: &Outpu
 /// Load each downloaded/enabled model and run a tiny inference to confirm it
 /// works, rendering the results through the shared environment-doctor printer.
 async fn run_validate(dir: &Path, global: bool, formatter: &OutputFormatter) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await.ok()
-    } else {
-        MemoryStore::open(dir).await.ok()
-    };
+    let store = super::open_store(dir, global).await.ok();
     let config_dir = store
         .as_ref()
         .map(|s| s.project_dir.clone())

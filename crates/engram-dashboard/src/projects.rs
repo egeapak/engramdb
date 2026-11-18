@@ -31,7 +31,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use engramdb::storage::{
     detect_worktree_main, manifest, paths, project_id::compute_project_id, FileRegistry,
-    MemoryStore, Registry, RegistryBackend, SchemaState,
+    MemoryStore, Registry, RegistryBackend, SchemaState, StoreTarget,
 };
 use serde::Serialize;
 
@@ -51,6 +51,18 @@ pub struct Location {
     pub id: String,
     pub kind: StoreKind,
     pub root: PathBuf,
+}
+
+impl Location {
+    /// The store this location names: a group by its id, a project by the
+    /// root it is keyed by now.
+    pub fn target(&self) -> StoreTarget {
+        match self.kind {
+            StoreKind::Global => StoreTarget::Global,
+            StoreKind::Group => StoreTarget::Group(self.id.clone()),
+            StoreKind::Project => StoreTarget::Project(self.root.clone()),
+        }
+    }
 }
 
 /// One row of `/api/projects`. Every string here except `id` and `kind` is

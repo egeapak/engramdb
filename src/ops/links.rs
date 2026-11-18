@@ -56,7 +56,7 @@ use anyhow::{anyhow, bail, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::storage::{MemoryStore, StorageError};
+use crate::storage::{MemoryStore, OpenMode, StorageError};
 use crate::types::{Memory, MemoryType, Status, Visibility};
 
 pub use crate::storage::edge_index::{EdgeField, EdgeRow};
@@ -104,29 +104,29 @@ macro_rules! refuse {
 /// group id, the global id) unchanged. An id, never a path: a path differs
 /// between checkouts and machines, and the file travels with the repository.
 pub fn canonical_store_id(spec: &str) -> Result<String> {
+    use crate::storage::{paths, StoreSpec};
     let spec = spec.trim();
-    if spec == "global" || spec == crate::storage::paths::GLOBAL_PROJECT_ID {
-        return Ok(crate::storage::paths::GLOBAL_PROJECT_ID.to_string());
-    }
-    if let Some(name) = spec.strip_prefix("group:") {
-        if name.trim().is_empty() {
-            refuse!("empty group name in store spec {spec:?}");
-        }
-        return Ok(crate::storage::paths::compute_group_id(name));
-    }
-    if crate::storage::paths::is_canonical_group_id(spec) {
+    // The canonical ids are accepted as themselves; `StoreSpec` (the front
+    // ends' spelling) would read both as paths.
+    if spec == paths::GLOBAL_PROJECT_ID || paths::is_canonical_group_id(spec) {
         return Ok(spec.to_string());
     }
-    if spec.len() == 16 && spec.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Ok(spec.to_ascii_lowercase());
+    match StoreSpec::parse(Some(spec)) {
+        StoreSpec::Global => Ok(paths::GLOBAL_PROJECT_ID.to_string()),
+        StoreSpec::Group { name, .. } if name.trim().is_empty() => {
+            refuse!("empty group name in store spec {spec:?}")
+        }
+        StoreSpec::Group { id, .. } => Ok(id),
+        StoreSpec::ProjectId(id) => Ok(id.to_ascii_lowercase()),
+        // An id, never a path (see above).
+        StoreSpec::Default | StoreSpec::Path(_) => refuse!(
+            "unrecognized store {spec:?}: expected \"global\", \"group:<name>\" or a 16-character \
+             project id"
+        ),
     }
-    refuse!(
-        "unrecognized store {spec:?}: expected \"global\", \"group:<name>\" or a 16-character \
-         project id"
-    )
 }
 
-/// Open the store `id` names ([`canonical_store_id`] form). `read_only`
+/// Open the store `id` names ([`canonical_store_id`] form). `OpenMode::ReadOnly`
 /// uses the side-effect-free open — the right choice for an existence check,
 /// which must not migrate or create anything in another project.
 ///
@@ -135,39 +135,27 @@ pub fn canonical_store_id(spec: &str) -> Result<String> {
 /// ([`crate::storage::paths::is_canonical_store_id`]) is refused before it
 /// reaches the registry or a path join — `__g_/../..` would otherwise open an
 /// arbitrary directory. Every caller reads a failed open as `Unknown`.
-pub async fn open_store_by_id(id: &str, read_only: bool) -> Result<MemoryStore> {
-    use crate::storage::paths;
+pub async fn open_store_by_id(id: &str, mode: OpenMode) -> Result<MemoryStore> {
+    use crate::storage::{paths, StoreTarget};
     if !paths::is_canonical_store_id(id) {
         refuse!("{id:?} is not a store id");
     }
-    if id == paths::GLOBAL_PROJECT_ID {
-        return Ok(if read_only {
-            MemoryStore::open_global_read_only().await?
-        } else {
-            MemoryStore::open_global().await?
-        });
-    }
-    if paths::is_group_id(id) {
-        return Ok(if read_only {
-            MemoryStore::open_group_read_only(id).await?
-        } else {
-            MemoryStore::open_group(id).await?
-        });
-    }
-    use crate::storage::RegistryBackend;
-    let registry = crate::storage::FileRegistry::global()?.load().await?;
-    let root = crate::storage::resolve_root_project_id(&registry, id);
-    let entry = registry
-        .projects
-        .iter()
-        .find(|e| e.project_id == root)
-        .ok_or_else(|| anyhow!("project {id} is not in the registry"))?;
-    let dir = std::path::PathBuf::from(&entry.project_path);
-    Ok(if read_only {
-        MemoryStore::open_read_only(&dir).await?
+    let target = if id == paths::GLOBAL_PROJECT_ID {
+        StoreTarget::Global
+    } else if paths::is_group_id(id) {
+        StoreTarget::Group(id.to_string())
     } else {
-        MemoryStore::open(&dir).await?
-    })
+        use crate::storage::RegistryBackend;
+        let registry = crate::storage::FileRegistry::global()?.load().await?;
+        let root = crate::storage::resolve_root_project_id(&registry, id);
+        let entry = registry
+            .projects
+            .iter()
+            .find(|e| e.project_id == root)
+            .ok_or_else(|| anyhow!("project {id} is not in the registry"))?;
+        StoreTarget::Project(std::path::PathBuf::from(&entry.project_path))
+    };
+    Ok(MemoryStore::open_target(&target, mode).await?)
 }
 
 /// A project's shared memories are committed to its repository; nothing
@@ -275,7 +263,7 @@ async fn resolve_target(store: &MemoryStore, dst: &str, dst_store: Option<&str>)
                 state,
             })
         }
-        Some(other) => match open_store_by_id(other, true).await {
+        Some(other) => match open_store_by_id(other, OpenMode::ReadOnly).await {
             Ok(target_store) => {
                 let id = target_store.resolve_id(dst).await.map_err(|e| match e {
                     StorageError::NotFound(id) => anyhow::Error::from(StorageError::NotFound(id))
@@ -1696,7 +1684,7 @@ async fn carry_links_inner(
             }
         }
         for (sid, ids) in by_store {
-            let Ok(other) = open_store_by_id(sid, true).await else {
+            let Ok(other) = open_store_by_id(sid, OpenMode::ReadOnly).await else {
                 continue;
             };
             let Ok(found) = other.get_batch(&ids).await else {
@@ -1923,7 +1911,7 @@ impl EndStates {
             }
         }
         for (sid, ids) in by_store {
-            let found = match open_store_by_id(sid, true).await {
+            let found = match open_store_by_id(sid, OpenMode::ReadOnly).await {
                 Ok(other) => other.batch_exists(&ids).await.ok(),
                 Err(_) => None,
             };
@@ -2302,7 +2290,7 @@ pub async fn edge_health(store: &MemoryStore) -> Result<EdgeHealth> {
     for (sid, ids) in foreign {
         // Absence of evidence is not evidence of deletion: a store that will
         // not open, or will not answer, leaves its edges unknown.
-        let opened = open_store_by_id(&sid, true).await.ok();
+        let opened = open_store_by_id(&sid, OpenMode::ReadOnly).await.ok();
         let found = match &opened {
             Some(other) => other.batch_exists(&ids).await.ok(),
             None => None,
@@ -3728,7 +3716,10 @@ mod tests {
     #[tokio::test]
     async fn path_like_store_ids_never_reach_the_filesystem() {
         for bad in ["__g_/../../../../tmp", "__g_..", "../0123456789ab"] {
-            let err = open_store_by_id(bad, true).await.err().unwrap();
+            let err = open_store_by_id(bad, OpenMode::ReadOnly)
+                .await
+                .err()
+                .unwrap();
             assert!(
                 err.downcast_ref::<LinkRefused>().is_some(),
                 "{bad}: {err:#}"

@@ -316,29 +316,16 @@ impl MemoryStore {
             .await?;
         }
 
-        let project_id = paths::GLOBAL_PROJECT_ID.to_string();
-
-        // Create global LanceDB directory
-        let lance_path = paths::global_lancedb_dir()?;
-        paths::ensure_private_parent(&lance_path)?;
-        async_fs::create_dir_all(&lance_path).await?;
-
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
-
-        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
-            .await
-            .map_err(StorageError::index("global init"))?;
-
-        let store = Self {
-            project_dir: global_dir,
-            project_id,
-            lance_index,
-        };
-        // Release before migrating (a reindex re-acquires this lock), mirroring
-        // `init`.
-        drop(_lock);
-        store.migrate_schema_if_needed().await?;
-        Ok(store)
+        Self::open_writable_at(
+            global_dir,
+            paths::GLOBAL_PROJECT_ID.to_string(),
+            &paths::global_lancedb_dir()?,
+            &config,
+            "global init",
+            Some(_lock),
+        )
+        .await
     }
 
     /// Open the global memory store, creating it if necessary.
@@ -350,25 +337,17 @@ impl MemoryStore {
             return Self::init_global().await;
         }
 
-        let project_id = paths::GLOBAL_PROJECT_ID.to_string();
-        let lance_path = paths::global_lancedb_dir()?;
-        paths::ensure_private_parent(&lance_path)?;
-        async_fs::create_dir_all(&lance_path).await?;
-
         let config_path = engramdb_dir.join("config.toml");
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
-
-        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
-            .await
-            .map_err(StorageError::index("global open"))?;
-
-        let store = Self {
-            project_dir: global_dir,
-            project_id,
-            lance_index,
-        };
-        store.migrate_schema_if_needed().await?;
-        Ok(store)
+        Self::open_writable_at(
+            global_dir,
+            paths::GLOBAL_PROJECT_ID.to_string(),
+            &paths::global_lancedb_dir()?,
+            &config,
+            "global open",
+            None,
+        )
+        .await
     }
 
     /// Returns `true` if this store is the global memory store.
@@ -421,29 +400,16 @@ impl MemoryStore {
             .await?;
         }
 
-        let project_id = group_id.to_string();
-
-        // Create group LanceDB directory
-        let lance_path = paths::group_lancedb_dir(group_id)?;
-        paths::ensure_private_parent(&lance_path)?;
-        async_fs::create_dir_all(&lance_path).await?;
-
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
-
-        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
-            .await
-            .map_err(StorageError::index("group init"))?;
-
-        let store = Self {
-            project_dir: group_dir,
-            project_id,
-            lance_index,
-        };
-        // Release before migrating (a reindex re-acquires this lock), mirroring
-        // `init`.
-        drop(_lock);
-        store.migrate_schema_if_needed().await?;
-        Ok(store)
+        Self::open_writable_at(
+            group_dir,
+            group_id.to_string(),
+            &paths::group_lancedb_dir(group_id)?,
+            &config,
+            "group init",
+            Some(_lock),
+        )
+        .await
     }
 
     /// Open a named group memory store, creating it if necessary.
@@ -455,25 +421,17 @@ impl MemoryStore {
             return Self::init_group(group_id).await;
         }
 
-        let project_id = group_id.to_string();
-        let lance_path = paths::group_lancedb_dir(group_id)?;
-        paths::ensure_private_parent(&lance_path)?;
-        async_fs::create_dir_all(&lance_path).await?;
-
         let config_path = engramdb_dir.join("config.toml");
         let config: engram_types::EngramConfig = load_config_or_default(&config_path).await;
-
-        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
-            .await
-            .map_err(StorageError::index("group open"))?;
-
-        let store = Self {
-            project_dir: group_dir,
-            project_id,
-            lance_index,
-        };
-        store.migrate_schema_if_needed().await?;
-        Ok(store)
+        Self::open_writable_at(
+            group_dir,
+            group_id.to_string(),
+            &paths::group_lancedb_dir(group_id)?,
+            &config,
+            "group open",
+            None,
+        )
+        .await
     }
 
     /// Returns `true` if this store is a named group memory store.
@@ -514,24 +472,56 @@ impl MemoryStore {
             }
         };
 
-        // Open (or create) global LanceDB
+        // Open (or create) global LanceDB. Every open (the hot path for all
+        // CLI commands and the MCP server) must migrate a store that predates
+        // the current schema, exactly like the init/global paths — otherwise
+        // reads that project the new columns fail and writes hit a schema
+        // mismatch on an un-upgraded table. `open_writable_at` does both.
         let lance_path = paths::lancedb_dir(&project_id)?;
-        paths::ensure_private_parent(&lance_path)?;
-        async_fs::create_dir_all(&lance_path).await?;
+        Self::open_writable_at(
+            dir.to_path_buf(),
+            project_id,
+            &lance_path,
+            &config,
+            "open",
+            None,
+        )
+        .await
+    }
 
-        let lance_index = LanceIndex::new(&lance_path, config.embeddings.dimensions)
+    /// The tail every writable open but [`Self::init`] shares: create the
+    /// LanceDB directory (owner-only parent), open the index at the
+    /// configured width, then migrate the schema if it is behind.
+    ///
+    /// `lock` is the store's write lock when the caller holds it (the lazy
+    /// creation paths). It is released after the index is open and before
+    /// the migration, because the migration's reindex re-acquires it and a
+    /// second acquire in this process would deadlock.
+    ///
+    /// The config is the caller's: [`Self::open`] and the shared-store opens
+    /// load it with different fallbacks and warnings. `init` is not routed
+    /// here because its registry write sits between the index open and the
+    /// migration, and moving the index open after it would change what a
+    /// failed init leaves behind.
+    async fn open_writable_at(
+        project_dir: PathBuf,
+        project_id: String,
+        lance_path: &Path,
+        config: &engram_types::EngramConfig,
+        what: &'static str,
+        lock: Option<write_lock::WriteLockGuard>,
+    ) -> Result<Self> {
+        paths::ensure_private_parent(lance_path)?;
+        async_fs::create_dir_all(lance_path).await?;
+        let lance_index = LanceIndex::new(lance_path, config.embeddings.dimensions)
             .await
-            .map_err(StorageError::index("open"))?;
-
+            .map_err(StorageError::index(what))?;
         let store = Self {
-            project_dir: dir.to_path_buf(),
+            project_dir,
             project_id,
             lance_index,
         };
-        // Every open (the hot path for all CLI commands and the MCP server) must
-        // migrate a store that predates the current schema, exactly like the
-        // init/global paths — otherwise reads that project the new columns fail
-        // and writes hit a schema mismatch on an un-upgraded table.
+        drop(lock);
         store.migrate_schema_if_needed().await?;
         Ok(store)
     }
