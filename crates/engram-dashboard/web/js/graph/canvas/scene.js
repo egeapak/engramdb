@@ -127,8 +127,21 @@ export function labelBox(S, i, x, y, anchor, weight = 700) {
   return [x0, y - 14, x0 + w, y + 6];
 }
 
+/**
+ * Labels are drawn straight onto an opaque layer when its `over` part is
+ * behind, and through the transparent `over` part otherwise. Chrome gives
+ * text on an opaque canvas LCD (subpixel) antialiasing, which a
+ * transparent one never gets, so the same label looked different by path
+ * (colour fringes, up to ~100 levels; Chrome 157). On an opaque canvas
+ * `source-atop` draws exactly what `source-over` does (every pixel is
+ * already opaque), and Skia keeps LCD text for `source-over` only.
+ */
+const opaque = (ctx) => typeof ctx.getContextAttributes === 'function' && ctx.getContextAttributes().alpha === false;
+
 export function drawLabels(ctx, S, items) {
   if (!items.length) return;
+  const op = ctx.globalCompositeOperation;
+  if (opaque(ctx)) ctx.globalCompositeOperation = 'source-atop';
   ctx.globalAlpha = 1;
   ctx.lineJoin = 'round';
   ctx.lineWidth = HALO;
@@ -145,6 +158,7 @@ export function drawLabels(ctx, S, items) {
     ctx.strokeText(S.labels[it.i], it.x, it.y);
     ctx.fillText(S.labels[it.i], it.x, it.y);
   }
+  ctx.globalCompositeOperation = op;
 }
 
 /** The stub lines (app.css `.xs-stub`): `state` full | faded | lit, `only` a memory's own. */
