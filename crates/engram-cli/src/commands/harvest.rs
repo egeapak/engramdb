@@ -1267,25 +1267,24 @@ releases a pin.",
 }
 
 fn parse_decision(value: &str) -> Result<HarvestDecision> {
-    match value.to_ascii_lowercase().as_str() {
-        "harvested" => Ok(HarvestDecision::Harvested),
-        "skipped" => Ok(HarvestDecision::Skipped),
-        "deferred" => Ok(HarvestDecision::Deferred),
-        "unreviewed" => Ok(HarvestDecision::Unreviewed),
-        other => bail!(
-            "unknown decision '{other}' (expected harvested, skipped, deferred, or unreviewed)"
-        ),
-    }
+    HarvestDecision::parse_known(value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown decision '{}' (expected {})",
+            value.to_ascii_lowercase(),
+            HarvestDecision::known_list()
+        )
+    })
 }
 
 fn parse_stage(value: &str) -> Result<harvest_state::HarvestStage> {
     use harvest_state::HarvestStage;
-    match value.to_ascii_lowercase().as_str() {
-        "collected" => Ok(HarvestStage::Collected),
-        "indexed" => Ok(HarvestStage::Indexed),
-        "compressed" => Ok(HarvestStage::Compressed),
-        other => bail!("unknown stage '{other}' (expected collected, indexed, or compressed)"),
-    }
+    HarvestStage::parse_known(value).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown stage '{}' (expected {})",
+            value.to_ascii_lowercase(),
+            HarvestStage::known_list()
+        )
+    })
 }
 
 /// Parse a `--older-than` value like `90d` into a day count.

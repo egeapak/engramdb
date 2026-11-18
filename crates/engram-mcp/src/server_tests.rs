@@ -6323,6 +6323,30 @@ async fn harvest_mark_decisions_and_clear() {
     );
 }
 
+/// `unreviewed` is the state `clear=true` writes, never a decision a caller
+/// records: `harvest_mark` deliberately accepts only three of the four
+/// decisions the ledger knows, and sharing the parser with `harvest_ledger`
+/// must not widen that.
+#[tokio::test]
+async fn harvest_mark_refuses_unreviewed() {
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "s-a");
+
+    let mut input = mark_input("s-a", None);
+    input.decision = Some("unreviewed".into());
+    let err = parse_err(&server.harvest_mark(Parameters(input)).await);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("unknown decision 'unreviewed'")
+            && message.contains("expected harvested, skipped, or deferred"),
+        "{err}"
+    );
+    // Nothing was recorded.
+    let ledger = engramdb::storage::harvest_state::read_harvested(dir.path());
+    assert!(!ledger.contains_key("s-a"), "{ledger:?}");
+}
+
 #[tokio::test]
 async fn harvest_mark_rejects_a_traversing_session_id() {
     let (_dir, server) = setup().await;

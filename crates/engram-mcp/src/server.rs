@@ -4803,7 +4803,7 @@ impl EngramDbServer {
         &self,
         Parameters(input): Parameters<HarvestLedgerInput>,
     ) -> Result<String, String> {
-        use engramdb::storage::harvest_state;
+        use engramdb::storage::harvest_state::{self, HarvestDecision, HarvestStage};
         let _scope = self.scope("harvest_ledger", input.project.as_deref());
         reject_store_target(input.project.as_deref())?;
         // The ledger is metadata about exactly the sessions `harvest_list`
@@ -4824,45 +4824,38 @@ impl EngramDbServer {
         // Validated rather than silently non-matching: a typo'd stage would
         // otherwise return an empty ledger, which reads as "nothing is
         // indexed" — an answer about the store, not about the argument.
-        if let Some(stage) = input.stage.as_deref() {
-            if !["collected", "indexed", "compressed"].contains(&stage.to_lowercase().as_str()) {
-                return Err(error_response(
+        let wanted_stage = match input.stage.as_deref() {
+            None => None,
+            Some(stage) => Some(HarvestStage::parse_known(stage).ok_or_else(|| {
+                error_response(
                     ErrorCode::ValidationError,
                     &format!(
-                        "unknown stage '{stage}' (expected collected, indexed, or compressed)"
+                        "unknown stage '{stage}' (expected {})",
+                        HarvestStage::known_list()
                     ),
-                ));
-            }
-        }
-        if let Some(decision) = input.decision.as_deref() {
-            if !["harvested", "skipped", "deferred", "unreviewed"]
-                .contains(&decision.to_lowercase().as_str())
-            {
-                return Err(error_response(
+                )
+            })?),
+        };
+        let wanted_decision = match input.decision.as_deref() {
+            None => None,
+            Some(decision) => Some(HarvestDecision::parse_known(decision).ok_or_else(|| {
+                error_response(
                     ErrorCode::ValidationError,
                     &format!(
-                        "unknown decision '{decision}' (expected harvested, skipped, deferred, \
-                         or unreviewed)"
+                        "unknown decision '{decision}' (expected {})",
+                        HarvestDecision::known_list()
                     ),
-                ));
-            }
-        }
+                )
+            })?),
+        };
 
         let mut rows: Vec<serde_json::Value> = ledger
             .iter()
-            .filter(|(_, e)| {
-                input.decision.as_deref().is_none_or(|want| {
-                    format!("{:?}", e.decision()).to_lowercase() == want.to_lowercase()
-                })
-            })
+            .filter(|(_, e)| wanted_decision.is_none_or(|want| e.decision() == want))
             // The two axes the tool's own description advertises. Only
             // `decision` was ever applied, so an agent asking for the indexed
             // sessions got every session instead — and could not tell.
-            .filter(|(_, e)| {
-                input.stage.as_deref().is_none_or(|want| {
-                    format!("{:?}", e.stage).to_lowercase() == want.to_lowercase()
-                })
-            })
+            .filter(|(_, e)| wanted_stage.is_none_or(|want| e.stage == want))
             .filter(|(_, e)| !input.with_archive.unwrap_or(false) || e.archive.is_some())
             .map(|(id, e)| {
                 serde_json::json!({
