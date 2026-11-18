@@ -3,7 +3,6 @@
 use crate::output::{errraw, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::{delete_memory, get_memory};
-use engramdb::storage::MemoryStore;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -23,11 +22,7 @@ pub async fn run_delete(
     force: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     // Get the memory to confirm what we're deleting
     let memory = get_memory(&store, id).await?;

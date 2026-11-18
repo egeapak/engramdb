@@ -131,11 +131,7 @@ pub async fn run_rollback(
     // `MemoryStore::reindex` takes the same non-reentrant advisory lock.
     drop(_write_lock);
     if !dry_run && rolled_back > 0 {
-        let opened = if global {
-            engramdb::storage::MemoryStore::open_global().await
-        } else {
-            engramdb::storage::MemoryStore::open(dir).await
-        };
+        let opened = super::open_store(dir, global).await;
         match opened {
             Ok(store) => {
                 if let Err(e) = store.reindex().await {

@@ -3,7 +3,6 @@
 use crate::output::OutputFormatter;
 use anyhow::Result;
 use engramdb::ops::challenge_memory;
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Parameters for the challenge command.
@@ -24,11 +23,7 @@ pub async fn run_challenge(
     params: ChallengeParams,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
     // Validate the edge before recording the challenge: a bad `--against`
     // must fail the whole command, not leave a challenge that a retry
     // would then record twice.

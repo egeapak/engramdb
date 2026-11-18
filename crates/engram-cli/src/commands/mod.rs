@@ -85,3 +85,22 @@ pub(crate) async fn staleness_config(
         .await
         .index
 }
+
+/// Open the store a command's `--global` flag selects: the global store
+/// (created when absent) or the project store in `dir` (which must exist).
+///
+/// One helper rather than the same `if global { open_global } else { open }`
+/// in every handler, so a rule about which store a flag names lives in one
+/// place. Writable on both tiers, exactly as the inline opens were.
+pub(crate) async fn open_store(
+    dir: &std::path::Path,
+    global: bool,
+) -> engramdb::storage::Result<engramdb::storage::MemoryStore> {
+    use engramdb::storage::{MemoryStore, OpenMode, StoreTarget};
+    let target = if global {
+        StoreTarget::Global
+    } else {
+        StoreTarget::project(dir)
+    };
+    MemoryStore::open_target(&target, OpenMode::ReadWrite).await
+}

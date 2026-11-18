@@ -4,7 +4,7 @@ use super::staleness_config;
 use crate::output::{outln, outraw, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::get_memory;
-use engramdb::storage::{memory_file, paths, MemoryStore};
+use engramdb::storage::{memory_file, paths};
 use engramdb::types::Visibility;
 use std::path::Path;
 use tokio::fs;
@@ -29,11 +29,7 @@ pub async fn run_get(
     path_only: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
     if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);
     }

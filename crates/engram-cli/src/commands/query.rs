@@ -53,10 +53,8 @@ pub async fn run_query(
 ) -> Result<()> {
     let store = if let Some(ref name) = group {
         MemoryStore::open_group(&engramdb::storage::paths::compute_group_id(name)).await?
-    } else if global {
-        MemoryStore::open_global().await?
     } else {
-        MemoryStore::open(dir).await?
+        super::open_store(dir, global).await?
     };
     if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);

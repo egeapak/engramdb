@@ -162,10 +162,8 @@ pub async fn run_update(
 
     let store = if let Some(gid) = &group_id {
         MemoryStore::open_group(gid).await?
-    } else if global {
-        MemoryStore::open_global().await?
     } else {
-        MemoryStore::open(dir).await?
+        super::open_store(dir, global).await?
     };
 
     // Build engine for auto-embedding on update. `MemoryStore` is `Clone` —
