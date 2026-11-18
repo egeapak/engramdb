@@ -128,20 +128,25 @@ export function labelBox(S, i, x, y, anchor, weight = 700) {
 }
 
 /**
- * Labels are drawn straight onto an opaque layer when its `over` part is
- * behind, and through the transparent `over` part otherwise. Chrome gives
- * text on an opaque canvas LCD (subpixel) antialiasing, which a
- * transparent one never gets, so the same label looked different by path
+ * Text is drawn straight onto an opaque layer when a part is behind, and
+ * through a transparent part (or the patch) otherwise. Chrome gives text on
+ * an opaque canvas LCD (subpixel) antialiasing, which a transparent one
+ * never gets, so the same label or scope name looked different by path
  * (colour fringes, up to ~100 levels; Chrome 157). On an opaque canvas
  * `source-atop` draws exactly what `source-over` does (every pixel is
- * already opaque), and Skia keeps LCD text for `source-over` only.
+ * already opaque), and Skia keeps LCD text for `source-over` only. Every
+ * text draw goes through `greyText`, which returns the composite to put back.
  */
 const opaque = (ctx) => typeof ctx.getContextAttributes === 'function' && ctx.getContextAttributes().alpha === false;
+function greyText(ctx) {
+  const op = ctx.globalCompositeOperation;
+  if (opaque(ctx)) ctx.globalCompositeOperation = 'source-atop';
+  return op;
+}
 
 export function drawLabels(ctx, S, items) {
   if (!items.length) return;
-  const op = ctx.globalCompositeOperation;
-  if (opaque(ctx)) ctx.globalCompositeOperation = 'source-atop';
+  const op = greyText(ctx);
   ctx.globalAlpha = 1;
   ctx.lineJoin = 'round';
   ctx.lineWidth = HALO;
@@ -187,6 +192,7 @@ export function drawStubs(ctx, S, fr, state, only) {
 export function drawTags(ctx, S, fr, hot, focused, onlyMarked) {
   if (!S.tags.length) return;
   const T = S.T;
+  const op = greyText(ctx);
   ctx.textBaseline = 'alphabetic';
   S.tags.forEach((tag, j) => {
     const isHot = j === hot;
@@ -217,13 +223,19 @@ export function drawTags(ctx, S, fr, hot, focused, onlyMarked) {
       ctx.fillText(b, x + wa, y);
     }
   });
+  ctx.globalCompositeOperation = op;
 }
 
 const hookFrame = (S, fr) => ({ scale: fr.scale, px: fr.dpr * fr.scale, font: S.font });
 
 const drawBelow = (ctx, S, fr) => S.hooks.drawBelow(ctx, backdropOf(S), S.T, hookFrame(S, fr));
 const drawEdgesOf = (ctx, S, fr) => S.hooks.drawEdges(ctx, S.recs, S.T, { scale: fr.scale, lit: false });
-const drawAbove = (ctx, S, fr) => S.hooks.drawAbove(ctx, backdropOf(S), S.T, hookFrame(S, fr));
+// (the style's scope names are text too: `greyText`)
+const drawAbove = (ctx, S, fr) => {
+  const op = greyText(ctx);
+  S.hooks.drawAbove(ctx, backdropOf(S), S.T, hookFrame(S, fr));
+  ctx.globalCompositeOperation = op;
+};
 const drawNodesOf = (ctx, S) => S.hooks.drawNodes(ctx, S.nodes, S.T, { focused: null, version: S.nodeVersion });
 
 /** The parts (module docs): `opaque` (drawn over the background) and the drawing, in layout units. */
