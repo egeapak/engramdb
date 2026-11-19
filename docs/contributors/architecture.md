@@ -92,7 +92,7 @@ If you put logic in `crates/engram-cli/src/commands/add.rs` instead of `src/ops/
 
 ## Storage and LanceDB
 
-`MemoryStore` (in `crates/engram-storage/src/store.rs`) is the orchestrator. It owns:
+`MemoryStore` (in `crates/engram-storage/src/store/`) is the orchestrator. It owns:
 
 - the project's `.engramdb/` directory,
 - a single LanceDB table holding **both** metadata-for-filtering and vectors,
