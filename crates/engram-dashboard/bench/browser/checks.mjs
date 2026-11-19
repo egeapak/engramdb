@@ -8,7 +8,12 @@
 //   node bench/browser/checks.mjs --stores /tmp/dash-bench \
 //     [--bin target/release/engramdb] [--assets web] [--views s60:full,s1k:all,s10k:open]
 //     [--styles plain,grid] [--dpr 2] [--viewport 1280x860] [--json out.json]
-//     [--chrome /usr/bin/google-chrome]
+//     [--chrome /usr/bin/google-chrome] [--dump-dir out/]
+//
+// `--dump-dir`: when a copied-versus-whole or theme pixel bound fails, write
+// both drawings and a mask of the differing pixels there as PNG files. The
+// failure's detail says where the pixels differ (`box`) and what share of
+// them carry colour fringes (`fringeNow`, `fringeKept`) either way.
 //
 // Per view and style it checks:
 //   a11y_list      one focusable element per drawn memory, with the SVG `<g>`'s
@@ -53,7 +58,7 @@
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -181,6 +186,50 @@ const PIXEL_DIFF = () => {
   return { share: n / (d.length / 4), max };
 };
 
+/**
+ * Why a pixel bound failed, in the page: where the differing pixels are, how
+ * many of them carry colour fringes (LCD text antialiasing paints R, G and B
+ * apart; a grey-on-white drawing keeps them equal), and the two drawings plus
+ * a mask as PNG data URLs, for `--dump-dir`.
+ */
+const PIXEL_DUMP = (images) => {
+  const c = [...document.querySelectorAll('.g-canvas canvas.g-cv-base, .g-canvas canvas.g-cv-dim')].find((x) => !x.hidden);
+  const w = c.width;
+  const d = c.getContext('2d').getImageData(0, 0, w, c.height).data;
+  const k = window.__px;
+  if (!k || k.length !== d.length) return null;
+  const mask = new Uint8ClampedArray(d.length).fill(255);
+  const spread = (a, i) => Math.max(a[i], a[i + 1], a[i + 2]) - Math.min(a[i], a[i + 1], a[i + 2]);
+  let n = 0;
+  let fringeNow = 0;
+  let fringeKept = 0;
+  const box = [Infinity, Infinity, -1, -1];
+  for (let i = 0; i < d.length; i += 4) {
+    const m = Math.max(Math.abs(d[i] - k[i]), Math.abs(d[i + 1] - k[i + 1]), Math.abs(d[i + 2] - k[i + 2]));
+    if (m <= 8) continue;
+    n++;
+    const x = (i / 4) % w;
+    const y = Math.floor(i / 4 / w);
+    box[0] = Math.min(box[0], x);
+    box[1] = Math.min(box[1], y);
+    box[2] = Math.max(box[2], x);
+    box[3] = Math.max(box[3], y);
+    if (spread(d, i) > 24) fringeNow++;
+    if (spread(k, i) > 24) fringeKept++;
+    mask[i + 1] = mask[i + 2] = 0;
+  }
+  const png = (data) => {
+    const cv = document.createElement('canvas');
+    cv.width = w;
+    cv.height = c.height;
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(data), w, c.height), 0, 0);
+    return cv.toDataURL('image/png');
+  };
+  const out = { differing: n, box: n ? box : null, fringeNow: n ? fringeNow / n : 0, fringeKept: n ? fringeKept / n : 0, size: [w, c.height] };
+  if (images) out.images = { kept: png(k), now: png(d), mask: png(mask) };
+  return out;
+};
+
 /** Until the canvas host owes nothing (its margin and hidden layer are drawn in idle time). */
 const layersIdle = (p) => p.waitForFunction(() => { const c = document.querySelector('.g-canvas'); return !c || c.graphDebug.idle(); }, null, { timeout: 10000 });
 
@@ -244,6 +293,17 @@ async function check(browser, url, size, view, style) {
   await openView(p, view);
   const out = { size, view, style, checks: {} };
   const ok = (name, pass, detail) => (out.checks[name] = { pass: !!pass, ...(detail === undefined ? {} : { detail }) });
+  // A failed pixel bound says where and how the drawings differ, and with
+  // `--dump-dir` leaves both drawings and a mask of the differing pixels.
+  const explain = async (name) => {
+    const why = await p.evaluate(PIXEL_DUMP, !!args['dump-dir']);
+    if (why && why.images) {
+      mkdirSync(args['dump-dir'], { recursive: true });
+      for (const [k, url] of Object.entries(why.images)) writeFileSync(join(args['dump-dir'], `${size}-${view}-${style}-${name}-${k}.png`), Buffer.from(url.split(',')[1], 'base64'));
+      delete why.images;
+    }
+    return why;
+  };
   const canvas = await p.evaluate(() => !!document.querySelector('.g-canvas'));
   out.surface = canvas ? 'canvas' : 'svg';
 
@@ -381,6 +441,7 @@ async function check(browser, url, size, view, style) {
     await p.evaluate(() => document.querySelector('.g-canvas').graphDebug.redrawAll());
     await layersIdle(p);
     copied = await p.evaluate(PIXEL_DIFF);
+    if (copied.share >= 0.002) copied.why = await explain('copied');
     await p.evaluate(LAYER_PIXELS, true);
   }
   await p.evaluate(() => [...document.querySelectorAll('.chip')].find((b) => b.textContent === 'Proposed').click());
@@ -515,6 +576,7 @@ async function check(browser, url, size, view, style) {
     await p.waitForTimeout(150);
   if (canvas) await layersIdle(p);
     const back = await p.evaluate(PIXEL_DIFF);
+    if (back.share >= 0.0005) back.why = await explain('theme-back');
     ok('theme', dark.share > 0.5 && back.share < 0.0005, { dark, back });
 
     // a height-only resize: the pointer still names the memory under it

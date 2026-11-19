@@ -1015,6 +1015,7 @@ jobs:
             --bin "$RUNNER_TEMP/bins/engramdb" \
             --chrome "$chrome" \
             --views s60:full,s1k:all,s1k:open \
+            --dump-dir "$RUNNER_TEMP/browser-dump" \
             --json "$RUNNER_TEMP/browser-checks.json"
 
       - name: Run the page checks
@@ -1040,6 +1041,7 @@ jobs:
           path: |
             ${{ runner.temp }}/browser-checks.json
             ${{ runner.temp }}/browser-pages.json
+            ${{ runner.temp }}/browser-dump/
           retention-days: 7
           if-no-files-found: warn
 
