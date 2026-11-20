@@ -835,7 +835,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["logical".into()]))
+            .select(crate::lance_index::project_columns(vec!["logical".into()]))
             .execute()
             .await
             .context("Failed to query LanceDB table for logical scopes")?;
@@ -873,7 +873,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["type".into()]))
+            .select(crate::lance_index::project_columns(vec!["type".into()]))
             .execute()
             .await
             .context("Failed to query LanceDB table for type counts")?;
@@ -902,7 +902,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .select(crate::lance_index::project_columns(vec!["id".into()]))
             .execute()
             .await
             .context("Failed to query LanceDB table for IDs")?;
@@ -935,7 +935,7 @@ impl LanceIndex {
         let table = self.open_table().await?;
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .select(crate::lance_index::project_columns(vec!["id".into()]))
             .only_if_expr(col("id").eq(lit(id)))
             .limit(1)
             .execute()
@@ -981,7 +981,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .select(crate::lance_index::project_columns(vec!["id".into()]))
             .only_if_expr(col("id").like(lit(pattern)))
             .execute()
             .await
@@ -1014,7 +1014,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "source_sessions".into(),
             ]))
@@ -1084,7 +1084,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "content_sha256".into(),
                 "content_len".into(),
@@ -1147,7 +1147,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "memory_id".into(),
                 "embed_sha256".into(),
             ]))
@@ -1247,7 +1247,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "type".into(),
                 "status".into(),
@@ -1276,7 +1276,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "summary".into(),
                 "type".into(),
@@ -1347,12 +1347,9 @@ impl LanceIndex {
     ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
-        let mut query =
-            table
-                .query()
-                .select(lancedb::query::Select::Columns(Self::filtering_columns(
-                    proj,
-                )));
+        let mut query = table.query().select(crate::lance_index::project_columns(
+            Self::filtering_columns(proj),
+        ));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
         }
@@ -1384,7 +1381,7 @@ impl LanceIndex {
         let table = self.open_table().await?;
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "watch_paths".into(),
                 "invalidated_at".into(),
@@ -1649,7 +1646,9 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+            .select(crate::lance_index::project_columns(
+                vec!["memory_id".into()],
+            ))
             .execute()
             .await
             .context("Failed to query chunks table for memory_ids")?;
@@ -1722,7 +1721,7 @@ impl LanceIndex {
             let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
             let mut stream = table
                 .query()
-                .select(lancedb::query::Select::Columns(vec![
+                .select(crate::lance_index::project_columns(vec![
                     "memory_id".into(),
                     "chunk_index".into(),
                     "vector".into(),
@@ -1854,7 +1853,9 @@ impl LanceIndex {
             let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
             let mut stream = table
                 .query()
-                .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+                .select(crate::lance_index::project_columns(
+                    vec!["memory_id".into()],
+                ))
                 .only_if_expr(is_in(col("memory_id"), list))
                 .execute()
                 .await
@@ -1882,7 +1883,9 @@ impl LanceIndex {
         let table = self.open_chunks_table().await?;
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+            .select(crate::lance_index::project_columns(
+                vec!["memory_id".into()],
+            ))
             .only_if_expr(col("memory_id").eq(lit(memory_id)))
             .limit(1)
             .execute()
@@ -1993,7 +1996,7 @@ impl LanceIndex {
             // adds it when an explicit projection omits it, but logs a
             // deprecation warning on every semantic query and says it will
             // stop doing so — and the loop below requires the column.
-            .select(Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "memory_id".into(),
                 "_distance".into(),
             ]))
@@ -2672,9 +2675,9 @@ impl LanceIndex {
         let table = self.open_table().await?;
         let query = table
             .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns(
-                proj,
-            )))
+            .select(crate::lance_index::project_columns(
+                Self::filtering_columns(proj),
+            ))
             .only_if_expr(predicate);
 
         let mut stream = query
@@ -3303,6 +3306,21 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
         });
     }
     Ok(entries)
+}
+
+/// Project a query onto plain, top-level columns.
+///
+/// Equivalent to `Select::Columns(names)`, without its cost. `Select::Columns`
+/// hands each name to lance backtick-quoted (`` `type` ``), and lance's
+/// planner only short-cuts a name that matches a field as written: a quoted
+/// one goes through the full SQL parser and a schema conversion per column,
+/// which was ~20% of every query's allocations (and ~40% of a scope-only
+/// one's) for a 20-column projection. `Select::Dynamic` with the bare name as
+/// its own expression takes that short-cut and yields the same column under
+/// the same name. Only for names that are a plain field: no dots, no
+/// expressions — every caller in this crate passes literal column names.
+pub(crate) fn project_columns(names: Vec<String>) -> Select {
+    Select::Dynamic(names.into_iter().map(|n| (n.clone(), n)).collect())
 }
 
 // ---- String parsing helpers ----
