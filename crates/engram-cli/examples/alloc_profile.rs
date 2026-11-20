@@ -102,11 +102,19 @@ static GLOBAL: Counting = Counting;
 // ---------------------------------------------------------------- process stats
 
 /// User + system CPU of the whole process, in microseconds.
+#[cfg(unix)]
 fn cpu_us() -> u64 {
     let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
     unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
     let tv = |t: libc::timeval| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64;
     tv(ru.ru_utime) + tv(ru.ru_stime)
+}
+
+/// CPU time is read with `getrusage`, which only Unix has. On other
+/// platforms the harness still compiles and reports 0.
+#[cfg(not(unix))]
+fn cpu_us() -> u64 {
+    0
 }
 
 /// Reset the kernel's peak-RSS mark to the current RSS (Linux).
