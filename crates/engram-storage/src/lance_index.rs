@@ -2722,22 +2722,24 @@ impl LanceIndex {
         let mut epistemics = Vec::with_capacity(n);
         let mut verified_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut generalities = Vec::with_capacity(n);
-        let mut origin_tasks: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut origin_tasks: Vec<Option<&str>> = Vec::with_capacity(n);
         let mut valid_froms: Vec<Option<String>> = Vec::with_capacity(n);
         let mut invalidated_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut watch_paths_col = Vec::with_capacity(n);
         let mut audiences: Vec<Option<String>> = Vec::with_capacity(n);
         let mut source_sessions_col = Vec::with_capacity(n);
-        let mut content_sha256s: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut content_sha256s: Vec<Option<&str>> = Vec::with_capacity(n);
         let mut content_lens: Vec<Option<u64>> = Vec::with_capacity(n);
 
         for entry in entries {
-            ids.push(entry.id.clone());
-            summaries.push(entry.summary.clone());
-            types.push(format!("{:?}", entry.type_).to_lowercase());
-            statuses.push(format!("{:?}", entry.status).to_lowercase());
-            provenances.push(format!("{:?}", entry.provenance_source).to_lowercase());
-            visibilities.push(format!("{:?}", entry.visibility).to_lowercase());
+            // Borrowed: the arrays copy the bytes into their own buffers, so
+            // owned per-row Strings would only be built to be dropped.
+            ids.push(entry.id.as_str());
+            summaries.push(entry.summary.as_str());
+            types.push(entry.type_.as_str());
+            statuses.push(entry.status.as_str());
+            provenances.push(entry.provenance_source.as_str());
+            visibilities.push(entry.visibility.as_str());
             criticalities.push(entry.criticality);
             confidences.push(entry.confidence);
             physicals.push(
@@ -2759,10 +2761,10 @@ impl LanceIndex {
                 serde_json::to_string(&entry.keyword_stems)
                     .context("Failed to serialize keyword stems")?,
             );
-            epistemics.push(entry.epistemic.as_str().to_string());
+            epistemics.push(entry.epistemic.as_str());
             verified_ats.push(entry.verified_at.map(|dt| dt.to_rfc3339()));
-            generalities.push(entry.generality.as_str().to_string());
-            origin_tasks.push(entry.origin_task.clone());
+            generalities.push(entry.generality.as_str());
+            origin_tasks.push(entry.origin_task.as_deref());
             valid_froms.push(entry.valid_from.map(|dt| dt.to_rfc3339()));
             invalidated_ats.push(entry.invalidated_at.map(|dt| dt.to_rfc3339()));
             watch_paths_col.push(
@@ -2777,7 +2779,7 @@ impl LanceIndex {
                 serde_json::to_string(&entry.source_sessions)
                     .context("Failed to serialize source_sessions")?,
             );
-            content_sha256s.push(entry.content_sha256.clone());
+            content_sha256s.push(entry.content_sha256.as_deref());
             content_lens.push(entry.content_len);
         }
 
