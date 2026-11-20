@@ -854,11 +854,7 @@ pub fn index_text_digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::types::hex::lower_hex(&hasher.finalize())
 }
 
 /// Trust marker prefixed to every rendered digest.

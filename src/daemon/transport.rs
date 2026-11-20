@@ -343,7 +343,7 @@ mod windows {
         let mut hasher = Sha256::new();
         hasher.update(s.as_bytes());
         let digest = hasher.finalize();
-        let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let hex = crate::types::hex::lower_hex(&digest[..8]);
         format!(r"\\.\pipe\engramdb-{hex}")
     }
 

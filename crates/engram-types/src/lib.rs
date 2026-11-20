@@ -17,6 +17,7 @@ pub mod config;
 mod decay;
 pub mod env;
 mod epistemic;
+pub mod hex;
 mod link;
 mod memory;
 pub mod normalize;

@@ -211,7 +211,7 @@ fn sha256_file(path: &Path) -> Result<String> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    engram_types::hex::lower_hex(bytes)
 }
 
 /// The cached copy of `file` in `repo` under `cache_dir`, if `main` has one

@@ -407,7 +407,7 @@ pub fn compute_group_id(name: &str) -> String {
     // Format the leading bytes explicitly rather than via `{:x}`: sha2 0.11's
     // `finalize` returns a `hybrid_array::Array` that no longer implements
     // `LowerHex` (see `project_id::hash_string`). Six bytes → twelve hex chars.
-    let hex: String = result.iter().take(6).map(|b| format!("{b:02x}")).collect();
+    let hex = engram_types::hex::lower_hex(&result[..6]);
     format!("__g_{hex}")
 }
 
