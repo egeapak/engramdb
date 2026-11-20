@@ -82,3 +82,7 @@ insta = { version = "1.49.0", features = ["filters"] }
 # Dev-only on purpose: the workspace uses feature resolver v2, so this does not
 # unify `vt100` into the shipped binary — see `progress.rs`.
 indicatif = { version = "0.18", features = ["in_memory"] }
+
+# `examples/alloc_profile.rs` reads getrusage for CPU time. Dev-only.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

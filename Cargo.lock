@@ -2181,6 +2181,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "insta",
+ "libc",
  "owo-colors",
  "predicates",
  "regex",
