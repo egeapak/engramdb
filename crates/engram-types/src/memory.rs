@@ -41,6 +41,22 @@ pub enum MemoryType {
 }
 
 impl MemoryType {
+    /// The lowercase name (`{:?}` lowercased, and the serde spelling).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MemoryType::Decision => "decision",
+            MemoryType::Convention => "convention",
+            MemoryType::Hazard => "hazard",
+            MemoryType::Context => "context",
+            MemoryType::Intent => "intent",
+            MemoryType::Relationship => "relationship",
+            MemoryType::Debug => "debug",
+            MemoryType::Preference => "preference",
+        }
+    }
+}
+
+impl MemoryType {
     /// Get the default decay strategy for this memory type
     pub fn default_decay(&self) -> Option<Decay> {
         match self {
@@ -114,6 +130,19 @@ pub enum Status {
     Challenged,
 }
 
+impl Status {
+    /// The lowercased variant name (`{:?}` lowercased), as the index column
+    /// and the MCP payloads spell it: `needsreview`, not the serde
+    /// `needs_review`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Status::Active => "active",
+            Status::NeedsReview => "needsreview",
+            Status::Challenged => "challenged",
+        }
+    }
+}
+
 /// Visibility level of a memory
 ///
 /// The lowercase aliases are for hand-edited hidden blocks (`visibility:
@@ -129,6 +158,16 @@ pub enum Visibility {
     /// Personal to a specific agent/session
     #[serde(alias = "personal")]
     Personal,
+}
+
+impl Visibility {
+    /// The lowercase name (`{:?}` lowercased, and the serde spelling).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Visibility::Shared => "shared",
+            Visibility::Personal => "personal",
+        }
+    }
 }
 
 /// Core Memory struct - represents a single piece of knowledge
@@ -599,6 +638,38 @@ impl MemoryUpdate {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn as_str_is_the_lowercased_debug_name() {
+        use crate::ProvenanceSource;
+        for t in [
+            MemoryType::Decision,
+            MemoryType::Convention,
+            MemoryType::Hazard,
+            MemoryType::Context,
+            MemoryType::Intent,
+            MemoryType::Relationship,
+            MemoryType::Debug,
+            MemoryType::Preference,
+        ] {
+            assert_eq!(t.as_str(), format!("{t:?}").to_lowercase());
+        }
+        for s in [Status::Active, Status::NeedsReview, Status::Challenged] {
+            assert_eq!(s.as_str(), format!("{s:?}").to_lowercase());
+        }
+        for v in [Visibility::Shared, Visibility::Personal] {
+            assert_eq!(v.as_str(), format!("{v:?}").to_lowercase());
+        }
+        for p in [
+            ProvenanceSource::Human,
+            ProvenanceSource::Agent,
+            ProvenanceSource::Inferred,
+            ProvenanceSource::Imported,
+        ] {
+            assert_eq!(p.as_str(), format!("{p:?}").to_lowercase());
+        }
+    }
+
     use super::*;
     use crate::DecayStrategy;
 

@@ -24,6 +24,18 @@ pub enum ProvenanceSource {
     Imported,
 }
 
+impl ProvenanceSource {
+    /// The lowercase name (`{:?}` lowercased, and the serde spelling).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProvenanceSource::Human => "human",
+            ProvenanceSource::Agent => "agent",
+            ProvenanceSource::Inferred => "inferred",
+            ProvenanceSource::Imported => "imported",
+        }
+    }
+}
+
 /// Provenance tracking for a memory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
