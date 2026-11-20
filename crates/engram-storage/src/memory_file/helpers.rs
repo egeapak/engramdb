@@ -15,6 +15,7 @@
 //! exactly as before unless their content happened to look structural — and
 //! those files were already mis-parsed, so nothing regresses.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -88,6 +89,12 @@ fn is_structural_line(line: &str) -> bool {
 /// for structure on re-parse. See the module docs for the scheme.
 pub fn escape_body_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    escape_body_text_into(&mut out, text);
+    out
+}
+
+/// [`escape_body_text`], appended to `out` (no intermediate copy).
+pub fn escape_body_text_into(out: &mut String, text: &str) {
     let mut first = true;
     for raw in text.split('\n') {
         if !first {
@@ -100,7 +107,6 @@ pub fn escape_body_text(text: &str) -> String {
         }
         out.push_str(raw);
     }
-    out
 }
 
 /// Collapse a value that the writer emits on a single structural line
@@ -109,24 +115,33 @@ pub fn escape_body_text(text: &str) -> String {
 /// provenance value injects raw lines into the body — a value containing
 /// `\n## Content` writes a fake section heading that, on re-parse, shadows
 /// the real content (first-occurrence-wins), silently replacing it.
-pub fn sanitize_single_line(value: &str) -> String {
+///
+/// Borrows the value when it is already one line, which is nearly always.
+pub fn sanitize_single_line(value: &str) -> Cow<'_, str> {
     if !value.contains(['\n', '\r']) {
-        return value.to_string();
+        return Cow::Borrowed(value);
     }
-    value
-        .split(['\n', '\r'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    Cow::Owned(
+        value
+            .split(['\n', '\r'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// Sanitize one item of a backtick-delimited list field (Files/Logical/Tags):
 /// collapse newlines like any single-line field, and strip backticks — the
 /// backtick is the item delimiter, so an embedded one would desynchronize the
 /// writer and parser (write→parse→write must be a fixed point).
-pub fn sanitize_list_item(item: &str) -> String {
-    sanitize_single_line(item).replace('`', "")
+pub fn sanitize_list_item(item: &str) -> Cow<'_, str> {
+    let line = sanitize_single_line(item);
+    if line.contains('`') {
+        Cow::Owned(line.replace('`', ""))
+    } else {
+        line
+    }
 }
 
 /// Reverse of [`escape_body_text`] for a single line: strip exactly one

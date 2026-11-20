@@ -48,7 +48,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::helpers::{
-    escape_body_text, format_provenance_source, parse_body_sections, parse_datetime_field,
+    escape_body_text_into, format_provenance_source, parse_body_sections, parse_datetime_field,
     parse_list_field, parse_provenance_section, parse_score_field, sanitize_list_item,
     sanitize_single_line, split_frontmatter, HIDDEN_META_END, HIDDEN_META_START,
 };
@@ -263,22 +263,76 @@ fn parse_v2(
     })
 }
 
+/// [`MinimalFrontmatter`] by reference, for the writer: the same fields under
+/// the same names and attributes, so it serializes to the same bytes without
+/// copying the id and title.
+#[derive(Serialize)]
+struct MinimalFrontmatterRef<'a> {
+    version: u32,
+    id: &'a str,
+    #[serde(rename = "type")]
+    type_: MemoryType,
+    status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    epistemic: Option<Epistemic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<&'a str>,
+}
+
+/// [`HiddenMeta`] by reference, for the writer (see
+/// [`MinimalFrontmatterRef`]). Field order and attributes must stay in step
+/// with `HiddenMeta`: the order is the order in the file.
+#[derive(Serialize)]
+struct HiddenMetaRef<'a> {
+    visibility: Option<Visibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accessed_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_while: Option<&'a Validity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid_from: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invalidated_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    superseded_by: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decay: Option<&'a Decay>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    supersedes: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audience: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    source_sessions: &'a [String],
+    #[serde(skip_serializing_if = "<[Challenge]>::is_empty")]
+    challenges: &'a [Challenge],
+    #[serde(skip_serializing_if = "<[Link]>::is_empty")]
+    links: &'a [Link],
+}
+
 fn write_v2(memory: &Memory) -> Result<String> {
-    let mut out = String::new();
+    use std::fmt::Write as _;
+
+    // Typical files are a few hundred bytes of structure around the text.
+    let mut out = String::with_capacity(
+        512 + memory.content.len() + memory.details.as_ref().map_or(0, String::len),
+    );
 
     // -- Minimal YAML frontmatter --
     out.push_str("---\n");
-    let fm = MinimalFrontmatter {
+    let fm = MinimalFrontmatterRef {
         version: CURRENT_FORMAT_VERSION,
-        id: memory.id.clone(),
+        id: &memory.id,
         type_: memory.type_,
         status: memory.status,
         epistemic: (memory.epistemic != memory.type_.default_epistemic())
             .then_some(memory.epistemic),
-        title: memory.title.clone(),
+        title: memory.title.as_deref(),
     };
-    let yaml = yaml::to_string(&fm)?;
-    out.push_str(&yaml);
+    out.push_str(&yaml::to_string(&fm)?);
     out.push_str("---\n\n");
 
     // -- H1: title (if set) or summary --
@@ -287,26 +341,29 @@ fn write_v2(memory: &Memory) -> Result<String> {
     // newlines (see `sanitize_single_line`) so a hostile/malformed value
     // can't inject structural lines (`## Content`, `<!-- engramdb`) into the
     // body and shadow the real sections on re-parse.
+    //
+    // `write!` into a `String` cannot fail.
     let heading = sanitize_single_line(memory.title.as_deref().unwrap_or(&memory.summary));
-    out.push_str(&format!("# {heading}\n\n"));
+    let _ = write!(out, "# {heading}\n\n");
 
     // When title is used as H1, write summary separately so it round-trips
     if memory.title.is_some() {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "**Summary:** {}\n\n",
             sanitize_single_line(&memory.summary)
-        ));
+        );
     }
 
     // -- ## Content --
     out.push_str("## Content\n\n");
-    out.push_str(&escape_body_text(&memory.content));
+    escape_body_text_into(&mut out, &memory.content);
     out.push('\n');
 
     // -- ## Details (optional) --
     if let Some(details) = &memory.details {
         out.push_str("\n## Details\n\n");
-        out.push_str(&escape_body_text(details));
+        escape_body_text_into(&mut out, details);
         out.push('\n');
     }
 
@@ -315,95 +372,90 @@ fn write_v2(memory: &Memory) -> Result<String> {
     // List items are backtick-delimited on a single structural line, so each
     // item is passed through `sanitize_list_item` (newlines collapsed,
     // delimiter backticks stripped) and empties are dropped — otherwise a
-    // pathological item would desynchronize write→parse→write.
-    let list_items = |items: &[String]| -> Vec<String> {
-        items
-            .iter()
-            .map(|i| sanitize_list_item(i))
-            .filter(|i| !i.is_empty())
-            .map(|i| format!("`{i}`"))
-            .collect()
-    };
-    out.push_str("\n## Scope\n\n");
-    // Note `list_items` also decides line presence: a list whose every item
-    // sanitizes away writes no line at all, matching what a re-parse yields.
-    let files = list_items(&memory.physical);
-    if !files.is_empty() {
-        out.push_str(&format!("- **Files:** {}\n", files.join(", ")));
-    }
-    let logical = list_items(&memory.logical);
-    if !logical.is_empty() {
-        out.push_str(&format!("- **Logical:** {}\n", logical.join(", ")));
-    }
+    // pathological item would desynchronize write→parse→write. Note an item
+    // list also decides line presence: a list whose every item sanitizes
+    // away writes no line at all, matching what a re-parse yields.
+    //
     // Tags are backtick-wrapped like Files/Logical so a tag containing a
     // comma survives the round trip (the parser splits plain values on
     // commas).
-    let tags = list_items(&memory.tags);
-    if !tags.is_empty() {
-        out.push_str(&format!("- **Tags:** {}\n", tags.join(", ")));
-    }
-    out.push_str(&format!("- **Criticality:** {}\n", memory.criticality));
-    out.push_str(&format!("- **Confidence:** {}\n", memory.confidence));
+    let list_line = |out: &mut String, label: &str, items: &[String]| {
+        let mut first = true;
+        for item in items {
+            let item = sanitize_list_item(item);
+            if item.is_empty() {
+                continue;
+            }
+            if first {
+                let _ = write!(out, "- **{label}:** ");
+                first = false;
+            } else {
+                out.push_str(", ");
+            }
+            out.push('`');
+            out.push_str(&item);
+            out.push('`');
+        }
+        if !first {
+            out.push('\n');
+        }
+    };
+    out.push_str("\n## Scope\n\n");
+    list_line(&mut out, "Files", &memory.physical);
+    list_line(&mut out, "Logical", &memory.logical);
+    list_line(&mut out, "Tags", &memory.tags);
+    let _ = writeln!(out, "- **Criticality:** {}", memory.criticality);
+    let _ = writeln!(out, "- **Confidence:** {}", memory.confidence);
     if memory.visibility == Visibility::Personal {
         out.push_str("- **Visibility:** personal\n");
     }
 
     // -- ## Provenance --
     out.push_str("\n## Provenance\n\n");
-    out.push_str(&format!(
-        "- **Source:** {}\n",
+    let _ = writeln!(
+        out,
+        "- **Source:** {}",
         format_provenance_source(memory.provenance.source)
-    ));
+    );
     // Provenance values are caller-supplied free text on single-line fields:
     // collapse newlines so they can't inject structural lines (and so a
     // multi-line Reason can't smuggle a `- **Created:** …` line that would
     // hijack the timestamps on re-parse).
     if let Some(ref agent_id) = memory.provenance.agent_id {
-        out.push_str(&format!(
-            "- **Agent:** {}\n",
-            sanitize_single_line(agent_id)
-        ));
+        let _ = writeln!(out, "- **Agent:** {}", sanitize_single_line(agent_id));
     }
     if let Some(ref model) = memory.provenance.model {
-        out.push_str(&format!("- **Model:** {}\n", sanitize_single_line(model)));
+        let _ = writeln!(out, "- **Model:** {}", sanitize_single_line(model));
     }
     if let Some(ref session_id) = memory.provenance.session_id {
-        out.push_str(&format!(
-            "- **Session:** {}\n",
-            sanitize_single_line(session_id)
-        ));
+        let _ = writeln!(out, "- **Session:** {}", sanitize_single_line(session_id));
     }
     if let Some(ref reason) = memory.provenance.reason {
-        out.push_str(&format!("- **Reason:** {}\n", sanitize_single_line(reason)));
+        let _ = writeln!(out, "- **Reason:** {}", sanitize_single_line(reason));
     }
-    out.push_str(&format!(
-        "- **Created:** {}\n",
-        memory.created_at.to_rfc3339()
-    ));
-    out.push_str(&format!(
-        "- **Updated:** {}\n",
-        memory.updated_at.to_rfc3339()
-    ));
+    let _ = writeln!(out, "- **Created:** {}", memory.created_at.to_rfc3339());
+    let _ = writeln!(out, "- **Updated:** {}", memory.updated_at.to_rfc3339());
 
     // -- Hidden metadata (HTML comment with YAML) --
-    let hidden = HiddenMeta {
+    let hidden = HiddenMetaRef {
         visibility: Some(memory.visibility),
         accessed_at: Some(memory.accessed_at),
         verified_at: memory.verified_at,
         expires_at: memory.expires_at,
-        valid_while: memory.valid_while.clone().filter(|v| !v.is_empty()),
+        valid_while: memory.valid_while.as_ref().filter(|v| !v.is_empty()),
         valid_from: memory.valid_from,
         invalidated_at: memory.invalidated_at,
-        superseded_by: memory.superseded_by.clone(),
-        decay: memory.decay.clone(),
-        supersedes: memory.supersedes.clone(),
-        audience: memory.audience.clone().filter(|a| !a.is_empty()),
-        source_sessions: memory.source_sessions.clone(),
-        challenges: memory.challenges.clone(),
-        links: memory.links.clone(),
+        superseded_by: memory.superseded_by.as_deref(),
+        decay: memory.decay.as_ref(),
+        supersedes: &memory.supersedes,
+        audience: memory.audience.as_deref().filter(|a| !a.is_empty()),
+        source_sessions: &memory.source_sessions,
+        challenges: &memory.challenges,
+        links: &memory.links,
     };
-    let hidden_yaml = yaml::to_string(&hidden)?;
-    out.push_str(&format!("\n<!-- engramdb\n{hidden_yaml}-->\n"));
+    out.push_str("\n<!-- engramdb\n");
+    out.push_str(&yaml::to_string(&hidden)?);
+    out.push_str("-->\n");
 
     Ok(out)
 }
