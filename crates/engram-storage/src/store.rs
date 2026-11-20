@@ -967,8 +967,11 @@ impl MemoryStore {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
 
-        let shared_map = scan_dir_to_map(&shared_dir).await;
-        let personal_map = scan_dir_to_map(&personal_dir).await;
+        // Only the requested ids are kept from the scans: a store's
+        // directory holds every memory, a batch names a few of them.
+        let wanted: HashSet<&str> = ids.iter().map(AsRef::as_ref).collect();
+        let shared_map = scan_dir_to_map(&shared_dir, &wanted).await;
+        let personal_map = scan_dir_to_map(&personal_dir, &wanted).await;
 
         // Overlap the per-file reads (bounded) instead of awaiting each in
         // sequence — this backs the retrieval hot path, where serializing
@@ -4056,10 +4059,14 @@ async fn scan_dir_to_stats(dir: &Path) -> DirStats {
 }
 
 /// Scan a directory and build a `HashMap` mapping memory ID → path
-/// for all `.md` files.  Handles both old (`<uuid>.md`) and new
-/// (`<slug>_<uuid>.md`) filename formats.
+/// for the `.md` files whose id is in `wanted`.  Handles both old
+/// (`<uuid>.md`) and new (`<slug>_<uuid>.md`) filename formats.
 /// Returns an empty map if the directory does not exist.
-async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
+///
+/// An entry whose id is not wanted costs no allocation of its own: the id
+/// is compared as a slice of the file name, and only a wanted one is turned
+/// into an owned id and path.
+async fn scan_dir_to_map(dir: &Path, wanted: &HashSet<&str>) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     if !dir.exists() {
         return map;
@@ -4068,10 +4075,15 @@ async fn scan_dir_to_map(dir: &Path) -> HashMap<String, PathBuf> {
         return map;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("md") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                let id = memory_file::extract_id_from_stem(stem).to_string();
+        let name = entry.file_name();
+        let name = Path::new(&name);
+        if name.extension().and_then(|s| s.to_str()) == Some("md") {
+            if let Some(stem) = name.file_stem().and_then(|s| s.to_str()) {
+                let id = memory_file::extract_id_from_stem(stem);
+                if !wanted.contains(id) {
+                    continue;
+                }
+                let (id, path) = (id.to_string(), entry.path());
                 match map.get(&id) {
                     // Stale duplicate from a crashed rename-update: keep the
                     // newest file (the rename path writes the new file last).

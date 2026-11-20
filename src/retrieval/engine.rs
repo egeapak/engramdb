@@ -2535,11 +2535,7 @@ pub(crate) fn embed_digest(
     // `sha2` 0.11's `finalize` returns a `hybrid_array::Array` with no
     // `LowerHex`, so `{:x}` does not compile — the same gotcha every other
     // digest site in this codebase documents.
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::types::hex::lower_hex(&hasher.finalize())
 }
 
 /// The document string the cross-encoder reranker scores against the query.

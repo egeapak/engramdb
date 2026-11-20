@@ -17,6 +17,7 @@ For developers hacking on EngramDB itself. To use EngramDB, go to [../users/](..
 11. [prompt-intent-eval.md](./prompt-intent-eval.md) — the embedding situation classifier the UserPromptSubmit hook now uses, and the parked context gate (zero-shot NLI and Laya, and trained classifiers), measured against the keyword tables.
 12. [dashboard-performance.md](./dashboard-performance.md) — the dashboard graph view's budgets, the benchmark stores, the Criterion and browser benches, and the results against each budget.
 13. [dashboard.md](./dashboard.md) — the dashboard crate: security model, read path, graph API, server-side layout, styles and surfaces, the one write path.
+14. [allocation-audit.md](./allocation-audit.md) — allocation, heap, RSS and CPU audit of the hot paths: the `alloc_profile` harness, every change kept or rejected with its numbers, struct sizes.
 
 The CI gate (`cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo nextest run --workspace --all-features`) is enforced — see [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md) for the canonical version.
 

@@ -266,7 +266,7 @@ fn hash_string(s: &str) -> String {
     // longer implements `LowerHex`, so format the bytes explicitly rather than
     // via `{:x}` — the output is byte-for-byte identical, keeping project IDs
     // stable.
-    result.iter().take(8).map(|b| format!("{b:02x}")).collect()
+    engram_types::hex::lower_hex(&result[..8])
 }
 
 #[cfg(test)]

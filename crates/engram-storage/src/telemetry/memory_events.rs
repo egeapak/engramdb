@@ -117,7 +117,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{Connection, Table};
 use serde::{Deserialize, Serialize};
 
@@ -977,12 +977,14 @@ async fn for_each_event_and_other(
     mut visit: impl FnMut(RawEvent),
     mut other: impl FnMut(&str, &str, DateTime<Utc>),
 ) -> Result<()> {
-    let mut query = table.query().select(Select::Columns(vec![
-        "memory_id".into(),
-        "kind".into(),
-        "ts".into(),
-        "session_id".into(),
-    ]));
+    let mut query = table
+        .query()
+        .select(crate::lance_index::project_columns(vec![
+            "memory_id".into(),
+            "kind".into(),
+            "ts".into(),
+            "session_id".into(),
+        ]));
     if let Some(f) = filter {
         query = query.only_if(f);
     }
