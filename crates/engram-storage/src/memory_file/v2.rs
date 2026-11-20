@@ -178,9 +178,9 @@ fn parse_v2(
     let fm: MinimalFrontmatter = yaml::from_str(frontmatter)?;
     super::validate_id_shape(&fm.id)?;
 
-    let sections = parse_body_sections(body);
+    let mut sections = parse_body_sections(body);
 
-    let h1 = sections.get("__h1__").cloned().unwrap_or_default();
+    let h1 = sections.remove("__h1__").unwrap_or_default();
     // When title is set, H1 is the title and summary is in a **Summary:** line.
     // Never fall back to the H1 here: for a titled memory the H1 *is* the
     // title, so a memory whose summary is legitimately empty would acquire the
@@ -190,8 +190,8 @@ fn parse_v2(
     } else {
         h1
     };
-    let content = sections.get("Content").cloned().unwrap_or_default();
-    let details = sections.get("Details").cloned().filter(|s| !s.is_empty());
+    let content = sections.remove("Content").unwrap_or_default();
+    let details = sections.remove("Details").filter(|s| !s.is_empty());
 
     // Parse scope
     let scope_text = sections.get("Scope").map(String::as_str).unwrap_or("");
@@ -490,13 +490,16 @@ fn visibility_from_scope_text(scope_text: &str) -> Visibility {
 }
 
 fn extract_bold_field(body: &str, field: &str) -> Option<String> {
-    let prefix = format!("**{field}:** ");
     for line in body.lines() {
         if line.starts_with("## ") {
             break;
         }
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+        let rest = trimmed
+            .strip_prefix("**")
+            .and_then(|r| r.strip_prefix(field))
+            .and_then(|r| r.strip_prefix(":** "));
+        if let Some(rest) = rest {
             let val = rest.trim().to_string();
             if !val.is_empty() {
                 return Some(val);
@@ -611,9 +614,10 @@ fn parse_hidden_meta(body: &str) -> Result<HiddenMeta> {
 fn is_conflict_marker(line: &str) -> bool {
     let line = line.trim_end();
     line == "======="
-        || ["<<<<<<<", ">>>>>>>", "|||||||"]
-            .iter()
-            .any(|m| line == *m || line.starts_with(&format!("{m} ")))
+        || ["<<<<<<<", ">>>>>>>", "|||||||"].iter().any(|m| {
+            line.strip_prefix(m)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with(' '))
+        })
 }
 
 #[cfg(test)]
