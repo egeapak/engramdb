@@ -29,6 +29,14 @@ Before marking ANY task as complete, you MUST run and pass both:
 
 Always pass `--workspace` so clippy/nextest cover every crate, not just the one in the current directory. No task is done until both commands succeed with zero warnings and zero errors. This applies to all agents and subagents. CI (`.github/workflows/ci.yml`) runs the exact same two commands plus `cargo nextest run --workspace --all-features`.
 
+## Performance conventions (mandatory on hot paths)
+
+Before you change any hot path, read and follow [`docs/contributors/performance-conventions.md`](../docs/contributors/performance-conventions.md). It holds the rules, the rejected ideas not to retry, the tools to measure with, and a checklist to run before you finish.
+
+Hot paths: hooks, query/retrieval and scoring, index reads (LanceDB), memory-file parse and write, the daemon request path and model loading, transcript digest and defang, and the dashboard layout and graph.
+
+A performance change is measured alone and must not change output (the golden pins, layout digests and snapshots stay unchanged).
+
 ## Common commands
 
 ```bash
