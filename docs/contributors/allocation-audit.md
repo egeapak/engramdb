@@ -239,6 +239,12 @@ both binaries and running `diff -r` on every `memories/` tree.
 | reindex-1k | 454900 → 454684 | -0.0% | 117216.3 → 117072.8 | -0.1% | 12910 → 12797 | -0.9% | 121.8 → 122.6 | +0.7% | 577710 → 583878 | +1.1% | 189244 → 193510 | +2.3% |
 | memfile-roundtrip | 229 → 165 | -27.9% | 43.8 → 41.0 | -6.3% | 21 → 21 | +0.0% | 27.0 → 28.0 | +3.6% | 42 → 38 | -9.3% | 42 → 38 | -7.6% |
 
+The CPU deltas of c3 for `create-1k` and `update-1k` (−21% and −10%) are
+inside those scenarios' noise (see [Noise](#noise)); the allocation
+deltas (−0.5%) are the finding. The same holds for c5 on `create-1k` and
+`update-1k` (−19% and −15%). c5's `reindex-1k` CPU delta (−16.5%) is at the
+edge of that scenario's ±17% spread.
+
 **c4 `878eb35`: Parse memory files without per-field marker strings.**
 `strip_field_marker` replaces a `format!("**{field}:**")` per field per
 line. The body sections map borrows its keys, and values are moved out
@@ -385,9 +391,11 @@ output is identical and `LAYOUT_VERSION` was not bumped.
 `KeywordStems` now holds `CompactString` (24 bytes, the same size as
 `String`). Almost every stem fits inline, so parsing a candidate row's
 stems JSON needs no allocation per stem. The JSON on disk is unchanged.
-`compact_str` was already in the shipped dependency tree through
-`tokenizers`. Writes pay one extra copy per stem, which shows as +1.9% bytes
-on `reindex`.
+`compact_str` was already in the default build's dependency tree through
+`tokenizers`. In the Ollama-only build (`--no-default-features --features
+ollama`) it is new: it arrives only through `engram-types`, with
+`castaway` and `rustversion`. Writes pay one extra copy per stem, which shows as +1.9% bytes
+on `reindex`. The follow-up f1 below removes that copy.
 
 | scenario | allocs/op | Δ | KiB/op | Δ | peak heap KiB | Δ | peak RSS MiB | Δ | CPU µs/op | Δ | wall µs/op | Δ |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -576,7 +584,61 @@ These were run on the final head, with ORT and the models staged as in
   layout pins pass.
 - `cargo tree -p engram-cli -e normal` shows no new shipped dependency.
   `libc` is a `cfg(unix)` dev-dependency of `engram-cli` used only by the
-  harness, and `compact_str` already shipped through `tokenizers`.
+  harness. `compact_str` already shipped through `tokenizers` in the
+  default build, but not in the Ollama-only build (see p2b).
+
+## Follow-up: review of the audit
+
+An independent review of the merged audit (PR #167) found no change in
+behaviour. It named a few spots the audit missed. Each fix was measured
+alone, in one interleaved A/B (5 reps × 3 rounds), against the binary just
+before it.
+
+**f1: Build `KeywordStems` as `CompactString` directly.**
+`KeywordStems::compute` built `String` stems and a `String`-keyed content
+map, then copied every stem into a `CompactString` and rebuilt the map.
+`normalize_as` and `normalize_counts_as` now build the stem type directly.
+A repeated stem is found by `&str` lookup and allocates nothing. This is
+the write path, and the query path for rows with no stored stems.
+
+| scenario | allocs/op | Δ | KiB/op | Δ | peak heap KiB | Δ | peak RSS MiB | Δ | CPU µs/op | Δ | wall µs/op | Δ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| create-1k | 156132 → 155342 | -0.5% | 24078.8 → 24054.3 | -0.1% | 6429 → 6429 | +0.0% | 119.3 → 119.3 | -0.0% | 78224 → 77428 | -1.0% | 36998 → 35548 | -3.9% |
+| update-1k | 97191 → 96560 | -0.6% | 19240.8 → 19234.6 | -0.0% | 5889 → 5888 | -0.0% | 118.6 → 118.4 | -0.1% | 38225 → 37890 | -0.9% | 27944 → 27425 | -1.9% |
+| reindex-1k | 316378 → 239220 | -24.4% | 116041.6 → 113567.3 | -2.1% | 12613 → 12614 | +0.0% | 120.0 → 120.4 | +0.4% | 233288 → 197604 | -15.3% | 102614 → 94793 | -7.6% |
+| memfile-roundtrip | 76 → 76 | +0.0% | 38.4 → 38.4 | +0.0% | 20 → 20 | +0.0% | 27.5 → 27.5 | -0.1% | 36 → 38 | +5.4% | 36 → 39 | +6.4% |
+
+The `reindex-1k` CPU spread in this run was ±8–10%, so its −15% is a
+finding. The `create` and `update` CPU deltas are noise. Kept.
+
+**f2: Preview a tool result without joining its blocks.**
+A `tool_result` whose `content` is an array was joined into one `String`
+with `\n`, only to keep its first non-blank line. `tool_result_preview`
+now takes the first non-blank line of the first block that has one, which
+is the same line: a line never spans two blocks.
+`tool_result_preview_matches_the_joined_blocks` checks it against the old
+join. The synthetic transcript has only string results, so
+`transcript-digest` shows no change (42,739 allocs/op on both sides). Kept,
+because it removes a copy of the whole result, which is often the largest
+string in a record, and the code is shorter.
+
+**Rejected: cache each hook `Preview` across the budget rounds.**
+The top slot gets two rounds and built its `Preview` twice. Caching one
+`Preview` per slot saved 3 allocations per hook (27,581 → 27,578 on
+`hook-pre-1k`), and CPU moved +0.4% to +2.8%, inside the noise. Not worth
+the extra state.
+
+**Guard: no `Select::Columns` in library code.**
+`lance_index::tests::no_library_code_projects_with_select_columns` scans
+`src/` and `crates/*/src/` and fails on any `Select::Columns` outside a
+comment, so c1 cannot regress quietly.
+
+**Guard: the borrowed writer structs stay in step.**
+c3 made `write_v2` serialize from `HiddenMetaRef` and
+`MinimalFrontmatterRef`. A test-only `as_ref()` on each owned struct
+destructures it with no `..`, so a new field fails the build until the
+`*Ref` struct has it. `ref_structs_serialize_like_the_owned_structs` checks
+that both write the same bytes.
 
 ## Not done / future
 

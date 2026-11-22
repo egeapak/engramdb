@@ -30,7 +30,9 @@
 //! weight — six points of pure noise beating the three points earned by the
 //! one word that meant anything.
 
+use std::borrow::Borrow;
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::sync::OnceLock;
 
 use compact_str::CompactString;
@@ -95,17 +97,32 @@ fn is_stopword(token: &str) -> bool {
 /// any word inflated the result. Both sides dedup so a term contributes at
 /// most once per field.
 pub fn normalize(text: &str) -> Vec<String> {
+    normalize_as(text)
+}
+
+/// A stem type that [`normalize_as`] and [`normalize_counts_as`] can build:
+/// `String` for the public API, `CompactString` for [`KeywordStems`].
+trait StemString: for<'a> From<&'a str> + Clone + Eq + Hash + Borrow<str> {}
+impl<S: for<'a> From<&'a str> + Clone + Eq + Hash + Borrow<str>> StemString for S {}
+
+/// [`normalize`], building each stem directly as `S`.
+///
+/// A repeated stem is found by `&str` lookup, so it allocates nothing. A new
+/// one is built once from the stemmer's output, never via a `String` first.
+fn normalize_as<S: StemString>(text: &str) -> Vec<S> {
     let lowered = text.to_lowercase();
     let stem = stemmer();
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<S> = HashSet::new();
     let mut out = Vec::new();
     for token in split_tokens(&lowered) {
         if is_stopword(token) {
             continue;
         }
-        let stemmed = stem.stem(token).into_owned();
-        if seen.insert(stemmed.clone()) {
-            out.push(stemmed);
+        let stemmed = stem.stem(token);
+        if !seen.contains(stemmed.as_ref()) {
+            let s = S::from(stemmed.as_ref());
+            seen.insert(s.clone());
+            out.push(s);
         }
     }
     out
@@ -129,16 +146,27 @@ pub fn normalize_set(text: &str) -> HashSet<String> {
 /// removal — the count of terms that could have matched, which is the right
 /// denominator for a density comparison.
 pub fn normalize_counts(text: &str) -> (HashMap<String, u32>, usize) {
+    normalize_counts_as(text)
+}
+
+/// [`normalize_counts`], building each stem directly as `S`. A repeated stem
+/// only bumps its count, with no allocation.
+fn normalize_counts_as<S: StemString>(text: &str) -> (HashMap<S, u32>, usize) {
     let lowered = text.to_lowercase();
     let stem = stemmer();
-    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut counts: HashMap<S, u32> = HashMap::new();
     let mut total = 0usize;
     for token in split_tokens(&lowered) {
         if is_stopword(token) {
             continue;
         }
         total += 1;
-        *counts.entry(stem.stem(token).into_owned()).or_insert(0) += 1;
+        let stemmed = stem.stem(token);
+        if let Some(count) = counts.get_mut(stemmed.as_ref()) {
+            *count += 1;
+        } else {
+            counts.insert(S::from(stemmed.as_ref()), 1);
+        }
     }
     (counts, total)
 }
@@ -177,23 +205,22 @@ pub struct KeywordStems {
 impl KeywordStems {
     /// Derive the stems for a memory's three weighted fields.
     pub fn compute(summary: &str, tags: &[String], content: &str) -> Self {
-        let (content_counts, content_len) = normalize_counts(content);
+        // Built as `CompactString` from the start: converting `String` stems
+        // afterwards copied every stem and rebuilt the content map.
+        let (content, content_len) = normalize_counts_as::<CompactString>(content);
         let mut tag_stems: Vec<CompactString> = Vec::new();
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<CompactString> = HashSet::new();
         for tag in tags {
-            for stem in normalize(tag) {
+            for stem in normalize_as::<CompactString>(tag) {
                 if seen.insert(stem.clone()) {
-                    tag_stems.push(stem.into());
+                    tag_stems.push(stem);
                 }
             }
         }
         Self {
-            summary: normalize(summary).into_iter().map(Into::into).collect(),
+            summary: normalize_as(summary),
             tags: tag_stems,
-            content: content_counts
-                .into_iter()
-                .map(|(k, v)| (k.into(), v))
-                .collect(),
+            content,
             content_len,
         }
     }
