@@ -12,7 +12,7 @@
                         ▼
    ┌────────────────────┴────────────────────┐    ┌───────────────────┐
    │  crates/engram-cli/  (Clap + dispatch   │    │  engram-cli/src/  │
-   │  ─────► src/commands/ handlers)     ◄── │    │  commands/hook.rs │
+   │  ─────► src/commands/ handlers)     ◄── │    │  commands/hook/   │
    │                                         │    └────────┬──────────┘
    └─────────────────┬───────────────────────┘             │
                      │                                     │
@@ -203,7 +203,7 @@ The daemon's settings (`[daemon]`) come only from the **global** config file (`e
 
 ## Retrieval pipeline
 
-`RetrievalEngine::run` (in `src/retrieval/engine.rs`) is the query pipeline:
+`RetrievalEngine::run` (in `src/retrieval/engine/mod.rs`) is the query pipeline:
 
 1. **Filter** — `apply_index_filters` applies hard filters (`types`, `tags`, `min_criticality`, `status`, `include_expired`) at the LanceDB layer.
 2. **Vector search** — if a query is present and embeddings are enabled, fetch top-K candidates by vector similarity from LanceDB.

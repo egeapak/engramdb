@@ -711,7 +711,7 @@ async fn dispatch(req: DaemonRequest, ctx: &Ctx) -> DaemonResponse {
                 // After the reply would otherwise be delayed: spawned, and
                 // throttled per project.
                 if ctx.hook_telemetry.maintenance_due(&project.root) {
-                    tokio::spawn(super::hooks::maintain(project.clone()));
+                    ctx.hook_telemetry.spawn_maintenance(project.clone());
                 }
             }
             return DaemonResponse::HookOutput {

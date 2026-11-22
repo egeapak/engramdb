@@ -17,8 +17,10 @@ Two scans.
    `errraw!` from `crate::output` (docs/contributors/testing.md).
 
    Allowed, by exact shape and nothing wider:
-     - `commands/hook.rs`, the whole file: it emits the hook protocol document
-       Claude Code parses off stdout, and holds no formatter.
+     - `commands/hook/protocol.rs`, the whole file: it emits the hook protocol
+       document Claude Code parses off stdout, plus the hooks' stderr
+       diagnostics, and holds no formatter. The rest of `commands/hook/` is
+       scanned like any other file.
      - the four `Sink::Stdout => println!("{}", args),` arms in `output.rs`,
        which are the sink.
      - `clap_complete::generate(.., &mut io::stdout())` in
@@ -49,7 +51,7 @@ import re
 import sys
 
 CLI_ROOT = "crates/engram-cli/src"
-CLI_EXEMPT_FILES = {"crates/engram-cli/src/commands/hook.rs"}
+CLI_EXEMPT_FILES = {"crates/engram-cli/src/commands/hook/protocol.rs"}
 LIB_ROOTS = [
     "src",
     "crates/engram-mcp/src",
