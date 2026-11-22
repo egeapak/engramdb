@@ -1215,8 +1215,6 @@ impl RetrievalEngine {
         query: &RetrievalQuery,
         expansion_parents: Option<usize>,
     ) -> Result<RetrievalResult> {
-        use crate::search::{keyword_search_stems, normalize_keyword_score, query_token_count};
-
         let query_started = std::time::Instant::now();
 
         // Step 0: Filter-mode requires at least one positive relevance input.
@@ -1436,65 +1434,18 @@ impl RetrievalEngine {
         };
 
         // Step 4: If query text + embeddings available, get semantic scores.
-        let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
-            if let Some(provider) = &self.embedding_provider {
-                let t_embed = std::time::Instant::now();
-                let embed_result = provider.embed(q).await;
-                self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
-
-                if let Ok(query_vector) = embed_result {
-                    // Over-fetch 3x so the top-k still has headroom after
-                    // chunk-level dedup.
-                    //
-                    // `max_results` is user-supplied: saturate the multiply
-                    // (a plain `* 3` panics in debug / wraps in release on
-                    // huge values) and cap the window — memories beyond it
-                    // are still returned, just with weak (sem = 0.0)
-                    // semantic evidence, so a finite cap only bounds work.
-                    let limit = query
-                        .max_results
-                        .unwrap_or(self.config.retrieval.max_results)
-                        .saturating_mul(3)
-                        .min(VECTOR_SEARCH_WINDOW_CAP);
-
-                    // Filter pushdown: when the index filters actually
-                    // narrowed the candidate set and it is small enough,
-                    // restrict the vector search to the surviving ids so
-                    // filtered-out memories can't saturate the top-k window
-                    // (which would degrade surviving candidates to weak
-                    // sem = 0.0 evidence and mis-rank them). With no filters
-                    // — or a still-large candidate set — fall back to the
-                    // whole-store search, where the windowing artifact is
-                    // mild because little or nothing in the window is
-                    // discarded.
-                    //
-                    // Narrowing happens in two places and both must count: the
-                    // Rust-side filters (visible as `filtered < total`) and the
-                    // LanceDB predicate pushdown (which narrows the scan before
-                    // `total_entry_count` is measured, so `filtered == total`
-                    // even though the store holds more rows).
-                    let narrowed = pushdown_applied || filtered_entries.len() < total_entry_count;
-                    let restrict_ids: Option<Vec<String>> = (narrowed
-                        && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
-                        .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
-
-                    let t_vs = std::time::Instant::now();
-                    let vs_result = self
-                        .store
-                        .vector_search(query_vector, limit, restrict_ids.as_deref())
-                        .await;
-                    self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
-                    vs_result
-                        .ok()
-                        .map(|matches| matches.into_iter().map(|m| (m.id, m.score)).collect())
-                } else {
-                    None
-                }
-            } else {
-                None
+        let semantic_scores_map: Option<HashMap<String, f64>> = match query.query {
+            Some(ref q) => {
+                // Narrowing happens in two places and both must count: the
+                // Rust-side filters (visible as `filtered < total`) and the
+                // LanceDB predicate pushdown (which narrows the scan before
+                // `total_entry_count` is measured, so `filtered == total`
+                // even though the store holds more rows).
+                let narrowed = pushdown_applied || filtered_entries.len() < total_entry_count;
+                self.semantic_scores(q, query, &filtered_entries, narrowed)
+                    .await
             }
-        } else {
-            None
+            None => None,
         };
 
         // Step 4.5: When vector search ran, fetch the set of memory ids that
@@ -1531,66 +1482,9 @@ impl RetrievalEngine {
         // Step 5: Run keyword search whenever query text is present. Keyword
         // scores power both the "keyword_only" mode and the filter-mode
         // sufficiency check, so we compute them even when embeddings are live.
-        let keyword_map: HashMap<String, f64> = if let Some(ref q) = query.query {
-            // Prefer the stems the write path already stored (schema v0.5.0).
-            // Rebuilding them here is the dominant cost of keyword scoring —
-            // ~17.7ms per 1000 memories — and it is identical on every query.
-            //
-            // Iterate the entries and fall back to the loaded memory only for
-            // rows written before the column existed (Step 3 loaded exactly
-            // those), so a partially-migrated store degrades in speed and never
-            // in correctness.
-            // Borrowed from the row on the common path; owned only for the
-            // fallback it has to compute.
-            fn stems_for<'a>(
-                e: &'a crate::storage::IndexForFiltering,
-                memory_map: &HashMap<String, Memory>,
-            ) -> Option<(&'a str, std::borrow::Cow<'a, KeywordStems>)> {
-                let stems = match &e.keyword_stems {
-                    Some(s) => std::borrow::Cow::Borrowed(s),
-                    None => {
-                        let m = memory_map.get(&e.id)?;
-                        std::borrow::Cow::Owned(KeywordStems::compute(
-                            &m.summary, &m.tags, &m.content,
-                        ))
-                    }
-                };
-                Some((e.id.as_str(), stems))
-            }
-            // The `None` arm is the pre-v0.5.0 fallback: deriving stems is
-            // ~16µs per memory (tokenize → stoplist → Snowball stem → dedup
-            // across three fields), so on a store that has not been reindexed
-            // since the column landed this dominates the query. Parallel above
-            // the same threshold as scoring; order-preserving either way,
-            // which matters here because `kw_results` indexes back into this
-            // vector.
-            let scored: Vec<(&str, std::borrow::Cow<'_, KeywordStems>)> =
-                if filtered_entries.len() >= PARALLEL_SCORE_MIN {
-                    use rayon::prelude::*;
-                    filtered_entries
-                        .par_iter()
-                        .filter_map(|e| stems_for(e, &memory_map))
-                        .collect()
-                } else {
-                    filtered_entries
-                        .iter()
-                        .filter_map(|e| stems_for(e, &memory_map))
-                        .collect()
-                };
-            // Split, order kept, so `kw_results` indexes both halves alike.
-            let (scored_ids, stems): (Vec<&str>, Vec<std::borrow::Cow<'_, KeywordStems>>) =
-                scored.into_iter().unzip();
-            let kw_results = keyword_search_stems(q, &stems);
-            let num_tokens = query_token_count(q);
-            kw_results
-                .into_iter()
-                .map(|(idx, raw)| {
-                    let norm = normalize_keyword_score(raw, num_tokens);
-                    (scored_ids[idx].to_string(), norm)
-                })
-                .collect()
-        } else {
-            HashMap::new()
+        let keyword_map: HashMap<String, f64> = match query.query {
+            Some(ref q) => keyword_scores(q, &filtered_entries, &memory_map),
+            None => HashMap::new(),
         };
 
         // Derive retrieval_quality label.
@@ -1766,19 +1660,8 @@ impl RetrievalEngine {
         // Only timed when the reranker is actually configured + enabled to
         // avoid recording bogus 0ms samples for the no-op path.
         if let Some(ref q) = query.query {
-            if self.reranking_available() && !candidates.is_empty() {
-                let top_n = self.config.rerank.top_n.min(candidates.len());
-                let want = candidates[..top_n].iter().map(|c| c.id.as_str());
-                self.load_missing(&mut memory_map, want).await?;
-                let t_rerank = std::time::Instant::now();
-                let rerank_result = self.apply_rerank(q, &mut candidates, &memory_map).await;
-                self.record_stage("rerank", t_rerank.elapsed().as_secs_f64() * 1000.0);
-                if let Err(e) = rerank_result {
-                    tracing::warn!("Reranking failed, using original scores: {}", e);
-                }
-            } else if let Err(e) = self.apply_rerank(q, &mut candidates, &memory_map).await {
-                tracing::warn!("Reranking failed, using original scores: {}", e);
-            }
+            self.rerank_candidates(q, &mut candidates, &mut memory_map)
+                .await?;
         }
 
         // Step 8.5: Rank threshold, on the reranked (sorted) candidates.
@@ -1917,6 +1800,89 @@ impl RetrievalEngine {
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
 
         Ok(result)
+    }
+
+    /// Step 8 of [`Self::query_expanding_from`]: rerank the sorted
+    /// candidates, loading the first `rerank.top_n` files the reranker
+    /// reads. A rerank failure keeps the original scores; only a failed
+    /// file load is an error.
+    async fn rerank_candidates(
+        &self,
+        q: &str,
+        candidates: &mut [ScoredCandidate],
+        memory_map: &mut HashMap<String, Memory>,
+    ) -> Result<()> {
+        if self.reranking_available() && !candidates.is_empty() {
+            let top_n = self.config.rerank.top_n.min(candidates.len());
+            let want = candidates[..top_n].iter().map(|c| c.id.as_str());
+            self.load_missing(memory_map, want).await?;
+            let t_rerank = std::time::Instant::now();
+            let rerank_result = self.apply_rerank(q, candidates, memory_map).await;
+            self.record_stage("rerank", t_rerank.elapsed().as_secs_f64() * 1000.0);
+            if let Err(e) = rerank_result {
+                tracing::warn!("Reranking failed, using original scores: {}", e);
+            }
+        } else if let Err(e) = self.apply_rerank(q, candidates, memory_map).await {
+            tracing::warn!("Reranking failed, using original scores: {}", e);
+        }
+        Ok(())
+    }
+
+    /// Step 4 of [`Self::query_expanding_from`]: embed the query text and
+    /// run the vector search. `None` when no embedding provider is set or
+    /// the embed or the search failed.
+    async fn semantic_scores(
+        &self,
+        q: &str,
+        query: &RetrievalQuery,
+        filtered_entries: &[crate::storage::IndexForFiltering],
+        narrowed: bool,
+    ) -> Option<HashMap<String, f64>> {
+        let provider = self.embedding_provider.as_ref()?;
+        let t_embed = std::time::Instant::now();
+        let embed_result = provider.embed(q).await;
+        self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
+
+        let query_vector = embed_result.ok()?;
+        // Over-fetch 3x so the top-k still has headroom after
+        // chunk-level dedup.
+        //
+        // `max_results` is user-supplied: saturate the multiply
+        // (a plain `* 3` panics in debug / wraps in release on
+        // huge values) and cap the window — memories beyond it
+        // are still returned, just with weak (sem = 0.0)
+        // semantic evidence, so a finite cap only bounds work.
+        let limit = query
+            .max_results
+            .unwrap_or(self.config.retrieval.max_results)
+            .saturating_mul(3)
+            .min(VECTOR_SEARCH_WINDOW_CAP);
+
+        // Filter pushdown: when the index filters actually
+        // narrowed the candidate set and it is small enough,
+        // restrict the vector search to the surviving ids so
+        // filtered-out memories can't saturate the top-k window
+        // (which would degrade surviving candidates to weak
+        // sem = 0.0 evidence and mis-rank them). With no filters
+        // — or a still-large candidate set — fall back to the
+        // whole-store search, where the windowing artifact is
+        // mild because little or nothing in the window is
+        // discarded.
+        // `narrowed` says whether the caller's filters cut the candidate
+        // set (see the call site).
+        let restrict_ids: Option<Vec<String>> = (narrowed
+            && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
+            .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
+
+        let t_vs = std::time::Instant::now();
+        let vs_result = self
+            .store
+            .vector_search(query_vector, limit, restrict_ids.as_deref())
+            .await;
+        self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
+        vs_result
+            .ok()
+            .map(|matches| matches.into_iter().map(|m| (m.id, m.score)).collect())
     }
 
     /// Load into `map` the memories among `ids` it does not hold yet, in one
@@ -2313,6 +2279,72 @@ pub(crate) static FILES_REQUESTED: std::sync::atomic::AtomicUsize =
 /// takes from the loaded memory, carried in the projection (schema v0.2.0),
 /// so a row scores identically without its file
 /// (`tests::rank_from_index_matches_file_load`).
+/// Step 5 of [`RetrievalEngine::query_expanding_from`]: normalized keyword
+/// scores for `filtered_entries`, keyed by memory id.
+fn keyword_scores(
+    q: &str,
+    filtered_entries: &[crate::storage::IndexForFiltering],
+    memory_map: &HashMap<String, Memory>,
+) -> HashMap<String, f64> {
+    use crate::search::{keyword_search_stems, normalize_keyword_score, query_token_count};
+
+    // Prefer the stems the write path already stored (schema v0.5.0).
+    // Rebuilding them here is the dominant cost of keyword scoring —
+    // ~17.7ms per 1000 memories — and it is identical on every query.
+    //
+    // Iterate the entries and fall back to the loaded memory only for
+    // rows written before the column existed (Step 3 loaded exactly
+    // those), so a partially-migrated store degrades in speed and never
+    // in correctness.
+    // Borrowed from the row on the common path; owned only for the
+    // fallback it has to compute.
+    fn stems_for<'a>(
+        e: &'a crate::storage::IndexForFiltering,
+        memory_map: &HashMap<String, Memory>,
+    ) -> Option<(&'a str, std::borrow::Cow<'a, KeywordStems>)> {
+        let stems = match &e.keyword_stems {
+            Some(s) => std::borrow::Cow::Borrowed(s),
+            None => {
+                let m = memory_map.get(&e.id)?;
+                std::borrow::Cow::Owned(KeywordStems::compute(&m.summary, &m.tags, &m.content))
+            }
+        };
+        Some((e.id.as_str(), stems))
+    }
+    // The `None` arm is the pre-v0.5.0 fallback: deriving stems is
+    // ~16µs per memory (tokenize → stoplist → Snowball stem → dedup
+    // across three fields), so on a store that has not been reindexed
+    // since the column landed this dominates the query. Parallel above
+    // the same threshold as scoring; order-preserving either way,
+    // which matters here because `kw_results` indexes back into this
+    // vector.
+    let scored: Vec<(&str, std::borrow::Cow<'_, KeywordStems>)> =
+        if filtered_entries.len() >= PARALLEL_SCORE_MIN {
+            use rayon::prelude::*;
+            filtered_entries
+                .par_iter()
+                .filter_map(|e| stems_for(e, memory_map))
+                .collect()
+        } else {
+            filtered_entries
+                .iter()
+                .filter_map(|e| stems_for(e, memory_map))
+                .collect()
+        };
+    // Split, order kept, so `kw_results` indexes both halves alike.
+    let (scored_ids, stems): (Vec<&str>, Vec<std::borrow::Cow<'_, KeywordStems>>) =
+        scored.into_iter().unzip();
+    let kw_results = keyword_search_stems(q, &stems);
+    let num_tokens = query_token_count(q);
+    kw_results
+        .into_iter()
+        .map(|(idx, raw)| {
+            let norm = normalize_keyword_score(raw, num_tokens);
+            (scored_ids[idx].to_string(), norm)
+        })
+        .collect()
+}
+
 fn score_target(e: &crate::storage::IndexForFiltering) -> ScoreTarget<'_> {
     ScoreTarget {
         created_at: e.created_at,
