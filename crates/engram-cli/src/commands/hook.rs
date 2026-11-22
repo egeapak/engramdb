@@ -50,12 +50,10 @@ fn extract_file_path(input: &str) -> Option<String> {
 /// local user's. Injecting them into agent context unmarked made
 /// repo-shipped text indistinguishable from the user's own notes; the
 /// marker lets the agent (and a reviewing human) weigh trust.
+/// [`trailer`] inlines the same two names.
+#[cfg(test)]
 fn source_marker(m: &engramdb::types::Memory) -> String {
-    format!(
-        "{}/{}",
-        format!("{:?}", m.visibility).to_lowercase(),
-        format!("{:?}", m.provenance.source).to_lowercase()
-    )
+    format!("{}/{}", m.visibility.as_str(), m.provenance.source.as_str())
 }
 
 /// The memory's ID, if it is safe to print into injected context.
@@ -78,9 +76,10 @@ fn id_marker(m: &engramdb::types::Memory) -> Option<&str> {
 
 /// `id: …; source: …` — the trailing parenthetical every entry carries.
 fn trailer(m: &engramdb::types::Memory) -> String {
+    let (visibility, source) = (m.visibility.as_str(), m.provenance.source.as_str());
     match id_marker(m) {
-        Some(id) => format!("id: {}; source: {}", id, source_marker(m)),
-        None => format!("source: {}", source_marker(m)),
+        Some(id) => format!("id: {id}; source: {visibility}/{source}"),
+        None => format!("source: {visibility}/{source}"),
     }
 }
 
@@ -101,27 +100,60 @@ const PREVIEW_TRUST_NOTE: &str =
 /// ends with a marker naming the call that returns the rest — the one
 /// declared loss path per entry (the other is the omission notice).
 fn preview_line(m: &engramdb::types::Memory, max_chars: usize) -> Option<String> {
-    let body = defang(&m.content);
-    let body = body.trim();
-    if max_chars == 0 || body.is_empty() || body == defang(&m.summary).trim() {
-        return None;
+    Preview::of(m)?.line(max_chars)
+}
+
+/// A memory's defanged body, made once and cut to as many lengths as the
+/// budget loop tries ([`preview_line`] for one length).
+struct Preview {
+    body: String,
+    chars: usize,
+    has_id: bool,
+}
+
+impl Preview {
+    /// `None` when there is no body, or it only repeats the summary.
+    fn of(m: &engramdb::types::Memory) -> Option<Self> {
+        let mut body = defang(&m.content);
+        let trimmed = body.trim();
+        if trimmed.is_empty() || trimmed == defang(&m.summary).trim() {
+            return None;
+        }
+        if trimmed.len() != body.len() {
+            body = trimmed.to_string();
+        }
+        Some(Self {
+            chars: body.chars().count(),
+            body,
+            has_id: id_marker(m).is_some(),
+        })
     }
-    if body.chars().count() <= max_chars {
-        return Some(format!("  {}", body));
+
+    fn line(&self, max_chars: usize) -> Option<String> {
+        if max_chars == 0 {
+            return None;
+        }
+        if self.chars <= max_chars {
+            return Some(format!("  {}", self.body));
+        }
+        let end = self
+            .body
+            .char_indices()
+            .nth(max_chars)
+            .map_or(self.body.len(), |(i, _)| i);
+        // The entry's summary line already carries the id; repeating it here
+        // cost ~40 bytes of a tight budget per truncated preview.
+        let how = if self.has_id {
+            "get the id above"
+        } else {
+            "get"
+        };
+        Some(format!(
+            "  {}… (truncated; full text: {})",
+            self.body[..end].trim_end(),
+            how
+        ))
     }
-    let kept: String = body.chars().take(max_chars).collect();
-    // The entry's summary line already carries the id; repeating it here
-    // cost ~40 bytes of a tight budget per truncated preview.
-    let how = if id_marker(m).is_some() {
-        "get the id above"
-    } else {
-        "get"
-    };
-    Some(format!(
-        "  {}… (truncated; full text: {})",
-        kept.trim_end(),
-        how
-    ))
 }
 
 /// Format scored memories into a compact additionalContext string (legacy
@@ -131,7 +163,7 @@ fn format_additional_context(header: &str, memories: &[ScoredMemory]) -> String 
     let mut lines: Vec<String> = vec![header.into()];
     for scored in memories {
         let m = &scored.memory;
-        let type_str = format!("{:?}", m.type_).to_lowercase();
+        let type_str = m.type_.as_str();
         lines.push(format!(
             "- [{}] {} (criticality: {:.1}, score: {:.2}, source: {})",
             type_str,
@@ -319,56 +351,53 @@ fn premise_clause(m: &engramdb::types::Memory) -> String {
 }
 
 fn format_class_entry(scored: &ScoredMemory, preview_chars: Option<usize>) -> Vec<String> {
-    let m = &scored.memory;
-    let tail = trailer(m);
-    let type_str = format!("{:?}", m.type_).to_lowercase();
-    let summary = defang(&m.summary);
-    let line = match m.epistemic {
-        Epistemic::Decision => {
-            let mut line = format!("- [{}] {}", type_str, summary);
-            if let Some(validity) = &m.valid_while {
-                if let Some(premise) = &validity.premise {
-                    line.push_str(&format!(" — because {}", defang(premise)));
-                }
-                if !validity.invalidated_by.is_empty() {
-                    line.push_str(&format!(
-                        "; revisit if {} changes",
-                        defang(&validity.invalidated_by.join(", "))
-                    ));
-                }
-            }
-            line.push_str(&format!(" ({})", tail));
-            line
-        }
-        Epistemic::Observation => {
-            let mut line = format!(
-                "- [{}] {} (observed {}",
-                type_str,
-                summary,
-                m.created_at.format("%Y-%m-%d")
-            );
-            if let Some(v) = m.verified_at {
-                line.push_str(&format!(", verified {}", v.format("%Y-%m-%d")));
-            }
-            line.push_str(&format!("; {})", tail));
-            line.push_str(&premise_clause(m));
-            line
-        }
-        Epistemic::Fact => {
-            let mut line = format!("- [{}] {}", type_str, summary);
-            if let Some(v) = m.verified_at {
-                line.push_str(&format!(" (verified {})", v.format("%Y-%m-%d")));
-            }
-            line.push_str(&format!(" ({})", tail));
-            line.push_str(&premise_clause(m));
-            line
-        }
-    };
-    let mut entry = vec![line];
-    if let Some(preview) = preview_chars.and_then(|n| preview_line(m, n)) {
+    let mut entry = vec![class_entry_line(&scored.memory)];
+    if let Some(preview) = preview_chars.and_then(|n| preview_line(&scored.memory, n)) {
         entry.push(preview);
     }
     entry
+}
+
+/// The summary line of a class-grouped entry ([`format_class_entry`]).
+fn class_entry_line(m: &engramdb::types::Memory) -> String {
+    use std::fmt::Write as _;
+    // `write!` into a `String` cannot fail.
+    let type_str = m.type_.as_str();
+    let summary = defang(&m.summary);
+    let mut line = format!("- [{type_str}] {summary}");
+    match m.epistemic {
+        Epistemic::Decision => {
+            if let Some(validity) = &m.valid_while {
+                if let Some(premise) = &validity.premise {
+                    let _ = write!(line, " — because {}", defang(premise));
+                }
+                if !validity.invalidated_by.is_empty() {
+                    let _ = write!(
+                        line,
+                        "; revisit if {} changes",
+                        defang(&validity.invalidated_by.join(", "))
+                    );
+                }
+            }
+            let _ = write!(line, " ({})", trailer(m));
+        }
+        Epistemic::Observation => {
+            let _ = write!(line, " (observed {}", m.created_at.format("%Y-%m-%d"));
+            if let Some(v) = m.verified_at {
+                let _ = write!(line, ", verified {}", v.format("%Y-%m-%d"));
+            }
+            let _ = write!(line, "; {})", trailer(m));
+            line.push_str(&premise_clause(m));
+        }
+        Epistemic::Fact => {
+            if let Some(v) = m.verified_at {
+                let _ = write!(line, " (verified {})", v.format("%Y-%m-%d"));
+            }
+            let _ = write!(line, " ({})", trailer(m));
+            line.push_str(&premise_clause(m));
+        }
+    }
+    line
 }
 
 /// Suppress task-scoped memories from hook injection (§8.3): entries with
@@ -561,18 +590,25 @@ fn format_class_context_with_budget(
         for ((si, ei), mut chars, min_chars) in rounds {
             let scored = sections[si].1[ei].0;
             let current = entry_len(&sections[si].1[ei].1);
+            // The summary line stays as rendered in pass 1; only the preview
+            // is cut to each length tried, from one defanged body.
+            let Some(preview) = Preview::of(&scored.memory) else {
+                continue; // no body to preview
+            };
+            let line_len = sections[si].1[ei].1[0].len() + 1;
             while chars >= min_chars {
-                let entry = format_class_entry(scored, Some(chars));
-                if entry.len() == 1 {
-                    break; // no body to preview
-                }
-                let len = entry_len(&entry);
+                let Some(line) = preview.line(chars) else {
+                    break;
+                };
+                let len = line_len + line.len() + 1;
                 if len <= current {
                     break; // already showing at least this much
                 }
                 if used + len - current <= body_budget {
                     used += len - current;
-                    sections[si].1[ei].1 = entry;
+                    let entry = &mut sections[si].1[ei].1;
+                    entry.truncate(1);
+                    entry.push(line);
                     any_preview = true;
                     break;
                 }

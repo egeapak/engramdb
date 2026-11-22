@@ -414,11 +414,15 @@ pub struct ParsedSession {
 /// Truncate on a char boundary, appending an ellipsis when shortened.
 fn truncate_chars(s: &str, max: usize) -> String {
     let trimmed = s.trim();
-    if trimmed.chars().count() <= max {
+    // The byte offset of the char after the first `max`, if there is one.
+    let Some((end, _)) = trimmed.char_indices().nth(max) else {
         return trimmed.to_string();
-    }
-    let cut: String = trimmed.chars().take(max).collect();
-    format!("{}…", cut.trim_end())
+    };
+    let cut = trimmed[..end].trim_end();
+    let mut out = String::with_capacity(cut.len() + '…'.len_utf8());
+    out.push_str(cut);
+    out.push('…');
+    out
 }
 
 /// Collapse a value to a single-line preview.
@@ -455,9 +459,11 @@ fn tool_target(input: &serde_json::Value) -> Option<String> {
 
 /// Extract the text of a `tool_result` block, whose `content` is either a
 /// bare string or an array of typed blocks.
-fn tool_result_text(block: &serde_json::Value) -> Option<String> {
+fn tool_result_text(block: &serde_json::Value) -> Option<std::borrow::Cow<'_, str>> {
     match block.get("content") {
-        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        // Borrowed: only a one-line preview is kept, and a tool result is
+        // often the largest string in the record.
+        Some(serde_json::Value::String(s)) => Some(std::borrow::Cow::Borrowed(s)),
         Some(serde_json::Value::Array(items)) => {
             let joined: Vec<&str> = items
                 .iter()
@@ -466,7 +472,7 @@ fn tool_result_text(block: &serde_json::Value) -> Option<String> {
             if joined.is_empty() {
                 None
             } else {
-                Some(joined.join("\n"))
+                Some(std::borrow::Cow::Owned(joined.join("\n")))
             }
         }
         _ => None,

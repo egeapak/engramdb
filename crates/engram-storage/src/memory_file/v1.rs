@@ -82,18 +82,18 @@ fn parse_v1(frontmatter: &str, body: &str) -> Result<Memory> {
     if !has_epistemic_key {
         memory.epistemic = memory.type_.default_epistemic();
     }
-    let sections = parse_body_sections(body);
+    let mut sections = parse_body_sections(body);
 
     // H1 title in body overrides frontmatter title
-    if let Some(title) = sections.get("__h1__") {
-        memory.title = Some(title.clone());
+    if let Some(title) = sections.remove("__h1__") {
+        memory.title = Some(title);
     }
 
-    if let Some(content) = sections.get("Content") {
-        memory.content = content.clone();
+    if let Some(content) = sections.remove("Content") {
+        memory.content = content;
     }
-    if let Some(details) = sections.get("Details") {
-        memory.details = Some(details.clone());
+    if let Some(details) = sections.remove("Details") {
+        memory.details = Some(details);
     }
 
     Ok(memory)

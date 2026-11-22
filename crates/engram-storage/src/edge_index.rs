@@ -390,7 +390,7 @@ async fn owns_any(table: &Table, owner_ids: &[String]) -> Result<bool> {
         let mut stream = table
             .query()
             .only_if_expr(owner_filter(owners))
-            .select(lancedb::query::Select::Columns(vec!["row_key".into()]))
+            .select(crate::lance_index::project_columns(vec!["row_key".into()]))
             .limit(1)
             .execute()
             .await

@@ -2181,6 +2181,7 @@ dependencies = [
  "indicatif",
  "inquire",
  "insta",
+ "libc",
  "owo-colors",
  "predicates",
  "regex",
@@ -2321,6 +2322,7 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "compact_str",
  "rust-stemmers",
  "serde",
  "serde_json",

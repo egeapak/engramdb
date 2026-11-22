@@ -35,16 +35,44 @@ pub struct Decay {
     pub strategy: DecayStrategy,
 
     /// Half-life for exponential decay (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lazy_delta::deserialize"
+    )]
     pub half_life: Option<Duration>,
 
     /// Time-to-live - absolute expiration (optional)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lazy_delta::deserialize"
+    )]
     pub ttl: Option<Duration>,
 
     /// Minimum relevance floor (0.0 to 1.0, default 0.0)
     #[serde(default)]
     pub floor: f64,
+}
+
+/// Deserialize an optional `TimeDelta` in chrono's own `(secs, nanos)` form.
+///
+/// chrono's impl builds its "out of bounds" error with `ok_or`, so every
+/// successful parse allocates an error message and drops it: two allocations
+/// per field, paid for every decayed row a query reads from the index. This
+/// accepts exactly what chrono accepts and builds the error only on failure.
+mod lazy_delta {
+    use chrono::Duration;
+    use serde::{de::Error, Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+        let Some((secs, nanos)) = Option::<(i64, i32)>::deserialize(d)? else {
+            return Ok(None);
+        };
+        Duration::new(secs, nanos as u32)
+            .map(Some)
+            .ok_or_else(|| D::Error::custom("TimeDelta out of bounds"))
+    }
 }
 
 impl Decay {
@@ -103,6 +131,31 @@ impl Decay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_delta_accepts_and_refuses_what_chrono_does() {
+        #[derive(Deserialize)]
+        struct Chrono {
+            half_life: Option<Duration>,
+        }
+        for json in [
+            r#"{"strategy":"exponential","half_life":[86400,0]}"#,
+            r#"{"strategy":"exponential","half_life":[-5,999999999]}"#,
+            r#"{"strategy":"exponential","half_life":null}"#,
+            r#"{"strategy":"exponential"}"#,
+            r#"{"strategy":"exponential","half_life":[9223372036854775807,0]}"#,
+            r#"{"strategy":"exponential","half_life":[1,2000000000]}"#,
+            r#"{"strategy":"exponential","half_life":"1d"}"#,
+        ] {
+            let ours = serde_json::from_str::<Decay>(json).map(|d| d.half_life);
+            let theirs = serde_json::from_str::<Chrono>(json).map(|c| c.half_life);
+            match (ours, theirs) {
+                (Ok(a), Ok(b)) => assert_eq!(a, b, "{json}"),
+                (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string(), "{json}"),
+                (a, b) => panic!("{json}: ours {a:?}, chrono {b:?}"),
+            }
+        }
+    }
 
     #[test]
     fn test_decay_none() {

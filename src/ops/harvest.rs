@@ -854,11 +854,7 @@ pub fn index_text_digest(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::types::hex::lower_hex(&hasher.finalize())
 }
 
 /// Trust marker prefixed to every rendered digest.
@@ -945,10 +941,11 @@ pub fn defang_memory_text(text: &str) -> String {
 /// for transcript text only: stored memory text goes through
 /// [`escape_harness_tags`] alone.
 fn defang_harness_tags(text: &str) -> String {
-    escape_harness_tags(&text.replace(
-        "ENGRAMDB-RECORDED-TRANSCRIPT",
-        "ENGRAMDB\u{2011}RECORDED\u{2011}TRANSCRIPT",
-    ))
+    const MARKER: &str = "ENGRAMDB-RECORDED-TRANSCRIPT";
+    if !text.contains(MARKER) {
+        return escape_harness_tags(text);
+    }
+    escape_harness_tags(&text.replace(MARKER, "ENGRAMDB\u{2011}RECORDED\u{2011}TRANSCRIPT"))
 }
 
 /// Unhyphenated scaffolding names, compared without case. Hyphenated and
@@ -1294,11 +1291,14 @@ fn escape_structural_line(line: &str) -> std::borrow::Cow<'_, str> {
 /// Make transcript text safe to interpolate into the digest body.
 fn defang(text: &str) -> String {
     let cleaned = transcripts::sanitize_for_terminal(text);
-    let escaped: String = cleaned
-        .lines()
-        .map(|l| escape_structural_line(l).into_owned())
-        .collect::<Vec<_>>()
-        .join("\n");
+    // `lines()` joined by `\n`, written into one buffer.
+    let mut escaped = String::with_capacity(cleaned.len() + 16);
+    for (i, line) in cleaned.lines().enumerate() {
+        if i > 0 {
+            escaped.push('\n');
+        }
+        escaped.push_str(&escape_structural_line(line));
+    }
     defang_harness_tags(&escaped)
 }
 
