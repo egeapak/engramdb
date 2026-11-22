@@ -92,11 +92,7 @@ fn normalize_line_endings(text: &str) -> std::borrow::Cow<'_, str> {
 pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    engram_types::hex::lower_hex(&hasher.finalize())
 }
 
 #[cfg(test)]

@@ -72,7 +72,7 @@ impl std::fmt::Debug for Security {
 fn random_hex(bytes: usize) -> anyhow::Result<String> {
     let mut buf = vec![0u8; bytes];
     getrandom::fill(&mut buf).map_err(|e| anyhow::anyhow!("no OS randomness: {e}"))?;
-    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+    Ok(engramdb::types::hex::lower_hex(&buf))
 }
 
 impl Security {

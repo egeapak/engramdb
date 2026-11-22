@@ -281,11 +281,20 @@ fn simulate(input: &ForceInput, lines: &[Line], px: &mut [f64], py: &mut [f64]) 
         dx[b] -= (ddx / d) * f;
         dy[b] -= (ddy / d) * f;
     };
+    // One bucket map for every iteration: each pass keeps the cells the last
+    // one used (and their vectors' capacity) and empties them, instead of
+    // allocating a map and a vector per occupied cell per iteration. A bucket
+    // still lists its members in ascending index order, so the force sums run
+    // in the same order and the layout is bit-identical.
+    let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     for it in 0..iters {
         let temp = GRID * (0.6 - (0.58 * it as f64) / iters as f64);
         dx.fill(0.0);
         dy.fill(0.0);
-        let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        buckets.retain(|_, b| !b.is_empty());
+        for b in buckets.values_mut() {
+            b.clear();
+        }
         for i in 0..n {
             buckets
                 .entry((cell_of(px[i], cell), cell_of(py[i], cell)))

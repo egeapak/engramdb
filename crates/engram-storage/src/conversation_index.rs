@@ -41,7 +41,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
 use std::sync::Arc;
 
@@ -242,7 +242,10 @@ impl ConversationIndex {
         let table = self.table().await?;
         let mut stream = table
             .query()
-            .select(Select::Columns(vec!["session_id".into(), "summary".into()]))
+            .select(crate::lance_index::project_columns(vec![
+                "session_id".into(),
+                "summary".into(),
+            ]))
             .execute()
             .await
             .context("Failed to scan the conversations table")?;
@@ -569,7 +572,7 @@ impl ConversationIndex {
         let table = self.table().await?;
         let mut stream = table
             .query()
-            .select(Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "session_id".into(),
                 "ended_at".into(),
             ]))

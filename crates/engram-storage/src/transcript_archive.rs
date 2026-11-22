@@ -302,11 +302,7 @@ pub fn export_archive_bounded(
 /// implements `LowerHex`, so `{:x}` does not compile — same gotcha already
 /// documented in `project_id::hash_to_id`.
 fn hex_digest(hasher: Sha256) -> String {
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    engram_types::hex::lower_hex(&hasher.finalize())
 }
 
 /// Remove one session's archive. Returns whether a file was deleted.

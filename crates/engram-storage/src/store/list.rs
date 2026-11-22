@@ -69,8 +69,11 @@ impl MemoryStore {
         let shared_dir = paths::memories_dir(&self.project_dir);
         let personal_dir = paths::personal_memories_dir(&self.project_id)?;
 
-        let shared_map = scan_dir_to_map(&shared_dir).await;
-        let personal_map = scan_dir_to_map(&personal_dir).await;
+        // Only the requested ids are kept from the scans: a store's
+        // directory holds every memory, a batch names a few of them.
+        let wanted: HashSet<&str> = ids.iter().map(AsRef::as_ref).collect();
+        let shared_map = scan_dir_to_map(&shared_dir, &wanted).await;
+        let personal_map = scan_dir_to_map(&personal_dir, &wanted).await;
 
         // Overlap the per-file reads (bounded) instead of awaiting each in
         // sequence — this backs the retrieval hot path, where serializing

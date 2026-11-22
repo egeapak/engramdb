@@ -33,6 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+use compact_str::CompactString;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 
@@ -156,14 +157,18 @@ pub fn normalize_counts(text: &str) -> (HashMap<String, u32>, usize) {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct KeywordStems {
     /// Distinct stems in the summary.
+    ///
+    /// Stems are [`CompactString`]s: almost every stem fits in the 24 inline
+    /// bytes, so the per-row parse a text query does for every candidate
+    /// allocates no string per stem. The JSON on disk is unchanged.
     #[serde(default, rename = "s")]
-    pub summary: Vec<String>,
+    pub summary: Vec<CompactString>,
     /// Distinct stems across all tags.
     #[serde(default, rename = "t")]
-    pub tags: Vec<String>,
+    pub tags: Vec<CompactString>,
     /// Content stems with occurrence counts.
     #[serde(default, rename = "c")]
-    pub content: HashMap<String, u32>,
+    pub content: HashMap<CompactString, u32>,
     /// Scoreable content tokens, post-stopword and pre-deduplication.
     #[serde(default, rename = "n")]
     pub content_len: usize,
@@ -173,19 +178,22 @@ impl KeywordStems {
     /// Derive the stems for a memory's three weighted fields.
     pub fn compute(summary: &str, tags: &[String], content: &str) -> Self {
         let (content_counts, content_len) = normalize_counts(content);
-        let mut tag_stems: Vec<String> = Vec::new();
+        let mut tag_stems: Vec<CompactString> = Vec::new();
         let mut seen = HashSet::new();
         for tag in tags {
             for stem in normalize(tag) {
                 if seen.insert(stem.clone()) {
-                    tag_stems.push(stem);
+                    tag_stems.push(stem.into());
                 }
             }
         }
         Self {
-            summary: normalize(summary),
+            summary: normalize(summary).into_iter().map(Into::into).collect(),
             tags: tag_stems,
-            content: content_counts,
+            content: content_counts
+                .into_iter()
+                .map(|(k, v)| (k.into(), v))
+                .collect(),
             content_len,
         }
     }
