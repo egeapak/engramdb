@@ -1436,65 +1436,18 @@ impl RetrievalEngine {
         };
 
         // Step 4: If query text + embeddings available, get semantic scores.
-        let semantic_scores_map: Option<HashMap<String, f64>> = if let Some(ref q) = query.query {
-            if let Some(provider) = &self.embedding_provider {
-                let t_embed = std::time::Instant::now();
-                let embed_result = provider.embed(q).await;
-                self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
-
-                if let Ok(query_vector) = embed_result {
-                    // Over-fetch 3x so the top-k still has headroom after
-                    // chunk-level dedup.
-                    //
-                    // `max_results` is user-supplied: saturate the multiply
-                    // (a plain `* 3` panics in debug / wraps in release on
-                    // huge values) and cap the window — memories beyond it
-                    // are still returned, just with weak (sem = 0.0)
-                    // semantic evidence, so a finite cap only bounds work.
-                    let limit = query
-                        .max_results
-                        .unwrap_or(self.config.retrieval.max_results)
-                        .saturating_mul(3)
-                        .min(VECTOR_SEARCH_WINDOW_CAP);
-
-                    // Filter pushdown: when the index filters actually
-                    // narrowed the candidate set and it is small enough,
-                    // restrict the vector search to the surviving ids so
-                    // filtered-out memories can't saturate the top-k window
-                    // (which would degrade surviving candidates to weak
-                    // sem = 0.0 evidence and mis-rank them). With no filters
-                    // — or a still-large candidate set — fall back to the
-                    // whole-store search, where the windowing artifact is
-                    // mild because little or nothing in the window is
-                    // discarded.
-                    //
-                    // Narrowing happens in two places and both must count: the
-                    // Rust-side filters (visible as `filtered < total`) and the
-                    // LanceDB predicate pushdown (which narrows the scan before
-                    // `total_entry_count` is measured, so `filtered == total`
-                    // even though the store holds more rows).
-                    let narrowed = pushdown_applied || filtered_entries.len() < total_entry_count;
-                    let restrict_ids: Option<Vec<String>> = (narrowed
-                        && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
-                        .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
-
-                    let t_vs = std::time::Instant::now();
-                    let vs_result = self
-                        .store
-                        .vector_search(query_vector, limit, restrict_ids.as_deref())
-                        .await;
-                    self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
-                    vs_result
-                        .ok()
-                        .map(|matches| matches.into_iter().map(|m| (m.id, m.score)).collect())
-                } else {
-                    None
-                }
-            } else {
-                None
+        let semantic_scores_map: Option<HashMap<String, f64>> = match query.query {
+            Some(ref q) => {
+                // Narrowing happens in two places and both must count: the
+                // Rust-side filters (visible as `filtered < total`) and the
+                // LanceDB predicate pushdown (which narrows the scan before
+                // `total_entry_count` is measured, so `filtered == total`
+                // even though the store holds more rows).
+                let narrowed = pushdown_applied || filtered_entries.len() < total_entry_count;
+                self.semantic_scores(q, query, &filtered_entries, narrowed)
+                    .await
             }
-        } else {
-            None
+            None => None,
         };
 
         // Step 4.5: When vector search ran, fetch the set of memory ids that
@@ -1917,6 +1870,63 @@ impl RetrievalEngine {
         self.record_query_outcome(!result.memories.is_empty(), &result.retrieval_quality);
 
         Ok(result)
+    }
+
+    /// Step 4 of [`Self::query_expanding_from`]: embed the query text and
+    /// run the vector search. `None` when no embedding provider is set or
+    /// the embed or the search failed.
+    async fn semantic_scores(
+        &self,
+        q: &str,
+        query: &RetrievalQuery,
+        filtered_entries: &[crate::storage::IndexForFiltering],
+        narrowed: bool,
+    ) -> Option<HashMap<String, f64>> {
+        let provider = self.embedding_provider.as_ref()?;
+        let t_embed = std::time::Instant::now();
+        let embed_result = provider.embed(q).await;
+        self.record_stage("embed", t_embed.elapsed().as_secs_f64() * 1000.0);
+
+        let query_vector = embed_result.ok()?;
+        // Over-fetch 3x so the top-k still has headroom after
+        // chunk-level dedup.
+        //
+        // `max_results` is user-supplied: saturate the multiply
+        // (a plain `* 3` panics in debug / wraps in release on
+        // huge values) and cap the window — memories beyond it
+        // are still returned, just with weak (sem = 0.0)
+        // semantic evidence, so a finite cap only bounds work.
+        let limit = query
+            .max_results
+            .unwrap_or(self.config.retrieval.max_results)
+            .saturating_mul(3)
+            .min(VECTOR_SEARCH_WINDOW_CAP);
+
+        // Filter pushdown: when the index filters actually
+        // narrowed the candidate set and it is small enough,
+        // restrict the vector search to the surviving ids so
+        // filtered-out memories can't saturate the top-k window
+        // (which would degrade surviving candidates to weak
+        // sem = 0.0 evidence and mis-rank them). With no filters
+        // — or a still-large candidate set — fall back to the
+        // whole-store search, where the windowing artifact is
+        // mild because little or nothing in the window is
+        // discarded.
+        // `narrowed` says whether the caller's filters cut the candidate
+        // set (see the call site).
+        let restrict_ids: Option<Vec<String>> = (narrowed
+            && filtered_entries.len() <= VECTOR_RESTRICT_MAX_IDS)
+            .then(|| filtered_entries.iter().map(|e| e.id.clone()).collect());
+
+        let t_vs = std::time::Instant::now();
+        let vs_result = self
+            .store
+            .vector_search(query_vector, limit, restrict_ids.as_deref())
+            .await;
+        self.record_stage("vector_search", t_vs.elapsed().as_secs_f64() * 1000.0);
+        vs_result
+            .ok()
+            .map(|matches| matches.into_iter().map(|m| (m.id, m.score)).collect())
     }
 
     /// Load into `map` the memories among `ids` it does not hold yet, in one
