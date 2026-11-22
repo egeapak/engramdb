@@ -19,7 +19,7 @@ Existing tools (`create_memory`, `query`) are the template — implement once in
 
 1. Implement `MyOpParams` / `MyOpResult` and the async function in `src/ops/<name>.rs`. Re-export from `src/ops/mod.rs`.
 2. CLI surface: add a `Command::MyOp` variant in `crates/engram-cli/src/app.rs`, a `run_my_op` handler in `crates/engram-cli/src/commands/<name>.rs`, re-export from `commands/mod.rs`, dispatch in `crates/engram-cli/src/lib.rs::run`.
-3. MCP surface: add a `#[tool(...)]` method on `EngramDbServer` in `crates/engram-mcp/src/server.rs` with a `MyOpRequest` input struct. Resolve the target store (handle the `project` parameter), call `ops::my_op`, serialize the result.
+3. MCP surface: add a `#[tool(...)]` method on `EngramDbServer` in `crates/engram-mcp/src/server.rs` with a `MyOpInput` input struct in `crates/engram-mcp/src/server/inputs.rs` (a new tool changes `tool_schemas_are_stable_across_the_split`'s golden: regenerate it with `ENGRAMDB_PIN_REGEN=1`). Resolve the target store (handle the `project` parameter), call `ops::my_op`, serialize the result.
 4. Test the op in `src/ops/<name>.rs::tests` and the CLI in `crates/engram-cli/tests/cli/<name>.rs`.
 
 ## Add a new memory type variant
