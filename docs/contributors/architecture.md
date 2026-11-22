@@ -12,7 +12,7 @@
                         ▼
    ┌────────────────────┴────────────────────┐    ┌───────────────────┐
    │  crates/engram-cli/  (Clap + dispatch   │    │  engram-cli/src/  │
-   │  ─────► src/commands/ handlers)     ◄── │    │  commands/hook.rs │
+   │  ─────► src/commands/ handlers)     ◄── │    │  commands/hook/   │
    │                                         │    └────────┬──────────┘
    └─────────────────┬───────────────────────┘             │
                      │                                     │

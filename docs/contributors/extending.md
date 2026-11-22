@@ -92,7 +92,7 @@ Existing tools (`create_memory`, `query`) are the template — implement once in
 
 1. **`crates/engram-cli/src/app.rs`**: extend `HookCommand` with the new variant.
 
-2. **`crates/engram-cli/src/commands/hook.rs`**: add the handler. Read event JSON from stdin (use `serde_json::Value` and `.get("...")` for forward-compat), emit `additionalContext` JSON.
+2. **`crates/engram-cli/src/commands/hook/`**: add the handler (`events.rs` holds the `process_*` handlers, `mod.rs::execute_hook` dispatches). Read event JSON from stdin (use `serde_json::Value` and `.get("...")` for forward-compat), emit `additionalContext` JSON.
 
 3. **`crates/engram-cli/src/commands/setup.rs`**: update the writer that adds hooks to `settings.json` so the new event is registered when users run `engramdb setup`.
 
