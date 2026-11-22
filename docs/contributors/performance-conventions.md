@@ -23,7 +23,7 @@ A change is on a hot path when it touches one of these:
 
 | hot path | where | why it is hot |
 |---|---|---|
-| Hooks | `crates/engram-cli/src/commands/hook.rs`, `src/daemon/hooks.rs` | PreToolUse and PostToolUse run on every tool call. UserPromptSubmit runs on every prompt. |
+| Hooks | `crates/engram-cli/src/commands/hook/`, `src/daemon/hooks.rs` | PreToolUse and PostToolUse run on every tool call. UserPromptSubmit runs on every prompt. |
 | Query and retrieval | `src/retrieval/`, `src/scoring/`, `src/scope/` | Every `query`, every hook that injects context. |
 | Index reads | `crates/engram-storage/src/lance_index.rs`, `store/list.rs` (`list_for_filtering*`, `get_batch`), `store/staleness.rs` (`check_staleness`) | Every query and every hook reads the index. |
 | Memory-file parse and write | `crates/engram-storage/src/memory_file/` | Every `get_batch`, `create`, `update` and `reindex`. |
@@ -156,7 +156,7 @@ query to 60 ms (query-latency-profile R7).
 ```rust
 // Don't: call store.get_batch(&all_candidate_ids) before scoring.
 
-// Do (src/retrieval/engine.rs): score each row with `score_target`, cut to
+// Do (src/retrieval/engine/mod.rs): score each row with `score_target`, cut to
 // `max_results`, then read only the survivors and their expanded
 // neighbours with `load_missing`.
 ```
@@ -173,7 +173,7 @@ with the ranking before the knobs existed.
 - When you add a scoring signal, attach it only when its knob is on.
 - Keep `default_config_reads_no_edges_or_usage` and
   `graph_signal_tests::default_config_ranking_is_unchanged_on_graph_fixture`
-  passing (`src/retrieval/engine.rs`).
+  passing (`src/retrieval/engine/mod.rs`).
 
 ### 9. Cache per process, not per engine
 
@@ -196,7 +196,7 @@ one read per period, not one per query.
 Why: rayon pays for itself only on large inputs. Most queries load a few
 survivors, and entering the pool there saves nothing.
 
-- Scoring: `PARALLEL_SCORE_MIN` = 64 (`src/retrieval/engine.rs`).
+- Scoring: `PARALLEL_SCORE_MIN` = 64 (`src/retrieval/engine/mod.rs`).
 - Parsing in `get_batch`: `PARALLEL_PARSE_MIN` = 32
   (`crates/engram-storage/src/store/mod.rs`).
 - The loop body must be a per-item map over read-only state, so the result
@@ -247,7 +247,7 @@ and a test pins each value to the old output.
 // Don't
 let type_str = format!("{:?}", m.type_).to_lowercase();
 
-// Do (crates/engram-cli/src/commands/hook.rs)
+// Do (crates/engram-cli/src/commands/hook/format.rs)
 let type_str = m.type_.as_str();
 ```
 
@@ -290,7 +290,7 @@ for (i, line) in cleaned.lines().enumerate() {
 ```
 
 For several parts, use `write!` into one `String` (`class_entry_line` in
-`hook.rs`), not `push_str(&format!(…))`.
+`hook/format.rs`), not `push_str(&format!(…))`.
 
 When only part of the result is kept, do not build the whole. A tool result
 with array content was joined into one `String` only to keep its first
@@ -303,7 +303,7 @@ Why: the hook budget loop re-defanged and re-rendered the whole entry for
 every preview length it tried (c6).
 
 ```rust
-// Do (crates/engram-cli/src/commands/hook.rs)
+// Do (crates/engram-cli/src/commands/hook/format.rs)
 let Some(preview) = Preview::of(&scored.memory) else { continue };
 // then preview.line(n) for each length n
 ```
@@ -421,7 +421,7 @@ for t in &texts {
     provider.embed(t).await?;
 }
 
-// Do (src/retrieval/engine.rs): `RetrievalEngine::embed_texts`, which
+// Do (src/retrieval/engine/mod.rs): `RetrievalEngine::embed_texts`, which
 // splits into chunks of EMBED_BATCH_CHUNK = 64 and calls embed_batch.
 ```
 
@@ -561,7 +561,7 @@ A performance change must pass all of these without regeneration:
   `ENGRAMDB_PIN_REGEN=1` for a performance change.
 - `graph_signal_tests::default_config_ranking_is_unchanged_on_graph_fixture`
   and `default_config_reads_no_edges_or_usage` in
-  `src/retrieval/engine.rs`.
+  `src/retrieval/engine/mod.rs`.
 - `the_fixture_layouts_match_their_pinned_digests` in
   `crates/engram-dashboard/src/layout/tests.rs`.
 - The insta snapshots of the CLI (see [testing.md](./testing.md)). No
