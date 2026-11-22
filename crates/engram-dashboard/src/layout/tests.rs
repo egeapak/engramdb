@@ -1346,3 +1346,27 @@ fn the_cache_decoder_rejects_generated_bytes() {
         }
     }
 }
+
+/// The page refuses a layout whose `v` is not its own
+/// `SERVER_LAYOUT_VERSION`, so a `LAYOUT_VERSION` bump that leaves the page
+/// behind breaks every graph view (the view shows a "malformed" error).
+#[test]
+fn the_page_reads_the_layout_version_the_server_sends() {
+    let js = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/web/js/graph/server-layout.js"
+    ));
+    let line = js
+        .lines()
+        .find(|l| l.starts_with("export const SERVER_LAYOUT_VERSION = "))
+        .expect("server-layout.js declares SERVER_LAYOUT_VERSION");
+    let page: u32 = line
+        .trim_start_matches("export const SERVER_LAYOUT_VERSION = ")
+        .trim_end_matches(';')
+        .parse()
+        .expect("SERVER_LAYOUT_VERSION is a number");
+    assert_eq!(
+        page, LAYOUT_VERSION,
+        "set SERVER_LAYOUT_VERSION in web/js/graph/server-layout.js to LAYOUT_VERSION"
+    );
+}
