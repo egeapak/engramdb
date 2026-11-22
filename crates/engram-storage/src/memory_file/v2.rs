@@ -313,6 +313,72 @@ struct HiddenMetaRef<'a> {
     links: &'a [Link],
 }
 
+/// Compile-time guard that keeps the borrowed writer structs in step with the
+/// owned ones. Both destructures list every field with no `..`, so a field
+/// added to [`MinimalFrontmatter`] or [`HiddenMeta`] fails the build here
+/// until the matching `*Ref` field exists. A field the writer forgets is
+/// otherwise parsed on read and erased on the next rewrite. Field order is
+/// checked at run time by `ref_structs_serialize_like_the_owned_structs`.
+#[cfg(test)]
+impl MinimalFrontmatter {
+    fn as_ref(&self) -> MinimalFrontmatterRef<'_> {
+        let MinimalFrontmatter {
+            version,
+            id,
+            type_,
+            status,
+            epistemic,
+            title,
+        } = self;
+        MinimalFrontmatterRef {
+            version: *version,
+            id,
+            type_: *type_,
+            status: *status,
+            epistemic: *epistemic,
+            title: title.as_deref(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl HiddenMeta {
+    fn as_ref(&self) -> HiddenMetaRef<'_> {
+        let HiddenMeta {
+            visibility,
+            accessed_at,
+            verified_at,
+            expires_at,
+            valid_while,
+            valid_from,
+            invalidated_at,
+            superseded_by,
+            decay,
+            supersedes,
+            audience,
+            source_sessions,
+            challenges,
+            links,
+        } = self;
+        HiddenMetaRef {
+            visibility: *visibility,
+            accessed_at: *accessed_at,
+            verified_at: *verified_at,
+            expires_at: *expires_at,
+            valid_while: valid_while.as_ref(),
+            valid_from: *valid_from,
+            invalidated_at: *invalidated_at,
+            superseded_by: superseded_by.as_deref(),
+            decay: decay.as_ref(),
+            supersedes,
+            audience: audience.as_deref(),
+            source_sessions,
+            challenges,
+            links,
+        }
+    }
+}
+
 fn write_v2(memory: &Memory) -> Result<String> {
     use std::fmt::Write as _;
 
@@ -657,5 +723,53 @@ mod visibility_tests {
             Visibility::Shared,
             "visibility must come from the field line, not any substring"
         );
+    }
+
+    /// The borrowed writer structs must serialize to the same bytes as the
+    /// owned structs the reader uses: same fields, same order, same skip
+    /// rules. The `as_ref` destructures catch a missing field at compile
+    /// time; this catches a field in the wrong place or with other attributes.
+    #[test]
+    fn ref_structs_serialize_like_the_owned_structs() {
+        let t: DateTime<Utc> = "2026-02-01T09:30:00Z".parse().unwrap();
+        let fm = MinimalFrontmatter {
+            version: CURRENT_FORMAT_VERSION,
+            id: "guard-1".to_string(),
+            type_: MemoryType::Decision,
+            status: Status::Active,
+            epistemic: Some(Epistemic::Fact),
+            title: Some("Guard title".to_string()),
+        };
+        assert_eq!(
+            yaml::to_string(&fm).unwrap(),
+            yaml::to_string(&fm.as_ref()).unwrap()
+        );
+
+        let full = HiddenMeta {
+            visibility: Some(Visibility::Personal),
+            accessed_at: Some(t),
+            verified_at: Some(t),
+            expires_at: Some(t),
+            valid_while: None,
+            valid_from: Some(t),
+            invalidated_at: Some(t),
+            superseded_by: Some("newer".to_string()),
+            decay: Some(Decay::exponential(chrono::Duration::days(14))),
+            supersedes: vec!["older".to_string()],
+            audience: Some(vec!["proj-a".to_string()]),
+            source_sessions: vec!["sess-1".to_string()],
+            challenges: vec![Challenge::new("evidence")],
+            links: vec![Link::new(
+                "other",
+                engram_types::LinkKind::RelatedTo,
+                engram_types::LinkOrigin::Human,
+            )],
+        };
+        for hidden in [full, HiddenMeta::default()] {
+            assert_eq!(
+                yaml::to_string(&hidden).unwrap(),
+                yaml::to_string(&hidden.as_ref()).unwrap()
+            );
+        }
     }
 }

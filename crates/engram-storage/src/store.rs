@@ -4063,9 +4063,9 @@ async fn scan_dir_to_stats(dir: &Path) -> DirStats {
 /// (`<uuid>.md`) and new (`<slug>_<uuid>.md`) filename formats.
 /// Returns an empty map if the directory does not exist.
 ///
-/// An entry whose id is not wanted costs no allocation of its own: the id
-/// is compared as a slice of the file name, and only a wanted one is turned
-/// into an owned id and path.
+/// An entry whose id is not wanted costs only the `OsString` that
+/// `DirEntry::file_name` returns: the id is compared as a slice of that
+/// name, and only a wanted one is turned into an owned id and path.
 async fn scan_dir_to_map(dir: &Path, wanted: &HashSet<&str>) -> HashMap<String, PathBuf> {
     let mut map = HashMap::new();
     if !dir.exists() {
