@@ -127,7 +127,7 @@ re-exported from it).
 │   └── parsing.rs       # shared enum/value parsers
 │
 ├── retrieval/           # query pipeline
-│   ├── engine.rs        # RetrievalEngine, RetrievalQuery, ScoredMemory (large)
+│   ├── engine/          # RetrievalEngine, RetrievalQuery, ScoredMemory (mod.rs) + test modules
 │   ├── filters.rs       # apply_index_filters, SearchFilters
 │   └── reranker.rs      # thin re-export of engram-models' rerank (Reranker, LocalReranker)
 │
@@ -223,7 +223,7 @@ Black-box CLI integration tests live in `crates/engram-cli/tests/cli/` (see
 | Add a new embedding provider | `crates/engram-models/src/embeddings/<provider>.rs` + extend `provider_specs` in `src/ops/mod.rs` (see [extending.md](./extending.md)) |
 | Add a new config field | `crates/engram-types/src/config.rs` (with `#[serde(default)]` + a `default_*` fn) + extend `provider_cache_key` if it affects model loading |
 | Change scoring | `src/scoring/composite.rs` (formula) or `src/scoring/decay.rs`, `src/scoring/trust.rs` (the multipliers) |
-| Change the retrieval pipeline | `src/retrieval/engine.rs` (stages) or `src/retrieval/filters.rs` (LanceDB filter mapping) |
+| Change the retrieval pipeline | `src/retrieval/engine/mod.rs` (stages) or `src/retrieval/filters.rs` (LanceDB filter mapping) |
 | Add a hook | `crates/engram-cli/src/commands/hook.rs` + `crates/engram-cli/src/app.rs::HookCommand` + plugin manifest `.claude-plugin/plugin.json` + setup writer `crates/engram-cli/src/commands/setup.rs` |
 | Add a daemon RPC | `src/daemon/protocol.rs` (wire) + `src/daemon/server.rs` (handler) + `src/daemon/remote.rs` (client) + bump `PROTOCOL_VERSION` if breaking |
 | Add a dashboard API endpoint | `crates/engram-dashboard/src/api.rs` (or a new module beside `graph.rs`) + the route in `src/lib.rs` + a test in `src/tests.rs`. A GET must write nothing. Read [dashboard.md](./dashboard.md) first. |
@@ -249,7 +249,7 @@ enforce this and must not be reintroduced:
 ## Intentionally big files
 
 `crates/engram-mcp/src/server.rs`, `crates/engram-cli/src/app.rs`,
-`src/retrieval/engine.rs`, `src/ops/doctor.rs`, `crates/engram-types/src/config.rs`
+`src/retrieval/engine/mod.rs`, `src/ops/doctor.rs`, `crates/engram-types/src/config.rs`
 are large by design — macros, connected algorithms, or `default_*` schemas that
 lose cohesion when split. If a split is unavoidable, split along invariants
 (e.g. config section), not line count.
