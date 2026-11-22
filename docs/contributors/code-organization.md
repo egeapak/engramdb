@@ -208,7 +208,7 @@ Budgets and measurements are in [dashboard-performance.md](./dashboard-performan
 │   ├── challenge.rs, review.rs, stats.rs, doctor.rs, gc.rs,
 │   ├── compress.rs, reindex.rs, migrate.rs, rollback.rs,
 │   ├── init.rs, serve.rs, daemon.rs, completions.rs,
-│   ├── setup.rs, hook.rs, projects.rs, task.rs, verify.rs
+│   ├── setup.rs, hook/, projects.rs, task.rs, verify.rs
 │   └── mod.rs           # re-exports
 ├── output.rs            # OutputFormatter: pretty / json / plain rendering
 ├── prompter.rs          # InquirePrompter for interactive flows
@@ -230,7 +230,7 @@ Black-box CLI integration tests live in `crates/engram-cli/tests/cli/` (see
 | Add a new config field | `crates/engram-types/src/config.rs` (with `#[serde(default)]` + a `default_*` fn) + extend `provider_cache_key` if it affects model loading |
 | Change scoring | `src/scoring/composite.rs` (formula) or `src/scoring/decay.rs`, `src/scoring/trust.rs` (the multipliers) |
 | Change the retrieval pipeline | `src/retrieval/engine/mod.rs` (stages) or `src/retrieval/filters.rs` (LanceDB filter mapping) |
-| Add a hook | `crates/engram-cli/src/commands/hook.rs` + `crates/engram-cli/src/app.rs::HookCommand` + plugin manifest `.claude-plugin/plugin.json` + setup writer `crates/engram-cli/src/commands/setup.rs` |
+| Add a hook | `crates/engram-cli/src/commands/hook/` (`events.rs` + `execute_hook` in `mod.rs`) + `crates/engram-cli/src/app.rs::HookCommand` + plugin manifest `.claude-plugin/plugin.json` + setup writer `crates/engram-cli/src/commands/setup.rs` |
 | Add a daemon RPC | `src/daemon/protocol.rs` (wire) + `src/daemon/server.rs` (handler) + `src/daemon/remote.rs` (client) + bump `PROTOCOL_VERSION` if breaking |
 | Add a dashboard API endpoint | `crates/engram-dashboard/src/api.rs` (or a new module beside `graph.rs`) + the route in `src/lib.rs` + a test in `src/tests.rs`. A GET must write nothing. Read [dashboard.md](./dashboard.md) first. |
 | Change a dashboard layout | `crates/engram-dashboard/src/layout/` + bump `LAYOUT_VERSION` when the output changes + `src/layout/tests.rs`. See [dashboard.md](./dashboard.md#server-side-layout-and-cache). |

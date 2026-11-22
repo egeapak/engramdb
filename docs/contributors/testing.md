@@ -109,8 +109,9 @@ silently. Use `outln!` / `errln!` / `outraw!` / `errraw!`
 (`use crate::output::{outln, …};`), which mirror
 `println!`/`eprintln!`/`print!`/`eprint!` including the bare `outln!(f)` form.
 The `formatter-output` CI job enforces this; it exempts only `output.rs`, which
-defines the macros, and `commands/hook.rs`, which emits the hook protocol
-document Claude Code parses off stdout and must never be styled or JSON-wrapped.
+defines the macros, and `commands/hook/protocol.rs`, which emits the hook
+protocol document Claude Code parses off stdout and must never be styled or
+JSON-wrapped. The rest of `commands/hook/` is scanned like any other file.
 
 **Colour is a tier-1 concern too.** `snap_colored(case, |f| …)` renders Pretty
 with styling forced on and writes a `<case>__pretty_color.snap` next to the
