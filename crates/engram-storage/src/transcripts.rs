@@ -457,24 +457,20 @@ fn tool_target(input: &serde_json::Value) -> Option<String> {
     None
 }
 
-/// Extract the text of a `tool_result` block, whose `content` is either a
+/// The one-line preview of a `tool_result` block, whose `content` is either a
 /// bare string or an array of typed blocks.
-fn tool_result_text(block: &serde_json::Value) -> Option<std::borrow::Cow<'_, str>> {
+///
+/// For an array this is the first non-blank line of the first block that has
+/// one: the same line the blocks joined with `\n` would give, since a line
+/// never spans two blocks. Nothing is joined, because only that line is kept
+/// and a tool result is often the largest string in the record.
+fn tool_result_preview(block: &serde_json::Value, max: usize) -> Option<String> {
     match block.get("content") {
-        // Borrowed: only a one-line preview is kept, and a tool result is
-        // often the largest string in the record.
-        Some(serde_json::Value::String(s)) => Some(std::borrow::Cow::Borrowed(s)),
-        Some(serde_json::Value::Array(items)) => {
-            let joined: Vec<&str> = items
-                .iter()
-                .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
-                .collect();
-            if joined.is_empty() {
-                None
-            } else {
-                Some(std::borrow::Cow::Owned(joined.join("\n")))
-            }
-        }
+        Some(serde_json::Value::String(s)) => first_line_preview(s, max),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+            .find_map(|t| first_line_preview(t, max)),
         _ => None,
     }
 }
@@ -636,9 +632,7 @@ pub fn parse_session(transcript_path: &Path, opts: ParseOptions) -> Result<Parse
                             }) = events.get_mut(idx)
                             {
                                 *ok = Some(!is_error);
-                                *result_preview = tool_result_text(block)
-                                    .as_deref()
-                                    .and_then(|t| first_line_preview(t, RESULT_PREVIEW_CHARS));
+                                *result_preview = tool_result_preview(block, RESULT_PREVIEW_CHARS);
                             }
                             pending.remove(id);
                         }
@@ -991,6 +985,43 @@ fn cwd_matches(cwd: Option<&str>, wanted: &[PathBuf], exact_dir: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preview of an array result equals the first line of its blocks
+    /// joined with `\n`, the way it was computed before the join was removed.
+    #[test]
+    fn tool_result_preview_matches_the_joined_blocks() {
+        let joined_first_line = |block: &serde_json::Value| -> Option<String> {
+            let items = block.get("content")?.as_array()?;
+            let texts: Vec<&str> = items
+                .iter()
+                .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                .collect();
+            if texts.is_empty() {
+                return None;
+            }
+            first_line_preview(&texts.join("\n"), RESULT_PREVIEW_CHARS)
+        };
+        let long = "é".repeat(RESULT_PREVIEW_CHARS + 5);
+        let cases = [
+            serde_json::json!({ "content": [] }),
+            serde_json::json!({ "content": [{ "type": "image" }] }),
+            serde_json::json!({ "content": [{ "text": "" }, { "text": "  \n" }] }),
+            serde_json::json!({ "content": [{ "text": "first" }, { "text": "second" }] }),
+            serde_json::json!({ "content": [{ "text": "" }, { "text": "\n\n  x \r\ny" }] }),
+            serde_json::json!({ "content": [{ "type": "image" }, { "text": long }] }),
+        ];
+        for case in &cases {
+            assert_eq!(
+                tool_result_preview(case, RESULT_PREVIEW_CHARS),
+                joined_first_line(case),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            tool_result_preview(&serde_json::json!({ "content": "\n ok \nmore" }), 10),
+            Some("ok".to_string())
+        );
+    }
     use std::io::Write;
     use tempfile::TempDir;
 
