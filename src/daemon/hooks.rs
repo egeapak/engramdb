@@ -174,7 +174,8 @@ pub(crate) struct HookTelemetry {
     last_maintenance: Mutex<HashMap<PathBuf, Instant>>,
     /// When each project's `hook_events` was last pruned and compacted.
     last_prune: Mutex<HashMap<String, Instant>>,
-    /// Full-batch writes started by [`Self::spawn_write`], awaited by
+    /// Full-batch writes started by [`Self::spawn_write`] and maintenance
+    /// passes started by [`Self::spawn_maintenance`], awaited by
     /// [`Self::flush`] so a shutdown does not exit before they commit.
     writes: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
@@ -267,8 +268,24 @@ impl HookTelemetry {
         writes.push(handle);
     }
 
+    /// Run [`maintain`] for a project the daemon just served, in the
+    /// background, without delaying the hook's reply.
+    ///
+    /// Tracked like a batch write, so the shutdown flush awaits it. A drain
+    /// that has claimed a project's hook or usage JSONL (renamed it out of
+    /// the readers' sight) and is waiting out its grace must reach its
+    /// insert: a daemon that exited there left the claimed lines missing
+    /// from every `stats` read until some later drain of that project, which
+    /// may never come.
+    pub(crate) fn spawn_maintenance(&self, project: HookProject) {
+        let handle = tokio::spawn(maintain(project));
+        let mut writes = self.writes.lock().unwrap_or_else(|e| e.into_inner());
+        writes.retain(|h| !h.is_finished());
+        writes.push(handle);
+    }
+
     /// Write every buffered event, after waiting for the background batch
-    /// writes. Failures are logged and the events dropped: telemetry must
+    /// writes and maintenance passes. Failures are logged and the events dropped: telemetry must
     /// never wedge the daemon.
     ///
     /// Hooks can still be served while a flush runs (a shutdown flush
@@ -575,6 +592,20 @@ mod tests {
         assert!(
             done.load(Ordering::SeqCst),
             "the late batch must commit before flush returns"
+        );
+    }
+
+    /// A maintenance pass is awaited by the shutdown flush: one that
+    /// claimed a JSONL generation must not be cut off before its insert.
+    #[tokio::test]
+    async fn flush_awaits_a_spawned_maintenance_pass() {
+        let t = HookTelemetry::default();
+        t.spawn_maintenance(project(true));
+        assert_eq!(t.writes.lock().unwrap().len(), 1, "the pass is tracked");
+        t.flush().await;
+        assert!(
+            t.writes.lock().unwrap().is_empty(),
+            "flush awaited and released the pass"
         );
     }
 

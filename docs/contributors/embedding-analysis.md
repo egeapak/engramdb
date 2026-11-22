@@ -35,7 +35,7 @@ purpose-built labeled corpus.
 ## Current implementation (what was measured against)
 
 - Embedded text is exactly `format!("{summary} {content}")`
-  (`src/retrieval/engine.rs::embed_memory_with`). **Title, tags, type, and
+  (`src/retrieval/engine/mod.rs::embed_memory_with`). **Title, tags, type, and
   logical scope never reach the embedding.**
 - `chunk_text` (`crates/engram-models/src/embeddings/chunking.rs`) splits on
   whitespace into fixed blocks of `max_tokens * 3/4` words (192 words at the
