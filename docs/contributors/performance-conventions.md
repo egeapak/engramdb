@@ -25,7 +25,7 @@ A change is on a hot path when it touches one of these:
 |---|---|---|
 | Hooks | `crates/engram-cli/src/commands/hook.rs`, `src/daemon/hooks.rs` | PreToolUse and PostToolUse run on every tool call. UserPromptSubmit runs on every prompt. |
 | Query and retrieval | `src/retrieval/`, `src/scoring/`, `src/scope/` | Every `query`, every hook that injects context. |
-| Index reads | `crates/engram-storage/src/lance_index.rs`, `store.rs` (`list_for_filtering*`, `get_batch`, `check_staleness`) | Every query and every hook reads the index. |
+| Index reads | `crates/engram-storage/src/lance_index.rs`, `store/list.rs` (`list_for_filtering*`, `get_batch`), `store/staleness.rs` (`check_staleness`) | Every query and every hook reads the index. |
 | Memory-file parse and write | `crates/engram-storage/src/memory_file/` | Every `get_batch`, `create`, `update` and `reindex`. |
 | Daemon request path | `src/daemon/server.rs`, `src/ops/provider_cache.rs`, `crates/engram-models/` | One process serves every session on the machine for days. |
 | Transcript digest and defang | `crates/engram-storage/src/transcripts.rs`, `src/ops/harvest.rs` | Runs over transcripts of 1–3 MB each. |
@@ -198,7 +198,7 @@ survivors, and entering the pool there saves nothing.
 
 - Scoring: `PARALLEL_SCORE_MIN` = 64 (`src/retrieval/engine.rs`).
 - Parsing in `get_batch`: `PARALLEL_PARSE_MIN` = 32
-  (`crates/engram-storage/src/store.rs`).
+  (`crates/engram-storage/src/store/mod.rs`).
 - The loop body must be a per-item map over read-only state, so the result
   order and values do not change.
 - When the work is long, use `tokio::task::spawn_blocking`, not rayon on a

@@ -64,7 +64,7 @@ re-exported from it).
 
 ```
 ├── lib.rs               # public re-exports
-├── store.rs             # MemoryStore orchestrator (the central type)
+├── store/               # MemoryStore orchestrator (the central type)
 ├── lance_index.rs       # LanceDB table: schema, IndexEntry, VectorMatch
 ├── manifest.rs          # manifest.toml: Manifest, EmbeddingFingerprint
 ├── memory_file/         # frontmatter+markdown serializer (v1 YAML, v2 TOML)
