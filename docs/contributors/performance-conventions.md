@@ -51,6 +51,9 @@ A change is on a hot path when it touches one of these:
 
 ### 1. Project columns with `project_columns`, never with `Select::Columns`
 
+Guard: `lance_index::tests::no_library_code_projects_with_select_columns`
+fails on any `Select::Columns` in library code (`src/` and `crates/*/src/`).
+
 Why: `Select::Columns` quotes each name. A quoted name goes through Lance's
 full SQL parser and a schema conversion per column, on every read. This was
 about 45% of a path query's allocations. The fix (c1) removed 55% of the
@@ -263,8 +266,7 @@ pub fn sanitize_single_line(value: &str) -> Cow<'_, str> {
 }
 ```
 
-Same pattern: `tool_result_text` in `transcripts.rs` borrows a plain string
-result. `defang_harness_tags` in `src/ops/harvest.rs` skips the `replace`
+Same pattern: `defang_harness_tags` in `src/ops/harvest.rs` skips the `replace`
 when the marker is absent.
 
 ### 14. Write into one pre-sized buffer, not a `Vec` plus `join`
@@ -289,6 +291,11 @@ for (i, line) in cleaned.lines().enumerate() {
 
 For several parts, use `write!` into one `String` (`class_entry_line` in
 `hook.rs`), not `push_str(&format!(…))`.
+
+When only part of the result is kept, do not build the whole. A tool result
+with array content was joined into one `String` only to keep its first
+line. `tool_result_preview` in `transcripts.rs` now takes the first
+non-blank line of the first block that has one, which is the same line.
 
 ### 15. Compute a value once, outside the loop that tries options
 
@@ -330,9 +337,19 @@ One `String` per stem was about 64% of a text query's allocations.
 allocations by 59% at 1,000 memories (p2b). The JSON on disk did not
 change, so no schema bump was needed.
 
-Before you add a dependency for this, check that it already ships
-(`cargo tree -p engram-cli -e normal`). `compact_str` already shipped
-through `tokenizers`.
+Build the inline type at the source, not by converting `String`s after.
+`KeywordStems::compute` first built `String` stems and a `String`-keyed map,
+then copied every stem into a `CompactString` and rebuilt the map. Building
+`CompactString` directly (`normalize_as` / `normalize_counts_as` in
+`engram-types/src/normalize.rs`) removed 24% of `reindex` allocations and
+15% of its CPU.
+
+Before you add a dependency for this, check every feature set, not only the
+default (`cargo tree -p engram-cli -e normal`, then again with
+`--no-default-features --features ollama`). `compact_str` ships through
+`tokenizers` in the default build. In the Ollama-only build it ships only
+because `engram-types` uses it, and it is a third-party type in a public
+field of that leaf crate. Name that cost in the change.
 
 ### 18. Do not build an error value on the success path
 
@@ -474,6 +491,7 @@ again unless the stated condition has changed.
 | Const size asserts on structs | No size is load-bearing. They only make new fields noisier. | When a size becomes load-bearing. |
 | Pad atomics against false sharing | The shared atomics are touched once per daemon request, which costs milliseconds. Not measurable. | Never at the current request cost. |
 | `read_msg` parsing from the reader's buffer | Saves 1 of 116 allocations per frame. | Never. |
+| Cache each hook `Preview` across the budget rounds | The top slot builds its preview twice. Caching it saved 3 of ~27,600 allocations per PreToolUse hook, and CPU stayed in the noise. | Never. |
 | Cache parsed `.md` files (in the daemon or per process) | The file read was 11% of a healthy query and is not hurt by fragments. It is the wrong stage to cache. Read only survivors instead (rule 7). | Measure the index projection first. |
 | A scalar index as the fix for a per-item store loop | It removes the row filter only, not the per-call open and plan. | Never. Batch instead (rule 4). |
 | Compaction on the `create` path | Added write latency and reordered the background ingest. | Never. It rides the read path. |
