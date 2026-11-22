@@ -96,7 +96,7 @@ fn the_data_and_config_dirs_are_isolated() {
 use anyhow::Result;
 use std::env;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Storage-engine targets pinned to `warn` in the default filter.
@@ -305,19 +305,9 @@ async fn dispatch_hook(
     Ok(())
 }
 
-/// Run the CLI application with parsed arguments.
-///
-/// This is the main entry point for the CLI. It determines the working directory,
-/// creates an output formatter, and dispatches to the appropriate command handler.
-///
-/// # Arguments
-/// * `cli` - Parsed command-line arguments
-///
-/// # Returns
-/// Ok(()) on success, or an error if the command fails
-pub async fn run(cli: Cli) -> Result<()> {
-    // Start of the hook-latency clock (see `commands::hook::record_hook_stats`).
-    let started = std::time::Instant::now();
+/// Install the stderr tracing subscriber: WARN by default, with the
+/// [`LANCE_QUIET`] baseline under any `RUST_LOG` directives.
+fn init_tracing() {
     // Initialize tracing so warnings (e.g. from reindex) are visible.
     // Defaults to WARN level; override with RUST_LOG env var.
     //
@@ -346,6 +336,115 @@ pub async fn run(cli: Cli) -> Result<()> {
         .without_time()
         .with_target(false)
         .init();
+}
+
+/// Commands that own their own worktree handling or touch no memory store.
+///
+/// If we're inside a linked git worktree, every other command is routed
+/// transparently to the main worktree's project: ensure it is initialized,
+/// consolidate any memories that were written under this worktree's own
+/// stray store, and register the worktree as a sub-project. `init` and
+/// `serve` perform their own worktree handling (they own user-facing
+/// messaging / run the MCP server); `completions` and `setup` don't touch
+/// a memory store; `daemon` is a process-wide model host whose settings
+/// come from the global config, not from any project.
+fn is_exempt_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Init { .. }
+            | Command::Serve { .. }
+            | Command::Completions { .. }
+            | Command::Setup { .. }
+            | Command::Daemon { .. }
+            | Command::Dashboard { .. }
+    )
+}
+
+/// Route `dir` to the main worktree's project unless the command is exempt.
+///
+/// Hooks are dispatched with a fail-open backstop, but that can't catch
+/// errors raised BEFORE dispatch — and worktree resolution hard-errors on a
+/// corrupt registry.json (user-writable, untrusted) or an unwritable global
+/// data dir. A failing PreToolUse hook breaks every Read/Write/Edit in the
+/// Claude Code session, so for hooks a resolution failure degrades to the
+/// unresolved dir (worst case: empty context) instead of exiting non-zero.
+async fn resolve_command_dir(
+    dir: PathBuf,
+    registry: &FileRegistry,
+    is_exempt: bool,
+    is_hook: bool,
+) -> Result<PathBuf> {
+    if is_exempt {
+        return Ok(dir);
+    }
+    match engramdb::storage::worktree::resolve_project_root(&dir, registry).await {
+        Ok(resolved) => Ok(resolved),
+        Err(e) if is_hook => {
+            tracing::warn!(
+                "engramdb hook: worktree resolution failed (continuing unresolved): {e}"
+            );
+            Ok(dir)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Best-effort, throttled housekeeping before a command runs.
+async fn run_auto_maintenance(
+    dir: &Path,
+    registry: &FileRegistry,
+    maintenance: &engramdb::types::MaintenanceConfig,
+    no_maintenance: bool,
+    is_exempt: bool,
+    is_hook: bool,
+    on_main_worktree: bool,
+) {
+    // When operating directly on the main worktree, run best-effort, throttled
+    // housekeeping: clean up orphan/stale projects and quick-check the store's
+    // health. Linked worktrees only link/consolidate (done by the resolution
+    // above); the cleanup is concentrated on the main checkout. Honors the
+    // `[maintenance]` config and the `--no-maintenance` flag. Failures are
+    // logged and swallowed so they never block the actual command.
+    // Hooks are additionally excluded: auto-maintenance is synchronous (a
+    // registry prune + store doctor scan when the throttle window expires)
+    // and hooks sit on Claude Code's PreToolUse hot path where that latency
+    // is paid before every Read/Write/Edit. Any ordinary CLI command still
+    // triggers maintenance on schedule.
+    if !is_exempt && !is_hook && on_main_worktree {
+        // Deliberately engine-less: a short-lived CLI process must not load
+        // embedding models just for housekeeping, so §11.4 consolidation
+        // gracefully skips here. The long-running MCP server passes its
+        // engine (see `maintain_main_project`), which is where consolidation
+        // actually runs.
+        engramdb::ops::auto_maintain(dir, registry, maintenance, no_maintenance).await;
+    }
+
+    // Compaction rides a much shorter cadence than the full pass above,
+    // because query latency tracks LanceDB fragment count and a write-heavy
+    // session degrades every scan several-fold long before the 6-hour window
+    // expires. The common case is one file stat: the throttle is checked
+    // before the store is opened. Unlike the full pass it also runs from a
+    // linked worktree: `dir` is already the main project there, which is the
+    // store a worktree session writes to and fragments.
+    if should_auto_compact(is_exempt, is_hook) {
+        engramdb::ops::auto_compact(dir, maintenance, no_maintenance).await;
+    }
+}
+
+/// Run the CLI application with parsed arguments.
+///
+/// This is the main entry point for the CLI. It determines the working directory,
+/// creates an output formatter, and dispatches to the appropriate command handler.
+///
+/// # Arguments
+/// * `cli` - Parsed command-line arguments
+///
+/// # Returns
+/// Ok(()) on success, or an error if the command fails
+pub async fn run(cli: Cli) -> Result<()> {
+    // Start of the hook-latency clock (see `commands::hook::record_hook_stats`).
+    let started = std::time::Instant::now();
+    init_tracing();
 
     // Determine working directory
     let dir = cli
@@ -413,49 +512,13 @@ pub async fn run(cli: Cli) -> Result<()> {
         }
     };
 
-    // If we're inside a linked git worktree, transparently route memory
-    // operations to the main worktree's project: ensure it is initialized,
-    // consolidate any memories that were written under this worktree's own
-    // stray store, and register the worktree as a sub-project. `init` and
-    // `serve` perform their own worktree handling (they own user-facing
-    // messaging / run the MCP server); `completions` and `setup` don't touch
-    // a memory store; `daemon` is a process-wide model host whose settings
-    // come from the global config, not from any project.
-    let is_exempt = matches!(
-        cli.command,
-        Command::Init { .. }
-            | Command::Serve { .. }
-            | Command::Completions { .. }
-            | Command::Setup { .. }
-            | Command::Daemon { .. }
-            | Command::Dashboard { .. }
-    );
-    // Hooks are dispatched below with a fail-open backstop, but that can't
-    // catch errors raised BEFORE dispatch — and worktree resolution hard-
-    // errors on a corrupt registry.json (user-writable, untrusted) or an
-    // unwritable global data dir. A failing PreToolUse hook breaks every
-    // Read/Write/Edit in the Claude Code session, so for hooks a resolution
-    // failure degrades to the unresolved dir (worst case: empty context)
-    // instead of exiting non-zero.
+    let is_exempt = is_exempt_command(&cli.command);
     let is_hook = matches!(cli.command, Command::Hook { .. });
     // Whether this invocation is on the main worktree (or a plain, non-worktree
     // project) rather than inside a linked git worktree — decided from the
     // *original* cwd before resolution rewrites it to the main root.
     let on_main_worktree = engramdb::storage::detect_worktree_main(&dir).is_none();
-    let dir = if is_exempt {
-        dir
-    } else {
-        match engramdb::storage::worktree::resolve_project_root(&dir, &registry).await {
-            Ok(resolved) => resolved,
-            Err(e) if is_hook => {
-                tracing::warn!(
-                    "engramdb hook: worktree resolution failed (continuing unresolved): {e}"
-                );
-                dir
-            }
-            Err(e) => return Err(e.into()),
-        }
-    };
+    let dir = resolve_command_dir(dir, &registry, is_exempt, is_hook).await?;
 
     // Load the project config once (best-effort: defaults if absent/unreadable)
     // — used for the maintenance policy below. The daemon policy reads the
@@ -463,37 +526,16 @@ pub async fn run(cli: Cli) -> Result<()> {
     let config_path = dir.join(".engramdb").join("config.toml");
     let config = engramdb::storage::config::load_config_or_default(&config_path).await;
 
-    // When operating directly on the main worktree, run best-effort, throttled
-    // housekeeping: clean up orphan/stale projects and quick-check the store's
-    // health. Linked worktrees only link/consolidate (done by the resolution
-    // above); the cleanup is concentrated on the main checkout. Honors the
-    // `[maintenance]` config and the `--no-maintenance` flag. Failures are
-    // logged and swallowed so they never block the actual command.
-    // Hooks are additionally excluded: auto-maintenance is synchronous (a
-    // registry prune + store doctor scan when the throttle window expires)
-    // and hooks sit on Claude Code's PreToolUse hot path where that latency
-    // is paid before every Read/Write/Edit. Any ordinary CLI command still
-    // triggers maintenance on schedule.
-    if !is_exempt && !is_hook && on_main_worktree {
-        // Deliberately engine-less: a short-lived CLI process must not load
-        // embedding models just for housekeeping, so §11.4 consolidation
-        // gracefully skips here. The long-running MCP server passes its
-        // engine (see `maintain_main_project`), which is where consolidation
-        // actually runs.
-        engramdb::ops::auto_maintain(&dir, &registry, &config.maintenance, cli.no_maintenance)
-            .await;
-    }
-
-    // Compaction rides a much shorter cadence than the full pass above,
-    // because query latency tracks LanceDB fragment count and a write-heavy
-    // session degrades every scan several-fold long before the 6-hour window
-    // expires. The common case is one file stat: the throttle is checked
-    // before the store is opened. Unlike the full pass it also runs from a
-    // linked worktree: `dir` is already the main project there, which is the
-    // store a worktree session writes to and fragments.
-    if should_auto_compact(is_exempt, is_hook) {
-        engramdb::ops::auto_compact(&dir, &config.maintenance, cli.no_maintenance).await;
-    }
+    run_auto_maintenance(
+        &dir,
+        &registry,
+        &config.maintenance,
+        cli.no_maintenance,
+        is_exempt,
+        is_hook,
+        on_main_worktree,
+    )
+    .await;
 
     // Compute the daemon policy once per process from the global config.
     // Defaults (daemon.enabled=true, use_for_cli=true → ConnectOnly by default)
