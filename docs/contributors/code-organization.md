@@ -162,7 +162,13 @@ re-exported from it).
 
 ```
 ├── lib.rs
-├── server.rs            # EngramDbServer: rmcp #[tool] macros + transports (large)
+├── server.rs            # EngramDbServer: struct, rmcp #[tool] bodies, ServerHandler (large)
+├── server/
+│   ├── inputs.rs        # the tools' `*Input` parameter structs (their JSON schemas)
+│   ├── outputs.rs       # result payloads, trusted_payload / defang_json
+│   ├── startup.rs       # deferred startup: StartupStatus, StartupNotice, run_startup
+│   ├── targets.rs       # `project` → directory / store, and the security gates
+│   └── transport.rs     # run_stdio, DiscoverProbeFilter, finish_session, run_sse
 ├── server_tests.rs      # the server's test module (same `server::tests` path, own file)
 └── error.rs             # MCP-specific error mapping
 ```
@@ -248,7 +254,7 @@ enforce this and must not be reintroduced:
 
 ## Intentionally big files
 
-`crates/engram-mcp/src/server.rs`, `crates/engram-cli/src/app.rs`,
+`crates/engram-mcp/src/server.rs` (the tool bodies), `crates/engram-cli/src/app.rs`,
 `src/retrieval/engine/mod.rs`, `src/ops/doctor.rs`, `crates/engram-types/src/config.rs`
 are large by design — macros, connected algorithms, or `default_*` schemas that
 lose cohesion when split. If a split is unavoidable, split along invariants
