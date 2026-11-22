@@ -21,23 +21,23 @@ bundled-onnxruntime = ["engramdb/bundled-onnxruntime"]
 ollama = ["engramdb/ollama"]
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
+chrono.workspace = true
 engramdb = { path = "../..", default-features = false }
 
 rmcp = { version = "3.8", features = ["macros", "server", "transport-io", "transport-streamable-http-server"] }
 # `http1` is needed for `axum::serve` (streamable-HTTP transport); rmcp 0.15
 # enabled it transitively, rmcp 1.x no longer does, so request it explicitly.
-axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+axum.workspace = true
 schemars = "1"
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
+tokio.workspace = true
 
-tracing = "0.1"
-anyhow = "1"
-uuid = { version = "1", features = ["v7", "serde"] }
+tracing.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 # Round-trips get_prompt / read_resource over the in-process duplex transport;
@@ -46,7 +46,7 @@ engramdb = { path = "../..", default-features = false, features = ["test-support
 # `arm()`s the per-process data/config-dir isolation (#[ctor] in src/lib.rs) so
 # the in-crate global-store tests don't race on the real global dir.
 engram-test-support = { path = "../engram-test-support" }
-ctor = "1"
+ctor.workspace = true
 rmcp = { version = "3.8", features = ["client"] }
-tempfile = "3"
-toml = "1"
+tempfile.workspace = true
+toml.workspace = true

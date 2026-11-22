@@ -11,5 +11,5 @@ name = "engram_test_support"
 path = "src/lib.rs"
 
 [dependencies]
-ctor = "1"
-tempfile = "3"
+ctor.workspace = true
+tempfile.workspace = true

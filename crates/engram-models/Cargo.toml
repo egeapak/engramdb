@@ -27,7 +27,7 @@ load-dynamic = ["fastembed?/ort-load-dynamic", "ort?/load-dynamic", "engram-onnx
 bundled-onnxruntime = ["fastembed?/ort-download-binaries-rustls-tls", "ort?/download-binaries", "engram-onnx?/bundled-onnxruntime"]
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
+chrono.workspace = true
 engram-types = { path = "../engram-types" }
 # ORT execution-provider wiring — optional so a build without ONNX Runtime
 # drops it entirely. Gated by the `onnxruntime` feature.
@@ -44,7 +44,7 @@ fastembed = { version = "7.5", default-features = false, features = ["hf-hub-rus
 # kept so that, when `bundled-onnxruntime` does turn the download on, its
 # `ureq` has a TLS backend (`tls_config(..)` only exists with one). See the
 # longer note in `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.15", default-features = false, features = ["ndarray", "std", "tls-rustls"], optional = true }
+ort = { workspace = true, features = ["ndarray", "std", "tls-rustls"], optional = true }
 # `tokenizers`, `hf-hub` and `ndarray` are used only by the
 # `onnxruntime`-gated loaders (embeddings override, reranker, NLI, T5) to
 # tokenize, fetch models and shape tensors, so they are optional under that
@@ -53,26 +53,26 @@ ort = { version = "2.0.0-rc.15", default-features = false, features = ["ndarray"
 # here does NOT unify, so the workspace would build `tokenizers` — and its
 # `onig`/`onig_sys` C dependency — twice for no gain. Bump this only when
 # fastembed does.
-tokenizers = { version = "0.23", default-features = false, features = ["onig"], optional = true }
-hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "ureq"], optional = true }
+tokenizers = { workspace = true, optional = true }
+hf-hub = { workspace = true, optional = true }
 ndarray = { version = "0.17", default-features = false, optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
+reqwest = { workspace = true, optional = true }
 
-serde = { version = "1", features = ["derive"] }
+serde.workspace = true
 # SHA-256 of built-in model files (`integrity`).
-sha2 = "0.11"
+sha2.workspace = true
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
-async-trait = "0.1"
+tokio.workspace = true
+async-trait.workspace = true
 
-tracing = "0.1"
-anyhow = "1"
-thiserror = "2"
-tempfile = "3"
+tracing.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
 engram-test-support = { path = "../engram-test-support" }
-ctor = "1"
+ctor.workspace = true
 
 # Drives `fastembed` and `ort` directly to isolate where int8 nondeterminism
 # comes from; neither exists without the ONNX Runtime stack.

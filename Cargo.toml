@@ -7,6 +7,38 @@ members = ["crates/*"]
 # you want a faster, narrower build.
 default-members = [".", "crates/*"]
 
+# Versions (and features every user agrees on) for crates that two or
+# more manifests use. A member adds its own features and `optional` on top;
+# workspace and member features are additive.
+[workspace.dependencies]
+anyhow = "1"
+arrow-array = "58"
+arrow-schema = "58"
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+chrono = { version = "0.4", features = ["serde"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+ctor = "1"
+dirs = "7"
+futures-util = { version = "0.3", default-features = false }
+hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "ureq"] }
+lancedb = { version = "0.37", default-features = false }
+libc = "0.2"
+ort = { version = "2.0.0-rc.15", default-features = false }
+rayon = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rustix = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tempfile = "3"
+thiserror = "2"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
+toml = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v7", "serde"] }
+
 # Single source of truth for the workspace version. Every crate sets
 # `version.workspace = true`, so a release bump is a one-line change here.
 [workspace.package]
@@ -93,45 +125,45 @@ engram-models = { path = "crates/engram-models", default-features = false }
 # Vector DB (the core's daemon metrics + LanceDB index). The embedding /
 # reranker / NLI models all live in the `engram-models` crate, so the core
 # no longer depends on `fastembed` directly.
-lancedb = { version = "0.37", default-features = false }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"], optional = true }
-arrow-array = "58"
-arrow-schema = "58"
+lancedb.workspace = true
+reqwest = { workspace = true, optional = true }
+arrow-array.workspace = true
+arrow-schema.workspace = true
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1"
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 
 # Utilities
-uuid = { version = "1", features = ["v7", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+uuid.workspace = true
+chrono.workspace = true
 globset = "0.4"
-sha2 = "0.11"
-dirs = "7"
-rayon = "1"
+sha2.workspace = true
+dirs.workspace = true
+rayon.workspace = true
 
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
-async-trait = "0.1"
+tokio.workspace = true
+futures-util = { workspace = true, features = ["alloc"] }
+async-trait.workspace = true
 
 # Logging
-tracing = "0.1"
+tracing.workspace = true
 
 # Error handling
-anyhow = "1"
+anyhow.workspace = true
 
 # Atomic file writes
-tempfile = "3"
+tempfile.workspace = true
 
 # Unix-only: safe geteuid() for the daemon's socket-permission hardening and
 # SO_PEERCRED peer checks (already in the dependency tree via tempfile et al.).
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["process"] }
+rustix = { workspace = true, features = ["process"] }
 # glibc `malloc_trim`: after the daemon unloads a model, hand the freed
 # heap back to the OS (already in the dependency tree via tempfile et al.).
-libc = "0.2"
+libc.workspace = true
 
 # Windows-only: the daemon client's named-pipe owner check (server process ->
 # token user SID). Already in the dependency tree via tokio et al.
@@ -148,11 +180,11 @@ windows-sys = { version = "0.61", features = [
 # this crate's tests; `#[cfg(test)]` items don't cross crate boundaries.
 engram-storage = { path = "crates/engram-storage", features = ["test-support"] }
 engram-test-support = { path = "crates/engram-test-support" }
-ctor = "1"
+ctor.workspace = true
 rand = "0.10"
 # Criterion benches live in this core crate (`benches/`); they exercise the
 # re-exported model/ops/scoring APIs.
-criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+criterion.workspace = true
 # The `examples/` are low-level ONNX/model benchmarks that drive `ort` /
 # `tokenizers` / `hf-hub` directly (alongside the re-exported engramdb model
 # APIs, which own the `fastembed` embedding/reranker paths), so they need those
@@ -160,12 +192,12 @@ criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 # `tls-rustls` pairs with `download-binaries` (the `ort-sys` build script's
 # download path needs a TLS provider on `ureq`); see the note in
 # `crates/engram-onnx/Cargo.toml`.
-ort = { version = "2.0.0-rc.15", default-features = false, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
+ort = { workspace = true, features = ["download-binaries", "ndarray", "std", "tls-rustls"] }
 # Must match `engram-models`' pin (which tracks fastembed's `^0.23.2`) —
 # otherwise the examples pull a second, non-unifying `tokenizers` build.
-tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
-hf-hub = { version = "0.5", default-features = false, features = ["rustls-tls", "ureq"] }
-toml = "1"
+tokenizers.workspace = true
+hf-hub.workspace = true
+toml.workspace = true
 
 
 [[bench]]
