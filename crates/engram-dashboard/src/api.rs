@@ -670,11 +670,7 @@ impl Cursor {
 /// An opaque paging cursor: `v` as hex-encoded JSON (URL-safe, and opaque
 /// to the frontend). Shared by `/memories` and `/relations`.
 pub(crate) fn hex_json<T: Serialize>(v: &T) -> String {
-    serde_json::to_vec(v)
-        .unwrap_or_default()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    engramdb::types::hex::lower_hex(&serde_json::to_vec(v).unwrap_or_default())
 }
 
 /// The inverse of [`hex_json`]; `None` for anything it did not produce.

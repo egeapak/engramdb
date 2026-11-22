@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod gc;
 pub mod get;
 pub mod harvest;
+pub mod harvest_archive;
 pub mod harvest_index;
 pub mod harvest_pin;
 pub mod link_proposals;
@@ -66,6 +67,7 @@ pub use harvest::{
     session_scope, DigestParams, SelectParams, SelectedSession, SessionDigest, SessionScope,
     DEFAULT_DIGEST_BUDGET,
 };
+pub use harvest_archive::archive_session_end;
 pub use harvest_index::{
     forget_session, index_pending, index_session, index_sessions, open_index_for_rebuild,
     reindex_from_copies, search as search_conversations, set_summary as set_conversation_summary,
@@ -283,25 +285,26 @@ struct ProviderSpecs {
     approx_download: &'static str,
 }
 
-/// Every provider string [`provider_specs`] accepts, in documentation order.
+/// Every provider string [`provider_specs`] accepts, in documentation order:
+/// the names of [`engram_types::EMBEDDING_PROVIDERS`], the one provider list
+/// (it also carries each provider's width, which `[embeddings].dimensions`
+/// defaults to).
 ///
 /// The `match` cannot be iterated, so this list is the enumeration and
 /// `known_providers_all_resolve` ties the two together: a name added to one
 /// and not the other fails that test.
-pub const KNOWN_PROVIDERS: &[&str] = &[
-    "onnx",
-    "all-minilm",
-    "all-minilm-l6",
-    "all-minilm-l12",
-    "all-minilm-l12-int8",
-    "all-minilm-l6-int8",
-    "all-minilm-l12-fp32",
-    "nomic-embed-text",
-    "mxbai-embed-large",
-    "mxbai-embed-large-q",
-    "bge-large-en-q",
-    "gte-large-en-q",
-];
+pub const KNOWN_PROVIDERS: &[&str] = &KNOWN_PROVIDER_NAMES;
+
+const KNOWN_PROVIDER_NAMES: [&str; engram_types::EMBEDDING_PROVIDERS.len()] = {
+    let table = engram_types::EMBEDDING_PROVIDERS;
+    let mut names = [""; engram_types::EMBEDDING_PROVIDERS.len()];
+    let mut i = 0;
+    while i < table.len() {
+        names[i] = table[i].0;
+        i += 1;
+    }
+    names
+};
 
 /// What a front end needs to know about a configured provider string, read
 /// from the one [`provider_specs`] table (so `stats` and `init` can never
@@ -1112,6 +1115,28 @@ mod tests {
         }
         assert_eq!(provider_info("onnx").unwrap().display_name, "all-minilm");
         assert!(provider_info("definitely-not-a-model").is_none());
+        assert!(provider_specs("definitely-not-a-model").is_none());
+    }
+
+    /// The provider table in `engram-types` (which `[embeddings].dimensions`
+    /// defaults from) and `provider_specs` must agree on every name and on
+    /// every backend's width; a name outside the table must resolve to
+    /// nothing, the documented off switch included.
+    #[test]
+    fn provider_specs_covers_exactly_the_known_providers() {
+        for (name, width) in engram_types::EMBEDDING_PROVIDERS {
+            let _specs = provider_specs(name).unwrap_or_else(|| panic!("{name} does not resolve"));
+            #[cfg(feature = "onnxruntime")]
+            assert_eq!(_specs.onnx.dimensions, *width, "{name} (onnx)");
+            #[cfg(feature = "ollama")]
+            assert_eq!(_specs.ollama.dimensions, *width, "{name} (ollama)");
+            let _ = width;
+        }
+        assert_eq!(
+            KNOWN_PROVIDERS.len(),
+            engram_types::EMBEDDING_PROVIDERS.len()
+        );
+        assert!(provider_specs(engram_types::EMBEDDINGS_OFF).is_none());
         assert!(provider_specs("definitely-not-a-model").is_none());
     }
 

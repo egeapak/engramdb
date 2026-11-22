@@ -270,10 +270,14 @@ jobs:
       # is invisible to tier 1 forever, and silently so.
       #
       # Exempt, deliberately outside the formatter:
-      #   - commands/hook.rs emits the hook protocol document that Claude Code
-      #                      parses off stdout, plus its stderr diagnostics.
-      #                      Styling or JSON-wrapping must never reach it, and
-      #                      those handlers hold no formatter.
+      #   - commands/hook/protocol.rs emits the hook protocol document that
+      #                      Claude Code parses off stdout, plus the hooks'
+      #                      stderr diagnostics (`read_stdin`,
+      #                      `print_hook_output`, `warn_unknown_hook`,
+      #                      `warn_unparseable_hook_args`). Styling or
+      #                      JSON-wrapping must never reach it, and those
+      #                      functions hold no formatter. The rest of
+      #                      commands/hook/ is scanned like any other file.
       #
       # output.rs is NOT exempt as a file. It was, on the grounds that it
       # defines the macros — and that hole is how `print_harvest_sessions`
@@ -1015,6 +1019,7 @@ jobs:
             --bin "$RUNNER_TEMP/bins/engramdb" \
             --chrome "$chrome" \
             --views s60:full,s1k:all,s1k:open \
+            --dump-dir "$RUNNER_TEMP/browser-dump" \
             --json "$RUNNER_TEMP/browser-checks.json"
 
       - name: Run the page checks
@@ -1040,6 +1045,7 @@ jobs:
           path: |
             ${{ runner.temp }}/browser-checks.json
             ${{ runner.temp }}/browser-pages.json
+            ${{ runner.temp }}/browser-dump/
           retention-days: 7
           if-no-files-found: warn
 

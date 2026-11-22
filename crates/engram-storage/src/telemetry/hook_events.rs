@@ -36,7 +36,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::{ColumnOrdering, ExecutableQuery, QueryBase, Select};
+use lancedb::query::{ColumnOrdering, ExecutableQuery, QueryBase};
 use lancedb::{Connection, Table};
 use serde::{Deserialize, Serialize};
 
@@ -255,11 +255,10 @@ pub(crate) fn ts_literal(ts: DateTime<Utc>) -> String {
     format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
 }
 
-/// SQL string literal. Hook names come from our own writers, but a drained
-/// JSONL file is a file on disk, so quote defensively.
-pub(crate) fn str_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
-}
+/// SQL string literal ([`crate::sql::sql_str`]). Hook names come from our
+/// own writers, but a drained JSONL file is a file on disk, so quote
+/// defensively.
+pub(crate) use crate::sql::sql_str as str_literal;
 
 /// Read the table's aggregate for the retention window: counts, errors and
 /// sums over every row, plus the newest `sample_cap` samples per group.
@@ -285,13 +284,15 @@ pub async fn load_groups(
 
     // Pass 1: counts over the whole window. Samples are not kept here; the
     // window can hold far more rows than the percentile cap.
-    let mut query = table.query().select(Select::Columns(vec![
-        "hook".into(),
-        "path".into(),
-        "ok".into(),
-        "duration_ms".into(),
-        "ts".into(),
-    ]));
+    let mut query = table
+        .query()
+        .select(crate::lance_index::project_columns(vec![
+            "hook".into(),
+            "path".into(),
+            "ok".into(),
+            "duration_ms".into(),
+            "ts".into(),
+        ]));
     if let Some(w) = &window {
         query = query.only_if(w.clone());
     }
@@ -334,7 +335,10 @@ pub async fn load_groups(
         }
         let mut stream = table
             .query()
-            .select(Select::Columns(vec!["ts".into(), "duration_ms".into()]))
+            .select(crate::lance_index::project_columns(vec![
+                "ts".into(),
+                "duration_ms".into(),
+            ]))
             .only_if(filter)
             .order_by(Some(vec![ColumnOrdering::desc_nulls_last(
                 "ts".to_string(),

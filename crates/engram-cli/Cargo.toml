@@ -37,48 +37,52 @@ engram-dashboard = { path = "../engram-dashboard", default-features = false }
 clap = { version = "4", features = ["derive"] }
 # Not test-only: `harvest show` decompresses an archived transcript to a temp
 # file so a pruned session can still be digested.
-tempfile = "3"
+tempfile.workspace = true
 clap_complete = "4"
 inquire = "0.9"
 owo-colors = { version = "4", features = ["supports-colors"] }
 indicatif = "0.18"
 
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-toml = "1"
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
 
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v7", "serde"] }
+chrono.workspace = true
+uuid.workspace = true
 shell-words = "1"
-dirs = "7"
+dirs.workspace = true
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util", "sync", "net", "process"] }
+tokio.workspace = true
 
-tracing = "0.1"
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1"
+anyhow.workspace = true
 
 # Unix-only: `dup2` to point a non-interactive `daemon run`'s stderr at the
 # daemon log. Same crate the core uses for its geteuid()/SO_PEERCRED
 # hardening, so this adds no new dependency to the tree.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", features = ["stdio"] }
+rustix = { workspace = true, features = ["stdio"] }
 
 [dev-dependencies]
 engramdb = { path = "../..", default-features = false, features = ["test-support"] }
 # `arm()`s the per-process data/config-dir isolation (#[ctor] in src/lib.rs) so
 # in-crate command unit tests don't touch the real global dir under nextest.
 engram-test-support = { path = "../engram-test-support" }
-ctor = "1"
+ctor.workspace = true
 assert_cmd = "2"
 predicates = "3"
 regex = "1"
-tempfile = "3"
+tempfile.workspace = true
 # Stub `EmbeddingProvider`s in the hook tests implement an `async_trait` trait.
-async-trait = "0.1"
+async-trait.workspace = true
 insta = { version = "1.49.0", features = ["filters"] }
 # `in_memory` pulls in `vt100` and gives us `InMemoryTerm`, the only way to see
 # what a `ProgressBar` renders (its normal draw target is hidden under a pipe).
 # Dev-only on purpose: the workspace uses feature resolver v2, so this does not
 # unify `vt100` into the shipped binary — see `progress.rs`.
 indicatif = { version = "0.18", features = ["in_memory"] }
+
+# `examples/alloc_profile.rs` reads getrusage for CPU time. Dev-only.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

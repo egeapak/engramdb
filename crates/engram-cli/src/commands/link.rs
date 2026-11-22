@@ -51,11 +51,7 @@ fn parse_status(s: &str) -> Result<LinkStatus> {
 }
 
 async fn open(dir: &Path, global: bool) -> Result<MemoryStore> {
-    Ok(if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    })
+    Ok(super::open_store(dir, global).await?)
 }
 
 /// Add an edge, or update the same edge's confidence / note / status.

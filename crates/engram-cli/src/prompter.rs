@@ -103,7 +103,6 @@ impl MockPrompter {
     /// the error to a default (or declines on it) absorbs the mistake — so
     /// "this path must not prompt" cannot be tested by supplying an empty
     /// queue alone. Assert on this counter instead.
-    #[allow(dead_code)]
     pub fn prompt_count(&self) -> usize {
         self.prompts.load(std::sync::atomic::Ordering::Relaxed)
     }

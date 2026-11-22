@@ -41,7 +41,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use chrono::{DateTime, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
 use std::sync::Arc;
 
@@ -242,7 +242,10 @@ impl ConversationIndex {
         let table = self.table().await?;
         let mut stream = table
             .query()
-            .select(Select::Columns(vec!["session_id".into(), "summary".into()]))
+            .select(crate::lance_index::project_columns(vec![
+                "session_id".into(),
+                "summary".into(),
+            ]))
             .execute()
             .await
             .context("Failed to scan the conversations table")?;
@@ -469,10 +472,7 @@ impl ConversationIndex {
         let existed = self.fetch(session_id).await?.is_some();
         let table = self.table().await?;
         table
-            .delete(&format!(
-                "session_id = '{}'",
-                session_id.replace('\'', "''")
-            ))
+            .delete(&format!("session_id = {}", crate::sql::sql_str(session_id)))
             .await
             .context("Failed to delete a conversation row")?;
         Ok(existed)
@@ -572,7 +572,7 @@ impl ConversationIndex {
         let table = self.table().await?;
         let mut stream = table
             .query()
-            .select(Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "session_id".into(),
                 "ended_at".into(),
             ]))
@@ -690,10 +690,7 @@ enum Window {
 /// backup or a hand-edited store, so the quote is doubled rather than assumed
 /// absent.
 fn quoted_list(ids: &[String]) -> String {
-    ids.iter()
-        .map(|id| format!("'{}'", id.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(", ")
+    crate::sql::sql_in_list(ids)
 }
 
 /// One non-null string cell, or `None` when the column is absent or null.

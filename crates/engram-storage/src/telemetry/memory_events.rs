@@ -117,7 +117,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{DateTime, NaiveDate, Utc};
 use futures_util::stream::StreamExt;
-use lancedb::query::{ExecutableQuery, QueryBase, Select};
+use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{Connection, Table};
 use serde::{Deserialize, Serialize};
 
@@ -939,8 +939,7 @@ fn opt_str(a: &StringArray, i: usize) -> Option<&str> {
 /// `column IN (…)` for at most [`MAX_IN_LIST`] ids (callers chunk).
 fn id_filter(column: &str, ids: &[String]) -> String {
     debug_assert!(!ids.is_empty() && ids.len() <= MAX_IN_LIST);
-    let list: Vec<String> = ids.iter().map(|s| str_literal(s)).collect();
-    format!("{column} IN ({})", list.join(", "))
+    format!("{column} IN ({})", crate::sql::sql_in_list(ids))
 }
 
 fn and(a: Option<String>, b: Option<String>) -> Option<String> {
@@ -978,12 +977,14 @@ async fn for_each_event_and_other(
     mut visit: impl FnMut(RawEvent),
     mut other: impl FnMut(&str, &str, DateTime<Utc>),
 ) -> Result<()> {
-    let mut query = table.query().select(Select::Columns(vec![
-        "memory_id".into(),
-        "kind".into(),
-        "ts".into(),
-        "session_id".into(),
-    ]));
+    let mut query = table
+        .query()
+        .select(crate::lance_index::project_columns(vec![
+            "memory_id".into(),
+            "kind".into(),
+            "ts".into(),
+            "session_id".into(),
+        ]));
     if let Some(f) = filter {
         query = query.only_if(f);
     }
@@ -1403,8 +1404,10 @@ async fn prune_at(store_id: &str, cutoff: DateTime<Utc>) -> Result<()> {
             );
             return Ok(());
         }
-        let list: Vec<String> = frozen.iter().map(|s| str_literal(s)).collect();
-        delete = format!("({delete}) AND memory_id NOT IN ({})", list.join(", "));
+        delete = format!(
+            "({delete}) AND memory_id NOT IN ({})",
+            crate::sql::sql_in_list(&frozen)
+        );
     }
     events
         .delete(&delete)

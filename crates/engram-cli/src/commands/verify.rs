@@ -3,7 +3,6 @@
 use crate::output::{outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops;
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Stamp `verified_at = now` on a memory; clear a doctor-initiated
@@ -14,11 +13,7 @@ pub async fn run_verify(
     id: &str,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     let result = ops::verify_memory(&store, id, engramdb::ops::Surface::Cli).await?;
 

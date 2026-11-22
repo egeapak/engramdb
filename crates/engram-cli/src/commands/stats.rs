@@ -39,11 +39,7 @@ pub async fn run_stats(
         return run_daemon_stats(formatter).await;
     }
 
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     if let Some(id) = usage.memory.as_deref() {
         return run_memory_usage(&store, id, formatter).await;

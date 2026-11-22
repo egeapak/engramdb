@@ -53,10 +53,8 @@ pub async fn run_query(
 ) -> Result<()> {
     let store = if let Some(ref name) = group {
         MemoryStore::open_group(&engramdb::storage::paths::compute_group_id(name)).await?
-    } else if global {
-        MemoryStore::open_global().await?
     } else {
-        MemoryStore::open(dir).await?
+        super::open_store(dir, global).await?
     };
     if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);
@@ -269,7 +267,7 @@ async fn compute_query_result(
 
 /// Record `returned` for what this query answered (each memory in its
 /// owning store's log), under the session id the CLI runs in when it knows
-/// one ([`engramdb::ops::usage::cli_session_id`]); sessionless events never
+/// one ([`engramdb::ops::usage::session_id_from_env`]); sessionless events never
 /// count toward promotion.
 fn record_returned(
     engine: &engramdb::retrieval::engine::RetrievalEngine,
@@ -283,7 +281,7 @@ fn record_returned(
         owners,
         mode,
         engramdb::ops::Surface::Cli,
-        engramdb::ops::usage::cli_session_id().as_deref(),
+        engramdb::ops::usage::session_id_from_env().as_deref(),
     );
 }
 

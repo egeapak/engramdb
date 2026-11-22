@@ -827,7 +827,7 @@ fn mark_with_an_unembeddable_summary_still_records_the_decision() {
     );
 }
 
-/// The privacy switch. Every failure inside `archive_ending_session` is
+/// The privacy switch. Every failure inside `ops::archive_session_end` is
 /// swallowed by `tracing::debug!`, so a regression here is silent — nothing
 /// is the expected output either way. The positive control is what makes the
 /// negative assertion mean anything.

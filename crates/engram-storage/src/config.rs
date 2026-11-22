@@ -37,6 +37,9 @@ pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
     if let Some(message) = retired_keys_message(config_path, &config) {
         warn_once(config_path, WarnKind::RetiredKeys, &message);
     }
+    if let Some(message) = embeddings_problems_message(config_path, &config) {
+        warn_once(config_path, WarnKind::Embeddings, &message);
+    }
     if let Err(e) = config.validate() {
         warn_once(
             config_path,
@@ -57,8 +60,8 @@ pub async fn load_config(config_path: &Path) -> Result<EngramConfig> {
 /// pattern: front-ends that must never fail because of a bad config (the MCP
 /// server, provider resolution, store open) still get defaults, but a config
 /// file that fails to parse is reported once per path per process instead of
-/// being silently ignored wholesale. A partial section (e.g. `[nli]` with
-/// required fields missing) fails the whole-file parse, so without the
+/// being silently ignored wholesale. One bad value (a wrong type, a weight
+/// table without `relevance`) fails the whole-file parse, so without the
 /// warning a user's entire config — including valid sections — vanished
 /// without a trace.
 pub async fn load_config_or_default(config_path: &Path) -> EngramConfig {
@@ -155,6 +158,22 @@ pub fn retired_keys_message(config_path: &Path, config: &EngramConfig) -> Option
     ))
 }
 
+/// The message for an `[embeddings]` section that loads but will not do
+/// what it says (see [`engram_types::EmbeddingsConfig::problems`]: an unknown
+/// provider, or a `dimensions` that is not the provider's width), or `None`.
+/// Shared by the loader's warning and `doctor`.
+pub fn embeddings_problems_message(config_path: &Path, config: &EngramConfig) -> Option<String> {
+    let problems = config.embeddings.problems();
+    if problems.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}: [embeddings] {}",
+        config_path.display(),
+        problems.join("; ")
+    ))
+}
+
 /// Warn once per path when a project config sets `[security]` keys.
 fn warn_legacy_security_keys(config_path: &Path, config: &EngramConfig) {
     if let Some(message) = legacy_security_message(config_path, config) {
@@ -248,6 +267,7 @@ enum WarnKind {
     LegacyDaemon,
     LegacySecurity,
     RetiredKeys,
+    Embeddings,
     UnknownGlobalKeys,
 }
 
@@ -620,5 +640,42 @@ enabled = false
                 .any(|m| m.contains(&shown) && m.contains("daemon.enabled")),
             "{log:?}"
         );
+    }
+
+    /// An `[embeddings]` problem is named once per file, beside (not instead
+    /// of) another warning for the same file.
+    #[tokio::test]
+    async fn embedding_problem_warning_is_emitted_once() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let path_a = a.path().join("config.toml");
+        let path_b = b.path().join("config.toml");
+        tokio::fs::write(&path_a, "[embeddings]\nprovider = \"bogus-embedder\"\n")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path_b,
+            "[embeddings]\nprovider = \"nomic-embed-text\"\ndimensions = 384\n[daemon]\nenabled = false\n",
+        )
+        .await
+        .unwrap();
+        for _ in 0..3 {
+            load_config_or_default(&path_a).await;
+            load_config_or_default(&path_b).await;
+        }
+        let log = emitted().lock().unwrap().clone();
+        let about = |p: &Path, key: &str| {
+            log.iter()
+                .filter(|m| m.contains(&p.display().to_string()) && m.contains(key))
+                .count()
+        };
+        assert_eq!(about(&path_a, "`bogus-embedder`"), 1, "{log:?}");
+        assert_eq!(about(&path_b, "768-dimensional"), 1, "{log:?}");
+        assert_eq!(about(&path_b, "daemon.enabled"), 1, "{log:?}");
+
+        // A clean section says nothing.
+        let cfg: EngramConfig =
+            toml::from_str("[embeddings]\nprovider = \"all-minilm\"\n").unwrap();
+        assert!(embeddings_problems_message(&path_a, &cfg).is_none());
     }
 }

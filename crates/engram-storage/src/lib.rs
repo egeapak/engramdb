@@ -22,9 +22,11 @@ pub mod memory_file;
 pub mod paths;
 pub mod project_id;
 pub mod registry;
+pub mod sql;
 pub mod staleness;
 mod state_file;
 pub mod store;
+pub mod store_target;
 pub mod task_state;
 pub mod telemetry;
 #[cfg(any(test, feature = "test-support"))]
@@ -54,6 +56,7 @@ pub use store::{
     CrossDirDuplicate, CrossDirWinner, MemoryStore, ReindexCounts, SchemaState,
     UnparseableMemoryFile,
 };
+pub use store_target::{OpenMode, StoreSpec, StoreTarget};
 pub use worktree::{consolidate_worktree_into_main, resolve_project_root};
 
 // Test isolation: link `engram-test-support` so its `#[ctor]` redirects

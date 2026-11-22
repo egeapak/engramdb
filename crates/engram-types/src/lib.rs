@@ -17,6 +17,7 @@ pub mod config;
 mod decay;
 pub mod env;
 mod epistemic;
+pub mod hex;
 mod link;
 mod memory;
 pub mod normalize;
@@ -26,6 +27,7 @@ mod title_strategy;
 
 // Re-export all public types
 pub use challenge::Challenge;
+pub use config::{embedding_provider_dimensions, EMBEDDINGS_OFF, EMBEDDING_PROVIDERS};
 pub use config::{
     ChallengePenalty, CliConfig, ContentConfig, DaemonConfig, EmbeddingBackend, EmbeddingsConfig,
     EngramConfig, EpistemicConfig, GlobalConfig, HarvestConfig, HooksConfig, LinksConfig,

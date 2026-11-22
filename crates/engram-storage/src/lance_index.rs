@@ -835,7 +835,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["logical".into()]))
+            .select(crate::lance_index::project_columns(vec!["logical".into()]))
             .execute()
             .await
             .context("Failed to query LanceDB table for logical scopes")?;
@@ -873,7 +873,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["type".into()]))
+            .select(crate::lance_index::project_columns(vec!["type".into()]))
             .execute()
             .await
             .context("Failed to query LanceDB table for type counts")?;
@@ -902,7 +902,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .select(crate::lance_index::project_columns(vec!["id".into()]))
             .execute()
             .await
             .context("Failed to query LanceDB table for IDs")?;
@@ -935,7 +935,7 @@ impl LanceIndex {
         let table = self.open_table().await?;
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .select(crate::lance_index::project_columns(vec!["id".into()]))
             .only_if_expr(col("id").eq(lit(id)))
             .limit(1)
             .execute()
@@ -981,7 +981,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["id".into()]))
+            .select(crate::lance_index::project_columns(vec!["id".into()]))
             .only_if_expr(col("id").like(lit(pattern)))
             .execute()
             .await
@@ -1014,7 +1014,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "source_sessions".into(),
             ]))
@@ -1084,7 +1084,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "content_sha256".into(),
                 "content_len".into(),
@@ -1147,7 +1147,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "memory_id".into(),
                 "embed_sha256".into(),
             ]))
@@ -1247,7 +1247,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "type".into(),
                 "status".into(),
@@ -1276,7 +1276,7 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "summary".into(),
                 "type".into(),
@@ -1347,12 +1347,9 @@ impl LanceIndex {
     ) -> Result<Vec<IndexForFiltering>> {
         let table = self.open_table().await?;
 
-        let mut query =
-            table
-                .query()
-                .select(lancedb::query::Select::Columns(Self::filtering_columns(
-                    proj,
-                )));
+        let mut query = table.query().select(crate::lance_index::project_columns(
+            Self::filtering_columns(proj),
+        ));
         if let Some(pred) = predicate {
             query = query.only_if(pred);
         }
@@ -1384,7 +1381,7 @@ impl LanceIndex {
         let table = self.open_table().await?;
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "id".into(),
                 "watch_paths".into(),
                 "invalidated_at".into(),
@@ -1649,7 +1646,9 @@ impl LanceIndex {
 
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+            .select(crate::lance_index::project_columns(
+                vec!["memory_id".into()],
+            ))
             .execute()
             .await
             .context("Failed to query chunks table for memory_ids")?;
@@ -1722,7 +1721,7 @@ impl LanceIndex {
             let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
             let mut stream = table
                 .query()
-                .select(lancedb::query::Select::Columns(vec![
+                .select(crate::lance_index::project_columns(vec![
                     "memory_id".into(),
                     "chunk_index".into(),
                     "vector".into(),
@@ -1854,7 +1853,9 @@ impl LanceIndex {
             let list = id_batch.iter().copied().map(lit).collect::<Vec<_>>();
             let mut stream = table
                 .query()
-                .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+                .select(crate::lance_index::project_columns(
+                    vec!["memory_id".into()],
+                ))
                 .only_if_expr(is_in(col("memory_id"), list))
                 .execute()
                 .await
@@ -1882,7 +1883,9 @@ impl LanceIndex {
         let table = self.open_chunks_table().await?;
         let mut stream = table
             .query()
-            .select(lancedb::query::Select::Columns(vec!["memory_id".into()]))
+            .select(crate::lance_index::project_columns(
+                vec!["memory_id".into()],
+            ))
             .only_if_expr(col("memory_id").eq(lit(memory_id)))
             .limit(1)
             .execute()
@@ -1993,7 +1996,7 @@ impl LanceIndex {
             // adds it when an explicit projection omits it, but logs a
             // deprecation warning on every semantic query and says it will
             // stop doing so — and the loop below requires the column.
-            .select(Select::Columns(vec![
+            .select(crate::lance_index::project_columns(vec![
                 "memory_id".into(),
                 "_distance".into(),
             ]))
@@ -2635,10 +2638,9 @@ impl LanceIndex {
             // an `expect` because `tag` is user-supplied, and this crate's
             // contract is that no user-derived input can panic a public
             // function (the same property `fuzz/` asserts elsewhere). The
-            // escaping here is the one place it is still done by hand, which
-            // is why it lives next to the expression it mirrors.
+            // literal is quoted by the shared `sql::sql_str`.
             let json_token = serde_json::to_string(tag).unwrap_or_else(|_| format!("\"{tag}\""));
-            format!("contains(tags, '{}')", json_token.replace('\'', "''"))
+            format!("contains(tags, {})", crate::sql::sql_str(&json_token))
         })
     }
 
@@ -2673,9 +2675,9 @@ impl LanceIndex {
         let table = self.open_table().await?;
         let query = table
             .query()
-            .select(lancedb::query::Select::Columns(Self::filtering_columns(
-                proj,
-            )))
+            .select(crate::lance_index::project_columns(
+                Self::filtering_columns(proj),
+            ))
             .only_if_expr(predicate);
 
         let mut stream = query
@@ -2720,22 +2722,24 @@ impl LanceIndex {
         let mut epistemics = Vec::with_capacity(n);
         let mut verified_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut generalities = Vec::with_capacity(n);
-        let mut origin_tasks: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut origin_tasks: Vec<Option<&str>> = Vec::with_capacity(n);
         let mut valid_froms: Vec<Option<String>> = Vec::with_capacity(n);
         let mut invalidated_ats: Vec<Option<String>> = Vec::with_capacity(n);
         let mut watch_paths_col = Vec::with_capacity(n);
         let mut audiences: Vec<Option<String>> = Vec::with_capacity(n);
         let mut source_sessions_col = Vec::with_capacity(n);
-        let mut content_sha256s: Vec<Option<String>> = Vec::with_capacity(n);
+        let mut content_sha256s: Vec<Option<&str>> = Vec::with_capacity(n);
         let mut content_lens: Vec<Option<u64>> = Vec::with_capacity(n);
 
         for entry in entries {
-            ids.push(entry.id.clone());
-            summaries.push(entry.summary.clone());
-            types.push(format!("{:?}", entry.type_).to_lowercase());
-            statuses.push(format!("{:?}", entry.status).to_lowercase());
-            provenances.push(format!("{:?}", entry.provenance_source).to_lowercase());
-            visibilities.push(format!("{:?}", entry.visibility).to_lowercase());
+            // Borrowed: the arrays copy the bytes into their own buffers, so
+            // owned per-row Strings would only be built to be dropped.
+            ids.push(entry.id.as_str());
+            summaries.push(entry.summary.as_str());
+            types.push(entry.type_.as_str());
+            statuses.push(entry.status.as_str());
+            provenances.push(entry.provenance_source.as_str());
+            visibilities.push(entry.visibility.as_str());
             criticalities.push(entry.criticality);
             confidences.push(entry.confidence);
             physicals.push(
@@ -2757,10 +2761,10 @@ impl LanceIndex {
                 serde_json::to_string(&entry.keyword_stems)
                     .context("Failed to serialize keyword stems")?,
             );
-            epistemics.push(entry.epistemic.as_str().to_string());
+            epistemics.push(entry.epistemic.as_str());
             verified_ats.push(entry.verified_at.map(|dt| dt.to_rfc3339()));
-            generalities.push(entry.generality.as_str().to_string());
-            origin_tasks.push(entry.origin_task.clone());
+            generalities.push(entry.generality.as_str());
+            origin_tasks.push(entry.origin_task.as_deref());
             valid_froms.push(entry.valid_from.map(|dt| dt.to_rfc3339()));
             invalidated_ats.push(entry.invalidated_at.map(|dt| dt.to_rfc3339()));
             watch_paths_col.push(
@@ -2775,7 +2779,7 @@ impl LanceIndex {
                 serde_json::to_string(&entry.source_sessions)
                     .context("Failed to serialize source_sessions")?,
             );
-            content_sha256s.push(entry.content_sha256.clone());
+            content_sha256s.push(entry.content_sha256.as_deref());
             content_lens.push(entry.content_len);
         }
 
@@ -3306,6 +3310,21 @@ fn batch_to_for_filtering(batch: &RecordBatch) -> Result<Vec<IndexForFiltering>>
     Ok(entries)
 }
 
+/// Project a query onto plain, top-level columns.
+///
+/// Equivalent to `Select::Columns(names)`, without its cost. `Select::Columns`
+/// hands each name to lance backtick-quoted (`` `type` ``), and lance's
+/// planner only short-cuts a name that matches a field as written: a quoted
+/// one goes through the full SQL parser and a schema conversion per column,
+/// which was ~20% of every query's allocations (and ~40% of a scope-only
+/// one's) for a 20-column projection. `Select::Dynamic` with the bare name as
+/// its own expression takes that short-cut and yields the same column under
+/// the same name. Only for names that are a plain field: no dots, no
+/// expressions — every caller in this crate passes literal column names.
+pub(crate) fn project_columns(names: Vec<String>) -> Select {
+    Select::Dynamic(names.into_iter().map(|n| (n.clone(), n)).collect())
+}
+
 // ---- String parsing helpers ----
 
 fn parse_memory_type(s: &str) -> Result<MemoryType> {
@@ -3384,6 +3403,56 @@ mod tests {
     use super::*;
     use engram_types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
+
+    /// Library code projects through [`project_columns`], never
+    /// `Select::Columns`, whose per-column SQL parse was the largest single
+    /// allocation cost on the query path (allocation audit, change c1).
+    /// Comments may name it; code may not.
+    #[test]
+    fn no_library_code_projects_with_select_columns() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        rust_files(&root.join("src"), &mut files);
+        let Ok(crates) = std::fs::read_dir(root.join("crates")) else {
+            panic!("crates/ not found from {}", root.display());
+        };
+        for krate in crates.flatten() {
+            rust_files(&krate.path().join("src"), &mut files);
+        }
+        assert!(
+            files.len() > 50,
+            "scan found too few files: {}",
+            files.len()
+        );
+        let needle = concat!("Select::", "Columns");
+        let mut hits = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if !code.starts_with("//") && code.contains(needle) {
+                    hits.push(format!("{}:{}", file.display(), n + 1));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "use project_columns instead of {needle}: {hits:?}"
+        );
+    }
 
     fn create_test_entry(id: &str) -> IndexEntry {
         let memory = Memory {

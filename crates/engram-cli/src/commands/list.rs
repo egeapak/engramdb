@@ -4,7 +4,6 @@ use super::staleness_config;
 use crate::output::OutputFormatter;
 use anyhow::Result;
 use engramdb::ops::{self, ListParams};
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// List all memories, optionally filtered by type, tags, status, and scope.
@@ -37,11 +36,7 @@ pub async fn run_list(
     verbose: bool,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
     if let Ok(Some(warning)) = store.check_staleness(&staleness_config(&store).await).await {
         formatter.print_warning(&warning);
     }

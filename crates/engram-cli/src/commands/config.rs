@@ -9,7 +9,6 @@
 use crate::output::{outln, OutputFormatter};
 use anyhow::Result;
 use engramdb::ops::{top_tags, AgentConfigView, DEFAULT_TOP_TAGS};
-use engramdb::storage::MemoryStore;
 use std::path::Path;
 
 /// Show effective config values and the store's top tags.
@@ -25,11 +24,7 @@ pub async fn run_config(
     top_tags_limit: Option<usize>,
     formatter: &OutputFormatter,
 ) -> Result<()> {
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     let config_path = store.project_dir.join(".engramdb/config.toml");
     let config = engramdb::storage::config::load_config_or_default(&config_path).await;

@@ -905,10 +905,7 @@ impl LayoutInput {
             LayoutInput::Overview(i) => serde_json::to_vec(i),
         };
         h.update(body.expect("a layout input serializes"));
-        h.finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
+        engramdb::types::hex::lower_hex(&h.finalize())
     }
 
     /// Run the layout: what the cache holds for it, or why it cannot be

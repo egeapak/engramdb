@@ -15,6 +15,7 @@
 //! exactly as before unless their content happened to look structural — and
 //! those files were already mis-parsed, so nothing regresses.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
@@ -88,6 +89,12 @@ fn is_structural_line(line: &str) -> bool {
 /// for structure on re-parse. See the module docs for the scheme.
 pub fn escape_body_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
+    escape_body_text_into(&mut out, text);
+    out
+}
+
+/// [`escape_body_text`], appended to `out` (no intermediate copy).
+pub fn escape_body_text_into(out: &mut String, text: &str) {
     let mut first = true;
     for raw in text.split('\n') {
         if !first {
@@ -100,7 +107,6 @@ pub fn escape_body_text(text: &str) -> String {
         }
         out.push_str(raw);
     }
-    out
 }
 
 /// Collapse a value that the writer emits on a single structural line
@@ -109,24 +115,33 @@ pub fn escape_body_text(text: &str) -> String {
 /// provenance value injects raw lines into the body — a value containing
 /// `\n## Content` writes a fake section heading that, on re-parse, shadows
 /// the real content (first-occurrence-wins), silently replacing it.
-pub fn sanitize_single_line(value: &str) -> String {
+///
+/// Borrows the value when it is already one line, which is nearly always.
+pub fn sanitize_single_line(value: &str) -> Cow<'_, str> {
     if !value.contains(['\n', '\r']) {
-        return value.to_string();
+        return Cow::Borrowed(value);
     }
-    value
-        .split(['\n', '\r'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    Cow::Owned(
+        value
+            .split(['\n', '\r'])
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// Sanitize one item of a backtick-delimited list field (Files/Logical/Tags):
 /// collapse newlines like any single-line field, and strip backticks — the
 /// backtick is the item delimiter, so an embedded one would desynchronize the
 /// writer and parser (write→parse→write must be a fixed point).
-pub fn sanitize_list_item(item: &str) -> String {
-    sanitize_single_line(item).replace('`', "")
+pub fn sanitize_list_item(item: &str) -> Cow<'_, str> {
+    let line = sanitize_single_line(item);
+    if line.contains('`') {
+        Cow::Owned(line.replace('`', ""))
+    } else {
+        line
+    }
 }
 
 /// Reverse of [`escape_body_text`] for a single line: strip exactly one
@@ -189,9 +204,9 @@ pub fn is_crlf_terminated(text: &str) -> bool {
 /// `memory_file_roundtrip` fuzz target). Whether a trailing `\r` is a CRLF
 /// terminator or content cannot be decided per line, so it is decided once
 /// for the file: see `crlf_file` below.
-pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
+pub fn parse_body_sections(body: &str) -> HashMap<&str, String> {
     let mut sections = HashMap::new();
-    let mut current_section: Option<String> = None;
+    let mut current_section: Option<&str> = None;
     let mut current_content = Vec::new();
     let mut in_hidden_block = false;
 
@@ -220,7 +235,7 @@ pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
         // that looks like an H1 later is content (old unescaped files).
         if current_section.is_none() && !sections.contains_key("__h1__") {
             if let Some(heading) = line.strip_prefix("# ") {
-                sections.insert("__h1__".to_string(), heading.trim().to_string());
+                sections.insert("__h1__", heading.trim().to_string());
                 continue;
             }
         }
@@ -237,7 +252,7 @@ pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
                 existing.push(' ');
                 existing.push_str(text);
             } else {
-                sections.insert("__blockquote__".to_string(), text.to_string());
+                sections.insert("__blockquote__", text.to_string());
             }
             continue;
         }
@@ -245,7 +260,7 @@ pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
         // H2 section
         if let Some(header) = line.strip_prefix("## ") {
             flush_section(&mut sections, &mut current_section, &mut current_content);
-            current_section = Some(header.trim().to_string());
+            current_section = Some(header.trim());
             continue;
         }
 
@@ -265,9 +280,9 @@ pub fn parse_body_sections(body: &str) -> HashMap<String, String> {
     sections
 }
 
-fn flush_section(
-    sections: &mut HashMap<String, String>,
-    current_section: &mut Option<String>,
+fn flush_section<'a>(
+    sections: &mut HashMap<&'a str, String>,
+    current_section: &mut Option<&'a str>,
     current_content: &mut Vec<&str>,
 ) {
     if let Some(name) = current_section.take() {
@@ -279,7 +294,8 @@ fn flush_section(
             .iter()
             .position(|line| !line.trim().is_empty())
             .unwrap_or(current_content.len());
-        let text = current_content[start..].join("\n").trim_end().to_string();
+        let mut text = current_content[start..].join("\n");
+        text.truncate(text.trim_end().len());
         // First occurrence wins: the writer emits each section once, so a
         // duplicate heading can only come from content in old unescaped files
         // (or hand edits) and must not override the real section.
@@ -293,15 +309,22 @@ fn flush_section(
 /// bullet and whitespace). The writer always puts fields there; requiring it
 /// stops a field VALUE containing the marker of a later field (e.g. a Reason
 /// of `**Created:** 1999-…`) from hijacking that field on re-parse.
-fn field_value_at_line_start<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+fn field_value_at_line_start<'a>(line: &'a str, field: &str) -> Option<&'a str> {
     let head = line.trim_start();
     let head = head.strip_prefix('-').map(str::trim_start).unwrap_or(head);
-    head.strip_prefix(marker)
+    strip_field_marker(head, field)
+}
+
+/// `s` after a leading `**{field}:**` marker, compared in place rather than
+/// against a formatted marker string.
+fn strip_field_marker<'a>(s: &'a str, field: &str) -> Option<&'a str> {
+    s.strip_prefix("**")?
+        .strip_prefix(field)?
+        .strip_prefix(":**")
 }
 
 /// Parse a numeric score from a line like `- **Criticality:** 0.95`
 pub fn parse_score_field(text: &str, field: &str) -> Option<f64> {
-    let marker = format!("**{field}:**");
     // A non-finite value (`NaN`, `inf` — both parse as `f64`) reads as
     // absent, so the caller's default applies: stored, it poisons every
     // score the memory takes part in.
@@ -317,7 +340,7 @@ pub fn parse_score_field(text: &str, field: &str) -> Option<f64> {
     };
     // Anchored pass: field at line start (the current writer's layout).
     for line in text.lines() {
-        if let Some(after) = field_value_at_line_start(line, &marker) {
+        if let Some(after) = field_value_at_line_start(line, field) {
             return parse_after(after);
         }
     }
@@ -329,7 +352,7 @@ pub fn parse_score_field(text: &str, field: &str) -> Option<f64> {
         for seg in line.split('|') {
             let seg = seg.trim();
             let seg = seg.strip_prefix('-').map(str::trim_start).unwrap_or(seg);
-            if let Some(after) = seg.strip_prefix(&marker) {
+            if let Some(after) = strip_field_marker(seg, field) {
                 return parse_after(after);
             }
         }
@@ -345,9 +368,8 @@ pub fn parse_score_field(text: &str, field: &str) -> Option<f64> {
 /// glob `src/**/*.{ts,tsx}` or a tag literally containing a comma. Legacy
 /// values without backticks keep the plain comma split.
 pub fn parse_list_field(text: &str, field: &str) -> Vec<String> {
-    let marker = format!("**{field}:**");
     for line in text.lines() {
-        if let Some(after) = field_value_at_line_start(line, &marker) {
+        if let Some(after) = field_value_at_line_start(line, field) {
             if after.contains('`') {
                 let mut items = Vec::new();
                 let mut rest = after;
@@ -375,9 +397,8 @@ pub fn parse_list_field(text: &str, field: &str) -> Vec<String> {
 
 /// Parse a datetime from a line like `- **Created:** 2026-01-15T10:00:00Z`
 pub fn parse_datetime_field(text: &str, field: &str) -> Option<DateTime<Utc>> {
-    let marker = format!("**{field}:**");
     for line in text.lines() {
-        if let Some(after) = field_value_at_line_start(line, &marker) {
+        if let Some(after) = field_value_at_line_start(line, field) {
             let after = after.trim();
             if let Ok(dt) = DateTime::parse_from_rfc3339(after) {
                 return Some(dt.with_timezone(&Utc));
@@ -393,9 +414,8 @@ pub fn parse_datetime_field(text: &str, field: &str) -> Option<DateTime<Utc>> {
 
 /// Parse a simple string field from `- **Key:** value` lines.
 pub fn parse_string_field(text: &str, field: &str) -> Option<String> {
-    let marker = format!("**{field}:**");
     for line in text.lines() {
-        if let Some(after) = field_value_at_line_start(line, &marker) {
+        if let Some(after) = field_value_at_line_start(line, field) {
             let val = after.trim().to_string();
             if !val.is_empty() {
                 return Some(val);

@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 use engramdb::ops;
 use engramdb::ops::usage::{DailyUsage, UsageView};
 use engramdb::storage::lance_index::IndexFilterable;
-use engramdb::storage::{MemoryStore, SchemaState, StorageError};
+use engramdb::storage::{MemoryStore, OpenMode, SchemaState, StorageError};
 use engramdb::types::{EngramConfig, Memory};
 use tokio::sync::Mutex;
 
-use crate::projects::{Location, StoreKind};
+use crate::projects::Location;
 use crate::ApiError;
 
 /// Open stores kept at once. Each holds a LanceDB connection; the dashboard
@@ -59,11 +59,7 @@ impl ReadStore {
 
     async fn open_here(location: Location) -> Result<Self, ApiError> {
         let location = &location;
-        let opened = match location.kind {
-            StoreKind::Global => MemoryStore::open_global_read_only().await,
-            StoreKind::Group => MemoryStore::open_group_read_only(&location.id).await,
-            StoreKind::Project => MemoryStore::open_read_only(&location.root).await,
-        };
+        let opened = MemoryStore::open_target(&location.target(), OpenMode::ReadOnly).await;
         let inner = opened.map_err(|e| match e {
             StorageError::NotInitialized => {
                 ApiError::unavailable(format!("{} has no EngramDB store", location.root.display()))

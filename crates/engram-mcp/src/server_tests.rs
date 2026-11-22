@@ -6323,6 +6323,62 @@ async fn harvest_mark_decisions_and_clear() {
     );
 }
 
+/// `unreviewed` is the state `clear=true` writes, never a decision a caller
+/// records: `harvest_mark` deliberately accepts only three of the four
+/// decisions the ledger knows, and sharing the parser with `harvest_ledger`
+/// must not widen that.
+#[tokio::test]
+async fn harvest_mark_refuses_unreviewed() {
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "s-a");
+
+    let mut input = mark_input("s-a", None);
+    input.decision = Some("unreviewed".into());
+    let err = parse_err(&server.harvest_mark(Parameters(input)).await);
+    let message = err["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("unknown decision 'unreviewed'")
+            && message.contains("expected harvested, skipped, or deferred"),
+        "{err}"
+    );
+    // Nothing was recorded.
+    let ledger = engramdb::storage::harvest_state::read_harvested(dir.path());
+    assert!(!ledger.contains_key("s-a"), "{ledger:?}");
+}
+
+/// `harvest_mark` shares the ledger's parser, so a decision is matched
+/// ASCII case-insensitively, as the CLI and `harvest_ledger` always did.
+#[tokio::test]
+async fn harvest_mark_decision_is_case_insensitive() {
+    let home = ScopedClaudeHome::new();
+    let (dir, server) = setup().await;
+    home.plant_session(dir.path(), "s-a");
+    home.plant_session(dir.path(), "s-b");
+
+    let mut input = mark_input("s-a", None);
+    input.decision = Some("Deferred".into());
+    let marked = parse_ok(&server.harvest_mark(Parameters(input)).await);
+    assert_eq!(marked["decision"], "deferred");
+
+    let mut input = mark_input("s-b", None);
+    input.decision = Some("SKIPPED".into());
+    let marked = parse_ok(&server.harvest_mark(Parameters(input)).await);
+    assert_eq!(marked["decision"], "skipped");
+
+    // Still refused in any case.
+    let mut input = mark_input("s-a", None);
+    input.decision = Some("Unreviewed".into());
+    let err = parse_err(&server.harvest_mark(Parameters(input)).await);
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("expected harvested, skipped, or deferred"),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn harvest_mark_rejects_a_traversing_session_id() {
     let (_dir, server) = setup().await;
@@ -8427,4 +8483,60 @@ async fn shutdown_waits_for_a_pending_ingest() {
         "the memory must have its vectors once the serve future returned"
     );
     assert_eq!(engramdb::retrieval::pending_ingests(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Tool JSON schemas
+// ---------------------------------------------------------------------------
+
+/// Where [`tool_schemas_are_stable_across_the_split`] keeps its golden.
+const TOOL_SCHEMAS_GOLDEN: &str = "src/testdata/tool_schemas.golden.json";
+
+/// Every tool the server lists — name, description, input schema, output
+/// schema, annotations and `_meta` — is byte-identical to the golden captured
+/// before `server.rs` was split into `server/`.
+///
+/// `schemars` names a schema definition after the Rust type, not its module,
+/// so moving an `*Input` struct must not change anything here; this proves
+/// it, and stays as a guard against a schema changing by accident. Read
+/// through the per-instance router, which is what `tools/list` serves.
+///
+/// Regenerate (only when a change is *meant* to alter a schema) with
+/// `ENGRAMDB_PIN_REGEN=1 cargo nextest run -p engram-mcp -E
+/// 'test(tool_schemas_are_stable_across_the_split)'`.
+#[tokio::test]
+async fn tool_schemas_are_stable_across_the_split() {
+    let (_dir, server) = setup().await;
+    let mut tools = server.tool_router.list_all();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = serde_json::to_string_pretty(&tools).expect("tools serialize");
+    out.push('\n');
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(TOOL_SCHEMAS_GOLDEN);
+    if std::env::var_os("ENGRAMDB_PIN_REGEN").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &out).unwrap();
+        return;
+    }
+    let golden = std::fs::read_to_string(&path).expect("golden file (see the test's docs)");
+    if golden != out {
+        let first = golden
+            .lines()
+            .zip(out.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| golden.lines().count().min(out.lines().count()));
+        let context = |s: &str| {
+            s.lines()
+                .skip(first.saturating_sub(3))
+                .take(6)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        panic!(
+            "tool schemas changed at line {}\n--- golden\n{}\n--- now\n{}",
+            first + 1,
+            context(&golden),
+            context(&out)
+        );
+    }
 }

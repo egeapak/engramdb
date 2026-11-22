@@ -245,9 +245,7 @@ fn stats_embeddings_status_accepts_every_known_provider() {
     for provider in engramdb::ops::KNOWN_PROVIDERS {
         write_embeddings_config(
             dir.path(),
-            &format!(
-                "[embeddings]\nprovider = \"{provider}\"\ndimensions = 384\nmax_tokens = 256\n"
-            ),
+            &format!("[embeddings]\nprovider = \"{provider}\"\nmax_tokens = 256\n"),
         );
         let output = helpers::cmd()
             .env("ENGRAMDB_MODEL_CACHE_DIR", empty_cache.path())
@@ -269,6 +267,11 @@ fn stats_embeddings_status_accepts_every_known_provider() {
         assert!(
             !stderr.contains("using defaults"),
             "{provider}: the test config did not load: {stderr}"
+        );
+        // `dimensions` is left out, so it follows the provider: no mismatch.
+        assert!(
+            !stderr.contains("-dimensional vectors"),
+            "{provider}: derived dimensions reported as a mismatch: {stderr}"
         );
         assert!(
             !stdout.contains("unknown provider"),

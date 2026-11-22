@@ -81,11 +81,7 @@ pub async fn run_reindex(
         return run_archive_reindex(dir, registry, embedding_backend, formatter, cell, policy)
             .await;
     }
-    let store = if global {
-        MemoryStore::open_global().await?
-    } else {
-        MemoryStore::open(dir).await?
-    };
+    let store = super::open_store(dir, global).await?;
 
     // Set up engine with embeddings if not index_only. `MemoryStore` is
     // `Clone` — a second `open` here paid a redundant config load + LanceDB
