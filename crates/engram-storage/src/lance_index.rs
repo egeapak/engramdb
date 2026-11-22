@@ -3404,6 +3404,56 @@ mod tests {
     use engram_types::{Memory, MemoryType, Provenance};
     use tempfile::TempDir;
 
+    /// Library code projects through [`project_columns`], never
+    /// `Select::Columns`, whose per-column SQL parse was the largest single
+    /// allocation cost on the query path (allocation audit, change c1).
+    /// Comments may name it; code may not.
+    #[test]
+    fn no_library_code_projects_with_select_columns() {
+        fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    rust_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files = Vec::new();
+        rust_files(&root.join("src"), &mut files);
+        let Ok(crates) = std::fs::read_dir(root.join("crates")) else {
+            panic!("crates/ not found from {}", root.display());
+        };
+        for krate in crates.flatten() {
+            rust_files(&krate.path().join("src"), &mut files);
+        }
+        assert!(
+            files.len() > 50,
+            "scan found too few files: {}",
+            files.len()
+        );
+        let needle = concat!("Select::", "Columns");
+        let mut hits = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if !code.starts_with("//") && code.contains(needle) {
+                    hits.push(format!("{}:{}", file.display(), n + 1));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "use project_columns instead of {needle}: {hits:?}"
+        );
+    }
+
     fn create_test_entry(id: &str) -> IndexEntry {
         let memory = Memory {
             id: id.to_string(),
