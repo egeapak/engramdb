@@ -26,4 +26,4 @@ tracing.workspace = true
 rust-stemmers = "1"
 # Inline (no heap) storage for the short stems in `KeywordStems`, which a text
 # query parses once per candidate row. Already in the dependency tree.
-compact_str = { version = "0.9", features = ["serde"] }
+compact_str = { version = "0.10", features = ["serde"] }
