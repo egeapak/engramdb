@@ -6,46 +6,46 @@ $ engramdb --no-maintenance --dir [PROJECT] query --mode rank -p src/main.rs
 exit: 0
 --- stdout ---
 {
-  "dropped_below_threshold": 1,
   "memories": [
     {
       "memory": {
-        "accessed_at": "[TIMESTAMP]",
-        "challenges": [],
-        "confidence": 0.8,
-        "content": "Chosen for the memory-safety guarantees.",
-        "created_at": "[TIMESTAMP]",
-        "criticality": 0.9,
-        "decay": {
-          "floor": 0.0,
-          "strategy": "none"
-        },
-        "epistemic": "decision",
         "id": "[UUID]",
-        "logical": [
-          "core.lang"
-        ],
+        "type": "decision",
+        "epistemic": "decision",
+        "summary": "Use Rust for the backend",
+        "title": "Use Rust Backend",
+        "content": "Chosen for the memory-safety guarantees.",
         "physical": [
           "src/main.rs"
         ],
-        "provenance": {
-          "source": "human"
-        },
-        "status": "Active",
-        "summary": "Use Rust for the backend",
-        "supersedes": [],
+        "logical": [
+          "core.lang"
+        ],
         "tags": [
           "rust",
           "backend"
         ],
-        "title": "Use Rust Backend",
-        "type": "decision",
+        "criticality": 0.9,
+        "decay": {
+          "strategy": "none",
+          "floor": 0.0
+        },
+        "provenance": {
+          "source": "human"
+        },
+        "confidence": 0.8,
+        "supersedes": [],
+        "status": "Active",
+        "visibility": "Shared",
+        "challenges": [],
+        "created_at": "[TIMESTAMP]",
         "updated_at": "[TIMESTAMP]",
-        "visibility": "Shared"
+        "accessed_at": "[TIMESTAMP]"
       },
       "score": 0.9
     }
   ],
-  "total": 1
+  "total": 1,
+  "dropped_below_threshold": 1
 }
 --- stderr ---

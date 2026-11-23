@@ -7,12 +7,12 @@ exit: 0
 --- stdout ---
 {
   "indexed": [],
+  "unchanged": [],
   "skipped": [
     {
-      "reason": "session session-alpha cannot be indexed: [EMBEDDING_UNAVAILABLE]",
-      "session_id": "session-alpha"
+      "session_id": "session-alpha",
+      "reason": "session session-alpha cannot be indexed: [EMBEDDING_UNAVAILABLE]"
     }
-  ],
-  "unchanged": []
+  ]
 }
 --- stderr ---

@@ -7,8 +7,8 @@ exit: 0
 --- stdout ---
 {
   "hookSpecificOutput": {
-    "additionalContext": "[EngramDB] Context is about to be compacted. Store durable discoveries first: decisions (with their premise), hazards, and verified observations via the memory create tool.",
-    "hookEventName": "PreCompact"
+    "hookEventName": "PreCompact",
+    "additionalContext": "[EngramDB] Context is about to be compacted. Store durable discoveries first: decisions (with their premise), hazards, and verified observations via the memory create tool."
   }
 }
 --- stderr ---

@@ -2699,10 +2699,10 @@ impl EngramDbServer {
         let digest = ops::harvest::digest_session(&transcript_path, params)
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;
 
-        // A declaration-ordered struct, not `json!{}`: serde_json is built
-        // without `preserve_order`, so a `json!{}` object sorts its keys and
+        // A declaration-ordered struct, not `json!{}`: without serde_json's
+        // `preserve_order` feature a `json!{}` object sorts its keys and
         // would emit `markdown` before `trust` — burying the marking the
-        // field exists to surface.
+        // field exists to surface. The struct does not depend on the feature.
         let (markdown, fence) = ops::harvest::render_digest_markdown_traced(&digest);
         let r = serde_json::to_string(&ops::harvest::DigestJson::new(&digest, &fence, markdown))
             .map_err(|e| error_response(ErrorCode::InternalError, &e.to_string()))?;

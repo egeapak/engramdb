@@ -2001,7 +2001,7 @@ impl LanceIndex {
                 "_distance".into(),
             ]))
             .limit(chunk_limit)
-            .nprobes(VECTOR_SEARCH_NPROBES)
+            .nprobes(VECTOR_SEARCH_NPROBES)?
             .refine_factor(VECTOR_SEARCH_REFINE_FACTOR);
         if let Some(ids) = restrict_to {
             // Typed literals: the ids never become query text, so there is no

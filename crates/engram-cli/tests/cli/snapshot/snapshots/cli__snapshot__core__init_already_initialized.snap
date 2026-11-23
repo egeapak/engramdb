@@ -5,6 +5,6 @@ expression: "f.run(&[\"init\", \"--no-embeddings\"])"
 $ engramdb --no-maintenance --dir [PROJECT] init --no-embeddings
 exit: 0
 --- stdout ---
-{"message":"EngramDB store already initialized at [PROJECT]/.engramdb (existing config and manifest preserved)","success":true}
+{"success":true,"message":"EngramDB store already initialized at [PROJECT]/.engramdb (existing config and manifest preserved)"}
 {"message":"Project ID: [PROJECT_ID]"}
 --- stderr ---

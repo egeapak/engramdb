@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] groups subscribe backend --yes
 exit: 0
 --- stdout ---
 {
-  "message": "Subscribed project '[PROJECT_ID]' to group 'backend' (id: __g_10e08a419e85).",
-  "success": true
+  "success": true,
+  "message": "Subscribed project '[PROJECT_ID]' to group 'backend' (id: __g_10e08a419e85)."
 }
 --- stderr ---

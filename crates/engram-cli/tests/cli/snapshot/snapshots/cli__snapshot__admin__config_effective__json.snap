@@ -6,30 +6,30 @@ $ engramdb --no-maintenance --dir [PROJECT] --format json config
 exit: 0
 --- stdout ---
 {
-  "embedding": {
-    "dimensions": 384,
-    "provider": "onnx"
+  "limits": {
+    "summary_max_chars": 200,
+    "content_soft_token_target": 500,
+    "embedding_chunk_tokens": 256
+  },
+  "retrieval": {
+    "default_max_results": 10,
+    "relevance_threshold": 0.45,
+    "search_threshold": 0.2,
+    "include_expired": false
   },
   "features": {
-    "contradiction_detection_enabled": false,
     "rerank_enabled": false,
     "rerank_top_n": 10,
+    "contradiction_detection_enabled": false,
     "title_strategy": "keyword"
+  },
+  "embedding": {
+    "provider": "onnx",
+    "dimensions": 384
   },
   "index": {
     "staleness_check": "size",
     "staleness_max_bytes": 8388608
-  },
-  "limits": {
-    "content_soft_token_target": 500,
-    "embedding_chunk_tokens": 256,
-    "summary_max_chars": 200
-  },
-  "retrieval": {
-    "default_max_results": 10,
-    "include_expired": false,
-    "relevance_threshold": 0.45,
-    "search_threshold": 0.2
   },
   "top_tags": []
 }

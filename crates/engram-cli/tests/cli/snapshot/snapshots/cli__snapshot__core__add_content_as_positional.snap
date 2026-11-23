@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] add -t convention -s Quick start for
 exit: 0
 --- stdout ---
 {
-  "message": "Created memory [UUID]",
-  "success": true
+  "success": true,
+  "message": "Created memory [UUID]"
 }
 --- stderr ---

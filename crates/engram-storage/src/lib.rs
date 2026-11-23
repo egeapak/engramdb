@@ -80,22 +80,22 @@ fn the_data_and_config_dirs_are_isolated() {
     );
 }
 
-/// `serde_json` must be built **without** its `preserve_order` feature, so a
-/// `serde_json::Map` (every `json!{}` object) sorts its keys. CLI and MCP JSON
+/// `serde_json` is built **with** its `preserve_order` feature, so a
+/// `serde_json::Map` (every `json!{}` object) keeps its keys in insertion
+/// order. lancedb (0.41 and later) turns the feature on, and Cargo unifies
+/// features across the build, so every crate sees it. CLI and MCP JSON
 /// output, the insta snapshots and the dashboard's pinned layout digests all
-/// depend on that order. Cargo unifies features across the build, so any
-/// dependency that turns the feature on changes it for every crate:
-/// lancedb 0.41 does (`serde_json = { features = ["preserve_order"] }`),
-/// which is one reason the workspace stays on lancedb 0.37. This crate depends on
-/// lancedb directly, so its test build sees the same unified features.
+/// depend on that order. If a lancedb release drops the feature, this test
+/// fails before those do: then decide whether to enable `preserve_order` in
+/// the workspace yourself (to keep today's order) or to re-record them.
 #[cfg(test)]
 #[test]
-fn serde_json_maps_sort_their_keys() {
+fn serde_json_maps_keep_insertion_order() {
     let map = serde_json::json!({ "b": 1, "a": 2 });
     assert_eq!(
         map.to_string(),
-        r#"{"a":2,"b":1}"#,
-        "serde_json's preserve_order feature is on: a dependency enabled it \
-         (find it with `cargo tree -e features -i serde_json`)"
+        r#"{"b":1,"a":2}"#,
+        "serde_json's preserve_order feature is off: did a lancedb upgrade drop it? \
+         (see `cargo tree -e features -i serde_json`)"
     );
 }

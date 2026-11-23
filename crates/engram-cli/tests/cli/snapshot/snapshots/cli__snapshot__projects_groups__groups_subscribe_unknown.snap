@@ -6,7 +6,7 @@ $ engramdb --no-maintenance --dir [PROJECT] groups subscribe no-such-group --yes
 exit: 0
 --- stdout ---
 {
-  "message": "Subscribed project '[PROJECT_ID]' to group 'no-such-group' (id: __g_8622e56e0d2a).",
-  "success": true
+  "success": true,
+  "message": "Subscribed project '[PROJECT_ID]' to group 'no-such-group' (id: __g_8622e56e0d2a)."
 }
 --- stderr ---

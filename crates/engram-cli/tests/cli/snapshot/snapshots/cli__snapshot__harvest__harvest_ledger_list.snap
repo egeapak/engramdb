@@ -7,14 +7,14 @@ exit: 0
 --- stdout ---
 [
   {
-    "archive": null,
+    "session_id": "session-alpha",
     "decision": "skipped",
+    "stage": "collected",
     "harvested_at": "[TIMESTAMP]",
     "memories_created": 0,
     "memory_ids": [],
     "note": "Superseded by the daemon design note.",
-    "session_id": "session-alpha",
-    "stage": "collected"
+    "archive": null
   }
 ]
 --- stderr ---

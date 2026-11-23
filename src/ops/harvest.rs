@@ -1103,13 +1103,14 @@ fn defang_event_for_json(event: &Event) -> Event {
 
 /// The JSON shape both front-ends emit for a digest.
 ///
-/// A `struct`, not `serde_json::json!{}`, and that is load-bearing:
-/// `serde_json` is built without `preserve_order`, so its `Map` is a
-/// `BTreeMap` and `json!{}` objects serialize **alphabetically** — which put
+/// A `struct`, not `serde_json::json!{}`, and that is load-bearing: without
+/// serde_json's `preserve_order` feature its `Map` is a `BTreeMap` and
+/// `json!{}` objects serialize **alphabetically** — which put
 /// `events` and `markdown` *before* `trust`, defeating the point of having a
 /// dedicated trust field at all. A derived `Serialize` writes fields in
 /// declaration order, so `trust` leads and `trust_end` trails no matter what
-/// the field names are.
+/// the field names are, and whether or not the feature is on (lancedb 0.41
+/// turns it on).
 #[derive(Debug, Serialize)]
 pub struct DigestJson<'a> {
     pub trust: &'static str,
@@ -2414,8 +2415,8 @@ mod tests {
 
     #[test]
     fn json_payload_leads_with_trust_and_trails_with_it() {
-        // The regression this guards is silent and was live: `serde_json` is
-        // built without `preserve_order`, so a `json!{}` object sorts keys
+        // The regression this guards is silent and was live: without
+        // serde_json's `preserve_order` feature a `json!{}` object sorts keys
         // alphabetically and emitted `events` and `markdown` *before*
         // `trust` — burying the very marking the field was added to surface.
         let digest = budget_digest(parsed(vec![prompt("why is the build failing")]), 10_000);

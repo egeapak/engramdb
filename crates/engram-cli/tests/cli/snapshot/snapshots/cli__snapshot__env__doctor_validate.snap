@@ -6,38 +6,38 @@ $ engramdb --no-maintenance --dir [PROJECT] doctor validate
 exit: 1
 --- stdout ---
 {
-  "all_passed": false,
   "sections": [
     {
+      "name": "Model validation",
       "checks": [
         {
-          "message": "inference failed: Failed to send embed request to Ollama",
           "name": "Embedding model",
           "passed": false,
+          "message": "inference failed: Failed to send embed request to Ollama",
           "suggestion": "Re-download the embedding model with `engramdb init`"
         },
         {
-          "message": "not enabled and not downloaded (skipped)",
           "name": "NLI model",
           "passed": true,
+          "message": "not enabled and not downloaded (skipped)",
           "status": "info"
         },
         {
-          "message": "disabled in config (skipped)",
           "name": "Reranker model",
           "passed": true,
+          "message": "disabled in config (skipped)",
           "status": "info"
         },
         {
-          "message": "keyword titling (no model) — skipped",
           "name": "Title model",
           "passed": true,
+          "message": "keyword titling (no model) — skipped",
           "status": "info"
         }
-      ],
-      "name": "Model validation"
+      ]
     }
   ],
+  "all_passed": false,
   "store_check": null
 }
 --- stderr ---

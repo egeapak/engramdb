@@ -6,7 +6,7 @@
 // from a response that should carry one, or a malformed one, is an error
 // the view shows (with a retry), never something it works around.
 //
-// Wire format (`v` 4). The layout rides in the same JSON document as the
+// Wire format (`v` 5). The layout rides in the same JSON document as the
 // nodes and edges it lays out, so it is keyed by their order there:
 //   scope-force: `pos` (two doubles per entry of `nodes`), `routes` (four
 //     per entry of `edges`: both ends), `label_xy` (two per node), each
@@ -27,7 +27,7 @@
 // names this layout, so the page keeps a viewport per layout under it.
 
 /** The encoding this page reads. */
-export const SERVER_LAYOUT_VERSION = 4;
+export const SERVER_LAYOUT_VERSION = 5;
 
 const ANCHORS = ['middle', 'start', 'end'];
 

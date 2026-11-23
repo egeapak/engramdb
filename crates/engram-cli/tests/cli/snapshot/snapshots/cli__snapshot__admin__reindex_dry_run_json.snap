@@ -6,20 +6,20 @@ $ engramdb --no-maintenance --dir [PROJECT] --format json reindex --dry-run
 exit: 0
 --- stdout ---
 {
-  "current": false,
-  "drifted": [],
   "dry_run": true,
-  "embeddings_unavailable": false,
+  "current": false,
+  "on_disk": 3,
   "indexed": 3,
+  "not_indexed": [],
+  "drifted": [],
+  "stale_vectors": [],
   "not_embedded": [
     "[UUID]",
     "[UUID]",
     "[UUID]"
   ],
-  "not_indexed": [],
-  "on_disk": 3,
-  "stale_vectors": [],
   "undetermined": [],
-  "without_digest": 0
+  "without_digest": 0,
+  "embeddings_unavailable": false
 }
 --- stderr ---

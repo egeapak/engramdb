@@ -7,18 +7,18 @@ exit: 0
 --- stdout ---
 [
   {
-    "created_at": "[TIMESTAMP]",
-    "criticality": 0.5,
-    "epistemic": "fact",
     "id": "[UUID]",
+    "type": "context",
+    "epistemic": "fact",
+    "summary": "Personal note",
     "physical": [
       "/"
     ],
+    "criticality": 0.5,
     "status": "Active",
-    "summary": "Personal note",
-    "type": "context",
-    "updated_at": "[TIMESTAMP]",
-    "visibility": "Personal"
+    "visibility": "Personal",
+    "created_at": "[TIMESTAMP]",
+    "updated_at": "[TIMESTAMP]"
   }
 ]
 --- stderr ---

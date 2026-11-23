@@ -6,6 +6,9 @@ $ engramdb --no-maintenance --dir [PROJECT] --format json projects stats
 exit: 0
 --- stdout ---
 {
+  "total_projects": 1,
+  "reachable_projects": 1,
+  "total_memories": 3,
   "by_type": [
     [
       "convention",
@@ -19,9 +22,6 @@ exit: 0
       "hazard",
       1
     ]
-  ],
-  "reachable_projects": 1,
-  "total_memories": 3,
-  "total_projects": 1
+  ]
 }
 --- stderr ---
